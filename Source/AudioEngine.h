@@ -1,0 +1,179 @@
+#pragma once
+
+#include <JuceHeader.h>
+#include "TrackProcessor.h"
+#include "AudioRecorder.h"
+#include "PlaybackEngine.h"
+#include "PluginManager.h"
+#include "PluginWindowManager.h"
+#include "MIDIManager.h"
+#include "Metronome.h"
+#include <vector>
+#include <memory>
+// ... (skip lines) ...
+
+class AudioEngine  : public juce::AudioIODeviceCallback
+{
+public:
+    AudioEngine();
+    ~AudioEngine() override;
+
+    void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
+                                           int numInputChannels,
+                                           float* const* outputChannelData,
+                                           int numOutputChannels,
+                                           int numSamples,
+                                           const juce::AudioIODeviceCallbackContext& context) override;
+
+    void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
+    void audioDeviceStopped() override;
+
+    juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
+
+    // Messaging
+    juce::String addTrack();  // Returns track ID
+    bool removeTrack(const juce::String& trackId);
+    bool reorderTrack(const juce::String& trackId, int newPosition);
+    int getTrackIndex(const juce::String& trackId) const;  // For lookups
+
+    // Metering
+    juce::var getMeteringData();
+
+    // Device Management
+    juce::var getAudioDeviceSetup();
+    void setAudioDeviceSetup(const juce::String& type, const juce::String& input, const juce::String& output, double sampleRate, int bufferSize);
+    
+    // Track control (Phase 1) - ID-based
+    void setTrackRecordArm(const juce::String& trackId, bool armed);
+    void setTrackInputMonitoring(const juce::String& trackId, bool enabled);
+    void setTrackInputChannels(const juce::String& trackId, int startChannel, int numChannels);
+    
+    // Volume/Pan/Mute/Solo (Phase 1) - ID-based
+    void setTrackVolume(const juce::String& trackId, float volumeDB);
+    void setTrackPan(const juce::String& trackId, float pan);
+    void setTrackMute(const juce::String& trackId, bool muted);
+    void setTrackSolo(const juce::String& trackId, bool soloed);
+    
+    // Transport control (Phase 2)
+    void setTransportPlaying(bool playing);
+    void setTransportRecording(bool recording);
+    bool isTransportPlaying() const { return isPlaying; }
+    bool isTransportRecording() const { return isRecordMode; }
+    void setLoopMode(bool loop) { isLooping = loop; }
+    bool getLoopMode() const { return isLooping; }
+    double getTransportPosition() const { return currentSamplePosition / currentSampleRate; }
+    void setTransportPosition(double seconds) { currentSamplePosition = seconds * currentSampleRate; }
+    void setTempo(double bpm);
+    double getTempo() const { return tempo; }
+
+    // Metronome (Phase 3)
+    void setMetronomeEnabled(bool enabled);
+    void setMetronomeVolume(float volume);
+    void setMetronomeAccentBeats(const std::vector<bool>& accents);
+    bool isMetronomeEnabled() const;
+    void setTimeSignature(int numerator, int denominator);
+    void getTimeSignature(int& numerator, int& denominator) const;
+    
+    // Get clips that were completed in the last recording session
+    std::vector<AudioRecorder::CompletedRecording> getLastCompletedClips();
+    
+    // Playback clip management - ID-based
+    void addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration);
+    void removePlaybackClip(const juce::String& trackId, const juce::String& filePath);
+    void clearPlaybackClips();
+    void clearTrackPlaybackClips(const juce::String& trackId);
+    
+    // FX Management (Phase 3) - ID-based
+    void scanForPlugins();
+    juce::var getAvailablePlugins();
+    bool addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath);
+    bool addTrackFX(const juce::String& trackId, const juce::String& pluginPath);
+    
+    // Plugin Editor Windows (Phase 3) - ID-based
+    void openPluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
+    void closePluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
+    
+    // MIDI Device Management (Phase 2)
+    juce::var getMIDIInputDevices();
+    bool openMIDIDevice(const juce::String& deviceName);
+    void closeMIDIDevice(const juce::String& deviceName);
+    juce::var getOpenMIDIDevices();
+    
+    // Track Type Management (Phase 2) - ID-based
+    void setTrackType(const juce::String& trackId, const juce::String& type); // 'audio', 'midi', 'instrument'
+    void setTrackMIDIInput(const juce::String& trackId, const juce::String& deviceName, int channel);
+    bool loadInstrument(const juce::String& trackId, const juce::String& vstPath);
+    
+    // Get loaded plugins info - ID-based
+    juce::var getTrackInputFX(const juce::String& trackId);
+    juce::var getTrackFX(const juce::String& trackId);
+    void removeTrackInputFX(const juce::String& trackId, int fxIndex);
+    void removeTrackFX(const juce::String& trackId, int fxIndex);
+    void bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed);
+    void bypassTrackFX(const juce::String& trackId, int fxIndex, bool bypassed);
+    bool reorderTrackInputFX(const juce::String& trackId, int fromIndex, int toIndex);
+    bool reorderTrackFX(const juce::String& trackId, int fromIndex, int toIndex);
+    
+    // Master \u0026 Monitoring (Phase 4)
+    bool addMasterFX(const juce::String& pluginPath);
+    bool addMonitoringFX(const juce::String& pluginPath);
+    void setMasterVolume(float volume);
+    float getMasterVolume() const { return masterVolume; }
+    void setMasterPan(float pan);
+    float getMasterPan() const { return masterPan; }
+    
+    // Metering (Phase 4)
+    juce::var getMeterLevels(); // Returns array of track RMS levels
+    float getMasterLevel() const; // Returns master output level
+    
+    // Waveform Visualization
+    juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int numPixels);
+
+private:
+    // MIDI message routing (Phase 2)
+    void handleMIDIMessage(const juce::String& deviceName, int channel, const juce::MidiMessage& message);
+    
+    juce::AudioDeviceManager deviceManager;
+    std::unique_ptr<juce::AudioProcessorGraph> mainProcessorGraph;
+    
+    juce::AudioProcessorGraph::Node::Ptr audioInputNode;
+    juce::AudioProcessorGraph::Node::Ptr audioOutputNode;
+    
+    // Track storage - ID-based system
+    std::map<juce::String, TrackProcessor*> trackMap;  // ID -> Track
+    std::vector<juce::String> trackOrder;  // Ordered list of track IDs for display/processing
+    
+    // Audio Recorder (Phase 2)
+    AudioRecorder audioRecorder;
+    PlaybackEngine playbackEngine;
+    bool isPlaying = false;
+    bool isRecordMode = false;
+    bool isLooping = false;
+    double currentSamplePosition = 0.0;
+    double currentSampleRate = 44100.0;
+    double tempo = 120.0;  // BPM
+    int timeSigNumerator = 4;
+    int timeSigDenominator = 4;
+    Metronome metronome;
+
+    juce::File projectAudioFolder;
+    std::vector<AudioRecorder::CompletedRecording> lastCompletedClips;  // Clips from last recording session
+    
+    // Plugin Management (Phase 3)
+    PluginManager pluginManager;
+    PluginWindowManager pluginWindowManager;
+    
+    // MIDI Management (Phase 2)
+    std::unique_ptr<MIDIManager> midiManager;
+    
+    // Master FX (Phase 5)
+    std::unique_ptr<juce::AudioProcessorGraph> masterFXChain;
+    std::unique_ptr<juce::AudioProcessorGraph> monitoringFXChain;  // Output-only, not in bounce
+    std::vector<juce::AudioProcessorGraph::Node::Ptr> masterFXNodes;
+    std::vector<juce::AudioProcessorGraph::Node::Ptr> monitoringFXNodes;
+    float masterVolume = 1.0f;
+    float masterPan = 0.0f;
+    std::atomic<float> masterOutputLevel { 0.0f }; // RMS level of master output
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
+};
