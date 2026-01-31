@@ -32,9 +32,15 @@ export function PeakMeter({
     ctx.fillStyle = "#0a0a0a";
     ctx.fillRect(0, 0, width, canvasHeight);
 
-    // Convert RMS to dB
-    const dbLevel = level > 0 ? 20 * Math.log10(level) : -60;
-    const normalizedLevel = Math.max(0, Math.min(1, (dbLevel + 60) / 72)); // -60dB to +12dB
+    // Apply noise floor - levels below this are treated as silence
+    const NOISE_FLOOR = 0.001; // ~-60dB
+    const clampedLevel = level < NOISE_FLOOR ? 0 : level;
+
+    // Convert RMS to dB with proper zero handling
+    const dbLevel =
+      clampedLevel > 0 ? 20 * Math.log10(clampedLevel) : -Infinity;
+    const normalizedLevel =
+      dbLevel === -Infinity ? 0 : Math.max(0, Math.min(1, (dbLevel + 60) / 72)); // -60dB to +12dB
 
     // Draw meter for left channel
     const drawChannel = (x: number, w: number, lv: number) => {

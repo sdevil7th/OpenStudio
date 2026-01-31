@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { nativeBridge } from "../services/NativeBridge";
+import { Button, Input, Select } from "./ui";
 import "./FXChainPanel.css";
 
 interface FXChainPanelProps {
@@ -188,9 +189,9 @@ export function FXChainPanel({
             {chainType === "input" ? "Input FX Chain" : "Track FX Chain"} -{" "}
             {trackName}
           </h3>
-          <button className="close-btn" onClick={onClose}>
+          <Button variant="ghost" size="icon-sm" onClick={onClose}>
             ×
-          </button>
+          </Button>
         </div>
 
         <div className="fx-chain-two-column-content">
@@ -237,13 +238,15 @@ export function FXChainPanel({
                         {fx.name}
                       </div>
                     </div>
-                    <button
-                      className="fx-remove-btn"
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
                       onClick={() => handleRemove(fx.index)}
                       title="Remove plugin"
+                      className="fx-remove-btn"
                     >
                       ×
-                    </button>
+                    </Button>
                   </div>
                 ))
               )}
@@ -258,31 +261,31 @@ export function FXChainPanel({
 
             {/* Search and Filter */}
             <div className="flex gap-2 p-2 bg-neutral-800">
-              <input
+              <Input
                 type="text"
-                className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-600"
+                variant="default"
+                size="md"
                 placeholder="Search plugins..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
+                className="flex-1"
               />
-              <select
-                className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2 text-white text-sm min-w-[150px] focus:outline-none focus:border-blue-600"
+              <Select
+                variant="default"
+                size="md"
                 value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-              >
-                {categories.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="bg-blue-600 border-none rounded px-4 py-2 text-white font-semibold cursor-pointer hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                onChange={(val) => setCategoryFilter(val as string)}
+                options={categories.map((cat) => ({ value: cat, label: cat }))}
+                className="min-w-[150px]"
+              />
+              <Button
+                variant="primary"
+                size="md"
                 onClick={handleScan}
                 disabled={pluginsLoading}
               >
                 {pluginsLoading ? "Scanning..." : "Scan"}
-              </button>
+              </Button>
             </div>
 
             {/* Plugin List */}
@@ -312,12 +315,13 @@ export function FXChainPanel({
                         {plugin.category}
                       </div>
                     </div>
-                    <button
-                      className="bg-blue-600 border-none rounded px-4 py-1.5 text-white font-semibold cursor-pointer hover:bg-blue-500"
+                    <Button
+                      variant="primary"
+                      size="sm"
                       onClick={() => handleAddPlugin(plugin)}
                     >
                       Add
-                    </button>
+                    </Button>
                   </div>
                 ))
               )}

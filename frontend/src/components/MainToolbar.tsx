@@ -1,5 +1,5 @@
-import classNames from "classnames";
 import { useDAWStore } from "../store/useDAWStore";
+import { Button } from "./ui";
 
 interface MainToolbarProps {
   onOpenSettings: () => void;
@@ -12,107 +12,132 @@ export function MainToolbar({
   onToggleMixer,
   showMixer,
 }: MainToolbarProps) {
-  const { transport, play, stop, toggleLoop, tracks } = useDAWStore();
+  const { transport, play, stop, toggleLoop, tracks, snapEnabled, toggleSnap } =
+    useDAWStore();
   const { isPlaying, loopEnabled } = transport;
   const hasArmedTracks = tracks.some((t) => t.armed);
-
-  const buttonClass =
-    "w-8 h-8 flex items-center justify-center rounded transition-colors text-lg bg-neutral-800 text-neutral-400 border border-neutral-700 hover:text-white hover:border-neutral-500 disabled:opacity-50 disabled:cursor-not-allowed";
-  const activeClass =
-    "bg-neutral-700 text-white border-neutral-500 shadow-[0_0_5px_rgba(255,255,255,0.1)]";
 
   return (
     <div className="h-12 bg-neutral-900 border-b border-b-neutral-950 flex items-center px-4 gap-4 shrink-0">
       {/* Transport Section - Now Connected! */}
       <div className="flex items-center gap-1">
-        <button
-          className={classNames(buttonClass, { [activeClass]: hasArmedTracks })}
+        <Button
+          variant="default"
+          size="icon-lg"
+          active={hasArmedTracks}
           title={
             hasArmedTracks ? "Tracks armed for recording" : "No tracks armed"
           }
         >
-          <span className="icon">🎙️</span>
-        </button>
-        <button
-          className={classNames(buttonClass, {
-            "bg-purple-700 text-white border-purple-600 hover:bg-purple-600":
-              loopEnabled,
-          })}
+          🎙️
+        </Button>
+        <Button
+          variant="purple"
+          size="icon-lg"
+          active={loopEnabled}
           onClick={toggleLoop}
           title="Toggle Loop"
         >
-          <span className="icon">🔁</span>
-        </button>
-        <button
-          className={classNames(buttonClass, {
-            "bg-red-700 text-white border-red-600 hover:bg-red-600 animation-pulse":
-              hasArmedTracks && isPlaying,
-          })}
+          🔁
+        </Button>
+        <Button
+          variant="danger"
+          size="icon-lg"
+          active={hasArmedTracks && isPlaying}
           onClick={play}
           title={hasArmedTracks ? "Record" : "Arm tracks to record"}
         >
-          <span className="icon">●</span>
-        </button>
-        <button
-          className={classNames(buttonClass, {
-            "bg-green-700 text-white border-green-600 hover:bg-green-600":
-              isPlaying,
-          })}
+          ●
+        </Button>
+        <Button
+          variant="success"
+          size="icon-lg"
+          active={isPlaying}
           onClick={play}
           title="Play"
         >
-          <span className="icon">▶</span>
-        </button>
-        <button className={buttonClass} onClick={stop} title="Stop">
-          <span className="icon">■</span>
-        </button>
+          ▶
+        </Button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          onClick={stop}
+          title="Stop"
+        >
+          ■
+        </Button>
       </div>
 
       <div className="w-px h-6 bg-neutral-700"></div>
 
       {/* Edit Tools */}
       <div className="flex items-center gap-1">
-        <button className={buttonClass} disabled title="Undo (TODO)">
-          <span className="icon">↶</span>
-        </button>
-        <button className={buttonClass} disabled title="Redo (TODO)">
-          <span className="icon">↷</span>
-        </button>
-        <button className={buttonClass} disabled title="Grid/Snap (TODO)">
-          <span className="icon">▦</span>
-        </button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          disabled
+          title="Undo (TODO)"
+        >
+          ↶
+        </Button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          disabled
+          title="Redo (TODO)"
+        >
+          ↷
+        </Button>
+        <Button
+          variant="primary"
+          size="icon-lg"
+          active={snapEnabled}
+          onClick={toggleSnap}
+          title={
+            snapEnabled
+              ? "Snap Enabled (Click to disable)"
+              : "Snap Disabled (Click to enable)"
+          }
+        >
+          ▦
+        </Button>
       </div>
 
       <div className="w-px h-6 bg-neutral-700"></div>
 
       {/* View Toggles - Mixer Now Works! */}
       <div className="flex items-center gap-1">
-        <button
-          className={classNames(buttonClass, {
-            "bg-blue-700 text-white border-blue-600 hover:bg-blue-600":
-              showMixer,
-          })}
+        <Button
+          variant="primary"
+          size="icon-lg"
+          active={showMixer}
           onClick={onToggleMixer}
           title="Toggle Mixer"
         >
-          <span className="icon">🎚️</span>
-        </button>
-        <button className={buttonClass} disabled title="FX Browser (TODO)">
-          <span className="icon">🎛️</span>
-        </button>
+          🎚️
+        </Button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          disabled
+          title="FX Browser (TODO)"
+        >
+          🎛️
+        </Button>
       </div>
 
       <div style={{ flex: 1 }}></div>
 
       {/* Settings */}
       <div className="flex items-center gap-1">
-        <button
-          className={buttonClass}
+        <Button
+          variant="default"
+          size="icon-lg"
           onClick={onOpenSettings}
           title="Audio Settings"
         >
-          <span className="icon">⚙️</span>
-        </button>
+          ⚙️
+        </Button>
       </div>
     </div>
   );

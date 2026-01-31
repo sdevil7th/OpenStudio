@@ -147,21 +147,24 @@ body {
 .workspace {
   flex: 1;
   display: flex;
-  overflow: hidden;
+  align-items: flex-start;
+  min-height: 0; /* Critical: allows flex item to shrink below content size */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .track-control-panel {
   width: 310px;
+  min-width: 310px;
+  flex-shrink: 0;
   background: #1a1a1a;
   border-right: 1px solid #0a0a0a;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  overflow-x: hidden;
 }
 
 .tcp-header {
-  padding: 6px;
+  padding: 2px 6px 3px 6px;
   border-bottom: 1px solid #2a2a2a;
   background: #121212;
 }
@@ -185,7 +188,6 @@ body {
 
 .tcp-tracks {
   flex: 1;
-  overflow-y: auto;
 }
 
 .tcp-master {

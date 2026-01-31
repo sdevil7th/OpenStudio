@@ -27,6 +27,7 @@ private:
     // Your private member variables go here...
     juce::WebBrowserComponent webView;
     AudioEngine audioEngine;
+    std::unique_ptr<juce::FileChooser> fileChooser;  // For async file dialogs
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

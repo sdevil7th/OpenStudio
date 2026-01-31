@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { Button } from "./ui";
 
 interface ColorPickerProps {
   currentColor: string;
@@ -69,10 +70,11 @@ export function ColorPicker({
       <div className="text-xs text-neutral-400 mb-2 px-1">Track Color</div>
       <div className="grid grid-cols-4 gap-1.5">
         {TRACK_COLORS.map((color) => (
-          <button
+          <Button
             key={color.value}
+            variant="ghost"
             onClick={() => onColorChange(color.value)}
-            className={`w-7 h-7 rounded-md transition-all hover:scale-110 hover:ring-2 hover:ring-white/50 ${
+            className={`w-7 h-7 !p-0 rounded-md transition-all hover:scale-110 hover:ring-2 hover:ring-white/50 ${
               currentColor === color.value ? "ring-2 ring-white scale-110" : ""
             }`}
             style={{ backgroundColor: color.value }}

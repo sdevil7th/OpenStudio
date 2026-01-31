@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import classNames from "classnames";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import { Button, NativeSelect } from "./ui";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -114,13 +114,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   if (!isOpen) return null;
 
-  const selectClass = classNames(
-    "bg-neutral-800 border border-neutral-700 text-neutral-200 p-2 rounded text-sm w-full focus:outline-none focus:border-blue-500",
-    {
-      "opacity-60 cursor-not-allowed bg-neutral-900": isLoading,
-    },
-  );
-
   return (
     <div
       className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-[1000] backdrop-blur-[2px]"
@@ -132,12 +125,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       >
         <div className="flex justify-between items-center p-4 bg-neutral-800 rounded-t-lg border-b border-neutral-700">
           <h2 className="m-0 text-lg font-medium">Audio Settings</h2>
-          <button
-            className="bg-transparent border-none text-neutral-400 text-2xl cursor-pointer hover:text-white leading-none"
+          <Button
+            variant="ghost"
+            size="icon-md"
             onClick={onClose}
           >
             ×
-          </button>
+          </Button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-5">
@@ -153,238 +147,138 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           {error && (
             <div className="p-3 bg-red-500/15 border border-red-500 rounded text-red-400 text-sm">
               <strong>Error:</strong> {error}
-              <button
+              <Button
+                variant="danger"
+                size="xs"
                 onClick={refreshConfig}
-                className="ml-2 bg-transparent border border-red-500 text-red-400 px-3 py-1 rounded cursor-pointer hover:bg-red-500/20"
+                className="ml-2"
               >
                 Retry
-              </button>
+              </Button>
             </div>
           )}
 
           {!loading && !error && !config && (
             <div className="p-5 text-center text-neutral-400">
               No audio configuration available.
-              <button
+              <Button
+                variant="primary"
+                size="xs"
                 onClick={refreshConfig}
-                className="ml-2 bg-transparent border border-blue-500 text-blue-400 px-3 py-1 rounded cursor-pointer hover:bg-blue-500/20"
+                className="ml-2"
               >
                 Load
-              </button>
+              </Button>
             </div>
           )}
 
           {config && config.current && (
             <>
               {/* Audio System (Driver Type) */}
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium text-neutral-400">
-                  Audio System
-                </label>
-                <select
-                  value={config.current.audioDeviceType}
-                  onChange={(e) =>
-                    updateConfig("audioDeviceType", e.target.value)
-                  }
-                  disabled={isLoading}
-                  className={selectClass}
-                >
-                  {config.availableTypes?.map((type: string) => (
-                    <option key={type} value={type}>
-                      {type}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <NativeSelect
+                label="Audio System"
+                options={config.availableTypes || []}
+                value={config.current.audioDeviceType}
+                onChange={(val) => updateConfig("audioDeviceType", val)}
+                loading={isLoading}
+                fullWidth
+              />
 
               {/* ASIO Driver Selection (only show when ASIO is selected) */}
               {config.current.audioDeviceType === "ASIO" && (
-                <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium text-neutral-400">
-                    ASIO Driver
-                  </label>
-                  <select
-                    value={
-                      isLoading
-                        ? ""
-                        : config.current.outputDevice ||
-                          (config.outputs && config.outputs[0]) ||
-                          ""
-                    }
-                    onChange={(e) => {
-                      const driverName = e.target.value;
-                      console.log(
-                        "[SettingsModal] ASIO driver selected:",
-                        driverName,
-                      );
-                      // For ASIO, input and output use the same driver
-                      const newConfig = {
-                        ...config,
-                        current: {
-                          ...config.current,
-                          inputDevice: driverName,
-                          outputDevice: driverName,
-                        },
-                      };
-                      setConfig(newConfig);
-                    }}
-                    disabled={isLoading}
-                    className={selectClass}
-                  >
-                    {isLoading ? (
-                      <option>--</option>
-                    ) : (
-                      config.outputs?.map((name: string) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </div>
+                <NativeSelect
+                  label="ASIO Driver"
+                  options={config.outputs || []}
+                  value={config.current.outputDevice || (config.outputs && config.outputs[0]) || ""}
+                  onChange={(val) => {
+                    console.log("[SettingsModal] ASIO driver selected:", val);
+                    // For ASIO, input and output use the same driver
+                    const newConfig = {
+                      ...config,
+                      current: {
+                        ...config.current,
+                        inputDevice: val,
+                        outputDevice: val,
+                      },
+                    };
+                    setConfig(newConfig);
+                  }}
+                  loading={isLoading}
+                  fullWidth
+                />
               )}
 
               {/* Input Device (hide for ASIO, show for others) */}
               {config.current.audioDeviceType !== "ASIO" && (
-                <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium text-neutral-400">
-                    Input Device
-                  </label>
-                  <select
-                    value={isLoading ? "" : config.current.inputDevice}
-                    onChange={(e) =>
-                      updateConfig("inputDevice", e.target.value)
-                    }
-                    disabled={isLoading}
-                    className={selectClass}
-                  >
-                    {isLoading ? (
-                      <option>--</option>
-                    ) : (
-                      config.inputs?.map((name: string) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </div>
+                <NativeSelect
+                  label="Input Device"
+                  options={config.inputs || []}
+                  value={config.current.inputDevice}
+                  onChange={(val) => updateConfig("inputDevice", val)}
+                  loading={isLoading}
+                  fullWidth
+                />
               )}
 
               {/* Output Device (hide for ASIO, show for others) */}
               {config.current.audioDeviceType !== "ASIO" && (
-                <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium text-neutral-400">
-                    Output Device
-                  </label>
-                  <select
-                    value={isLoading ? "" : config.current.outputDevice}
-                    onChange={(e) =>
-                      updateConfig("outputDevice", e.target.value)
-                    }
-                    disabled={isLoading}
-                    className={selectClass}
-                  >
-                    {isLoading ? (
-                      <option>--</option>
-                    ) : (
-                      config.outputs?.map((name: string) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </div>
+                <NativeSelect
+                  label="Output Device"
+                  options={config.outputs || []}
+                  value={config.current.outputDevice}
+                  onChange={(val) => updateConfig("outputDevice", val)}
+                  loading={isLoading}
+                  fullWidth
+                />
               )}
 
               {/* Sample Rate */}
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium text-neutral-400">
-                  Sample Rate
-                </label>
-                <select
-                  value={
-                    isLoading
-                      ? ""
-                      : config.current.sampleRate ||
-                        (config.sampleRates && config.sampleRates[0]) ||
-                        44100
-                  }
-                  onChange={(e) => {
-                    const rate = parseFloat(e.target.value);
-                    console.log("[SettingsModal] Sample rate selected:", rate);
-                    updateConfig("sampleRate", rate);
-                  }}
-                  disabled={isLoading}
-                  className={selectClass}
-                >
-                  {isLoading ? (
-                    <option>--</option>
-                  ) : config.sampleRates && config.sampleRates.length > 0 ? (
-                    config.sampleRates.map((sr: number) => (
-                      <option key={sr} value={sr}>
-                        {sr} Hz
-                      </option>
-                    ))
-                  ) : (
-                    <option value={44100}>44100 Hz</option>
-                  )}
-                </select>
-              </div>
+              <NativeSelect
+                label="Sample Rate"
+                options={config.sampleRates?.length > 0 ? config.sampleRates : [44100]}
+                value={config.current.sampleRate || (config.sampleRates && config.sampleRates[0]) || 44100}
+                onChange={(val) => {
+                  console.log("[SettingsModal] Sample rate selected:", val);
+                  updateConfig("sampleRate", Number(val));
+                }}
+                formatLabel={(val) => `${val} Hz`}
+                loading={isLoading}
+                fullWidth
+              />
 
               {/* Buffer Size */}
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium text-neutral-400">
-                  Buffer Size
-                </label>
-                <select
-                  value={
-                    isLoading
-                      ? ""
-                      : config.current.bufferSize ||
-                        (config.bufferSizes && config.bufferSizes[0]) ||
-                        512
-                  }
-                  onChange={(e) => {
-                    const size = parseInt(e.target.value);
-                    console.log("[SettingsModal] Buffer size selected:", size);
-                    updateConfig("bufferSize", size);
-                  }}
-                  disabled={isLoading}
-                  className={selectClass}
-                >
-                  {isLoading ? (
-                    <option>--</option>
-                  ) : config.bufferSizes && config.bufferSizes.length > 0 ? (
-                    config.bufferSizes.map((bs: number) => (
-                      <option key={bs} value={bs}>
-                        {bs} samples
-                      </option>
-                    ))
-                  ) : (
-                    <option value={512}>512 samples</option>
-                  )}
-                </select>
-              </div>
+              <NativeSelect
+                label="Buffer Size"
+                options={config.bufferSizes?.length > 0 ? config.bufferSizes : [512]}
+                value={config.current.bufferSize || (config.bufferSizes && config.bufferSizes[0]) || 512}
+                onChange={(val) => {
+                  console.log("[SettingsModal] Buffer size selected:", val);
+                  updateConfig("bufferSize", Number(val));
+                }}
+                formatLabel={(val) => `${val} samples`}
+                loading={isLoading}
+                fullWidth
+              />
             </>
           )}
         </div>
 
         <div className="p-4 border-t border-neutral-700 flex justify-end bg-neutral-800 rounded-b-lg gap-2">
-          <button
-            className="px-5 py-2 rounded text-sm bg-neutral-700 text-white hover:bg-neutral-600 transition-colors"
+          <Button
+            variant="default"
+            size="md"
             onClick={onClose}
           >
             Cancel
-          </button>
-          <button
-            className="px-5 py-2 rounded text-sm bg-blue-600 text-white font-medium hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          </Button>
+          <Button
+            variant="primary"
+            size="md"
             onClick={handleApply}
             disabled={!config || loading}
           >
             Apply
-          </button>
+          </Button>
         </div>
       </div>
     </div>

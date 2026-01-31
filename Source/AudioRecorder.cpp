@@ -57,6 +57,9 @@ bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File
     state.isActive = true;
     state.startTime = 0.0;  // Will be set by AudioEngine
     state.samplesWritten = 0;
+    state.numChannels = numChannels;
+    state.sampleBuffer.clear();
+    state.sampleBuffer.reserve(static_cast<size_t>(sampleRate * numChannels * 60)); // Reserve ~60 seconds
     
     juce::Logger::writeToLog("AudioRecorder: Started recording track " + trackId + 
                            " to " + file.getFullPathName());
@@ -66,12 +69,28 @@ bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File
 void AudioRecorder::writeBlock(const juce::String& trackId, const juce::AudioBuffer<float>& buffer, int numSamples)
 {
     const juce::ScopedLock sl (writerLock);
-    
+
     auto it = activeRecordings.find(trackId);
     if (it != activeRecordings.end() && it->second.isActive && it->second.writer)
     {
         it->second.writer->writeFromAudioSampleBuffer(buffer, 0, numSamples);
         it->second.samplesWritten += numSamples;
+
+        // Store samples in buffer for live waveform display (interleaved format)
+        auto& state = it->second;
+        const int numChannels = state.numChannels;
+        const size_t prevSize = state.sampleBuffer.size();
+        state.sampleBuffer.resize(prevSize + static_cast<size_t>(numSamples * numChannels));
+
+        for (int s = 0; s < numSamples; ++s)
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                const int bufferChannel = std::min(ch, buffer.getNumChannels() - 1);
+                state.sampleBuffer[prevSize + static_cast<size_t>(s * numChannels + ch)] =
+                    buffer.getSample(bufferChannel, s);
+            }
+        }
     }
 }
 
@@ -140,8 +159,72 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
     }
     
     activeRecordings.clear();
-    juce::Logger::writeToLog("AudioRecorder: Stopped all recordings. Completed " + 
+    juce::Logger::writeToLog("AudioRecorder: Stopped all recordings. Completed " +
                            juce::String(completedClips.size()) + " clips.");
-    
+
     return completedClips;
+}
+
+juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels)
+{
+    juce::Array<juce::var> peakData;
+
+    const juce::ScopedLock sl(writerLock);
+
+    auto it = activeRecordings.find(trackId);
+    if (it == activeRecordings.end() || !it->second.isActive)
+    {
+        // No recording in progress for this track
+        return peakData;
+    }
+
+    const auto& state = it->second;
+    const int numChannels = state.numChannels;
+    const size_t totalSamples = state.sampleBuffer.size() / static_cast<size_t>(numChannels);
+
+    if (totalSamples == 0 || numChannels == 0 || samplesPerPixel <= 0 || numPixels <= 0)
+    {
+        return peakData;
+    }
+
+    // Calculate peaks for each pixel
+    for (int pixel = 0; pixel < numPixels; ++pixel)
+    {
+        const juce::int64 startSample = static_cast<juce::int64>(pixel) * samplesPerPixel;
+
+        if (startSample >= static_cast<juce::int64>(totalSamples))
+            break;
+
+        const int samplesToRead = std::min(samplesPerPixel,
+            static_cast<int>(totalSamples - static_cast<size_t>(startSample)));
+
+        // Create peak object with channels array
+        juce::DynamicObject::Ptr peakObj = new juce::DynamicObject();
+        juce::Array<juce::var> channels;
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            float minVal = 0.0f;
+            float maxVal = 0.0f;
+
+            for (int s = 0; s < samplesToRead; ++s)
+            {
+                const size_t bufferIndex = (static_cast<size_t>(startSample) + static_cast<size_t>(s))
+                                           * static_cast<size_t>(numChannels) + static_cast<size_t>(ch);
+                const float sample = state.sampleBuffer[bufferIndex];
+                if (sample < minVal) minVal = sample;
+                if (sample > maxVal) maxVal = sample;
+            }
+
+            juce::DynamicObject::Ptr channelPeak = new juce::DynamicObject();
+            channelPeak->setProperty("min", minVal);
+            channelPeak->setProperty("max", maxVal);
+            channels.add(juce::var(channelPeak.get()));
+        }
+
+        peakObj->setProperty("channels", channels);
+        peakData.add(juce::var(peakObj.get()));
+    }
+
+    return peakData;
 }

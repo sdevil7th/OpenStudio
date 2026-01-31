@@ -15,7 +15,7 @@ declare global {
     __JUCE__?: {
       backend: {
         // Native functions registered via withNativeFunction
-        addTrack?: () => Promise<string>;
+        addTrack?: (explicitId?: string) => Promise<string>;
         removeTrack?: (trackId: string) => Promise<boolean>;
         reorderTrack?: (
           trackId: string,
@@ -79,6 +79,12 @@ declare global {
             duration: number;
           }>
         >;
+        // Live recording waveform - returns peaks for recording in progress
+        getRecordingPeaks?: (
+          trackId: string,
+          samplesPerPixel: number,
+          numPixels: number,
+        ) => Promise<WaveformPeak[]>;
 
         // FX Management (Phase 3)
         scanForPlugins?: () => Promise<boolean>;
@@ -176,6 +182,53 @@ declare global {
         ) => Promise<boolean>;
         loadInstrument?: (trackId: string, vstPath: string) => Promise<boolean>;
 
+        // Project Save/Load (F2)
+        showSaveDialog?: (
+          defaultPath?: string,
+          title?: string,
+        ) => Promise<string>;
+        showOpenDialog?: (title?: string) => Promise<string>;
+        saveProjectToFile?: (
+          filePath: string,
+          jsonContent: string,
+        ) => Promise<boolean>;
+        loadProjectFromFile?: (filePath: string) => Promise<string>;
+
+        // Plugin State Serialization (F2)
+        getPluginState?: (
+          trackId: string,
+          fxIndex: number,
+          isInputFX: boolean,
+        ) => Promise<string>;
+        setPluginState?: (
+          trackId: string,
+          fxIndex: number,
+          isInputFX: boolean,
+          base64State: string,
+        ) => Promise<boolean>;
+        getMasterPluginState?: (fxIndex: number) => Promise<string>;
+        setMasterPluginState?: (
+          fxIndex: number,
+          base64State: string,
+        ) => Promise<boolean>;
+
+        // MIDI
+        sendMidiNote?: (
+          trackId: string,
+          note: number,
+          velocity: number,
+          isNoteOn: boolean,
+        ) => Promise<void>;
+
+        // Media Import (F10)
+        importMediaFile?: (filePath: string) => Promise<{
+          filePath: string;
+          duration: number;
+          sampleRate: number;
+          numChannels: number;
+          format: string;
+        }>;
+
         // Event system
         addEventListener?: (
           eventId: string,
@@ -244,12 +297,18 @@ class NativeBridge {
   }
 
   // CORRECTED: Call native functions directly as methods
-  async addTrack(): Promise<string> {
+  async addTrack(explicitId?: string): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.addTrack) {
-      return await window.__JUCE__.backend.addTrack();
+      if (explicitId) {
+        return await window.__JUCE__.backend.addTrack(explicitId);
+      } else {
+        return await window.__JUCE__.backend.addTrack();
+      }
     } else {
-      console.log("Mock: addTrack");
-      return "Mock Track Added";
+      const id =
+        explicitId || "Mock_Track_" + Math.random().toString(36).substr(2, 9);
+      console.log("Mock: addTrack", id);
+      return id;
     }
   }
 
@@ -537,6 +596,35 @@ class NativeBridge {
     return [];
   }
 
+  // Live recording waveform - get peaks for recording in progress
+  async getRecordingPeaks(
+    trackId: string,
+    samplesPerPixel: number,
+    numPixels: number,
+  ): Promise<WaveformPeak[]> {
+    if (this.isNative && window.__JUCE__?.backend.getRecordingPeaks) {
+      return await window.__JUCE__.backend.getRecordingPeaks(
+        trackId,
+        samplesPerPixel,
+        numPixels,
+      );
+    } else {
+      // Mock: generate fake live recording waveform data
+      const peaks: WaveformPeak[] = [];
+      for (let i = 0; i < numPixels; i++) {
+        // Simulate recording waveform with some randomness
+        const amplitude = 0.3 + Math.random() * 0.4;
+        peaks.push({
+          channels: [
+            { min: -amplitude, max: amplitude },
+            { min: -amplitude * 0.9, max: amplitude * 0.9 },
+          ],
+        });
+      }
+      return peaks;
+    }
+  }
+
   // FX Management (Phase 3)
   async scanForPlugins(): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.scanForPlugins) {
@@ -812,6 +900,184 @@ class NativeBridge {
       return await window.__JUCE__.backend.loadInstrument(trackId, vstPath);
     }
     return false;
+  }
+
+  // Project Save/Load (F2)
+  async showSaveDialog(defaultPath?: string, title?: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.showSaveDialog) {
+      return await window.__JUCE__.backend.showSaveDialog(defaultPath, title);
+    }
+    console.log("[NativeBridge] Mock showSaveDialog");
+    return "";
+  }
+
+  async showOpenDialog(title?: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.showOpenDialog) {
+      return await window.__JUCE__.backend.showOpenDialog(title);
+    }
+    console.log("[NativeBridge] Mock showOpenDialog");
+    return "";
+  }
+
+  async saveProjectToFile(
+    filePath: string,
+    jsonContent: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.saveProjectToFile) {
+      return await window.__JUCE__.backend.saveProjectToFile(
+        filePath,
+        jsonContent,
+      );
+    }
+    console.log(
+      `[NativeBridge] Mock saveProjectToFile: ${filePath} (${jsonContent.length} bytes)`,
+    );
+    return true;
+  }
+
+  async loadProjectFromFile(filePath: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.loadProjectFromFile) {
+      return await window.__JUCE__.backend.loadProjectFromFile(filePath);
+    }
+    console.log(`[NativeBridge] Mock loadProjectFromFile: ${filePath}`);
+    return "";
+  }
+
+  // Render/Export (F3)
+  async renderProject(options: {
+    source: string;
+    startTime: number;
+    endTime: number;
+    filePath: string;
+    format: string;
+    sampleRate: number;
+    bitDepth: number;
+    channels: number;
+    normalize: boolean;
+    addTail: boolean;
+    tailLength: number;
+  }): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.renderProject) {
+      return await window.__JUCE__.backend.renderProject(
+        options.source,
+        options.startTime,
+        options.endTime,
+        options.filePath,
+        options.format,
+        options.sampleRate,
+        options.bitDepth,
+        options.channels,
+        options.normalize,
+        options.addTail,
+        options.tailLength
+      );
+    }
+    console.log(
+      `[NativeBridge] Mock renderProject: ${options.filePath} (${options.format}, ${options.startTime}-${options.endTime}s)`,
+    );
+    // Simulate render progress
+    return new Promise((resolve) => {
+      setTimeout(() => resolve(true), 2000);
+    });
+  }
+
+  // MIDI
+  async sendMidiNote(
+    trackId: string,
+    note: number,
+    velocity: number,
+    isNoteOn: boolean
+  ): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.sendMidiNote) {
+      await window.__JUCE__.backend.sendMidiNote(
+        trackId,
+        note,
+        velocity,
+        isNoteOn
+      );
+      return;
+    }
+    console.log(
+      `[NativeBridge] Mock sendMidiNote: track=${trackId}, note=${note}, velocity=${velocity}, on=${isNoteOn}`,
+    );
+  }
+
+  // Media Import (F10)
+  async importMediaFile(filePath: string): Promise<{
+    filePath: string;
+    duration: number;
+    sampleRate: number;
+    numChannels: number;
+    format: string;
+  }> {
+    if (this.isNative && window.__JUCE__?.backend.importMediaFile) {
+      return await window.__JUCE__.backend.importMediaFile(filePath);
+    }
+    console.log(`[NativeBridge] Mock importMediaFile: ${filePath}`);
+    // Mock: return fake audio file metadata
+    return {
+      filePath: filePath,
+      duration: 30.5,
+      sampleRate: 44100,
+      numChannels: 2,
+      format: filePath.endsWith('.wav') ? 'WAV' :
+              filePath.endsWith('.mp3') ? 'MP3' :
+              filePath.endsWith('.mp4') ? 'MP4' : 'Unknown',
+    };
+  }
+
+  // Plugin State Management (F2)
+  async getPluginState(
+    trackId: string,
+    fxIndex: number,
+    isInputFX: boolean,
+  ): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getPluginState) {
+      return await window.__JUCE__.backend.getPluginState(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
+    }
+    // Mock state
+    return "";
+  }
+
+  async setPluginState(
+    trackId: string,
+    fxIndex: number,
+    isInputFX: boolean,
+    base64State: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setPluginState) {
+      return await window.__JUCE__.backend.setPluginState(
+        trackId,
+        fxIndex,
+        isInputFX,
+        base64State,
+      );
+    }
+    return true;
+  }
+
+  async getMasterPluginState(fxIndex: number): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getMasterPluginState) {
+      return await window.__JUCE__.backend.getMasterPluginState(fxIndex);
+    }
+    return "";
+  }
+
+  async setMasterPluginState(
+    fxIndex: number,
+    base64State: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMasterPluginState) {
+      return await window.__JUCE__.backend.setMasterPluginState(
+        fxIndex,
+        base64State,
+      );
+    }
+    return true;
   }
 
   // FX Chain Management

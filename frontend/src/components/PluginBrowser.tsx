@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { nativeBridge } from "../services/NativeBridge";
+import { useDAWStore } from "../store/useDAWStore";
+import { Button, Input, Select } from "./ui";
 
 interface Plugin {
   name: string;
@@ -11,7 +13,7 @@ interface Plugin {
 
 interface PluginBrowserProps {
   trackId: string;
-  targetChain: "input" | "track" | "master";
+  targetChain: "input" | "track" | "master" | "instrument";
   onClose: () => void;
   embedded?: boolean; // If true, renders without overlay/modal wrapper
 }
@@ -58,7 +60,18 @@ export function PluginBrowser({
   const handleAddPlugin = async (plugin: Plugin) => {
     try {
       let success = false;
-      if (targetChain === "input") {
+      if (targetChain === "instrument") {
+        success = await nativeBridge.loadInstrument(
+          trackId,
+          plugin.fileOrIdentifier,
+        );
+        // Update the store with the loaded instrument
+        if (success) {
+          useDAWStore.getState().updateTrack(trackId, {
+            instrumentPlugin: plugin.fileOrIdentifier,
+          });
+        }
+      } else if (targetChain === "input") {
         success = await nativeBridge.addTrackInputFX(
           trackId,
           plugin.fileOrIdentifier,
@@ -74,7 +87,7 @@ export function PluginBrowser({
 
       if (success) {
         console.log(
-          `[PluginBrowser] Added ${plugin.name} to ${targetChain} chain`,
+          `[PluginBrowser] Added ${plugin.name} to ${targetChain}`,
         );
         onClose(); // Notify parent that plugin was added
       }
@@ -83,11 +96,16 @@ export function PluginBrowser({
     }
   };
 
+  // Filter plugins based on targetChain - show only instruments when loading an instrument
+  const basePlugins = targetChain === "instrument"
+    ? plugins.filter((p) => p.isInstrument)
+    : plugins.filter((p) => !p.isInstrument);
+
   const categories = [
     "All",
-    ...Array.from(new Set(plugins.map((p) => p.category))),
+    ...Array.from(new Set(basePlugins.map((p) => p.category))),
   ];
-  const filteredPlugins = plugins.filter((p) => {
+  const filteredPlugins = basePlugins.filter((p) => {
     const matchesSearch =
       p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.manufacturer.toLowerCase().includes(searchTerm.toLowerCase());
@@ -105,31 +123,31 @@ export function PluginBrowser({
             : "flex gap-2 p-3 border-b border-neutral-700 bg-neutral-800 rounded-t-lg"
         }
       >
-        <input
+        <Input
           type="text"
-          className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-600"
+          variant="default"
+          size="md"
           placeholder="Search plugins..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
+          className="flex-1"
         />
-        <select
-          className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2 text-white text-sm min-w-[150px] focus:outline-none focus:border-blue-600"
+        <Select
+          variant="default"
+          size="md"
           value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-        >
-          {categories.map((cat) => (
-            <option key={cat} value={cat}>
-              {cat}
-            </option>
-          ))}
-        </select>
-        <button
-          className="bg-blue-600 border-none rounded px-4 py-2 text-white font-semibold cursor-pointer hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          onChange={(val) => setCategoryFilter(val as string)}
+          options={categories.map((cat) => ({ value: cat, label: cat }))}
+          className="min-w-[150px]"
+        />
+        <Button
+          variant="primary"
+          size="md"
           onClick={handleScan}
           disabled={loading}
         >
           {loading ? "Scanning..." : "Scan"}
-        </button>
+        </Button>
       </div>
 
       <div
@@ -164,12 +182,13 @@ export function PluginBrowser({
                   {plugin.category}
                 </div>
               </div>
-              <button
-                className="bg-blue-600 border-none rounded px-4 py-1.5 text-white font-semibold cursor-pointer hover:bg-blue-500"
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={() => handleAddPlugin(plugin)}
               >
                 Add
-              </button>
+              </Button>
             </div>
           ))
         )}
@@ -194,14 +213,15 @@ export function PluginBrowser({
       >
         <div className="flex justify-between items-center p-4 border-b border-neutral-700">
           <h2 className="m-0 text-lg text-white font-semibold">
-            Plugin Browser - {targetChain.toUpperCase()} FX
+            {targetChain === "instrument" ? "Instrument Browser" : `Plugin Browser - ${targetChain.toUpperCase()} FX`}
           </h2>
-          <button
-            className="bg-transparent border-none text-neutral-400 text-2xl cursor-pointer p-0 w-8 h-8 hover:text-white"
+          <Button
+            variant="ghost"
+            size="icon-md"
             onClick={onClose}
           >
             ×
-          </button>
+          </Button>
         </div>
         {content}
       </div>

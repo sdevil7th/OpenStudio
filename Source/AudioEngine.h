@@ -31,7 +31,7 @@ public:
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
 
     // Messaging
-    juce::String addTrack();  // Returns track ID
+    juce::String addTrack(const juce::String& explicitId = juce::String());  // Returns track ID, optional explicit ID for restore
     bool removeTrack(const juce::String& trackId);
     bool reorderTrack(const juce::String& trackId, int newPosition);
     int getTrackIndex(const juce::String& trackId) const;  // For lookups
@@ -126,8 +126,15 @@ public:
     juce::var getMeterLevels(); // Returns array of track RMS levels
     float getMasterLevel() const; // Returns master output level
     
+    // Plugin State Serialization (F2 - Project Save/Load)
+    juce::String getPluginState(const juce::String& trackId, int fxIndex, bool isInputFX);
+    bool setPluginState(const juce::String& trackId, int fxIndex, bool isInputFX, const juce::String& base64State);
+    juce::String getMasterPluginState(int fxIndex);
+    bool setMasterPluginState(int fxIndex, const juce::String& base64State);
+    
     // Waveform Visualization
     juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int numPixels);
+    juce::var getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels);
 
 private:
     // MIDI message routing (Phase 2)

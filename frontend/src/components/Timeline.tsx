@@ -1,12 +1,21 @@
-import React, { useRef, useEffect, useState, useCallback } from "react";
+import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { Stage, Layer, Rect, Line, Text, Group, Circle } from "react-konva";
+import { useShallow } from "zustand/shallow";
 import {
   useDAWStore,
   Track,
   AudioClip,
+  MIDIClip,
   RecordingClip,
 } from "../store/useDAWStore";
 import { nativeBridge, WaveformPeak } from "../services/NativeBridge";
+import { ContextMenu } from "./ContextMenu";
+import { HorizontalScrollbar } from "./HorizontalScrollbar";
+import { MemoizedPlayhead as Playhead } from "./Playhead";
+import {
+  snapToGrid,
+  calculateGridInterval,
+} from "../utils/snapToGrid";
 
 // Constants
 const RULER_HEIGHT = 30;
@@ -20,10 +29,28 @@ interface TimelineProps {
 // Cache for waveform data to avoid re-fetching
 type WaveformCache = Map<string, WaveformPeak[]>;
 
+// Recording waveform cache (trackId -> peaks + width at fetch time)
+type RecordingWaveformData = { peaks: WaveformPeak[]; widthPixels: number };
+type RecordingWaveformCache = Map<string, RecordingWaveformData>;
+
+// Clip context menu state type
+type ClipContextMenuState = {
+  x: number;
+  y: number;
+  clipId: string;
+  trackId: string;
+} | null;
+
 export function Timeline({ tracks }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
+  const [recordingWaveformCache, setRecordingWaveformCache] = useState<RecordingWaveformCache>(new Map());
+
+
+  // Clip context menu state
+  const [clipContextMenu, setClipContextMenu] =
+    useState<ClipContextMenuState>(null);
 
   // Drag state for clip movement and resizing
   const [dragState, setDragState] = useState<{
@@ -51,8 +78,57 @@ export function Timeline({ tracks }: TimelineProps) {
   // Ghost track state for auto-creation when dragging to empty space
   const [showGhostTrack, setShowGhostTrack] = useState(false);
 
+  // Reset drag state helper function
+  const resetDragState = useCallback(() => {
+    setDragState({
+      type: null,
+      clipId: null,
+      trackIndex: null,
+      startX: 0,
+      startTime: 0,
+      originalStartTime: 0,
+      originalDuration: 0,
+      originalOffset: 0,
+    });
+    setShowGhostTrack(false);
+  }, []);
+
+  // Global mouseup and blur handlers to prevent stuck drag state
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (dragState.type !== null) {
+        console.log("[Timeline] Global mouseup - resetting drag state");
+        resetDragState();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      if (dragState.type !== null) {
+        console.log("[Timeline] Window blur - resetting drag state");
+        resetDragState();
+      }
+    };
+
+    // Add global listeners when drag is active
+    if (dragState.type !== null) {
+      window.addEventListener("mouseup", handleGlobalMouseUp);
+      window.addEventListener("blur", handleWindowBlur);
+    }
+
+    return () => {
+      window.removeEventListener("mouseup", handleGlobalMouseUp);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [dragState.type, resetDragState]);
+
+  // Time selection drag state
+  const [timeSelectionDrag, setTimeSelectionDrag] = useState<{
+    active: boolean;
+    startTime: number;
+  } | null>(null);
+
+  // Use useShallow to prevent re-renders when unrelated state changes (like currentTime)
   const {
-    transport,
     recordingClips,
     pixelsPerSecond,
     setZoom,
@@ -76,28 +152,127 @@ export function Timeline({ tracks }: TimelineProps) {
     clipboard,
     addTrack,
     timeSignature,
-  } = useDAWStore();
+    markers,
+    regions,
+    snapEnabled,
+    gridSize,
+    timeSelection,
+    setTimeSelection,
+    openPianoRoll,
+    addMIDIClip,
+  } = useDAWStore(
+    useShallow((state) => ({
+      recordingClips: state.recordingClips,
+      pixelsPerSecond: state.pixelsPerSecond,
+      setZoom: state.setZoom,
+      seekTo: state.seekTo,
+      scrollX: state.scrollX,
+      scrollY: state.scrollY,
+      setScroll: state.setScroll,
+      trackHeight: state.trackHeight,
+      setTrackHeight: state.setTrackHeight,
+      selectedClipId: state.selectedClipId,
+      selectClip: state.selectClip,
+      moveClipToTrack: state.moveClipToTrack,
+      resizeClip: state.resizeClip,
+      setClipVolume: state.setClipVolume,
+      setClipFades: state.setClipFades,
+      copyClip: state.copyClip,
+      cutClip: state.cutClip,
+      pasteClip: state.pasteClip,
+      deleteClip: state.deleteClip,
+      duplicateClip: state.duplicateClip,
+      clipboard: state.clipboard,
+      addTrack: state.addTrack,
+      timeSignature: state.timeSignature,
+      markers: state.markers,
+      regions: state.regions,
+      snapEnabled: state.snapEnabled,
+      gridSize: state.gridSize,
+      timeSelection: state.timeSelection,
+      setTimeSelection: state.setTimeSelection,
+      openPianoRoll: state.openPianoRoll,
+      addMIDIClip: state.addMIDIClip,
+    }))
+  );
 
-  const { currentTime, tempo, loopEnabled, loopStart, loopEnd } = transport;
+  // Use selectors for transport values - but NOT currentTime (causes 60fps re-renders)
+  // currentTime is handled via Zustand subscribe for playhead animation only
+  const tempo = useDAWStore((state) => state.transport.tempo);
+  const loopEnabled = useDAWStore((state) => state.transport.loopEnabled);
+  const loopStart = useDAWStore((state) => state.transport.loopStart);
+  const loopEnd = useDAWStore((state) => state.transport.loopEnd);
+  const isPlaying = useDAWStore((state) => state.transport.isPlaying);
+  const isRecording = useDAWStore((state) => state.transport.isRecording);
 
-  // Handle container resize
+  // Calculate stage height early (needed by multiple effects and render)
+  const MIN_STAGE_HEIGHT = 400;
+  const stageHeight = Math.max(tracks.length * trackHeight, MIN_STAGE_HEIGHT);
+
+  // Handle container resize using ResizeObserver for accurate detection
   useEffect(() => {
-    const updateDimensions = () => {
-      if (containerRef.current) {
-        setDimensions({
-          width: containerRef.current.clientWidth,
-          height: Math.max(
-            containerRef.current.clientHeight,
-            RULER_HEIGHT + tracks.length * trackHeight,
-          ),
-        });
-      }
+    const container = containerRef.current;
+    if (!container) return;
+
+    let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    // Calculate available width from parent workspace minus track control panel
+    // This is the single source of truth for available width
+    const getAvailableWidth = () => {
+      const parent = container.parentElement;
+      if (!parent) return 800; // Fallback
+
+      // Calculate directly from parent - don't rely on container.clientWidth
+      // which may not have shrunk yet due to CSS layout timing
+      const workspaceWidth = parent.clientWidth;
+      const tcpWidth = 310; // Track control panel fixed width from CSS
+      return Math.max(100, workspaceWidth - tcpWidth);
     };
 
+    const updateDimensions = () => {
+      const newWidth = getAvailableWidth();
+      // Use parent height since container might not have resized yet
+      const parent = container.parentElement;
+      const newHeight = parent ? parent.clientHeight : container.clientHeight;
+
+      setDimensions((prev) => {
+        if (prev.width === newWidth && prev.height === newHeight) {
+          return prev;
+        }
+        return { width: newWidth, height: newHeight };
+      });
+    };
+
+    // Immediate update on resize with small debounce for performance
+    const handleResize = () => {
+      // Cancel pending timeout
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+
+      // Immediate update for responsive feel
+      updateDimensions();
+
+      // Also schedule a follow-up update after layout settles
+      resizeTimeout = setTimeout(updateDimensions, 100);
+    };
+
+    // Initial measurement
     updateDimensions();
-    window.addEventListener("resize", updateDimensions);
-    return () => window.removeEventListener("resize", updateDimensions);
-  }, [tracks.length, trackHeight]);
+
+    // Watch parent (workspace) for size changes - most reliable for shrinking
+    const resizeObserver = new ResizeObserver(handleResize);
+    if (container.parentElement) {
+      resizeObserver.observe(container.parentElement);
+    }
+
+    // Window resize as additional trigger
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", handleResize);
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+    };
+  }, []);
 
   // Handle scroll wheel for zoom with native listener to prevent browser zoom
   // Use requestAnimationFrame for smooth scrolling
@@ -182,23 +357,11 @@ export function Timeline({ tracks }: TimelineProps) {
           Math.min(maxTimelineScroll, scrollX + e.deltaY * scrollSpeed),
         );
         scheduleScroll(newScrollX, scrollY);
-      } else {
-        // Normal scroll: VERTICAL (scroll tracks up/down)
-        e.preventDefault();
-        const scrollSpeed = 1.5;
-        // Calculate max vertical scroll based on track count
-        const stageHeight = dimensions.height - 16; // Account for scrollbar
-        const totalTracksHeight = tracks.length * trackHeight + RULER_HEIGHT;
-        const maxScrollY = Math.max(0, totalTracksHeight - stageHeight);
-        const newScrollY = Math.max(
-          0,
-          Math.min(maxScrollY, scrollY + e.deltaY * scrollSpeed),
-        );
-        scheduleScroll(scrollX, newScrollY);
       }
+      // Normal vertical scroll: Let native scroll handle it (no preventDefault)
     };
 
-    // Use passive: false to allow preventDefault to work
+    // Use passive: false to allow preventDefault to work for zoom/horizontal scroll
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
   }, [
@@ -211,16 +374,51 @@ export function Timeline({ tracks }: TimelineProps) {
     scheduleScroll,
     tracks,
     dimensions.width,
-    dimensions.height,
   ]);
 
-  // Handle ruler click for seek
+  // Handle ruler click for seek or time selection
   const handleRulerClick = async (e: any) => {
     const stage = e.target.getStage();
     const pointerPos = stage.getPointerPosition();
-    if (pointerPos && pointerPos.y < RULER_HEIGHT) {
-      const clickedTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+    if (!pointerPos) return;
+
+    const clickedTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+
+    // Shift+click: Start time selection drag
+    if (e.evt.shiftKey) {
+      setTimeSelectionDrag({
+        active: true,
+        startTime: Math.max(0, clickedTime),
+      });
+    } else {
+      // Normal click: Seek
       await seekTo(Math.max(0, clickedTime));
+    }
+  };
+
+  // Handle mouse move for time selection dragging
+  const handleStageMouseMove = (e: any) => {
+    if (timeSelectionDrag && timeSelectionDrag.active) {
+      const stage = e.target.getStage();
+      const pointerPos = stage.getPointerPosition();
+      if (pointerPos) {
+        const currentTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+        const startTime = timeSelectionDrag.startTime;
+        const endTime = Math.max(0, currentTime);
+
+        // Update time selection
+        setTimeSelection(
+          Math.min(startTime, endTime),
+          Math.max(startTime, endTime)
+        );
+      }
+    }
+  };
+
+  // Handle mouse up to finalize time selection
+  const handleStageMouseUp = () => {
+    if (timeSelectionDrag && timeSelectionDrag.active) {
+      setTimeSelectionDrag(null);
     }
   };
 
@@ -244,7 +442,7 @@ export function Timeline({ tracks }: TimelineProps) {
         e.preventDefault();
         // Paste at current playhead position on first track
         if (tracks.length > 0) {
-          pasteClip(tracks[0].id, currentTime);
+          pasteClip(tracks[0].id, useDAWStore.getState().transport.currentTime);
         }
       }
       // Duplicate: Ctrl+D
@@ -263,7 +461,6 @@ export function Timeline({ tracks }: TimelineProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     selectedClipId,
-    currentTime,
     copyClip,
     cutClip,
     pasteClip,
@@ -272,33 +469,108 @@ export function Timeline({ tracks }: TimelineProps) {
     tracks,
   ]);
 
-  // Auto-Scroll during playback
+  // Auto-Scroll during playback - uses Zustand subscribe to avoid re-renders
   useEffect(() => {
-    if (!transport.isPlaying) return;
+    if (!isPlaying) return;
 
-    const playheadX = currentTime * pixelsPerSecond;
-    const triggerPoint = scrollX + dimensions.width * 0.75;
+    // Track last scroll position to avoid scrolling backwards
+    let lastAutoScrollX = scrollX;
 
-    // If playhead goes past 75% of viewport, scroll to keep it there
-    if (playheadX > triggerPoint) {
-      const targetScrollX = playheadX - dimensions.width * 0.75;
-      setScroll(targetScrollX, 0);
-    }
-  }, [
-    currentTime,
-    transport.isPlaying,
-    scrollX,
-    pixelsPerSecond,
-    dimensions.width,
-    setScroll,
-  ]);
+    const unsubscribe = useDAWStore.subscribe((state) => {
+      if (!state.transport.isPlaying) return;
+
+      const currentTime = state.transport.currentTime;
+      const playheadX = currentTime * pixelsPerSecond;
+      const triggerPoint = lastAutoScrollX + dimensions.width * 0.75;
+
+      // If playhead goes past 75% of viewport, scroll to keep it there
+      if (playheadX > triggerPoint) {
+        const targetScrollX = playheadX - dimensions.width * 0.75;
+        lastAutoScrollX = targetScrollX;
+        setScroll(targetScrollX, 0);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isPlaying, scrollX, pixelsPerSecond, dimensions.width, setScroll]);
 
   // Note: Removed auto-scroll when stopped - users should be able to freely scroll
   // the timeline when not playing. Auto-scroll only happens during playback.
 
+
+  // Track the last bar we fetched recording peaks for
+  const lastFetchedBarRef = useRef<number>(-1);
+
+  // Fetch recording waveforms only when a bar boundary is crossed
+  // Uses Zustand subscribe to avoid Timeline re-renders on every currentTime change
+  useEffect(() => {
+    if (!isRecording || recordingClips.length === 0) {
+      // Clear recording waveform cache and reset bar tracking when not recording
+      if (recordingWaveformCache.size > 0) {
+        setRecordingWaveformCache(new Map());
+      }
+      lastFetchedBarRef.current = -1;
+      return;
+    }
+
+    // Calculate bar duration for this effect
+    const secondsPerBeat = 60 / tempo;
+    const beatsPerBar = timeSignature.numerator;
+    const barDuration = secondsPerBeat * beatsPerBar;
+
+    // Subscribe to currentTime changes
+    const unsubscribe = useDAWStore.subscribe((state) => {
+      const currentTime = state.transport.currentTime;
+      const currentBar = Math.floor(currentTime / barDuration);
+
+      // Only fetch if we've crossed into a new bar
+      if (currentBar <= lastFetchedBarRef.current) {
+        return;
+      }
+
+      lastFetchedBarRef.current = currentBar;
+
+      const fetchRecordingPeaks = async () => {
+        const newCache = new Map(recordingWaveformCache);
+
+        for (const rc of recordingClips) {
+          // Calculate the recording width in pixels
+          const recordingDuration = currentTime - rc.startTime;
+          if (recordingDuration <= 0) continue;
+
+          const widthPixels = Math.ceil(recordingDuration * pixelsPerSecond);
+          if (widthPixels < 10) continue; // Don't fetch for tiny clips
+
+          try {
+            // Request peaks at reasonable resolution
+            const samplesPerPixel = Math.floor((recordingDuration * 44100) / widthPixels);
+            const peaks = await nativeBridge.getRecordingPeaks(
+              rc.trackId,
+              samplesPerPixel,
+              widthPixels,
+            );
+
+            if (peaks && peaks.length > 0) {
+              newCache.set(rc.trackId, { peaks, widthPixels });
+            }
+          } catch (e) {
+            console.error("Failed to fetch recording peaks:", e);
+          }
+        }
+
+        setRecordingWaveformCache(newCache);
+      };
+
+      fetchRecordingPeaks();
+    });
+
+    return () => unsubscribe();
+  }, [isRecording, recordingClips, tempo, timeSignature.numerator, pixelsPerSecond, recordingWaveformCache]);
+
   // Render Grid Lines (Bars and Beats)
-  const renderGrid = () => {
-    const gridLines = [];
+  // Memoized grid rendering - only recalculates when dependencies change, not on every currentTime update
+  const gridLines = useMemo(() => {
+    const lines = [];
     const secondsPerBeat = 60 / tempo;
     const beatsPerBar = timeSignature.numerator;
     const secondsPerBar = secondsPerBeat * beatsPerBar;
@@ -316,26 +588,13 @@ export function Timeline({ tracks }: TimelineProps) {
       const barX = barTime * pixelsPerSecond - scrollX;
 
       // Draw Bar Line (Stronger)
-      gridLines.push(
+      lines.push(
         <Line
           key={`bar-${bar}`}
-          points={[barX, RULER_HEIGHT, barX, dimensions.height]}
+          points={[barX, 0, barX, stageHeight]}
           stroke="#ffffff"
           strokeWidth={1}
           opacity={0.15}
-          listening={false}
-        />,
-      );
-
-      // Draw Bar Number in Ruler
-      gridLines.push(
-        <Text
-          key={`bar-label-${bar}`}
-          x={barX + 2}
-          y={RULER_HEIGHT - 12}
-          text={(bar + 1).toString()}
-          fontSize={10}
-          fill="#888"
           listening={false}
         />,
       );
@@ -346,10 +605,10 @@ export function Timeline({ tracks }: TimelineProps) {
         if (beatTime > endVisibleTime) break;
 
         const beatX = beatTime * pixelsPerSecond - scrollX;
-        gridLines.push(
+        lines.push(
           <Line
             key={`beat-${bar}-${beat}`}
-            points={[beatX, RULER_HEIGHT, beatX, dimensions.height]}
+            points={[beatX, 0, beatX, stageHeight]}
             stroke="#ffffff"
             strokeWidth={0.5}
             opacity={0.05}
@@ -358,11 +617,11 @@ export function Timeline({ tracks }: TimelineProps) {
         );
       }
     }
-    return gridLines;
-  };
+    return lines;
+  }, [tempo, timeSignature.numerator, scrollX, pixelsPerSecond, dimensions.width, stageHeight]);
 
-  // Generate ruler marks (beat/bar-based to work correctly at any tempo)
-  const generateRulerMarks = () => {
+  // Memoized ruler marks - only recalculates when dependencies change
+  const rulerMarks = useMemo(() => {
     const marks: React.ReactNode[] = [];
     const beatsPerBar = timeSignature.numerator;
     const secondsPerBeat = 60 / tempo;
@@ -437,7 +696,7 @@ export function Timeline({ tracks }: TimelineProps) {
     }
 
     return marks;
-  };
+  }, [tempo, timeSignature.numerator, scrollX, pixelsPerSecond, dimensions.width]);
 
   // Render track rows
   //   const renderTrackRows = () => {
@@ -504,6 +763,7 @@ export function Timeline({ tracks }: TimelineProps) {
     trackIndex: number,
     trackY: number,
     trackColor: string,
+    trackId: string,
   ) => {
     const x = clip.startTime * pixelsPerSecond - scrollX;
     const width = clip.duration * pixelsPerSecond;
@@ -584,9 +844,15 @@ export function Timeline({ tracks }: TimelineProps) {
       selectClip(clip.id);
     };
 
-    // Handle drag start
+    // Handle drag start - only set up if not already set by handleMouseDown (for resize)
     const handleDragStart = (e: any) => {
       selectClip(clip.id);
+
+      // If dragState is already set up by handleMouseDown for resize, don't overwrite it
+      if (dragState.clipId === clip.id && (dragState.type === "resize-left" || dragState.type === "resize-right")) {
+        return; // Keep the resize state that handleMouseDown set
+      }
+
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
 
@@ -612,12 +878,15 @@ export function Timeline({ tracks }: TimelineProps) {
       // Calculate new time position
       const deltaX = pointerPos.x - dragState.startX;
       const deltaTime = deltaX / pixelsPerSecond;
-      const newStartTime = Math.max(0, dragState.originalStartTime + deltaTime);
+      let newStartTime = Math.max(0, dragState.originalStartTime + deltaTime);
+
+      // Apply snap-to-grid if enabled
+      if (snapEnabled) {
+        newStartTime = snapToGrid(newStartTime, tempo, timeSignature, gridSize);
+      }
 
       // Calculate target track based on Y position
-      const targetTrackIndex = Math.floor(
-        (pointerPos.y - RULER_HEIGHT) / trackHeight,
-      );
+      const targetTrackIndex = Math.floor(pointerPos.y / trackHeight);
 
       // Check if dragging below all existing tracks (to empty space)
       if (targetTrackIndex >= tracks.length) {
@@ -647,33 +916,35 @@ export function Timeline({ tracks }: TimelineProps) {
     };
 
     // Handle drag end
-    const handleDragEnd = () => {
+    const handleDragEnd = async () => {
       // Only handle if this clip was actually being dragged
       if (dragState.clipId !== clip.id) return;
 
       // If ghost track was shown, create a new track and move clip to it
       if (showGhostTrack) {
-        const newTrackId = crypto.randomUUID(); // Generate string ID
-        addTrack({
-          id: newTrackId,
-          name: `Track ${tracks.length + 1}`,
-        });
-        // Move clip to the new track (last index)
-        moveClipToTrack(clip.id, newTrackId, clip.startTime);
+        try {
+          // Call backend to create track first - this returns the real track ID
+          const backendTrackId = await nativeBridge.addTrack();
+
+          // Add to frontend with the backend's ID
+          addTrack({
+            id: backendTrackId,
+            name: `Track ${tracks.length + 1}`,
+          });
+
+          // Move clip to the new track
+          await moveClipToTrack(clip.id, backendTrackId, clip.startTime);
+
+          console.log(
+            `[Timeline] Created new track ${backendTrackId} from drag`,
+          );
+        } catch (error) {
+          console.error("[Timeline] Failed to create track from drag:", error);
+        }
       }
 
-      // Always hide ghost track and reset drag state
-      setShowGhostTrack(false);
-      setDragState({
-        type: null,
-        clipId: null,
-        trackIndex: null,
-        startX: 0,
-        startTime: 0,
-        originalStartTime: 0,
-        originalDuration: 0,
-        originalOffset: 0,
-      });
+      // Always reset drag state (also hides ghost track)
+      resetDragState();
     };
 
     // Mouse handlers for edge resize
@@ -703,14 +974,17 @@ export function Timeline({ tracks }: TimelineProps) {
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
 
-      // Determine drag type
+      // Determine drag type based on cursor position
       let dragType: "move" | "resize-left" | "resize-right" = "move";
       if (relativeX < EDGE_THRESHOLD) {
         dragType = "resize-left";
+        stage.container().style.cursor = "ew-resize";
       } else if (relativeX > width - EDGE_THRESHOLD) {
         dragType = "resize-right";
+        stage.container().style.cursor = "ew-resize";
       }
 
+      // Set drag state immediately - handleDragStart will preserve resize types
       setDragState({
         type: dragType,
         clipId: clip.id,
@@ -733,10 +1007,16 @@ export function Timeline({ tracks }: TimelineProps) {
       const deltaTime = deltaX / pixelsPerSecond;
 
       if (dragState.type === "resize-left") {
-        const newStartTime = Math.max(
+        let newStartTime = Math.max(
           0,
           dragState.originalStartTime + deltaTime,
         );
+
+        // Apply snap-to-grid if enabled
+        if (snapEnabled) {
+          newStartTime = snapToGrid(newStartTime, tempo, timeSignature, gridSize);
+        }
+
         const timeDiff = newStartTime - dragState.originalStartTime;
         const newDuration = Math.max(
           0.1,
@@ -745,10 +1025,23 @@ export function Timeline({ tracks }: TimelineProps) {
         const newOffset = Math.max(0, dragState.originalOffset + timeDiff);
         resizeClip(clip.id, newStartTime, newDuration, newOffset);
       } else if (dragState.type === "resize-right") {
-        const newDuration = Math.max(
+        let newDuration = Math.max(
           0.1,
           dragState.originalDuration + deltaTime,
         );
+
+        // Apply snap-to-grid to end time (start + duration) if enabled
+        if (snapEnabled) {
+          const endTime = clip.startTime + newDuration;
+          const snappedEndTime = snapToGrid(
+            endTime,
+            tempo,
+            timeSignature,
+            gridSize
+          );
+          newDuration = Math.max(0.1, snappedEndTime - clip.startTime);
+        }
+
         resizeClip(clip.id, clip.startTime, newDuration, clip.offset);
       } else {
         handleDragMove(e);
@@ -762,6 +1055,19 @@ export function Timeline({ tracks }: TimelineProps) {
         onDragStart={handleDragStart}
         onDragMove={handleDragMoveModified}
         onDragEnd={handleDragEnd}
+        dragBoundFunc={(_pos: any) => {
+          // During resize operations, prevent the Group from moving
+          // Our handleDragMoveModified updates the clip state directly
+          if (
+            dragState.type === "resize-left" ||
+            dragState.type === "resize-right"
+          ) {
+            return { x: 0, y: 0 }; // Lock position - we manage clip position via state
+          }
+          // For move operations, also return 0,0 because we update state directly
+          // and the Group re-renders at the new position
+          return { x: 0, y: 0 };
+        }}
       >
         {/* Clip background */}
         <Rect
@@ -777,6 +1083,15 @@ export function Timeline({ tracks }: TimelineProps) {
           onMouseMove={handleMouseMove}
           onMouseLeave={handleMouseLeave}
           onMouseDown={handleMouseDown}
+          onContextMenu={(e: any) => {
+            e.evt.preventDefault();
+            setClipContextMenu({
+              x: e.evt.clientX,
+              y: e.evt.clientY,
+              clipId: clip.id,
+              trackId: trackId,
+            });
+          }}
         />
         {/* Waveform visualization */}
         {waveformShapes}
@@ -873,12 +1188,15 @@ export function Timeline({ tracks }: TimelineProps) {
               </>
             );
           })()}
-        {/* Fade handles - draggable triangles at corners */}
+        {/* Fade handles - draggable triangles at fade positions */}
         {isSelected &&
           (() => {
             const handleFadeInDrag = (e: any) => {
+              e.cancelBubble = true; // Prevent parent Group from receiving event
+              e.evt?.stopPropagation?.();
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
+              // Calculate fade length based on pointer position relative to clip start
               const relativeX = pointerPos.x - x;
               const fadeLength = Math.max(
                 0,
@@ -888,9 +1206,12 @@ export function Timeline({ tracks }: TimelineProps) {
             };
 
             const handleFadeOutDrag = (e: any) => {
+              e.cancelBubble = true; // Prevent parent Group from receiving event
+              e.evt?.stopPropagation?.();
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
-              const relativeX = x + width - pointerPos.x;
+              // Calculate fade length based on pointer position relative to clip end
+              const relativeX = (x + width) - pointerPos.x;
               const fadeLength = Math.max(
                 0,
                 Math.min(clip.duration / 2, relativeX / pixelsPerSecond),
@@ -898,9 +1219,10 @@ export function Timeline({ tracks }: TimelineProps) {
               setClipFades(clip.id, clip.fadeIn, fadeLength);
             };
 
-            const fadeHandleSize = 12;
             const fadeInWidth = clip.fadeIn * pixelsPerSecond;
             const fadeOutWidth = clip.fadeOut * pixelsPerSecond;
+            // Max position for fade handles (half of clip width)
+            const maxFadeWidth = width / 2;
 
             return (
               <>
@@ -938,42 +1260,50 @@ export function Timeline({ tracks }: TimelineProps) {
                     listening={false}
                   />
                 )}
-                {/* Fade in handle */}
-                <Line
-                  points={[
-                    x,
-                    trackY + 5,
-                    x + fadeHandleSize,
-                    trackY + 5,
-                    x,
-                    trackY + 5 + fadeHandleSize,
-                  ]}
+                {/* Fade in handle - circle at fade position */}
+                <Circle
+                  x={x + fadeInWidth}
+                  y={trackY + 10}
+                  radius={6}
                   fill="#4cc9f0"
-                  closed
+                  stroke="#fff"
+                  strokeWidth={1}
                   draggable
+                  onDragStart={(e: any) => {
+                    e.cancelBubble = true;
+                    e.evt?.stopPropagation?.();
+                  }}
                   onDragMove={handleFadeInDrag}
+                  onDragEnd={(e: any) => {
+                    e.cancelBubble = true;
+                    e.evt?.stopPropagation?.();
+                  }}
                   dragBoundFunc={(pos: any) => ({
-                    x: Math.max(x, Math.min(x + width / 2, pos.x)),
-                    y: trackY + 5,
+                    x: Math.max(x, Math.min(x + maxFadeWidth, pos.x)),
+                    y: trackY + 10,
                   })}
                 />
-                {/* Fade out handle */}
-                <Line
-                  points={[
-                    x + width,
-                    trackY + 5,
-                    x + width - fadeHandleSize,
-                    trackY + 5,
-                    x + width,
-                    trackY + 5 + fadeHandleSize,
-                  ]}
+                {/* Fade out handle - circle at fade position */}
+                <Circle
+                  x={x + width - fadeOutWidth}
+                  y={trackY + 10}
+                  radius={6}
                   fill="#4cc9f0"
-                  closed
+                  stroke="#fff"
+                  strokeWidth={1}
                   draggable
+                  onDragStart={(e: any) => {
+                    e.cancelBubble = true;
+                    e.evt?.stopPropagation?.();
+                  }}
                   onDragMove={handleFadeOutDrag}
+                  onDragEnd={(e: any) => {
+                    e.cancelBubble = true;
+                    e.evt?.stopPropagation?.();
+                  }}
                   dragBoundFunc={(pos: any) => ({
-                    x: Math.max(x + width / 2, Math.min(x + width, pos.x)),
-                    y: trackY + 5,
+                    x: Math.max(x + width - maxFadeWidth, Math.min(x + width, pos.x)),
+                    y: trackY + 10,
                   })}
                 />
               </>
@@ -983,78 +1313,237 @@ export function Timeline({ tracks }: TimelineProps) {
     );
   };
 
-  // Render recording clip (visual placeholder for active recording)
+  // Render recording clip with live waveform
   const renderRecordingClip = (
     clip: RecordingClip,
     trackY: number,
     trackColor: string,
   ) => {
     const x = clip.startTime * pixelsPerSecond - scrollX;
+    const currentTime = useDAWStore.getState().transport.currentTime;
     const width = (currentTime - clip.startTime) * pixelsPerSecond;
 
     if (width <= 0) return null;
 
+    // Get recording waveform data if available
+    const recordingData = recordingWaveformCache.get(clip.trackId);
+
+    // Generate waveform visualization from recording peaks
+    const renderRecordingWaveform = (): React.ReactNode[] => {
+      if (!recordingData || recordingData.peaks.length === 0) return [];
+
+      const { peaks: recordingPeaks, widthPixels: peaksWidth } = recordingData;
+      const numChannels = recordingPeaks[0]?.channels?.length || 1;
+      const waveforms: React.ReactNode[] = [];
+      const waveformHeight = trackHeight - 20;
+
+      for (let ch = 0; ch < numChannels; ch++) {
+        const points: number[] = [];
+        const channelHeight = waveformHeight / numChannels;
+        const channelY = trackY + 10 + ch * channelHeight;
+        const centerY = channelY + channelHeight / 2;
+        const halfHeight = channelHeight / 2 - 2;
+
+        // Draw top half (max values) - use peaksWidth (width at fetch time), not current width
+        for (let i = 0; i < recordingPeaks.length; i++) {
+          const channelData = recordingPeaks[i].channels[ch];
+          if (!channelData) continue;
+
+          const px = x + (i * peaksWidth) / recordingPeaks.length;
+          const py = centerY - channelData.max * halfHeight;
+          points.push(px, py);
+        }
+
+        // Draw bottom half (min values, reversed)
+        for (let i = recordingPeaks.length - 1; i >= 0; i--) {
+          const channelData = recordingPeaks[i].channels[ch];
+          if (!channelData) continue;
+
+          const px = x + (i * peaksWidth) / recordingPeaks.length;
+          const py = centerY - channelData.min * halfHeight;
+          points.push(px, py);
+        }
+
+        if (points.length > 0) {
+          waveforms.push(
+            <Line
+              key={`recording-waveform-${clip.trackId}-ch${ch}`}
+              points={points}
+              fill={trackColor}
+              opacity={0.8}
+              closed
+              stroke={trackColor}
+              strokeWidth={0.5}
+              listening={false}
+            />,
+          );
+        }
+      }
+
+      return waveforms;
+    };
+
     return (
       <Group key={`recording-${clip.trackId}`}>
+        {/* Background */}
         <Rect
           x={x}
           y={trackY + 5}
           width={width}
           height={trackHeight - 10}
           fill={trackColor}
-          opacity={0.5}
+          opacity={0.3}
           cornerRadius={3}
           stroke={trackColor}
           strokeWidth={1}
         />
+        {/* Live waveform visualization */}
+        {renderRecordingWaveform()}
+        {/* Recording indicator text */}
         <Text
           x={x + 5}
           y={trackY + 8}
-          text="Recording..."
+          text="REC"
           fontSize={10}
           fill="#fff"
-          width={width - 10}
+          fontStyle="bold"
           listening={false}
         />
-        {/* Pulse animation effect overlay */}
-        <Rect
-          x={x}
-          y={trackY + 5}
-          width={width}
-          height={trackHeight - 10}
-          fill={trackColor}
-          opacity={0.2}
-          cornerRadius={3}
+        {/* Recording indicator dot (pulsing effect via opacity) */}
+        <Circle
+          x={x + 35}
+          y={trackY + 13}
+          radius={4}
+          fill="#ff3333"
           listening={false}
         />
       </Group>
     );
   };
 
-  // Render playhead
-  const renderPlayhead = () => {
-    const x = currentTime * pixelsPerSecond - scrollX;
-    if (x < 0 || x > dimensions.width) return null;
+  // Render MIDI clip
+  const renderMIDIClip = (
+    clip: MIDIClip,
+    _trackIndex: number,
+    trackY: number,
+    trackColor: string,
+    trackId: string,
+  ) => {
+    const x = clip.startTime * pixelsPerSecond - scrollX;
+    const width = clip.duration * pixelsPerSecond;
+    const isSelected = selectedClipId === clip.id;
+
+    // Skip if clip is outside visible area
+    if (x + width < 0 || x > dimensions.width) return null;
+
+    // Get note events and calculate visual representation
+    const noteOns = clip.events.filter((e) => e.type === "noteOn");
+
+    // Generate simple visual representation of notes
+    const renderNotePreview = () => {
+      if (noteOns.length === 0) return null;
+
+      const previewHeight = trackHeight - 20;
+      const lines: React.ReactNode[] = [];
+
+      // Find min/max notes for scaling
+      const notes = noteOns.map(e => e.note || 60);
+      const minNote = Math.min(...notes);
+      const maxNote = Math.max(...notes);
+      const noteRange = Math.max(1, maxNote - minNote);
+
+      noteOns.forEach((noteOn, i) => {
+        const noteOff = clip.events.find(
+          (e) => e.type === "noteOff" && e.note === noteOn.note && e.timestamp > noteOn.timestamp
+        );
+        if (!noteOff || noteOn.note === undefined) return;
+
+        const noteX = x + (noteOn.timestamp / clip.duration) * width;
+        const noteWidth = Math.max(2, ((noteOff.timestamp - noteOn.timestamp) / clip.duration) * width);
+        const noteY = trackY + 10 + ((maxNote - noteOn.note) / noteRange) * (previewHeight - 4);
+        const noteHeight = Math.max(2, previewHeight / noteRange);
+
+        lines.push(
+          <Rect
+            key={`midi-note-${i}`}
+            x={noteX}
+            y={noteY}
+            width={noteWidth}
+            height={Math.min(noteHeight, 4)}
+            fill={clip.color || trackColor}
+            opacity={0.8}
+            listening={false}
+          />
+        );
+      });
+
+      return lines;
+    };
+
+    const handleMIDIClipClick = () => {
+      selectClip(clip.id);
+    };
+
+    const handleMIDIClipDoubleClick = () => {
+      // Open piano roll editor
+      openPianoRoll(trackId, clip.id);
+    };
 
     return (
-      <Group>
-        {/* Playhead line */}
-        <Line
-          points={[x, 0, x, dimensions.height]}
-          stroke="#4cc9f0"
-          strokeWidth={1}
-        />
-        {/* Playhead handle */}
+      <Group key={clip.id}>
+        {/* Clip background */}
         <Rect
-          x={x - 6}
-          y={0}
-          width={12}
-          height={RULER_HEIGHT}
-          fill="#4cc9f0"
-          opacity={0.3}
+          x={x}
+          y={trackY + 5}
+          width={width}
+          height={trackHeight - 10}
+          fill={clip.color || trackColor}
+          opacity={0.25}
+          cornerRadius={3}
+          onClick={handleMIDIClipClick}
+          onTap={handleMIDIClipClick}
+          onDblClick={handleMIDIClipDoubleClick}
+          onDblTap={handleMIDIClipDoubleClick}
+        />
+        {/* Note preview */}
+        {renderNotePreview()}
+        {/* Clip border */}
+        <Rect
+          x={x}
+          y={trackY + 5}
+          width={width}
+          height={trackHeight - 10}
+          stroke={isSelected ? "#4cc9f0" : "#fff"}
+          strokeWidth={isSelected ? 2 : 0.5}
+          cornerRadius={3}
+          listening={false}
+        />
+        {/* MIDI indicator */}
+        <Text
+          x={x + 5}
+          y={trackY + 8}
+          text={`♪ ${clip.name}`}
+          fontSize={10}
+          fill="#fff"
+          width={width - 10}
+          listening={false}
         />
       </Group>
     );
+  };
+
+  // Handle double-click on empty MIDI track area to create new clip
+  const handleTrackDoubleClick = (
+    trackId: string,
+    trackType: string,
+    clickTime: number,
+  ) => {
+    if (trackType === "midi" || trackType === "instrument") {
+      // Create a new MIDI clip at the clicked position
+      const newClipId = addMIDIClip(trackId, clickTime, 4); // 4 second default duration
+      // Open the piano roll for the new clip
+      openPianoRoll(trackId, newClipId);
+    }
   };
 
   // Render loop region
@@ -1069,7 +1558,7 @@ export function Timeline({ tracks }: TimelineProps) {
         x={startX}
         y={0}
         width={endX - startX}
-        height={dimensions.height}
+        height={stageHeight}
         fill="#a855f7"
         opacity={0.1}
         listening={false}
@@ -1077,11 +1566,133 @@ export function Timeline({ tracks }: TimelineProps) {
     );
   };
 
+  // Render time selection
+  const renderTimeSelection = () => {
+    if (!timeSelection) return null;
+
+    const startX = timeSelection.start * pixelsPerSecond - scrollX;
+    const endX = timeSelection.end * pixelsPerSecond - scrollX;
+
+    return (
+      <Rect
+        x={startX}
+        y={0}
+        width={endX - startX}
+        height={stageHeight}
+        fill="#3b82f6"
+        opacity={0.15}
+        listening={false}
+      />
+    );
+  };
+
+  // Render snap grid lines
+  const renderSnapGridLines = () => {
+    if (!snapEnabled) return null;
+
+    const gridLines: React.ReactNode[] = [];
+    const gridInterval = calculateGridInterval(tempo, timeSignature, gridSize);
+
+    // Calculate visible time range
+    const startTime = scrollX / pixelsPerSecond;
+    const endTime = (scrollX + dimensions.width) / pixelsPerSecond;
+
+    // Generate grid lines for visible range
+    const startIndex = Math.floor(startTime / gridInterval);
+    const endIndex = Math.ceil(endTime / gridInterval);
+
+    for (let i = startIndex; i <= endIndex; i++) {
+      const time = i * gridInterval;
+      const x = time * pixelsPerSecond - scrollX;
+
+      // Skip if outside visible range
+      if (x < -10 || x > dimensions.width + 10) continue;
+
+      gridLines.push(
+        <Line
+          key={`snap-grid-${i}`}
+          points={[x, 0, x, stageHeight]}
+          stroke="#10b981"
+          strokeWidth={0.5}
+          opacity={0.2}
+          dash={[4, 4]}
+          listening={false}
+        />
+      );
+    }
+
+    return <Group>{gridLines}</Group>;
+  };
+
+  // Render markers (just the lines in main stage - flags are in ruler)
+  const renderMarkers = () => {
+    if (!markers || markers.length === 0) return null;
+
+    return (
+      <Group>
+        {markers.map((marker) => {
+          const x = marker.time * pixelsPerSecond - scrollX;
+
+          // Skip if outside visible range
+          if (x < -20 || x > dimensions.width + 20) return null;
+
+          return (
+            <Line
+              key={marker.id}
+              points={[x, 0, x, stageHeight]}
+              stroke={marker.color || "#eab308"}
+              strokeWidth={2}
+              opacity={0.8}
+              listening={false}
+            />
+          );
+        })}
+      </Group>
+    );
+  };
+
+  // Render regions (shown in ruler stage, this just shows borders in main stage)
+  const renderRegions = () => {
+    if (!regions || regions.length === 0) return null;
+
+    return (
+      <Group>
+        {regions.map((region) => {
+          const startX = region.startTime * pixelsPerSecond - scrollX;
+          const endX = region.endTime * pixelsPerSecond - scrollX;
+
+          // Skip if outside visible range
+          if (endX < -20 || startX > dimensions.width + 20) return null;
+
+          return (
+            <Group key={region.id}>
+              {/* Region borders in main stage */}
+              <Line
+                points={[startX, 0, startX, stageHeight]}
+                stroke={region.color || "#06b6d4"}
+                strokeWidth={1}
+                opacity={0.5}
+                listening={false}
+              />
+              <Line
+                points={[endX, 0, endX, stageHeight]}
+                stroke={region.color || "#06b6d4"}
+                strokeWidth={1}
+                opacity={0.5}
+                listening={false}
+              />
+            </Group>
+          );
+        })}
+      </Group>
+    );
+  };
+
   // Render ghost track when dragging to empty space
   const renderGhostTrack = () => {
     if (!showGhostTrack) return null;
 
-    const ghostY = RULER_HEIGHT + tracks.length * trackHeight;
+    const ghostY = tracks.length * trackHeight;
 
     return (
       <Group>
@@ -1120,74 +1731,129 @@ export function Timeline({ tracks }: TimelineProps) {
 
     // Check recording clips - extend timeline to current recording position
     recordingClips.forEach((_rc) => {
-      const recordingEnd = currentTime;
+      const recordingEnd = useDAWStore.getState().transport.currentTime;
       if (recordingEnd > maxClipEnd) maxClipEnd = recordingEnd;
     });
 
     // Timeline length = last clip end + 5 minutes (300 seconds)
     const extraTime = 300; // 5 minutes
     return (maxClipEnd + extraTime) * pixelsPerSecond;
-  }, [tracks, recordingClips, currentTime, pixelsPerSecond]);
+  }, [tracks, recordingClips, pixelsPerSecond]);
 
   const totalTimelineWidth = calculateTotalWidth();
 
   return (
     <div
       ref={containerRef}
-      className="timeline-container relative flex-1 bg-neutral-900 overflow-hidden flex flex-col"
+      className="timeline-container relative flex-1 min-w-0 bg-neutral-900 flex flex-col"
     >
+      {/* Sticky Ruler */}
+      <div className="sticky top-0 z-10 bg-[#0a0a0a]">
+        <Stage
+          width={dimensions.width}
+          height={RULER_HEIGHT}
+          onMouseDown={handleRulerClick}
+        >
+          <Layer>
+            {/* Ruler Background */}
+            <Rect
+              x={0}
+              y={0}
+              width={dimensions.width}
+              height={RULER_HEIGHT}
+              fill="#0a0a0a"
+            />
+            {/* Ruler Marks */}
+            {rulerMarks}
+            {/* Playhead indicator in ruler - separate component */}
+            <Playhead
+              type="ruler"
+              pixelsPerSecond={pixelsPerSecond}
+              scrollX={scrollX}
+              stageHeight={0}
+              viewportWidth={dimensions.width}
+              rulerHeight={RULER_HEIGHT}
+            />
+          </Layer>
+        </Stage>
+      </div>
+
+      {/* Main Timeline Stage */}
       <Stage
         width={dimensions.width}
-        height={dimensions.height - 16}
-        onMouseDown={handleRulerClick}
+        height={stageHeight}
+        onMouseMove={handleStageMouseMove}
+        onMouseUp={handleStageMouseUp}
       >
         <Layer>
           {/* Background */}
           <Rect
             width={dimensions.width}
-            height={dimensions.height - 16}
+            height={stageHeight}
             fill="#121212"
           />
 
           {/* Grid Lines */}
-          {renderGrid()}
+          {gridLines}
+
+          {/* Snap Grid Lines */}
+          {renderSnapGridLines()}
 
           {/* Loop Region */}
           {renderLoopRegion()}
 
-          {/* Tracks Background Alternating */}
-          {tracks.map((_, i) => (
+          {/* Time Selection */}
+          {renderTimeSelection()}
+
+          {/* Tracks Background Alternating - with double-click for MIDI clip creation */}
+          {tracks.map((track, i) => (
             <Rect
               key={`track-bg-${i}`}
               x={0}
-              y={RULER_HEIGHT + i * trackHeight - scrollY}
+              y={i * trackHeight}
               width={dimensions.width}
               height={trackHeight}
               fill={i % 2 === 0 ? "#1a1a1a" : "#171717"}
               opacity={1}
+              onDblClick={(e: any) => {
+                if (track.type === "midi" || track.type === "instrument") {
+                  const stage = e.target.getStage();
+                  const pointerPos = stage.getPointerPosition();
+                  const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+                  handleTrackDoubleClick(track.id, track.type, clickTime);
+                }
+              }}
+              onDblTap={(e: any) => {
+                if (track.type === "midi" || track.type === "instrument") {
+                  const stage = e.target.getStage();
+                  const pointerPos = stage.getPointerPosition();
+                  const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+                  handleTrackDoubleClick(track.id, track.type, clickTime);
+                }
+              }}
             />
           ))}
 
-          {/* Ruler Background */}
-          <Rect
-            x={0}
-            y={0}
-            width={dimensions.width}
-            height={RULER_HEIGHT}
-            fill="#0a0a0a"
-          />
-          {/* Ruler Marks */}
-          {generateRulerMarks()}
+          {/* Regions (behind markers) */}
+          {renderRegions()}
+
+          {/* Markers */}
+          {renderMarkers()}
 
           {/* Clips and Recording Clips */}
           {tracks.map((track, i) => {
-            const trackY = RULER_HEIGHT + i * trackHeight - scrollY;
+            const trackY = i * trackHeight;
 
             return (
               <Group key={track.id}>
-                {/* Existing Clips */}
+                {/* Existing Audio Clips */}
                 {track.clips.map((clip) =>
-                  renderClip(clip, i, trackY, track.color),
+                  renderClip(clip, i, trackY, track.color, track.id),
+                )}
+
+                {/* Existing MIDI Clips */}
+                {track.midiClips.map((clip) =>
+                  renderMIDIClip(clip, i, trackY, track.color, track.id),
                 )}
 
                 {/* Recording Clip (if this track is recording) */}
@@ -1204,94 +1870,64 @@ export function Timeline({ tracks }: TimelineProps) {
           {/* Ghost Track */}
           {renderGhostTrack()}
 
-          {/* Playhead */}
-          {renderPlayhead()}
+          {/* Playhead - separate component to avoid Timeline re-renders */}
+          <Playhead
+            type="main"
+            pixelsPerSecond={pixelsPerSecond}
+            scrollX={scrollX}
+            stageHeight={stageHeight}
+            viewportWidth={dimensions.width}
+          />
         </Layer>
       </Stage>
 
-      {/* Custom Horizontal Scrollbar with dynamic thumb width */}
-      {(() => {
-        const trackWidth = dimensions.width - 16; // Account for padding
-        const thumbWidthRatio = Math.min(
-          1,
-          dimensions.width / totalTimelineWidth,
-        );
-        const thumbWidth = Math.max(30, trackWidth * thumbWidthRatio); // Min 30px thumb
-        const maxScroll = Math.max(0, totalTimelineWidth - dimensions.width);
-        const thumbPosition =
-          maxScroll > 0 ? (scrollX / maxScroll) * (trackWidth - thumbWidth) : 0;
+      {/* Custom Horizontal Scrollbar */}
+      <HorizontalScrollbar
+        viewportWidth={dimensions.width}
+        totalWidth={totalTimelineWidth}
+        scrollX={scrollX}
+        scrollY={scrollY}
+        onScroll={scheduleScroll}
+        setScroll={setScroll}
+      />
 
-        const handleTrackClick = (e: React.MouseEvent<HTMLDivElement>) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const clickX = e.clientX - rect.left - 8; // Account for padding
-          const clickRatio = clickX / trackWidth;
-          const newScrollX = clickRatio * maxScroll;
-          scheduleScroll(Math.max(0, Math.min(maxScroll, newScrollX)), scrollY);
-        };
-
-        const handleThumbMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-          e.stopPropagation();
-          const startX = e.clientX;
-          const startScrollX = scrollX;
-
-          // Use RAF for smooth dragging
-          let rafId: number | null = null;
-          let pendingScrollX = startScrollX;
-
-          const handleMouseMove = (moveEvent: MouseEvent) => {
-            const deltaX = moveEvent.clientX - startX;
-            const scrollableTrackWidth = trackWidth - thumbWidth;
-            const deltaScroll =
-              scrollableTrackWidth > 0
-                ? (deltaX / scrollableTrackWidth) * maxScroll
-                : 0;
-            pendingScrollX = Math.max(
-              0,
-              Math.min(maxScroll, startScrollX + deltaScroll),
-            );
-
-            // Schedule update on next frame
-            if (rafId === null) {
-              rafId = requestAnimationFrame(() => {
-                setScroll(pendingScrollX, scrollY);
-                rafId = null;
-              });
-            }
-          };
-
-          const handleMouseUp = () => {
-            document.removeEventListener("mousemove", handleMouseMove);
-            document.removeEventListener("mouseup", handleMouseUp);
-            // Cancel any pending RAF and apply final position
-            if (rafId !== null) {
-              cancelAnimationFrame(rafId);
-              setScroll(pendingScrollX, scrollY);
-            }
-          };
-
-          document.addEventListener("mousemove", handleMouseMove);
-          document.addEventListener("mouseup", handleMouseUp);
-        };
-
-        return (
-          <div
-            className="h-4 bg-neutral-800 flex items-center px-2 cursor-pointer"
-            onClick={handleTrackClick}
-          >
-            <div className="relative w-full h-2 bg-neutral-700 rounded">
-              <div
-                className="absolute h-2 bg-neutral-500 rounded cursor-grab active:cursor-grabbing hover:bg-neutral-400 transition-colors"
-                style={{
-                  left: `${thumbPosition}px`,
-                  width: `${thumbWidth}px`,
-                }}
-                onMouseDown={handleThumbMouseDown}
-                onClick={(e) => e.stopPropagation()}
-              />
-            </div>
-          </div>
-        );
-      })()}
+      {/* Clip Context Menu */}
+      {clipContextMenu && (
+        <ContextMenu
+          x={clipContextMenu.x}
+          y={clipContextMenu.y}
+          items={[
+            {
+              label: "Cut",
+              shortcut: "Ctrl+X",
+              onClick: () => cutClip(clipContextMenu.clipId),
+            },
+            {
+              label: "Copy",
+              shortcut: "Ctrl+C",
+              onClick: () => copyClip(clipContextMenu.clipId),
+            },
+            {
+              label: "Paste",
+              shortcut: "Ctrl+V",
+              disabled: !clipboard.clip,
+              onClick: () => pasteClip(clipContextMenu.trackId, useDAWStore.getState().transport.currentTime),
+            },
+            { divider: true, label: "" },
+            {
+              label: "Duplicate",
+              shortcut: "Ctrl+D",
+              onClick: () => duplicateClip(clipContextMenu.clipId),
+            },
+            {
+              label: "Delete",
+              shortcut: "Del",
+              onClick: () => deleteClip(clipContextMenu.clipId),
+            },
+          ]}
+          onClose={() => setClipContextMenu(null)}
+        />
+      )}
     </div>
   );
 }

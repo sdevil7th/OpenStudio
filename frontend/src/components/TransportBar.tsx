@@ -1,11 +1,50 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import classNames from "classnames";
+import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
 import { MetronomeSettings } from "./MetronomeSettings";
+import { Button, Input, TimeSignatureInput } from "./ui";
+
+/**
+ * Lightweight time display component - subscribes ONLY to currentTime.
+ * This prevents the entire TransportBar from re-rendering 60fps.
+ */
+const MusicalTimeDisplay = memo(function MusicalTimeDisplay() {
+  const currentTime = useDAWStore((state) => state.transport.currentTime);
+  const tempo = useDAWStore((state) => state.transport.tempo);
+  const timeSignature = useDAWStore((state) => state.timeSignature);
+
+  const beatsPerSecond = tempo / 60;
+  const totalBeats = currentTime * beatsPerSecond;
+  const beatsPerBar = timeSignature.numerator;
+  const bars = Math.floor(totalBeats / beatsPerBar) + 1;
+  const beats = Math.floor(totalBeats % beatsPerBar) + 1;
+  const ticks = Math.floor((totalBeats % 1) * 100);
+
+  return (
+    <div className="bg-neutral-950 text-sky-500 px-3 py-1 rounded text-sm min-w-[70px] text-center">
+      {`${bars}.${beats}.${ticks.toString().padStart(2, "0")}`}
+    </div>
+  );
+});
+
+const RealTimeDisplay = memo(function RealTimeDisplay() {
+  const currentTime = useDAWStore((state) => state.transport.currentTime);
+
+  const mins = Math.floor(currentTime / 60);
+  const secs = Math.floor(currentTime % 60);
+  const ms = Math.floor((currentTime % 1) * 1000);
+
+  return (
+    <div className="bg-neutral-950 text-emerald-500 px-3 py-1 rounded text-sm min-w-[80px] text-center">
+      {`${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`}
+    </div>
+  );
+});
 
 export function TransportBar() {
+  // Use useShallow to prevent re-renders from currentTime changes
   const {
-    transport,
     tracks,
     play,
     record,
@@ -13,24 +52,39 @@ export function TransportBar() {
     stop,
     toggleLoop,
     setTempo,
+    tapTempo,
     seekTo,
     toggleMetronome,
     metronomeEnabled,
     timeSignature,
     setTimeSignature,
-  } = useDAWStore();
+  } = useDAWStore(
+    useShallow((state) => ({
+      tracks: state.tracks,
+      play: state.play,
+      record: state.record,
+      pause: state.pause,
+      stop: state.stop,
+      toggleLoop: state.toggleLoop,
+      setTempo: state.setTempo,
+      tapTempo: state.tapTempo,
+      seekTo: state.seekTo,
+      toggleMetronome: state.toggleMetronome,
+      metronomeEnabled: state.metronomeEnabled,
+      timeSignature: state.timeSignature,
+      setTimeSignature: state.setTimeSignature,
+    }))
+  );
 
-  const { isPlaying, isPaused, isRecording, currentTime, tempo, loopEnabled } =
-    transport;
+  // These transport values are needed for button states - use individual selectors
+  const isPlaying = useDAWStore((state) => state.transport.isPlaying);
+  const isPaused = useDAWStore((state) => state.transport.isPaused);
+  const isRecording = useDAWStore((state) => state.transport.isRecording);
+  const tempo = useDAWStore((state) => state.transport.tempo);
+  const loopEnabled = useDAWStore((state) => state.transport.loopEnabled);
 
   // Local state for input fields (blur-based updates)
   const [tempTempo, setTempTempo] = useState(tempo.toString());
-  const [tempNumerator, setTempNumerator] = useState(
-    timeSignature.numerator.toString(),
-  );
-  const [tempDenominator, setTempDenominator] = useState(
-    timeSignature.denominator.toString(),
-  );
   const [showMetronomeSettings, setShowMetronomeSettings] = useState(false);
 
   // Sync local state when store changes (e.g., from external source)
@@ -38,28 +92,6 @@ export function TransportBar() {
     setTempTempo(tempo.toString());
   }, [tempo]);
 
-  useEffect(() => {
-    setTempNumerator(timeSignature.numerator.toString());
-    setTempDenominator(timeSignature.denominator.toString());
-  }, [timeSignature.numerator, timeSignature.denominator]);
-
-  // Format with actual time signature
-  const formatMusicalTime = (seconds: number): string => {
-    const beatsPerSecond = tempo / 60;
-    const totalBeats = seconds * beatsPerSecond;
-    const beatsPerBar = timeSignature.numerator;
-    const bars = Math.floor(totalBeats / beatsPerBar) + 1;
-    const beats = Math.floor(totalBeats % beatsPerBar) + 1;
-    const ticks = Math.floor((totalBeats % 1) * 100);
-    return `${bars}.${beats}.${ticks.toString().padStart(2, "0")}`;
-  };
-
-  const formatRealTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 1000);
-    return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
-  };
 
   const handlePlay = async () => {
     if (!isPlaying || isPaused) {
@@ -98,30 +130,6 @@ export function TransportBar() {
     }
   };
 
-  // Time signature numerator: only update on blur
-  const handleNumeratorBlur = () => {
-    const val = parseInt(tempNumerator);
-    if (isNaN(val) || val < 1 || val > 32) {
-      // Revert to current value
-      setTempNumerator(timeSignature.numerator.toString());
-    } else {
-      setTimeSignature(val, timeSignature.denominator);
-    }
-  };
-
-  // Time signature denominator: only update on blur
-  const handleDenominatorBlur = () => {
-    const val = parseInt(tempDenominator);
-    // Denominator should be a power of 2: 1, 2, 4, 8, 16, 32
-    const validDenominators = [1, 2, 4, 8, 16, 32];
-    if (isNaN(val) || val < 1 || val > 32 || !validDenominators.includes(val)) {
-      // Revert to current value
-      setTempDenominator(timeSignature.denominator.toString());
-    } else {
-      setTimeSignature(timeSignature.numerator, val);
-    }
-  };
-
   // Handle Enter key to blur the input (apply changes)
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
@@ -143,13 +151,9 @@ export function TransportBar() {
       <div className="h-10 bg-neutral-900 border-t border-neutral-700 border-b border-b-neutral-950 flex items-center px-4 justify-between shrink-0">
         {/* Left: Time Display */}
         <div className="flex items-center gap-2 font-mono">
-          <div className="bg-neutral-950 text-sky-500 px-3 py-1 rounded text-sm min-w-[70px] text-center">
-            {formatMusicalTime(currentTime)}
-          </div>
+          <MusicalTimeDisplay />
           <span className="text-neutral-500">/</span>
-          <div className="bg-neutral-950 text-emerald-500 px-3 py-1 rounded text-sm min-w-[80px] text-center">
-            {formatRealTime(currentTime)}
-          </div>
+          <RealTimeDisplay />
           <div
             className={classNames("text-xs px-2", {
               "text-red-500": isRecording,
@@ -162,130 +166,90 @@ export function TransportBar() {
 
         {/* Center: Transport Controls */}
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="default"
+            size="icon-lg"
             onClick={handleGoToStart}
-            className="w-8 h-8 bg-neutral-800 border border-neutral-700 rounded text-neutral-400 hover:text-white hover:border-neutral-500 transition-all text-sm flex items-center justify-center"
             title="Go to Start"
           >
             ⏮
-          </button>
-          <button
-            onClick={handleRecord}
+          </Button>
+          <Button
+            variant="danger"
+            size="icon-lg"
+            active={isRecording}
             disabled={!hasArmedTracks && isPlaying}
-            className={classNames(
-              "w-8 h-8 rounded transition-all text-sm flex items-center justify-center border",
-              {
-                "bg-red-700 text-white border-red-600": isRecording,
-                "bg-neutral-800 text-red-500 border-neutral-700 hover:bg-red-700 hover:text-white":
-                  hasArmedTracks && !isRecording,
-                "bg-neutral-800 text-neutral-500 border-neutral-700":
-                  !hasArmedTracks && !isRecording,
-              },
-            )}
+            onClick={handleRecord}
             title={hasArmedTracks ? "Play & Record" : "Arm a track to record"}
           >
             ●
-          </button>
-          <button
-            onClick={handlePlay}
+          </Button>
+          <Button
+            variant="success"
+            size="icon-lg"
+            active={isPlaying && !isRecording}
             disabled={isPlaying && !isPaused}
-            className={classNames(
-              "w-8 h-8 rounded transition-all text-sm flex items-center justify-center border disabled:opacity-40",
-              {
-                "bg-green-700 text-white border-green-600":
-                  isPlaying && !isRecording,
-                "bg-neutral-800 text-green-500 border-neutral-700 hover:bg-green-700 hover:text-white":
-                  !isPlaying || isRecording,
-              },
-            )}
+            onClick={handlePlay}
             title="Play"
           >
             ▶
-          </button>
-          <button
-            onClick={handleStop}
+          </Button>
+          <Button
+            variant="default"
+            size="icon-lg"
             disabled={!isPlaying && !isPaused}
-            className="w-8 h-8 bg-neutral-800 border border-neutral-700 rounded text-neutral-400 hover:text-white hover:bg-neutral-700 transition-all text-sm disabled:opacity-40 flex items-center justify-center"
+            onClick={handleStop}
             title="Stop"
           >
             ■
-          </button>
-          <button
-            onClick={handlePause}
+          </Button>
+          <Button
+            variant="primary"
+            size="icon-lg"
+            active={isPaused}
             disabled={!isPlaying}
-            className={classNames(
-              "w-8 h-8 rounded transition-all text-sm flex items-center justify-center border disabled:opacity-40",
-              {
-                "bg-blue-600 text-white border-blue-500": isPaused,
-                "bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-white":
-                  !isPaused,
-              },
-            )}
+            onClick={handlePause}
             title="Pause"
           >
             ⏸
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="purple"
+            size="icon-lg"
+            active={loopEnabled}
             onClick={toggleLoop}
-            className={classNames(
-              "w-8 h-8 rounded transition-all text-sm flex items-center justify-center border",
-              {
-                "bg-purple-700 text-white border-purple-600": loopEnabled,
-                "bg-neutral-800 text-purple-500 border-neutral-700 hover:bg-purple-700 hover:text-white":
-                  !loopEnabled,
-              },
-            )}
             title="Loop"
           >
             🔁
-          </button>
+          </Button>
           <div className="w-2"></div>
           {/* Metronome */}
-          <button
+          <Button
+            variant="warning"
+            size="icon-lg"
+            active={metronomeEnabled}
             onClick={toggleMetronome}
-            className={classNames(
-              "w-8 h-8 rounded transition-all text-sm flex items-center justify-center border",
-              {
-                "bg-yellow-700 text-white border-yellow-600": metronomeEnabled,
-                "bg-neutral-800 text-yellow-500 border-neutral-700 hover:bg-yellow-700 hover:text-white":
-                  !metronomeEnabled,
-              },
-            )}
             title="Metronome Click"
           >
             M
-          </button>
+          </Button>
         </div>
 
         {/* Right: Project Info */}
         <div className="flex items-center gap-4 text-xs">
-          <div className="flex items-center gap-1">
-            <div className="flex flex-col items-center">
-              <span className="text-neutral-500 text-[9px] uppercase">
-                Time Sig
-              </span>
-              <div className="flex items-center gap-1 bg-neutral-800 border border-neutral-700 rounded px-1">
-                <input
-                  className="w-5 bg-transparent text-center text-white focus:outline-none"
-                  value={tempNumerator}
-                  onChange={(e) => setTempNumerator(e.target.value)}
-                  onBlur={handleNumeratorBlur}
-                  onKeyDown={handleKeyDown}
-                />
-                <span className="text-neutral-500">/</span>
-                <input
-                  className="w-5 bg-transparent text-center text-white focus:outline-none"
-                  value={tempDenominator}
-                  onChange={(e) => setTempDenominator(e.target.value)}
-                  onBlur={handleDenominatorBlur}
-                  onKeyDown={handleKeyDown}
-                />
-              </div>
-            </div>
+          <div className="flex items-end gap-1">
+            <TimeSignatureInput
+              numerator={timeSignature.numerator}
+              denominator={timeSignature.denominator}
+              onChange={setTimeSignature}
+              showLabel
+              size="sm"
+            />
             {/* Metronome Settings Button */}
-            <button
+            <Button
+              variant="ghost"
+              size="icon-sm"
               onClick={() => setShowMetronomeSettings(true)}
-              className="w-6 h-6 flex items-center justify-center text-neutral-400 hover:text-white hover:bg-neutral-700 rounded transition-colors"
               title="Metronome Settings"
             >
               <svg
@@ -300,18 +264,32 @@ export function TransportBar() {
                   clipRule="evenodd"
                 />
               </svg>
-            </button>
+            </Button>
           </div>
-          <div className="flex flex-col items-center">
+          <div className="flex flex-col items-center gap-1">
             <span className="text-neutral-500 text-[9px] uppercase">BPM</span>
-            <input
-              type="text"
-              value={tempTempo}
-              onChange={(e) => setTempTempo(e.target.value)}
-              onBlur={handleTempoBlur}
-              onKeyDown={handleKeyDown}
-              className="w-12 bg-neutral-900 border border-neutral-700 rounded px-1 text-center text-neutral-400 text-xs focus:outline-none focus:border-blue-600"
-            />
+            <div className="flex items-center gap-1">
+              <Input
+                type="text"
+                variant="compact"
+                size="xs"
+                centerText
+                value={tempTempo}
+                onChange={(e) => setTempTempo(e.target.value)}
+                onBlur={handleTempoBlur}
+                onKeyDown={handleKeyDown}
+                className="w-8"
+                inputClassName="w-8"
+              />
+              <Button
+                variant="default"
+                size="xs"
+                onClick={tapTempo}
+                title="Tap Tempo (T)"
+              >
+                TAP
+              </Button>
+            </div>
           </div>
         </div>
 

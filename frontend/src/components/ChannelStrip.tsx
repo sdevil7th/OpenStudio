@@ -3,6 +3,7 @@ import classNames from "classnames";
 import { PeakMeter } from "./PeakMeter";
 import { useDAWStore, Track } from "../store/useDAWStore";
 import { FXChainPanel } from "./FXChainPanel";
+import { Button, Slider } from "./ui";
 
 interface ChannelStripProps {
   track: Track;
@@ -28,8 +29,7 @@ export function ChannelStrip({
   const [phaseInverted, setPhaseInverted] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
 
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const volumeDB = parseFloat(e.target.value);
+  const handleVolumeChange = (volumeDB: number) => {
     if (isMaster) {
       // Convert dB to linear for master
       const linearVolume = volumeDB <= -60 ? 0 : Math.pow(10, volumeDB / 20);
@@ -39,8 +39,8 @@ export function ChannelStrip({
     }
   };
 
-  const handlePanChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const pan = parseFloat(e.target.value) / 100;
+  const handlePanChange = (panValue: number) => {
+    const pan = panValue / 100;
     if (isMaster) {
       setMasterPan(pan);
     } else {
@@ -131,32 +131,29 @@ export function ChannelStrip({
 
       {/* Phase Invert */}
       <div className="px-1 pb-1 shrink-0">
-        <button
+        <Button
+          variant="warning"
+          size="xs"
+          fullWidth
+          active={phaseInverted}
           onClick={() => setPhaseInverted(!phaseInverted)}
-          className={classNames(
-            "w-full h-5 text-[10px] font-bold rounded flex items-center justify-center gap-1 transition-colors",
-            {
-              "bg-orange-500 text-black": phaseInverted,
-              "bg-neutral-800 text-neutral-400 border border-neutral-600 hover:text-white":
-                !phaseInverted,
-            },
-          )}
           title="Phase Invert"
         >
           Ø
-        </button>
+        </Button>
       </div>
 
       {/* Pan Section - Horizontal Slider like Reaper */}
       <div className="px-1 pb-1 shrink-0">
         <div className="flex flex-col items-center gap-0.5">
-          <input
-            type="range"
-            min="-100"
-            max="100"
+          <Slider
+            orientation="horizontal"
+            variant="pan"
+            min={-100}
+            max={100}
             value={track.pan * 100}
             onChange={handlePanChange}
-            className="w-full h-2 bg-neutral-800 rounded cursor-pointer accent-green-600"
+            className="w-full"
             title={panDisplay}
           />
           <span className="text-[8px] text-neutral-500 font-mono">
@@ -186,21 +183,16 @@ export function ChannelStrip({
 
         {/* Vertical Fader */}
         <div className="flex-1 flex justify-center">
-          <input
-            type="range"
-            min="-60"
-            max="12"
-            step="0.1"
+          <Slider
+            orientation="vertical"
+            variant="fader"
+            min={-60}
+            max={12}
+            step={0.1}
             value={track.volumeDB}
             onChange={handleVolumeChange}
-            className="vertical-fader"
-            style={{
-              writingMode: "vertical-lr",
-              direction: "rtl",
-              width: "18px",
-              height: "100%",
-              maxHeight: isMaster ? "100px" : "85px",
-            }}
+            height={isMaster ? "100px" : "75px"}
+            width="18px"
             title={`${formatVolume(track.volumeDB)} dB`}
           />
         </div>
@@ -221,50 +213,38 @@ export function ChannelStrip({
 
       {/* M/S/R Buttons */}
       <div className="flex gap-0.5 p-1 shrink-0">
-        <button
+        <Button
+          variant="success"
+          size="xs"
+          active={track.muted}
           onClick={() => toggleTrackMute(track.id)}
-          className={classNames(
-            "flex-1 h-6 text-[10px] font-bold rounded transition-colors",
-            {
-              "bg-green-700 text-white": track.muted,
-              "bg-neutral-800 text-neutral-400 border border-neutral-600 hover:text-white":
-                !track.muted,
-            },
-          )}
           title="Mute"
+          className="flex-1"
         >
           M
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="warning"
+          size="xs"
+          active={track.soloed}
           onClick={() => toggleTrackSolo(track.id)}
-          className={classNames(
-            "flex-1 h-6 text-[10px] font-bold rounded transition-colors",
-            {
-              "bg-yellow-500 text-black": track.soloed,
-              "bg-neutral-800 text-neutral-400 border border-neutral-600 hover:text-white":
-                !track.soloed,
-            },
-          )}
           title="Solo"
+          className="flex-1"
         >
           S
-        </button>
+        </Button>
         {!isMaster && (
-          <button
+          <Button
+            variant="danger"
+            size="xs"
+            active={track.armed}
+            activeStyle={track.armed ? "glow" : "solid"}
             onClick={() => toggleTrackArmed(track.id)}
-            className={classNames(
-              "flex-1 h-6 text-[10px] font-bold rounded transition-colors",
-              {
-                "bg-red-700 text-white shadow-[0_0_5px_rgba(220,38,38,0.5)]":
-                  track.armed,
-                "bg-neutral-800 text-neutral-400 border border-neutral-600 hover:text-white":
-                  !track.armed,
-              },
-            )}
             title="Record Arm"
+            className="flex-1"
           >
             R
-          </button>
+          </Button>
         )}
       </div>
 

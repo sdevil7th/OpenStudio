@@ -16,6 +16,7 @@ import {
 import { ChannelStrip } from "./ChannelStrip";
 import { SortableTrack } from "./SortableTrack";
 import { useDAWStore, Track } from "../store/useDAWStore";
+import { Button } from "./ui";
 
 interface MixerPanelProps {
   isVisible: boolean;
@@ -82,14 +83,14 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
         <span className="text-[9px] font-semibold text-neutral-400 uppercase tracking-wider">
           Mixer
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={onClose || toggleMixer}
-          className="w-4 h-4 flex items-center justify-center text-neutral-400 hover:text-white 
-                               hover:bg-red-700 rounded text-xs transition-colors"
           title="Close Mixer"
         >
           ×
-        </button>
+        </Button>
       </div>
 
       {/* Channel Strips Container */}

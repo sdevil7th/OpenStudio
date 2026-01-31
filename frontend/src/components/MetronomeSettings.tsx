@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import classNames from "classnames";
+import { Button, TimeSignatureInput } from "./ui";
 
 interface MetronomeSettingsProps {
   isOpen: boolean;
@@ -16,20 +16,6 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     metronomeEnabled,
     toggleMetronome,
   } = useDAWStore();
-
-  // Local state for time signature inputs
-  const [tempNumerator, setTempNumerator] = useState(
-    timeSignature.numerator.toString(),
-  );
-  const [tempDenominator, setTempDenominator] = useState(
-    timeSignature.denominator.toString(),
-  );
-
-  // Sync local state when store changes
-  useEffect(() => {
-    setTempNumerator(timeSignature.numerator.toString());
-    setTempDenominator(timeSignature.denominator.toString());
-  }, [timeSignature.numerator, timeSignature.denominator]);
 
   if (!isOpen) return null;
 
@@ -53,32 +39,6 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     setMetronomeAccentBeats(Array(timeSignature.numerator).fill(true));
   };
 
-  // Time signature handlers
-  const handleNumeratorBlur = () => {
-    const val = parseInt(tempNumerator);
-    if (isNaN(val) || val < 1 || val > 32) {
-      setTempNumerator(timeSignature.numerator.toString());
-    } else {
-      setTimeSignature(val, timeSignature.denominator);
-    }
-  };
-
-  const handleDenominatorBlur = () => {
-    const val = parseInt(tempDenominator);
-    const validDenominators = [1, 2, 4, 8, 16, 32];
-    if (isNaN(val) || val < 1 || val > 32 || !validDenominators.includes(val)) {
-      setTempDenominator(timeSignature.denominator.toString());
-    } else {
-      setTimeSignature(timeSignature.numerator, val);
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      (e.target as HTMLInputElement).blur();
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
@@ -91,54 +51,37 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           <h3 className="text-sm font-semibold text-white">
             Metronome Settings
           </h3>
-          <button
+          <Button
+            variant="ghost"
+            size="icon-sm"
             onClick={onClose}
-            className="w-5 h-5 flex items-center justify-center text-neutral-400 hover:text-white hover:bg-red-700 rounded text-xs"
           >
             ×
-          </button>
+          </Button>
         </div>
 
         {/* Enable/Disable */}
         <div className="flex items-center gap-3 mb-4 pb-3 border-b border-neutral-700">
-          <button
+          <Button
+            variant="warning"
+            size="sm"
+            active={metronomeEnabled}
             onClick={() => toggleMetronome()}
-            className={classNames(
-              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
-              {
-                "bg-yellow-600 text-white": metronomeEnabled,
-                "bg-neutral-700 text-neutral-400 hover:bg-neutral-600":
-                  !metronomeEnabled,
-              },
-            )}
           >
             {metronomeEnabled ? "Enabled" : "Disabled"}
-          </button>
+          </Button>
         </div>
 
         {/* Time Signature Section */}
         <div className="mb-4 pb-3 border-b border-neutral-700">
           <div className="text-xs text-neutral-400 mb-2">Time Signature</div>
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1 bg-neutral-900 border border-neutral-600 rounded px-2 py-1">
-              <input
-                type="text"
-                className="w-8 bg-transparent text-center text-white text-sm focus:outline-none"
-                value={tempNumerator}
-                onChange={(e) => setTempNumerator(e.target.value)}
-                onBlur={handleNumeratorBlur}
-                onKeyDown={handleKeyDown}
-              />
-              <span className="text-neutral-500 text-lg">/</span>
-              <input
-                type="text"
-                className="w-8 bg-transparent text-center text-white text-sm focus:outline-none"
-                value={tempDenominator}
-                onChange={(e) => setTempDenominator(e.target.value)}
-                onBlur={handleDenominatorBlur}
-                onKeyDown={handleKeyDown}
-              />
-            </div>
+            <TimeSignatureInput
+              numerator={timeSignature.numerator}
+              denominator={timeSignature.denominator}
+              onChange={setTimeSignature}
+              size="md"
+            />
             <span className="text-neutral-500 text-xs">
               (Beats per bar / Note value)
             </span>
@@ -152,45 +95,44 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           </div>
           <div className="flex gap-2 flex-wrap">
             {Array.from({ length: timeSignature.numerator }).map((_, i) => (
-              <button
+              <Button
                 key={i}
+                variant="warning"
+                size="md"
                 onClick={() => handleBeatClick(i)}
                 disabled={i === 0}
-                className={classNames(
-                  "w-10 h-10 rounded-lg text-sm font-bold transition-all",
-                  "flex items-center justify-center",
-                  {
-                    // Beat 1 is always accented and highlighted
-                    "bg-yellow-600 text-white cursor-default": i === 0,
-                    // Other accented beats
-                    "bg-yellow-500/70 text-white hover:bg-yellow-500":
-                      i !== 0 && metronomeAccentBeats[i],
-                    // Non-accented beats
-                    "bg-neutral-700 text-neutral-300 hover:bg-neutral-600":
-                      i !== 0 && !metronomeAccentBeats[i],
-                  },
-                )}
+                active={i === 0 || metronomeAccentBeats[i]}
+                className={classNames("w-10 h-10 rounded-lg", {
+                  "cursor-default": i === 0,
+                  "!bg-yellow-500/70": i !== 0 && metronomeAccentBeats[i],
+                  "!bg-neutral-700 !text-neutral-300 hover:!bg-neutral-600 !border-neutral-600":
+                    i !== 0 && !metronomeAccentBeats[i],
+                })}
               >
                 {i + 1}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
 
         {/* Quick Actions */}
         <div className="flex gap-2">
-          <button
+          <Button
+            variant="default"
+            size="sm"
             onClick={handleReset}
-            className="flex-1 px-3 py-1.5 bg-neutral-700 text-neutral-300 rounded text-xs hover:bg-neutral-600 transition-colors"
+            fullWidth
           >
             Reset
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
             onClick={handleAccentAll}
-            className="flex-1 px-3 py-1.5 bg-neutral-700 text-neutral-300 rounded text-xs hover:bg-neutral-600 transition-colors"
+            fullWidth
           >
             Accent All
-          </button>
+          </Button>
         </div>
       </div>
     </div>

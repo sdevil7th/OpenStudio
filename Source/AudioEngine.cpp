@@ -335,7 +335,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 }
 
-juce::String AudioEngine::addTrack()
+juce::String AudioEngine::addTrack(const juce::String& explicitId)
 {
     logToDisk("AudioEngine: Adding Track...");
 
@@ -352,7 +352,7 @@ juce::String AudioEngine::addTrack()
     
     if (trackNode)
     {
-        juce::String trackId = juce::Uuid().toString();
+        juce::String trackId = explicitId.isNotEmpty() ? explicitId : juce::Uuid().toString();
         
         trackMap[trackId] = rawTrackPtr;
         trackOrder.push_back(trackId);
@@ -1502,6 +1502,11 @@ juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int sample
     return peakData;
 }
 
+juce::var AudioEngine::getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels)
+{
+    return audioRecorder.getRecordingPeaks(trackId, samplesPerPixel, numPixels);
+}
+
 //==============================================================================
 // Metronome & Transport Control (Phase 3)
 
@@ -1542,4 +1547,112 @@ void AudioEngine::getTimeSignature(int& numerator, int& denominator) const
 {
     numerator = timeSigNumerator;
     denominator = timeSigDenominator;
+}
+
+//==============================================================================
+// Plugin State Serialization (F2 - Project Save/Load)
+
+juce::String AudioEngine::getPluginState(const juce::String& trackId, int fxIndex, bool isInputFX)
+{
+    if (trackMap.find(trackId) == trackMap.end())
+        return {};
+    
+    auto* track = trackMap[trackId];
+    if (!track)
+        return {};
+    
+    juce::AudioProcessor* processor = nullptr;
+    
+    if (isInputFX)
+    {
+        if (fxIndex >= 0 && fxIndex < track->getNumInputFX())
+            processor = track->getInputFXProcessor(fxIndex);
+    }
+    else
+    {
+        if (fxIndex >= 0 && fxIndex < track->getNumTrackFX())
+            processor = track->getTrackFXProcessor(fxIndex);
+    }
+    
+    if (!processor)
+        return {};
+    
+    // Get plugin state as memory block
+    juce::MemoryBlock stateData;
+    processor->getStateInformation(stateData);
+    
+    // Convert to Base64 string
+    return stateData.toBase64Encoding();
+}
+
+bool AudioEngine::setPluginState(const juce::String& trackId, int fxIndex, bool isInputFX, const juce::String& base64State)
+{
+    if (trackMap.find(trackId) == trackMap.end())
+        return false;
+    
+    auto* track = trackMap[trackId];
+    if (!track)
+        return false;
+    
+    juce::AudioProcessor* processor = nullptr;
+    
+    if (isInputFX)
+    {
+        if (fxIndex >= 0 && fxIndex < track->getNumInputFX())
+            processor = track->getInputFXProcessor(fxIndex);
+    }
+    else
+    {
+        if (fxIndex >= 0 && fxIndex < track->getNumTrackFX())
+            processor = track->getTrackFXProcessor(fxIndex);
+    }
+    
+    if (!processor)
+        return false;
+    
+    // Decode Base64 to memory block
+    juce::MemoryBlock stateData;
+    if (!stateData.fromBase64Encoding(base64State))
+        return false;
+    
+    // Set plugin state
+    processor->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
+    
+    juce::Logger::writeToLog("AudioEngine: Restored plugin state for track " + trackId + 
+                             " FX " + juce::String(fxIndex) + " (isInput: " + (isInputFX ? "true" : "false") + ")");
+    return true;
+}
+
+juce::String AudioEngine::getMasterPluginState(int fxIndex)
+{
+    if (fxIndex < 0 || fxIndex >= static_cast<int>(masterFXNodes.size()))
+        return {};
+    
+    auto& node = masterFXNodes[fxIndex];
+    if (!node || !node->getProcessor())
+        return {};
+    
+    juce::MemoryBlock stateData;
+    node->getProcessor()->getStateInformation(stateData);
+    
+    return stateData.toBase64Encoding();
+}
+
+bool AudioEngine::setMasterPluginState(int fxIndex, const juce::String& base64State)
+{
+    if (fxIndex < 0 || fxIndex >= static_cast<int>(masterFXNodes.size()))
+        return false;
+    
+    auto& node = masterFXNodes[fxIndex];
+    if (!node || !node->getProcessor())
+        return false;
+    
+    juce::MemoryBlock stateData;
+    if (!stateData.fromBase64Encoding(base64State))
+        return false;
+    
+    node->getProcessor()->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
+    
+    juce::Logger::writeToLog("AudioEngine: Restored master plugin state for FX " + juce::String(fxIndex));
+    return true;
 }

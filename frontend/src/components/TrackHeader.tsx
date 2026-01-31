@@ -4,6 +4,8 @@ import { useDAWStore, Track } from "../store/useDAWStore";
 import { FXChainPanel } from "./FXChainPanel";
 import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
 import { ColorPicker } from "./ColorPicker";
+import { PluginBrowser } from "./PluginBrowser";
+import { Button, Input, Select } from "./ui";
 
 interface TrackHeaderProps {
   track: Track;
@@ -23,6 +25,7 @@ export function TrackHeader({ track }: TrackHeaderProps) {
 
   const [showFXChain, setShowFXChain] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
+  const [showInstrumentBrowser, setShowInstrumentBrowser] = useState(false);
   const [inputType, setInputType] = useState<"stereo" | "mono">(
     track.inputChannelCount === 1 ? "mono" : "stereo",
   );
@@ -99,6 +102,8 @@ export function TrackHeader({ track }: TrackHeaderProps) {
           className="w-2 shrink-0 cursor-pointer hover:w-3 transition-all relative group/color"
           style={{ background: track.color || "#666" }}
           title="Click to change track color"
+          data-color-bar
+          data-no-select
         >
           {/* Hover indicator */}
           <div className="absolute inset-0 bg-white/20 opacity-0 group-hover/color:opacity-100 transition-opacity" />
@@ -120,141 +125,147 @@ export function TrackHeader({ track }: TrackHeaderProps) {
           {/* Row 1: Record Arm + Name + M/S/FX */}
           <div className="flex items-center gap-2">
             {/* Record Arm Button */}
-            <button
+            <Button
+              variant="danger"
+              size="icon-md"
+              shape="circle"
+              active={track.armed}
+              activeStyle="glow"
               onClick={handleRecordArm}
-              className={classNames(
-                "w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 transition-all border-2",
-                {
-                  "bg-red-700 border-red-600 text-white shadow-[0_0_8px_rgba(229,57,53,0.5)]":
-                    track.armed,
-                  "bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-500":
-                    !track.armed,
-                },
-              )}
               title="Record Arm"
+              className="shrink-0"
             >
               ●
-            </button>
+            </Button>
 
             {/* Track Name */}
-            <input
+            <Input
               type="text"
+              variant="inline"
+              size="sm"
               value={track.name}
               onChange={handleNameChange}
-              className="flex-1 min-w-0 bg-neutral-700 border-none rounded px-2 py-1 text-xs text-white 
-                                       focus:outline-none focus:ring-1 focus:ring-neutral-500 truncate"
               placeholder="Track Name"
+              className="flex-1 min-w-0 truncate"
             />
 
             {/* M S FX Buttons */}
             <div className="flex gap-0.5 shrink-0">
-              <button
+              <Button
+                variant="success"
+                size="icon-sm"
+                active={track.muted}
                 onClick={handleMute}
-                className={classNames(
-                  "w-6 h-6 text-[11px] font-bold rounded transition-all",
-                  {
-                    "bg-green-700 text-white": track.muted,
-                    "bg-neutral-800 text-neutral-400 border border-neutral-700 hover:text-white":
-                      !track.muted,
-                  },
-                )}
                 title="Mute"
               >
                 M
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="warning"
+                size="icon-sm"
+                active={track.soloed}
                 onClick={handleSolo}
-                className={classNames(
-                  "w-6 h-6 text-[11px] font-bold rounded transition-all",
-                  {
-                    "bg-yellow-500 text-black": track.soloed,
-                    "bg-neutral-800 text-neutral-400 border border-neutral-700 hover:text-white":
-                      !track.soloed,
-                  },
-                )}
                 title="Solo"
               >
                 S
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="default"
+                size="icon-sm"
                 onClick={handleOpenFX}
-                className="w-6 h-6 text-[10px] font-bold rounded bg-neutral-800 text-neutral-400 
-                                           border border-neutral-700 hover:text-green-500 hover:border-green-500 transition-all"
                 title="FX Chain"
+                className="hover:text-green-500 hover:border-green-500"
               >
                 FX
-              </button>
+              </Button>
             </div>
           </div>
 
           {/* Row 2: Track Type + Input Selector */}
           <div className="flex items-center gap-2">
             {/* Track Type Selector */}
-            <select
+            <Select
+              variant="compact"
+              size="xs"
               value={track.type}
-              onChange={async (e) => {
-                const newType = e.target.value as
-                  | "audio"
-                  | "midi"
-                  | "instrument";
+              onChange={async (val) => {
+                const newType = val as "audio" | "midi" | "instrument";
                 updateTrack(track.id, { type: newType });
                 // Update backend
                 const { nativeBridge } =
                   await import("../services/NativeBridge");
                 await nativeBridge.setTrackType(track.id, newType);
               }}
-              className="bg-neutral-800 border border-neutral-700 rounded px-1 py-0.5 text-[10px] text-neutral-400 
-                                       focus:outline-none cursor-pointer w-[70px] shrink-0"
-            >
-              <option value="audio">Audio</option>
-              <option value="midi">MIDI</option>
-              <option value="instrument">Instrument</option>
-            </select>
+              options={[
+                { value: "audio", label: "Audio" },
+                { value: "midi", label: "MIDI" },
+                { value: "instrument", label: "Instrument" },
+              ]}
+              className="w-[70px] shrink-0"
+            />
 
             {/* Audio Input Controls */}
             {track.type === "audio" && (
               <>
                 {/* Input Type Toggle */}
-                <select
+                <Select
+                  variant="compact"
+                  size="xs"
                   value={inputType}
-                  onChange={(e) => {
-                    const type = e.target.value as "stereo" | "mono";
+                  onChange={(val) => {
+                    const type = val as "stereo" | "mono";
                     setInputType(type);
                     updateTrack(track.id, {
                       inputType: type,
                       inputChannelCount: type === "stereo" ? 2 : 1,
                     });
                   }}
-                  className="bg-neutral-800 border border-neutral-700 rounded px-1 py-0.5 text-[10px] text-neutral-400 
-                                               focus:outline-none cursor-pointer w-[54px] shrink-0"
-                >
-                  <option value="stereo">Stereo</option>
-                  <option value="mono">Mono</option>
-                </select>
+                  options={[
+                    { value: "stereo", label: "Stereo" },
+                    { value: "mono", label: "Mono" },
+                  ]}
+                  className="w-[54px] shrink-0"
+                />
 
                 {/* Input Channel Selector */}
                 <div className="min-w-0 relative group">
-                  <select
+                  <Select
+                    variant="accent"
+                    size="xs"
                     value={currentInputValue}
-                    onChange={handleInputChange}
-                    className="w-24 bg-emerald-700 border border-emerald-600 rounded px-2 py-0.5 
-                                                   text-[10px] text-white focus:outline-none cursor-pointer truncate appearance-none"
-                    title="Input Routing"
-                  >
-                    {availableInputs.map((input) => (
-                      <option key={input.value} value={input.value}>
-                        {input.label}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(val) => {
+                      const value = val.toString();
+                      const [startChannel, numChannels] = value.split("-").map(Number);
+                      setTrackInput(track.id, startChannel, numChannels);
+                    }}
+                    options={availableInputs}
+                    className="w-24 truncate appearance-none"
+                  />
                 </div>
               </>
             )}
 
             {/* MIDI Input Controls */}
-            {(track.type === "midi" || track.type === "instrument") && (
+            {track.type === "midi" && (
               <div className="flex-1 text-[10px] text-neutral-400">
-                MIDI Track - See MIDI settings below
+                MIDI Track - Double-click timeline to create clip
+              </div>
+            )}
+            {/* Instrument Track Controls */}
+            {track.type === "instrument" && (
+              <div className="flex items-center gap-1 flex-1">
+                <Button
+                  variant="default"
+                  size="icon-sm"
+                  onClick={() => setShowInstrumentBrowser(true)}
+                  title="Load Instrument Plugin"
+                  className="hover:text-purple-400 hover:border-purple-400 text-[9px] px-1.5"
+                >
+                  {track.instrumentPlugin ? "🎹" : "🎹+"}
+                </Button>
+                <span className="text-[10px] text-neutral-400 truncate max-w-[100px]" title={track.instrumentPlugin || "No instrument"}>
+                  {track.instrumentPlugin ? track.instrumentPlugin.split(/[/\\]/).pop() : "No instrument"}
+                </span>
               </div>
             )}
 
@@ -264,11 +275,9 @@ export function TrackHeader({ track }: TrackHeaderProps) {
             </div>
           </div>
 
-          {/* Row 3: MIDI Device Selector (conditional) */}
+          {/* Row 3: MIDI Device Selector (conditional) - now compact inline */}
           {(track.type === "midi" || track.type === "instrument") && (
-            <div className="mt-1">
-              <MIDIDeviceSelector trackId={track.id} />
-            </div>
+            <MIDIDeviceSelector trackId={track.id} />
           )}
         </div>
 
@@ -299,6 +308,16 @@ export function TrackHeader({ track }: TrackHeaderProps) {
           trackName={track.name}
           chainType="track"
           onClose={() => setShowFXChain(false)}
+        />
+      )}
+
+      {showInstrumentBrowser && (
+        <PluginBrowser
+          trackId={track.id}
+          targetChain="instrument"
+          onClose={() => {
+            setShowInstrumentBrowser(false);
+          }}
         />
       )}
     </>

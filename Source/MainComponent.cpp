@@ -83,7 +83,11 @@ MainComponent::MainComponent()
                         }
                    })
                    .withNativeFunction ("addTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                       juce::String trackId = audioEngine.addTrack();
+                       juce::String explicitId = "";
+                       if (args.size() > 0 && args[0].isString()) {
+                           explicitId = args[0].toString();
+                       }
+                       juce::String trackId = audioEngine.addTrack(explicitId);
                        completion(trackId);
                    })
                    .withNativeFunction ("removeTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -483,6 +487,16 @@ MainComponent::MainComponent()
                            completion(juce::Array<juce::var>());
                        }
                    })
+                   .withNativeFunction ("getRecordingPeaks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() == 3) {
+                           juce::String trackId = args[0].toString();
+                           int samplesPerPixel = args[1];
+                           int numPixels = args[2];
+                           completion(audioEngine.getRecordingPeaks(trackId, samplesPerPixel, numPixels));
+                       } else {
+                           completion(juce::Array<juce::var>());
+                       }
+                   })
                    // Playback clip management
                    .withNativeFunction ("addPlaybackClip", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 4 && args[1].isString() && args[2].isDouble() && args[3].isDouble()) {
@@ -561,6 +575,159 @@ MainComponent::MainComponent()
                             juce::String trackId = args[0].toString();
                             juce::String vstPath = args[1].toString();
                             completion(audioEngine.loadInstrument(trackId, vstPath));
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    // ========== Project Save/Load (F2) ==========
+                    .withNativeFunction ("showSaveDialog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Show native save file dialog
+                        // Args: [defaultPath (optional), title (optional)]
+                        juce::String defaultPath = args.size() > 0 ? args[0].toString() : "";
+                        juce::String title = args.size() > 1 ? args[1].toString() : "Save Project";
+                        
+                        juce::File initialDir = defaultPath.isNotEmpty() 
+                            ? juce::File(defaultPath).getParentDirectory()
+                            : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+                        juce::String initialFileName = defaultPath.isNotEmpty()
+                            ? juce::File(defaultPath).getFileName()
+                            : "Untitled.s13";
+                        
+                        // Use async file chooser
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            title,
+                            initialDir.getChildFile(initialFileName),
+                            "*.s13",
+                            true  // Use native dialog
+                        );
+                        
+                        auto flags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles;
+                        
+                        fileChooser->launchAsync(flags, [completion](const juce::FileChooser& fc) {
+                            auto result = fc.getResult();
+                            if (result.getFullPathName().isNotEmpty()) {
+                                // Ensure .s13 extension
+                                juce::String path = result.getFullPathName();
+                                if (!path.endsWithIgnoreCase(".s13")) {
+                                    path += ".s13";
+                                }
+                                completion(path);
+                            } else {
+                                completion("");  // User cancelled
+                            }
+                        });
+                    })
+                    .withNativeFunction ("showOpenDialog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Show native open file dialog
+                        // Args: [title (optional)]
+                        juce::String title = args.size() > 0 ? args[0].toString() : "Open Project";
+                        
+                        juce::File initialDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+                        
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            title,
+                            initialDir,
+                            "*.s13",
+                            true  // Use native dialog
+                        );
+                        
+                        auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+                        
+                        fileChooser->launchAsync(flags, [completion](const juce::FileChooser& fc) {
+                            auto result = fc.getResult();
+                            if (result.existsAsFile()) {
+                                completion(result.getFullPathName());
+                            } else {
+                                completion("");  // User cancelled
+                            }
+                        });
+                    })
+                    .withNativeFunction ("saveProjectToFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Save project JSON to file
+                        // Args: [filePath, jsonContent]
+                        if (args.size() == 2 && args[0].isString() && args[1].isString()) {
+                            juce::String filePath = args[0].toString();
+                            juce::String jsonContent = args[1].toString();
+                            
+                            juce::File file(filePath);
+                            bool success = file.replaceWithText(jsonContent);
+                            
+                            if (success) {
+                                juce::Logger::writeToLog("Project saved to: " + filePath);
+                            } else {
+                                juce::Logger::writeToLog("Failed to save project to: " + filePath);
+                            }
+                            
+                            completion(success);
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("loadProjectFromFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Load project JSON from file
+                        // Args: [filePath]
+                        if (args.size() == 1 && args[0].isString()) {
+                            juce::String filePath = args[0].toString();
+                            juce::File file(filePath);
+                            
+                            if (file.existsAsFile()) {
+                                juce::String jsonContent = file.loadFileAsString();
+                                juce::Logger::writeToLog("Project loaded from: " + filePath + " (" + juce::String(jsonContent.length()) + " chars)");
+                                completion(jsonContent);
+                            } else {
+                                juce::Logger::writeToLog("Project file not found: " + filePath);
+                                completion("");
+                            }
+                        } else {
+                            completion("");
+                        }
+                    })
+                    .withNativeFunction ("getPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Get plugin state as base64 string
+                        // Args: [trackId, fxIndex, isInputFX]
+                        if (args.size() == 3) {
+                            juce::String trackId = args[0].toString();
+                            int fxIndex = args[1];
+                            bool isInputFX = args[2];
+                            juce::String state = audioEngine.getPluginState(trackId, fxIndex, isInputFX);
+                            completion(state);
+                        } else {
+                            completion("");
+                        }
+                    })
+                    .withNativeFunction ("setPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Set plugin state from base64 string
+                        // Args: [trackId, fxIndex, isInputFX, base64State]
+                        if (args.size() == 4) {
+                            juce::String trackId = args[0].toString();
+                            int fxIndex = args[1];
+                            bool isInputFX = args[2];
+                            juce::String base64State = args[3].toString();
+                            bool success = audioEngine.setPluginState(trackId, fxIndex, isInputFX, base64State);
+                            completion(success);
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("getMasterPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Get master FX plugin state as base64
+                        // Args: [fxIndex]
+                        if (args.size() == 1) {
+                            int fxIndex = args[0];
+                            juce::String state = audioEngine.getMasterPluginState(fxIndex);
+                            completion(state);
+                        } else {
+                            completion("");
+                        }
+                    })
+                    .withNativeFunction ("setMasterPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Set master FX plugin state from base64
+                        // Args: [fxIndex, base64State]
+                        if (args.size() == 2) {
+                            int fxIndex = args[0];
+                            juce::String base64State = args[1].toString();
+                            bool success = audioEngine.setMasterPluginState(fxIndex, base64State);
+                            completion(success);
                         } else {
                             completion(false);
                         }

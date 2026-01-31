@@ -35,6 +35,10 @@ public:
     };
     std::vector<CompletedRecording> stopAllRecordings(double currentSampleRate);
 
+    // Get waveform peaks for a recording currently in progress
+    // Returns peaks calculated from buffered samples at the requested resolution
+    juce::var getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels);
+
 private:
     struct ActiveRecording
     {
@@ -44,6 +48,8 @@ private:
         bool isActive = false;
         double startTime = 0.0;      // Recording start time in seconds
         juce::int64 samplesWritten = 0;  // Total samples written
+        int numChannels = 2;  // Number of channels being recorded
+        std::vector<float> sampleBuffer;  // Interleaved samples for live waveform display
     };
     
     std::map<juce::String, ActiveRecording> activeRecordings;

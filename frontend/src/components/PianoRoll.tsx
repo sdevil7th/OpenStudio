@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Stage, Layer, Rect, Line, Text, Group } from "react-konva";
 import { useDAWStore, MIDIEvent } from "../store/useDAWStore";
+import { Button } from "./ui";
 import "./PianoRoll.css";
 
 interface PianoRollProps {
@@ -34,6 +35,8 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [tool, setTool] = useState<"draw" | "select" | "erase">("draw");
   const [zoom, setZoom] = useState(100); // pixels per beat
+  const [scrollX, setScrollX] = useState(0);
+  const [scrollY, setScrollY] = useState(TOTAL_NOTES * NOTE_HEIGHT / 2 - 300); // Center around middle C
 
   const track = useDAWStore((state) =>
     state.tracks.find((t) => t.id === trackId),
@@ -55,6 +58,27 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
     window.addEventListener("resize", updateDimensions);
     return () => window.removeEventListener("resize", updateDimensions);
   }, []);
+
+  // Handle wheel scrolling
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.shiftKey) {
+        // Horizontal scroll
+        setScrollX((prev) => Math.max(0, prev + e.deltaY));
+      } else {
+        // Vertical scroll
+        const maxScrollY = TOTAL_NOTES * NOTE_HEIGHT - (dimensions.height - 40);
+        setScrollY((prev) => Math.max(0, Math.min(maxScrollY, prev + e.deltaY)));
+      }
+    };
+
+    container.addEventListener("wheel", handleWheel, { passive: false });
+    return () => container.removeEventListener("wheel", handleWheel);
+  }, [dimensions.height]);
 
   if (!clip || !track) {
     return <div className="piano-roll-empty">No MIDI clip selected</div>;
@@ -79,10 +103,10 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
   const handleStageClick = (e: any) => {
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
-    const x = pos.x - PIANO_WIDTH;
+    const x = pos.x - PIANO_WIDTH + scrollX;
     const y = pos.y;
 
-    if (x < 0) return; // Clicked on piano keyboard
+    if (pos.x < PIANO_WIDTH) return; // Clicked on piano keyboard
 
     const time = snapTime(x / pixelsPerSecond);
     const note = getNoteFromY(y);
@@ -210,7 +234,7 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
       lines.push(
         <Line
           key={`h-${i}`}
-          points={[PIANO_WIDTH, y, PIANO_WIDTH + gridWidth, y]}
+          points={[PIANO_WIDTH, y, PIANO_WIDTH + gridWidth - scrollX, y]}
           stroke={isC ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.05)"}
           strokeWidth={isC ? 1 : 0.5}
         />,
@@ -220,13 +244,16 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
     // Vertical lines (beat grid)
     const beatInterval = 1 / beatsPerSecond;
     for (let t = 0; t <= clip.duration; t += beatInterval * GRID_SNAP) {
-      const x = PIANO_WIDTH + t * pixelsPerSecond;
+      const x = PIANO_WIDTH + t * pixelsPerSecond - scrollX;
       const isBeat = Math.abs(t % beatInterval) < 0.001;
+
+      // Skip if outside visible area
+      if (x < PIANO_WIDTH || x > dimensions.width) continue;
 
       lines.push(
         <Line
           key={`v-${t}`}
-          points={[x, 0, x, TOTAL_NOTES * NOTE_HEIGHT]}
+          points={[x, 0, x, TOTAL_NOTES * NOTE_HEIGHT - scrollY]}
           stroke={isBeat ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.05)"}
           strokeWidth={isBeat ? 1 : 0.5}
         />,
@@ -250,8 +277,12 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
 
       if (!noteOff || noteOn.note === undefined) continue;
 
-      const x = PIANO_WIDTH + noteOn.timestamp * pixelsPerSecond;
+      const x = PIANO_WIDTH + noteOn.timestamp * pixelsPerSecond - scrollX;
       const y = getNoteY(noteOn.note);
+
+      // Skip if outside visible area
+      const noteWidth = (noteOff.timestamp - noteOn.timestamp) * pixelsPerSecond;
+      if (x + noteWidth < PIANO_WIDTH || x > dimensions.width) continue;
       const width = (noteOff.timestamp - noteOn.timestamp) * pixelsPerSecond;
       const velocity = noteOn.velocity || 80;
       const opacity = velocity / 127;
@@ -277,27 +308,33 @@ export function PianoRoll({ clipId, trackId }: PianoRollProps) {
   return (
     <div className="piano-roll" ref={containerRef}>
       <div className="piano-roll-toolbar">
-        <button
-          className={`tool-btn ${tool === "draw" ? "active" : ""}`}
+        <Button
+          variant="default"
+          size="sm"
+          active={tool === "draw"}
           onClick={() => setTool("draw")}
           title="Draw Tool (D)"
         >
           ✏️ Draw
-        </button>
-        <button
-          className={`tool-btn ${tool === "select" ? "active" : ""}`}
+        </Button>
+        <Button
+          variant="default"
+          size="sm"
+          active={tool === "select"}
           onClick={() => setTool("select")}
           title="Select Tool (V)"
         >
           ↖️ Select
-        </button>
-        <button
-          className={`tool-btn ${tool === "erase" ? "active" : ""}`}
+        </Button>
+        <Button
+          variant="default"
+          size="sm"
+          active={tool === "erase"}
           onClick={() => setTool("erase")}
           title="Erase Tool (E)"
         >
           🗑️ Erase
-        </button>
+        </Button>
         <div className="toolbar-divider" />
         <label>Zoom:</label>
         <input
