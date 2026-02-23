@@ -1,17 +1,24 @@
 import { useState, useEffect } from "react";
 import classNames from "classnames";
 import { useDAWStore, Track } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 import { FXChainPanel } from "./FXChainPanel";
 import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
 import { ColorPicker } from "./ColorPicker";
 import { PluginBrowser } from "./PluginBrowser";
+import { PianoIcon } from "./icons";
 import { Button, Input, Select } from "./ui";
 
 interface TrackHeaderProps {
   track: Track;
+  isSelected?: boolean;
 }
 
-export function TrackHeader({ track }: TrackHeaderProps) {
+export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
+  // Isolated meter subscription — this component re-renders at 10Hz for the
+  // mini activity bar, but that's cheap and doesn't affect Timeline/App.
+  const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
+
   const {
     toggleTrackMute,
     toggleTrackSolo,
@@ -21,7 +28,16 @@ export function TrackHeader({ track }: TrackHeaderProps) {
     audioDeviceSetup,
     refreshAudioDeviceSetup,
     trackHeight,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    toggleTrackMute: s.toggleTrackMute,
+    toggleTrackSolo: s.toggleTrackSolo,
+    toggleTrackArmed: s.toggleTrackArmed,
+    setTrackInput: s.setTrackInput,
+    updateTrack: s.updateTrack,
+    audioDeviceSetup: s.audioDeviceSetup,
+    refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
+    trackHeight: s.trackHeight,
+  })));
 
   const [showFXChain, setShowFXChain] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
@@ -85,15 +101,15 @@ export function TrackHeader({ track }: TrackHeaderProps) {
 
   // Meter gradient based on level
   const getMeterColor = () => {
-    if (track.meterLevel > 0.9) return "#f44336"; // Keeping hex for dynamic gradient or could allow standard colors if possible
-    if (track.meterLevel > 0.7) return "#ffc107";
+    if (meterLevel > 0.9) return "#f44336"; // Keeping hex for dynamic gradient or could allow standard colors if possible
+    if (meterLevel > 0.7) return "#ffc107";
     return "#4caf50";
   };
 
   return (
     <>
       <div
-        className="flex bg-neutral-800 border-b border-neutral-900 relative overflow-hidden box-border"
+        className={`flex border-b border-neutral-900 relative overflow-hidden box-border ${isSelected ? "bg-neutral-700" : "bg-neutral-800"}`}
         style={{ height: trackHeight }}
       >
         {/* Track Color Bar - Clickable to change color */}
@@ -174,10 +190,29 @@ export function TrackHeader({ track }: TrackHeaderProps) {
                 size="icon-sm"
                 onClick={handleOpenFX}
                 title="FX Chain"
-                className="hover:text-green-500 hover:border-green-500"
+                className={
+                  (track.inputFxCount + track.trackFxCount) > 0
+                    ? "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]"
+                    : "hover:text-green-500 hover:border-green-500"
+                }
               >
                 FX
               </Button>
+              <Button
+                variant="default"
+                size="icon-sm"
+                active={track.showAutomation}
+                onClick={() => useDAWStore.getState().toggleTrackAutomation(track.id)}
+                title="Toggle Automation"
+                className={track.showAutomation ? "text-green-400!" : ""}
+              >
+                A
+              </Button>
+              {track.frozen && (
+                <span className="text-xs text-blue-400 px-1" title="Track is frozen">
+                  ❄
+                </span>
+              )}
             </div>
           </div>
 
@@ -214,11 +249,14 @@ export function TrackHeader({ track }: TrackHeaderProps) {
                   value={inputType}
                   onChange={(val) => {
                     const type = val as "stereo" | "mono";
+                    const channelCount = type === "stereo" ? 2 : 1;
                     setInputType(type);
                     updateTrack(track.id, {
                       inputType: type,
-                      inputChannelCount: type === "stereo" ? 2 : 1,
+                      inputChannelCount: channelCount,
                     });
+                    // Sync with C++ backend so recording uses correct channel count
+                    setTrackInput(track.id, track.inputStartChannel, channelCount);
                   }}
                   options={[
                     { value: "stereo", label: "Stereo" },
@@ -261,7 +299,8 @@ export function TrackHeader({ track }: TrackHeaderProps) {
                   title="Load Instrument Plugin"
                   className="hover:text-purple-400 hover:border-purple-400 text-[9px] px-1.5"
                 >
-                  {track.instrumentPlugin ? "🎹" : "🎹+"}
+                  <PianoIcon size={14} />
+                  {track.instrumentPlugin ? null : "+"}
                 </Button>
                 <span className="text-[10px] text-neutral-400 truncate max-w-[100px]" title={track.instrumentPlugin || "No instrument"}>
                   {track.instrumentPlugin ? track.instrumentPlugin.split(/[/\\]/).pop() : "No instrument"}
@@ -292,10 +331,10 @@ export function TrackHeader({ track }: TrackHeaderProps) {
           <div
             className={classNames(
               "w-full transition-all duration-75",
-              track.armed && track.meterLevel > 0.01 && "animate-pulse", // Pulse when recording with signal
+              track.armed && meterLevel > 0.01 && "animate-pulse", // Pulse when recording with signal
             )}
             style={{
-              height: `${Math.min(100, track.meterLevel * 100)}%`,
+              height: `${Math.min(100, meterLevel * 100)}%`,
               background: `linear-gradient(to top, ${getMeterColor()}, ${getMeterColor()})`,
             }}
           />

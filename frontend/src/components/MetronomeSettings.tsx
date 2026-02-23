@@ -1,6 +1,8 @@
+import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import classNames from "classnames";
-import { Button, TimeSignatureInput } from "./ui";
+import { Button, TimeSignatureInput, Slider } from "./ui";
 
 interface MetronomeSettingsProps {
   isOpen: boolean;
@@ -15,6 +17,13 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     setMetronomeAccentBeats,
     metronomeEnabled,
     toggleMetronome,
+    metronomeVolume,
+    setMetronomeVolume,
+    metronomeTrackId,
+    generateMetronomeTrack,
+    removeMetronomeTrack,
+    metronomeClickPath,
+    metronomeAccentPath,
   } = useDAWStore();
 
   if (!isOpen) return null;
@@ -39,8 +48,8 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     setMetronomeAccentBeats(Array(timeSignature.numerator).fill(true));
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  return createPortal(
+    <div className="fixed inset-0 z-2000 flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
 
@@ -56,7 +65,7 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
             size="icon-sm"
             onClick={onClose}
           >
-            ×
+            <X size={16} />
           </Button>
         </div>
 
@@ -70,6 +79,26 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           >
             {metronomeEnabled ? "Enabled" : "Disabled"}
           </Button>
+        </div>
+
+        {/* Volume Control */}
+        <div className="mb-4 pb-3 border-b border-neutral-700">
+          <div className="text-xs text-neutral-400 mb-2">Volume</div>
+          <div className="flex items-center gap-3">
+            <Slider
+              orientation="horizontal"
+              variant="default"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(metronomeVolume * 100)}
+              onChange={(val) => setMetronomeVolume(val / 100)}
+              width="180px"
+            />
+            <span className="text-neutral-300 text-xs w-8 text-right">
+              {Math.round(metronomeVolume * 100)}%
+            </span>
+          </div>
         </div>
 
         {/* Time Signature Section */}
@@ -89,7 +118,7 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
         </div>
 
         {/* Accent Beats */}
-        <div className="mb-4">
+        <div className="mb-4 pb-3 border-b border-neutral-700">
           <div className="text-xs text-neutral-400 mb-2">
             Click beats to toggle accent (beat 1 is always accented)
           </div>
@@ -115,6 +144,96 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           </div>
         </div>
 
+        {/* Metronome Track */}
+        <div className="mb-4 pb-3 border-b border-neutral-700">
+          <div className="text-xs text-neutral-400 mb-2">
+            Render as Track (for export)
+          </div>
+          <div className="flex gap-2">
+            {metronomeTrackId ? (
+              <>
+                <Button
+                  variant="warning"
+                  size="sm"
+                  onClick={() => generateMetronomeTrack()}
+                  fullWidth
+                >
+                  Regenerate Track
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => removeMetronomeTrack()}
+                  fullWidth
+                >
+                  Remove Track
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => generateMetronomeTrack()}
+                fullWidth
+              >
+                Add as Track
+              </Button>
+            )}
+          </div>
+          {metronomeTrackId && (
+            <p className="text-[10px] text-neutral-500 mt-1">
+              Track auto-regenerates when metronome settings change.
+            </p>
+          )}
+        </div>
+
+        {/* Custom Click Sounds (Phase 9C) */}
+        <div className="mb-4 pb-3 border-b border-neutral-700">
+          <div className="text-xs text-neutral-400 mb-2">Click Sounds</div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-400 w-14">Click:</span>
+              <span className="text-xs text-neutral-300 flex-1 truncate">
+                {metronomeClickPath ? metronomeClickPath.split(/[/\\]/).pop() : "Default (Synth)"}
+              </span>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => {
+                  void useDAWStore.getState().setMetronomeClickSound("");
+                }}
+              >
+                {metronomeClickPath ? "Reset" : "Custom..."}
+              </Button>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-400 w-14">Accent:</span>
+              <span className="text-xs text-neutral-300 flex-1 truncate">
+                {metronomeAccentPath ? metronomeAccentPath.split(/[/\\]/).pop() : "Default (Synth)"}
+              </span>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => {
+                  void useDAWStore.getState().setMetronomeAccentSound("");
+                }}
+              >
+                {metronomeAccentPath ? "Reset" : "Custom..."}
+              </Button>
+            </div>
+            {(metronomeClickPath || metronomeAccentPath) && (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => { void useDAWStore.getState().resetMetronomeSounds(); }}
+                fullWidth
+              >
+                Reset All to Default
+              </Button>
+            )}
+          </div>
+        </div>
+
         {/* Quick Actions */}
         <div className="flex gap-2">
           <Button
@@ -135,6 +254,7 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

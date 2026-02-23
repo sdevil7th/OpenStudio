@@ -17,11 +17,13 @@ public:
     // Get list of available plugins
     juce::Array<juce::PluginDescription> getAvailablePlugins() const;
     
-    // Load a plugin by its description
-    std::unique_ptr<juce::AudioProcessor> loadPlugin(const juce::PluginDescription& description);
-    
-    // Load a plugin by file path
-    std::unique_ptr<juce::AudioProcessor> loadPluginFromFile(const juce::String& filePath);
+    // Load a plugin by its description (uses actual device sample rate & block size)
+    std::unique_ptr<juce::AudioProcessor> loadPlugin(const juce::PluginDescription& description,
+                                                     double sampleRate = 44100.0, int blockSize = 512);
+
+    // Load a plugin by file path (uses actual device sample rate & block size)
+    std::unique_ptr<juce::AudioProcessor> loadPluginFromFile(const juce::String& filePath,
+                                                              double sampleRate = 44100.0, int blockSize = 512);
 
 private:
     juce::AudioPluginFormatManager formatManager;

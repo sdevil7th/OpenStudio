@@ -1,687 +1,1186 @@
-1. Import clips audio + video -> if video is imported, take the audio only and import as a clip
-2. Fx chain on master channel.
-3. Export -> Full detailed analysis (will do later) (timeline range selector, for selected range export)
-4. clips editiing actions.
-5. undo/redo -> history actions
-6. Project settings and saving and opening saved ones. the project file should have a .s13 extension.
-7. Loop selected range
+# Studio13-v3 Feature Tracker
 
-Small features for later:
-
-1. Tap tempo
-2. snap to bar grid for moving clips or resizing them
-3. Reaper shows the peak level graph for recordings while the recording is happening (with a delay though), can we populate the peak graph for the clips while recording? Can we do that once each bar is completed?
-
-notes for me:
-
-1. check support with re-pitch, very important
-
-Export details:
-
-Export options ->
-Source: master mix, selected tracks (stem), master mix + stems, Selected tracks via Master, region render matrix, region render matrix via Master
-
-Bounds: Custom time range, Entire Project, time selection
-
-File format: WAV, AIFF, FLAC, MP3, OGG
+> **Last Updated:** 2026-02-19 (Phase 7E complete: +17 features, 108/160 total)
+> **Project Extension:** `.s13`
+> **Status Legend:** `[x]` Implemented | `[~]` Partially Implemented | `[ ]` Not Started
 
 ---
 
-# Feature Implementation Plan
+## Feature Comparison: REAPER vs Studio13
 
-> **Last Updated:** 2026-01-29
-> **Status Legend:** `[ ]` Not started | `[/]` In Progress | `[x]` Completed
-
-## Recent Updates (2026-01-29)
-
-**Major Implementations Completed:**
-- ✅ Export/Render Modal UI (backend rendering still needed)
-- ✅ Tap Tempo with keyboard shortcut (T key)
-- ✅ Snap to Grid system with MainToolbar toggle, View menu settings, and Timeline integration
-- ✅ Markers & Regions system with Insert menu integration and Timeline visualization
-- ✅ Loop Selected Range with Shift+drag time selection creation
-- ✅ Enhanced View Menu with loop controls and snap settings
-- ✅ Enhanced Insert Menu with marker/region creation
-- ✅ Recent Projects submenu in File menu with localStorage persistence
-- ✅ ProjectSettingsModal component for project metadata (name, notes, sample rate, bit depth, tempo, time signature)
-- ✅ Virtual MIDI Keyboard component with 2-octave piano interface, routes to selected MIDI track
-- ✅ Media Import frontend (F10) - Import audio/video files with Insert key shortcut
-- ✅ Timeline enhancements: markers/regions/time selection visualization, snap grid lines, Shift+drag time selection
-- ✅ Keyboard shortcuts: T (tap), M (marker), Shift+M (named marker), Shift+R (region), L (loop), Ctrl+L (loop to selection), Alt+Enter (project settings), Alt+B (virtual keyboard), Insert (import media), Shift+drag (time selection)
-- ✅ Created comprehensive snap utilities for musical time calculations
-
-## Configuration Decisions
-
-| Setting                    | Value                   | Notes                                          |
-| -------------------------- | ----------------------- | ---------------------------------------------- |
-| Project Templates Location | App Data                | Stored in app data folder                      |
-| Recent Projects Limit      | 10                      | Maximum recent projects to remember            |
-| Render Mode                | One-at-a-time           | Single thread for reliability over speed       |
-| Video Audio Extraction     | FFmpeg (bundled)        | Will bundle FFmpeg for cross-platform support  |
-| Snap Grid Default          | Bar                     | Configurable via UI                            |
-| Undo History Size          | 50                      | Configurable variable: `MAX_UNDO_HISTORY = 50` |
-| Live Recording Peaks       | Per Bar                 | Update waveform display once per bar           |
-| Master Track Position      | Bottom of track headers | Master strip already positioned in mixer       |
+This document maps every feature from REAPER's interface (toolbar, menus, render modal) to Studio13's current implementation status. Features marked as remaining include implementation guidance.
 
 ---
 
-## Phase 1: Core Infrastructure (CRITICAL)
+## I. Top Toolbar
 
-### F1. Undo/Redo System with History
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| New Project | [x] | Ctrl+N, clears state with confirmation |
+| Open Project | [x] | Ctrl+O, native file dialog, loads .s13 |
+| Save Project | [x] | Ctrl+S, .s13 JSON format with plugin states |
+| Project Settings | [x] | Alt+Enter, ProjectSettingsModal (name, notes, sample rate, bit depth, tempo, time sig) |
+| Undo / Redo | [x] | Ctrl+Z / Ctrl+Shift+Z, CommandManager pattern, 50-step history |
+| Undo History Window | [x] | Ctrl+Alt+Z toggle, UndoHistoryPanel in View menu, floating panel |
+| Metronome Toggle | [x] | Toggle in TransportBar, configurable accents/volume |
+| Auto-Crossfade | [x] | Toggle in MainToolbar and View menu, auto-applies fadeIn/fadeOut on clip overlap |
+| Snap Options | [x] | Snap toggle + grid size (bar/beat/half/quarter) in MainToolbar and View menu |
+| Locking | [x] | Per-clip lock (prevents drag/resize/delete), lock icon overlay, context menu toggle |
 
-**Complexity:** HIGH | **Backend Dependency:** None
+### Remaining Toolbar Features
 
-- [x] Create `Command` interface and `CommandManager` class
-- [x] Create command classes in `src/store/commands/`:
-  - [x] `AddTrackCommand` / `RemoveTrackCommand`
-  - [x] `MoveClipCommand` / `ResizeClipCommand` / `DeleteClipCommand`
-  - [x] `AddClipCommand` (for recording/import)
-  - [x] `UpdateTrackCommand` (name, color, etc.)
-  - [x] `SetClipFadesCommand` / `SetClipVolumeCommand`
-- [x] Add to `useDAWStore.ts`:
-  - [x] `canUndo: boolean` and `canRedo: boolean` state
-  - [x] `executeCommand(command: Command)` action
-  - [x] `undo()` and `redo()` actions
-  - [x] `MAX_UNDO_HISTORY = 50` constant (in CommandManager)
-- [x] Wrap existing store actions in command objects (progressive migration)
-  - [x] `deleteClip` - fully undoable
-  - [x] `duplicateClip` - fully undoable
-  - [x] `resizeClip` - fully undoable
-  - [x] `setClipFades` - fully undoable
-- [x] Add global keyboard shortcuts (Ctrl+Z, Ctrl+Shift+Z)
-- [x] Create `UndoHistoryPanel` component for visual history display
+#### Auto-Crossfade Toggle
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** LOW
 
----
+When two audio clips overlap on the same track, automatically generate a crossfade at the intersection.
 
-### F2. Project Save/Load System (.s13 format)
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `autoCrossfade: boolean` (default: `true`)
+   - Add `toggleAutoCrossfade()` action
+   - Add `defaultCrossfadeLength: number` (default: `0.05` = 50ms)
+2. **Timeline** (`Timeline.tsx`):
+   - In the clip drag/move handler, detect overlaps between clips on the same track
+   - When overlap detected and `autoCrossfade` enabled:
+     - Calculate overlap region
+     - Set `fadeOut` on the earlier clip and `fadeIn` on the later clip to match the overlap duration
+   - Render crossfade region visually (X-shaped lines between the two fade curves)
+3. **Toolbar** (`MainToolbar.tsx`):
+   - Add auto-crossfade toggle button (icon: two overlapping waveforms)
+4. **Backend**: No changes needed — fades already applied in PlaybackEngine
 
-**Complexity:** CRITICAL | **Backend Dependency:** HIGH
+#### Locking System
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** None
 
-#### Backend (C++) Tasks
+Prevent accidental edits to specific elements (clip position, fades, volume, track order).
 
-- [x] Implement plugin state serialization in `AudioEngine`:
-  - [x] `getPluginState(trackId, fxIndex, isInputFX)` → Base64 string
-  - [x] `setPluginState(trackId, fxIndex, isInputFX, base64State)` → bool
-  - [x] `getMasterPluginState(fxIndex)` → Base64 string
-  - [x] `setMasterPluginState(fxIndex, base64State)` → bool
-- [x] Add file dialog natives in `MainComponent.cpp`:
-  - [x] `showSaveDialog(defaultPath, filters)` → string (path)
-  - [x] `showOpenDialog(filters)` → string (path)
-- [x] Add project I/O methods:
-  - [x] `saveProject(filePath, jsonState)` → bool
-  - [x] `loadProject(filePath)` → string (JSON)
-
-#### Frontend Tasks
-
-- [x] Add to `nativeBridge.ts`:
-  - [x] `saveProject()`, `loadProject()`
-  - [x] `getPluginState()`, `setPluginState()`
-  - [x] `showSaveDialog()`, `showOpenDialog()`
-- [x] Add to `useDAWStore.ts`:
-  - [x] `projectPath: string | null`
-  - [x] `isModified: boolean`
-  - [x] `serializeProject()` → Studio13Project JSON (implemented inline in `saveProject`)
-  - [x] `deserializeProject(json)` → void (implemented inline in `loadProject`)
-  - [x] `saveProject()`, `loadProject()`, `newProject()` actions
-  - [x] `recentProjects: string[]` (max 10, stored in localStorage)
-  - [x] `clearRecentProjects()` action
-  - [x] Project metadata fields: `projectName`, `projectNotes`, `projectSampleRate`, `projectBitDepth`
-  - [x] Project settings actions: `setProjectName()`, `setProjectNotes()`, `setProjectSampleRate()`, `setProjectBitDepth()`
-  - [x] `showProjectSettings: boolean` state
-  - [x] `openProjectSettings()`, `closeProjectSettings()` actions
-- [x] Create `ProjectSettingsModal.tsx`:
-  - [x] Project name input
-  - [x] Project notes textarea
-  - [x] Sample rate selector (44.1k-192k Hz)
-  - [x] Bit depth selector (16/24/32-bit)
-  - [x] Tempo input (BPM)
-  - [x] Time signature selectors (numerator/denominator)
-  - [x] Apply/Cancel buttons with local state management
-- [x] Integrate ProjectSettingsModal with App.tsx
-- [x] Wire to File menu (Alt+Enter) and keyboard shortcut
-- [x] Update save/load to persist project metadata in .s13 files
-- [x] Wire up File menu items (see F4)
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `lockSettings: { items: boolean; envelopes: boolean; timeSelection: boolean; markers: boolean }` (all default `false`)
+   - Add `globalLocked: boolean` (default: `false`)
+   - Add `toggleGlobalLock()` and `setLockSetting(key, value)` actions
+   - Add `locked: boolean` to `AudioClip` interface
+2. **Timeline** (`Timeline.tsx`):
+   - Before drag/resize/fade operations, check if clip is locked or if global lock + item lock is enabled
+   - Show lock icon overlay on locked clips
+   - Prevent drag if `lockSettings.items` is true
+3. **UI**: Lock button in MainToolbar with right-click context menu showing granular lock options
+4. **Track Header**: Add lock icon to per-clip context menu
 
 ---
 
-### F3. Export/Render System
+## II. File Menu
 
-**Complexity:** CRITICAL | **Backend Dependency:** CRITICAL
-**Status:** Frontend Complete ✅ | Backend Pending ⏳
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| New Project | [x] | Ctrl+N |
+| Open Project | [x] | Ctrl+O |
+| Recent Projects | [x] | Submenu with last 10 projects, localStorage persistence |
+| Save Project | [x] | Ctrl+S |
+| Save Project As | [x] | Ctrl+Shift+S |
+| Project Settings | [x] | Alt+Enter |
+| Close Project | [x] | Ctrl+F4, prompts save if modified |
+| Clean Current Project Directory | [ ] | **NOT IMPLEMENTED** |
+| Batch File/Item Converter | [ ] | **NOT IMPLEMENTED** |
+| Render | [x] | Ctrl+Alt+R, RenderModal with format/bounds/options |
+| Render Queue | [ ] | **NOT IMPLEMENTED** |
+| Quit | [x] | Ctrl+Q |
+| New Project in Tab | [ ] | **NOT IMPLEMENTED** (requires MDI architecture) |
+| Save New Version | [x] | Increments version suffix (project.s13 → project_v2.s13), File menu |
+| Save Live Output to Disk | [ ] | **NOT IMPLEMENTED** |
+| Consolidate/Export Tracks | [ ] | **NOT IMPLEMENTED** |
+| Export Project MIDI | [ ] | **NOT IMPLEMENTED** |
+| Recovery Mode (bypass FX on open) | [ ] | **NOT IMPLEMENTED** |
+| Timestamped Backup (.s13-bak) | [x] | Auto-backup at configurable intervals, Preferences dialog toggle |
 
-#### Backend (C++) Tasks
+### Remaining File Menu Features
 
-- [ ] Implement offline rendering in `AudioEngine`:
-  - [ ] `renderOffline(options, progressCallback)` method
-  - [ ] Stop realtime audio device during render
-  - [ ] Process graph in offline loop
-  - [ ] Write to disk (WAV/AIFF/FLAC/MP3/OGG)
-  - [ ] Restart realtime device after completion
-- [ ] Register progress callback as native event
+#### ~~Close Project~~ — IMPLEMENTED
 
-#### Frontend Tasks ✅ COMPLETED
+#### Clean Current Project Directory
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** MEDIUM
 
-- [x] Add to `nativeBridge.ts`:
-  - [x] `renderProject(options)` with progress listener (mock implementation)
-- [x] Add to `useDAWStore.ts`:
-  - [x] `showRenderModal: boolean` state
-  - [x] `openRenderModal()` and `closeRenderModal()` actions
-  - [x] `timeSelection: { start: number; end: number } | null` for render bounds
-- [x] Create `RenderModal.tsx`:
-  - [x] Source selector (Master mix, Selected tracks, Stems)
-  - [x] Bounds selector (Entire project, Custom time range, Time selection)
-  - [x] Time bounds editor with tail support (ms)
-  - [x] Directory browser and filename input
-  - [x] Format selector: WAV, AIFF, FLAC, MP3, OGG
-  - [x] Sample rate selector (44.1k-192k Hz)
-  - [x] Bit depth selector (16/24/32-bit)
-  - [x] Channels selector (Stereo/Mono)
-  - [x] Normalize and Dither checkboxes
-  - [x] Progress bar during render
-  - [x] Cancel button
-- [x] Wire to File menu (Ctrl+Alt+R) and View menu
-- [x] Integrate with App.tsx
+Scan the project folder, identify audio files not referenced by any clip, and offer to delete them.
 
----
+**Implementation Plan:**
+1. **Backend** (`MainComponent.cpp`):
+   - Add `cleanProjectDirectory(projectPath, referencedFiles[])` → returns `{orphanedFiles: string[], totalSize: number}`
+   - Walks the project directory, compares against referenced file list
+   - Add `deleteFiles(filePaths[])` → deletes the orphaned files
+2. **Frontend**:
+   - Collect all `clip.filePath` values from store
+   - Call backend with project directory + referenced files
+   - Show modal listing orphaned files with checkboxes + total size
+   - Confirm button calls deleteFiles
 
-## Phase 2: Menu System Implementation
+#### Render Queue
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** LOW
 
-### F4. File Menu
+Queue multiple render jobs and execute them sequentially.
 
-**Complexity:** MEDIUM | **Backend Dependency:** Depends on F2/F3
-**Status:** Complete ✅ | Close Project Deferred
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `renderQueue: RenderJob[]` (each job = full render options object)
+   - Add `addToRenderQueue(options)`, `removeFromRenderQueue(index)`, `executeRenderQueue()` actions
+2. **UI**: "Add to Queue" button in RenderModal alongside "Render"
+3. **RenderQueuePanel.tsx**: New component showing queued jobs with status, progress, remove buttons
+4. **Execution**: Process jobs sequentially, update progress per-job
 
-- [x] Create `components/menus/MenuDropdown.tsx` (reusable dropdown)
-  - [x] Supports keyboard shortcuts display
-  - [x] Submenu support with arrow indicator
-  - [x] Checkmark support for toggles
-  - [x] Dividers between menu sections
-  - [x] Disabled state styling
-- [x] Implement in `MenuBar.tsx`:
-  - [x] New project (Ctrl+N) - Reset store, clear backend with confirmation
-  - [x] Open project... (Ctrl+O) - File dialog, load .s13
-  - [x] Save project (Ctrl+S) - Save or prompt if new
-  - [x] Save project as... (Ctrl+Shift+S) - Always prompt
-  - [x] Recent projects submenu (from localStorage) - Lists recent .s13 files with "Clear Recent Projects" option
-  - [ ] Close project (Ctrl+F4) - Save prompt, then clear - **DEFERRED**
-  - [x] Project settings... (Alt+Enter) - Opens ProjectSettingsModal (project name, notes, sample rate, bit depth, tempo, time signature)
-  - [x] Render... (Ctrl+Alt+R) - Opens RenderModal
-  - [x] Quit (Ctrl+Q) - Console log (native window close needed)
+#### Timestamped Backup
+**Priority:** MEDIUM | **Complexity:** LOW | **Backend:** LOW
 
----
+Auto-save .s13-bak files at configurable intervals.
 
-### F5. Edit Menu
+**Implementation Plan:**
+1. **Store**: Add `autoBackupInterval: number` (default: 300000 = 5 min), `autoBackupEnabled: boolean`
+2. **App.tsx**: `setInterval` that calls `saveProject()` to `projectPath + '.bak'` with timestamp
+3. **Backend**: No changes — `saveProjectToFile` already works with any path
+4. **Settings**: Add auto-backup toggle + interval to Project Settings modal
 
-**Complexity:** MEDIUM | **Backend Dependency:** None
-**Status:** Core Complete ✅ | Advanced Features Deferred
+#### Recovery Mode (Bypass FX on Open)
+**Priority:** LOW | **Complexity:** LOW | **Backend:** None
 
-- [x] Create `components/menus/EditMenu.tsx`
-- [x] Create reusable `components/menus/MenuDropdown.tsx`
-- [x] Core menu items implemented:
-  - [x] Undo (Ctrl+Z) - from F1, disabled when canUndo=false
-  - [x] Redo (Ctrl+Shift+Z) - from F1, disabled when canRedo=false
-  - [x] Cut (Ctrl+X) - cuts selected clip
-  - [x] Copy (Ctrl+C) - copies selected clip
-  - [x] Paste (Ctrl+V) - pastes at playhead on selected track
-  - [x] Duplicate (Ctrl+D) - duplicates selected clip
-  - [x] Delete (Delete) - deletes selected tracks or clips
-  - [x] Select All Tracks (Ctrl+A)
-  - [x] Deselect All (Esc)
-- [ ] Advanced features deferred:
-  - [ ] Undo History Panel (Ctrl+Alt+Z)
-  - [ ] `selectAllClips()`
-  - [ ] Cut within time selection (Ctrl+Shift+X)
-  - [ ] Copy within time selection (Ctrl+Shift+C)
-  - [ ] Nudge/Set Items (N)
-  - [ ] Dynamic Split (D) - transient detection
-  - [ ] Crossfade Editor
+Open a project without loading any VST3 plugins (useful when a plugin causes crashes).
+
+**Implementation Plan:**
+1. Add `loadProject(path, { bypassFX: true })` option
+2. When `bypassFX` is true, skip the FX restoration loop in `deserializeProject()`
+3. Add "Open Project (Safe Mode)" to File menu or hold Shift while opening
+
+#### Export Project MIDI
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** MEDIUM
+
+Export all MIDI clips as a single .mid file.
+
+**Implementation Plan:**
+1. **Backend**: Use `MIDIClip::exportToMidiFile()` (already exists as skeleton)
+2. **Frontend**: Collect all MIDI clips, serialize events, call backend export
+3. Requires MIDI clip system to be fully operational first
 
 ---
 
-### F6. Insert Menu
+## III. Edit Menu
 
-**Complexity:** MEDIUM | **Backend Dependency:** LOW
-**Status:** Core Features Complete ✅ | Timeline Visualization Pending
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Undo | [x] | Ctrl+Z |
+| Redo | [x] | Ctrl+Shift+Z |
+| Undo History | [x] | Ctrl+Alt+Z toggle, floating panel in View menu |
+| Cut | [x] | Ctrl+X, clips |
+| Copy | [x] | Ctrl+C, clips |
+| Paste | [x] | Ctrl+V, at playhead on selected track |
+| Duplicate | [x] | Ctrl+D |
+| Delete | [x] | Delete key |
+| Select All | [x] | Ctrl+A (tracks) |
+| Deselect All | [x] | Esc |
+| Ripple Editing (Off/Per-Track/All) | [ ] | **NOT IMPLEMENTED** |
+| Split at Cursor | [x] | S key, splits selected clips (or all under playhead) with undo/redo |
+| Split at Time Selection | [ ] | **NOT IMPLEMENTED** |
+| Crossfade Editor | [ ] | **NOT IMPLEMENTED** |
+| Item Properties | [ ] | **NOT IMPLEMENTED** (no dedicated clip inspector) |
+| Razor Editing | [ ] | **NOT IMPLEMENTED** |
+| Select All Clips | [x] | Ctrl+Shift+A selects all clips across all tracks |
+| Cut within Time Selection | [x] | Trims clips to selection bounds, stores in clipboard, removes content |
+| Copy within Time Selection | [x] | Trims clips to selection bounds, stores in clipboard |
+| Nudge Items | [x] | Arrow Left/Right (grid), Ctrl+Arrow (10ms fine) |
+| Dynamic Split (Transient Detection) | [ ] | **NOT IMPLEMENTED** |
 
-- [x] Implemented in `MenuBar.tsx` (no separate InsertMenu.tsx needed)
-- [x] Add new types to store:
-  - [x] `Marker` interface (id, time, name, color)
-  - [x] `Region` interface (id, name, startTime, endTime, color)
-- [x] Add to `useDAWStore.ts`:
-  - [x] `markers: Marker[]` state
-  - [x] `regions: Region[]` state
-  - [x] `addMarker(time, name?)` - creates marker with auto-name or custom
-  - [x] `removeMarker(id)`
-  - [x] `updateMarker(id, updates)`
-  - [x] `addRegion(start, end, name?)` - creates region from time bounds
-  - [x] `removeRegion(id)`
-  - [x] `updateRegion(id, updates)`
-- [x] Update `Timeline.tsx` to render markers and regions in ruler
-- [x] Implement menu items:
-  - [x] Media file... (Insert) - Import audio/video - Frontend complete, backend pending
-  - [ ] New MIDI item - Create empty MIDI clip - **DEFERRED**
-  - [x] Marker (M) - Add at playhead, keyboard shortcut added
-  - [x] Marker with name (Shift+M) - Prompt for name, keyboard shortcut added
-  - [x] Region from selection (Shift+R) - Creates from timeSelection, keyboard shortcut added
-  - [x] Track (Ctrl+T) - Add new audio track (already implemented)
-  - [x] New MIDI Track (Ctrl+Shift+T) - Add new MIDI track
-  - [ ] Virtual instrument on new track... - **DEFERRED**
+### Remaining Edit Menu Features
 
----
+#### ~~Split at Cursor (S key)~~ — IMPLEMENTED
 
-### F7. Actions Menu (Command Palette)
+#### Split at Time Selection
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** None
 
-**Complexity:** MEDIUM | **Backend Dependency:** None
+Split clips at both edges of the time selection, isolating the selected region.
 
-- [ ] Create `store/actionRegistry.ts`:
-  ```typescript
-  interface Action {
-    id: string;
-    name: string;
-    description: string;
-    shortcut?: string;
-    category: string;
-    execute: () => void;
-  }
-  ```
-- [ ] Create `components/CommandPalette.tsx`:
-  - [ ] Searchable modal
-  - [ ] Filter by category
-  - [ ] Recent actions section
-  - [ ] Keyboard navigation
-- [ ] Register all actions in registry
-- [ ] Add global shortcut (`) to open palette
+**Implementation Plan:**
+1. Same logic as split at cursor but applied at both `timeSelection.start` and `timeSelection.end`
+2. Creates up to 3 clips per original clip (before, within, after selection)
 
----
+#### Ripple Editing
+**Priority:** MEDIUM | **Complexity:** HIGH | **Backend:** None
 
-### F8. View Menu & Options
+When deleting or inserting clips, automatically shift downstream clips to close/open gaps.
 
-**Complexity:** LOW | **Backend Dependency:** None
-**Status:** Enhanced ✅ | Master Track Visibility Pending
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `rippleMode: 'off' | 'per_track' | 'all_tracks'` (default: `'off'`)
+   - Add `setRippleMode(mode)` action
+2. **Modify existing actions**: `deleteClip`, `splitClipAtPlayhead`, paste — when ripple is enabled:
+   - `'per_track'`: After delete, find all clips on same track with `startTime > deletedClip.endTime`, shift them left by deleted clip's duration
+   - `'all_tracks'`: Same as above but for ALL tracks
+   - For insert/paste: shift downstream clips right
+3. **UI**: Three-state toggle button in Edit menu and MainToolbar (Off → Per Track → All Tracks)
+4. **Visual**: Show ripple mode indicator in toolbar
 
-- [x] Implemented in `MenuBar.tsx`:
-  - [x] Show Mixer (Ctrl+M) - toggle with checkmark
-  - [x] Show Virtual MIDI Keyboard (Alt+B) - toggle with checkmark
-  - [x] Audio Settings... - opens SettingsModal
-  - [x] Render... (Ctrl+Alt+R) - opens RenderModal
-  - [x] Zoom In (Ctrl++) - increases pixelsPerSecond
-  - [x] Zoom Out (Ctrl+-) - decreases pixelsPerSecond
-  - [x] Zoom to Fit (Ctrl+0) - resets to default zoom
-  - [x] Loop Enabled (L) - toggle with checkmark
-  - [x] Set Loop to Selection (Ctrl+L) - sets loop region from timeSelection
-  - [x] Snap Enabled - toggle with checkmark (F14)
-  - [x] Grid Size submenu - Bar, Beat, Half Beat, Quarter Beat (F14)
-- [x] Add to `useDAWStore.ts`:
-  - [x] `showVirtualKeyboard: boolean` - added with toggleVirtualKeyboard() action
-  - [ ] `showMasterTrack: boolean` - **TODO** (for track headers section)
-  - [x] `snapEnabled: boolean` (default: true) - completed (F14)
-  - [x] `gridSize: 'bar' | 'beat' | 'half_beat' | 'quarter_beat'` (default: 'bar') - completed (F14)
-- [x] Create `VirtualPianoKeyboard.tsx`:
-  - [x] On-screen piano keys (2 octaves, C3-B4)
-  - [x] Click/touch to send MIDI note on/off
-  - [x] Visual feedback for active notes (blue highlight)
-  - [x] Note names displayed on keys
-  - [x] Routes to first selected MIDI track
-  - [x] Warning message when no MIDI track selected
-  - [x] Close button in header
-- [x] Add sendMidiNote to NativeBridge
-- [x] Keyboard shortcut Alt+B to toggle virtual keyboard
-- [x] Integrate with App.tsx
-- [ ] View menu additions needed:
-  - [ ] Toggle master track visible (Ctrl+Alt+M) - **TODO**
+#### Razor Editing
+**Priority:** MEDIUM | **Complexity:** HIGH | **Backend:** None
 
----
+Draw rectangular "razor" areas over specific clips/automation without splitting. Can be moved, copied, deleted.
 
-### F9. Help Menu
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `razorEdits: Array<{ trackId: string; startTime: number; endTime: number }>`
+   - Add `addRazorEdit()`, `removeRazorEdit()`, `moveRazorEdit()`, `deleteRazorEditContent()` actions
+2. **Timeline** (`Timeline.tsx`):
+   - Alt+Right-Drag to create razor areas (red/orange rectangles)
+   - Razor areas are per-track (can span partial clips)
+   - Delete key on razor area: removes the audio within the razor bounds (splits clips at boundaries, deletes middle)
+   - Drag razor area to move the enclosed audio
+3. **Render**: "Razor edit areas" source option in RenderModal
 
-**Complexity:** LOW | **Backend Dependency:** None
+#### Crossfade Editor
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** None
 
-- [ ] Create `components/AboutModal.tsx`
-- [ ] Create `components/KeyboardShortcutsModal.tsx`
-- [ ] Create `components/menus/HelpMenu.tsx`:
-  - [ ] Documentation (open URL)
-  - [ ] Key bindings and mouse modifiers (Shift+F1)
-  - [ ] About Studio13 (Ctrl+F1)
-  - [ ] Changelog
+Dedicated modal for fine-tuning crossfade shape between two overlapping clips.
 
----
+**Implementation Plan:**
+1. **New component** `CrossfadeEditor.tsx`:
+   - Shows both waveforms at the crossfade point
+   - Fade curve shape selector (linear, equal-power, S-curve, logarithmic)
+   - Asymmetric fade handles (in/out can have different shapes)
+   - Preview playback of the crossfade region
+2. **Store**: Add `crossfadeShape` to clip fade properties
+3. **Backend**: PlaybackEngine already applies linear fades — extend to support curve types via lookup table
 
-## Phase 3: Media & Clip Features
+#### Item/Clip Properties Inspector
+**Priority:** MEDIUM | **Complexity:** LOW | **Backend:** None
 
-### F10. Import Media (Audio + Video)
+Floating panel showing all properties of the selected clip (name, file, duration, offset, volume, fades, sample rate).
 
-**Complexity:** MEDIUM | **Backend Dependency:** MEDIUM
-**Status:** Frontend Complete ✅ | Backend Pending ⏳
+**Implementation Plan:**
+1. **New component** `ClipPropertiesPanel.tsx`:
+   - Display: file path, format, sample rate, channels, duration
+   - Editable: name, volume (dB), fade in/out (seconds), offset, start time
+   - Opens on F2 or double-click clip
+2. **Store**: Add `showClipProperties: boolean` and `toggleClipProperties()` action
 
-#### Backend (C++) Tasks
+#### Dynamic Split (Transient Detection)
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** HIGH
 
-- [ ] Bundle FFmpeg with application
-- [ ] Add to `AudioConverter.cpp`:
-  - [ ] `extractAudioFromVideo(videoPath, outputPath)` → string
-- [ ] Support formats: WAV, AIFF, FLAC, MP3, OGG, MP4, MOV, AVI, MKV
+Automatically split a clip at transient peaks (e.g., drum hits).
 
-#### Frontend Tasks ✅ COMPLETED
+**Implementation Plan:**
+1. **Backend** (`AudioEngine.cpp`):
+   - Add `detectTransients(filePath, sensitivity, minGap)` → returns `double[]` (array of hit times)
+   - Use spectral flux or onset detection algorithm
+2. **Frontend**: Call backend, get transient times, call `splitClipAtPlayhead()` for each
+3. **UI**: Modal with sensitivity slider, preview transient markers on waveform
 
-- [x] Add to `nativeBridge.ts`:
-  - [x] `importMediaFile(filePath)` → returns media metadata (mock implementation)
-- [x] Add to `useDAWStore.ts`:
-  - [x] `importMedia(filePath, trackId, startTime)` action
-- [x] Add "Media file..." menu item to Insert menu (Insert key)
-- [x] Integrate with MenuBar.tsx and App.tsx
-- [x] Add keyboard shortcut: Insert key
-- [x] Auto-detect target track (selected or first audio track)
-- [x] Import at current playhead position
+#### ~~Nudge Items~~ — IMPLEMENTED
 
 ---
 
-### F11. Clip Editing Actions (Fix + Enhance)
+## IV. View Menu
 
-**Complexity:** HIGH | **Backend Dependency:** MEDIUM
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Master Track Visible | [ ] | **NOT IMPLEMENTED** (master exists in mixer only) |
+| Mixer Control Panel (MCP) | [x] | Ctrl+M toggle |
+| Routing Matrix | [ ] | **NOT IMPLEMENTED** |
+| Track Wiring Diagram | [ ] | **NOT IMPLEMENTED** |
+| Region/Marker Manager | [x] | Floating panel, click to navigate, rename/delete, View menu toggle |
+| Media Explorer | [ ] | **NOT IMPLEMENTED** |
+| Big Clock | [x] | Floating clock with time/beats format, color-coded by transport state |
+| Video Window | [ ] | **NOT IMPLEMENTED** |
+| Screensets/Layouts | [ ] | **NOT IMPLEMENTED** |
+| Docker/Panel System | [ ] | **NOT IMPLEMENTED** |
+| Zoom In/Out/Fit | [x] | Ctrl++/-/0 |
+| Loop Toggle | [x] | L key |
+| Snap/Grid Settings | [x] | Toggle + grid size submenu |
+| Virtual MIDI Keyboard | [x] | Alt+B toggle |
 
-- [ ] Fix broken functionality in `Timeline.tsx`:
-  - [ ] Resize (left/right edge drag)
-  - [ ] Fade In/Out handles
-- [ ] Add new clip actions:
-  - [ ] Split at playhead (S)
-  - [ ] Mute clip - add `muted: boolean` to AudioClip
-  - [ ] Lock clip - add `locked: boolean` to AudioClip
-- [ ] **FUTURE:** Reverse, Normalize (requires backend processing)
+### Remaining View Menu Features
 
----
+#### Master Track in TCP
+**Priority:** MEDIUM | **Complexity:** LOW | **Backend:** None
 
-### F12. Loop Selected Range
+Show master track at the bottom of the track control panel (TCP) with volume fader, mute, and FX button.
 
-**Complexity:** LOW | **Backend Dependency:** None
-**Status:** FULLY COMPLETE ✅
+**Implementation Plan:**
+1. **New component** `MasterTrackHeader.tsx`:
+   - Master volume fader (horizontal), mute button, FX button (opens master FX chain)
+   - Fixed at bottom of track header list
+2. **Store**: Add `showMasterTrack: boolean` (default: `true`), `toggleMasterTrack()` action
+3. **View menu**: "Show Master Track (Ctrl+Alt+M)" toggle item
 
-- [x] Add to `useDAWStore.ts`:
-  - [x] `timeSelection: { start: number; end: number } | null` state
-  - [x] `setTimeSelection(start, end)` action
-  - [x] `clearTimeSelection()` action
-  - [x] `setLoopToSelection()` action - enables loop and sets bounds from timeSelection
-- [x] Add keyboard shortcuts:
-  - [x] L - Toggle Loop (also in View menu)
-  - [x] Ctrl+L - Set Loop to Selection (also in View menu)
-- [x] Update `Timeline.tsx`:
-  - [x] Render time selection visually (distinct from loop region - blue overlay)
-  - [x] Shift+drag to create time selection
-  - [x] Display time selection bounds
+#### Routing Matrix
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** HIGH
 
----
+Grid-based view where any track can route to any other track or hardware output.
 
-## Phase 4: Small Features
+**Implementation Plan:**
+1. **Backend** (`AudioEngine.cpp`):
+   - Implement send/bus routing — `TrackProcessor` already has a `sends` skeleton
+   - Add `createBus()`, `setTrackSend(trackId, busId, level, pan, preFader)` methods
+   - Add bus tracks to the processing graph
+2. **New component** `RoutingMatrix.tsx`:
+   - Grid: rows = source tracks, columns = destination tracks/outputs
+   - Click cell to toggle send, drag to set level
+3. **Store**: Add `buses: Bus[]`, send levels per track
 
-### F13. Tap Tempo
+#### Region/Marker Manager
+**Priority:** MEDIUM | **Complexity:** LOW | **Backend:** None
 
-**Complexity:** LOW | **Backend Dependency:** None
-**Status:** FULLY COMPLETE ✅
+Spreadsheet-like panel listing all markers and regions with batch editing.
 
-- [x] Add to `useDAWStore.ts`:
-  - [x] `tapTimestamps: number[]` - stores last 8 taps
-  - [x] `tapTempo()` action:
-    - [x] Records timestamp using `performance.now()`
-    - [x] Calculates average BPM from intervals between taps
-    - [x] Clamps BPM to range 40-240
-    - [x] Auto-resets after 2 seconds of inactivity
-    - [x] Requires minimum 2 taps to calculate tempo
-- [x] Add TAP button to `TransportBar.tsx` next to BPM input
-- [x] Keyboard shortcut (T) added to App.tsx
-- [x] Updates tempo immediately via `setTempo()` action
+**Implementation Plan:**
+1. **New component** `MarkerManager.tsx`:
+   - Table with columns: Name, Type (marker/region), Time/Start, End, Color
+   - Click to navigate to marker/region
+   - Edit name/color inline
+   - Batch delete selected
+   - Sort by time/name
+2. **Store**: Already has full CRUD for markers and regions
+3. **View menu**: "Region/Marker Manager" item
 
----
+#### Media Explorer
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** MEDIUM
 
-### F14. Snap to Grid
+Integrated file browser for auditioning and importing audio files.
 
-**Complexity:** MEDIUM | **Backend Dependency:** None
-**Status:** FULLY COMPLETE ✅
+**Implementation Plan:**
+1. **Backend**: Add `browseDirectory(path)` → returns file list with metadata
+   - Add `previewAudioFile(path)` → plays file through monitor output
+2. **New component** `MediaExplorer.tsx`:
+   - Directory tree browser (left panel)
+   - File list with waveform previews
+   - Preview playback button (tempo-matched if possible)
+   - Drag-and-drop files onto timeline
+   - Filter by format, search by name
+3. **Store**: Add `mediaExplorerPath`, `mediaExplorerFiles`, browsing actions
 
-- [x] Add snap settings to store:
-  - [x] `snapEnabled: boolean` (default: true)
-  - [x] `gridSize: 'bar' | 'beat' | 'half_beat' | 'quarter_beat'` (default: 'bar')
-  - [x] `toggleSnap()` action
-  - [x] `setGridSize(size)` action
-- [x] Create utility function `utils/snapToGrid.ts`:
-  - [x] `snapToGrid(time, tempo, timeSignature, gridSize)` → snapped time
-  - [x] `snapToGridFloor()` and `snapToGridCeil()` variants
-  - [x] `calculateGridInterval()` - calculates interval based on tempo/time sig/grid size
-  - [x] `getGridLines()` - returns array of grid line positions for rendering
-  - [x] `isSnappedToGrid()` - checks if time is already snapped (with tolerance)
-- [x] Modify drag handlers in `Timeline.tsx`:
-  - [x] Apply snap to clip drag (when snapEnabled)
-  - [x] Apply snap to clip resize left (when snapEnabled)
-  - [x] Apply snap to clip resize right (when snapEnabled)
-  - [ ] Apply snap to fade handles (when snapEnabled) - **DEFERRED**
-  - [ ] Apply snap to marker/region placement - **DEFERRED**
-- [x] Add visual grid lines in Timeline ruler (green dashed lines when snap enabled)
-- [x] Add snap toggle button to MainToolbar
-  - [x] Shows blue when enabled
-  - [x] Displays snap state in tooltip
-- [x] Add snap settings to View menu:
-  - [x] "Snap Enabled" toggle with checkmark
-  - [x] "Grid Size" submenu with options: Bar, Beat, Half Beat, Quarter Beat
-  - [x] Checkmark shows current grid size
+#### Big Clock
+**Priority:** LOW | **Complexity:** LOW | **Backend:** None
 
----
+Large floating time/beat display.
 
-### F15. Live Peak Graph During Recording
-
-**Complexity:** MEDIUM | **Backend Dependency:** MEDIUM
-
-- [ ] Add to `AudioRecorder.cpp`:
-  - [ ] Buffer peak data during recording
-  - [ ] `getRecordingPeaks(trackId)` → vector of peaks
-- [ ] Add to `nativeBridge.ts`:
-  - [ ] `getRecordingPeaks(trackId)` method
-- [ ] Update `Timeline.tsx`:
-  - [ ] Poll peaks every bar during recording
-  - [ ] Render partial waveform in recording clip
+**Implementation Plan:**
+1. **New component** `BigClock.tsx`:
+   - Large monospace font showing: bars:beats:ticks or hh:mm:ss.ms
+   - Toggle between time formats
+   - Project name, tempo, time signature display
+   - Resizable floating panel
+2. **Store**: Add `showBigClock: boolean`, `bigClockFormat: 'time' | 'beats'`
+3. **View menu**: "Big Clock" toggle item
 
 ---
 
-## Phase 5: Master Channel & Track
+## V. Insert Menu
 
-### F16. Master Channel FX Chain
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| New Track | [x] | Ctrl+T (audio), Ctrl+Shift+T (MIDI) |
+| Virtual Instrument on New Track | [x] | Creates instrument track + opens plugin browser, Insert menu |
+| Media File | [x] | Insert key, frontend complete |
+| Empty MIDI Item | [x] | Insert menu, creates 4-beat empty MIDI clip at playhead on selected/first MIDI track |
+| Empty Item | [ ] | **NOT IMPLEMENTED** |
+| Click Source | [ ] | **NOT IMPLEMENTED** |
+| Marker | [x] | M key at playhead |
+| Marker with Name | [x] | Shift+M |
+| Region | [x] | Shift+R from time selection |
+| Time Signature/Tempo Change Marker | [ ] | **NOT IMPLEMENTED** |
+| Track Spacer | [ ] | **NOT IMPLEMENTED** |
+| Insert Multiple Tracks | [x] | Prompt for count and type, Insert menu |
+| SMPTE LTC/MTC Timecode | [~] | SMPTE timecode display in TransportBar (24/25/29.97/30fps), no LTC generation |
 
-**Complexity:** LOW | **Backend Dependency:** Already exists
+### Remaining Insert Menu Features
 
-- [ ] Add Master track to mixer panel (already done)
-- [ ] Add FX button to master channel strip
-- [ ] Wire to `FXChainPanel` with `chainType="master"`
+#### Virtual Instrument on New Track
+**Priority:** HIGH | **Complexity:** MEDIUM | **Backend:** LOW
 
----
+Macro: creates a new instrument track, opens plugin browser, loads selected VSTi, arms for MIDI.
 
-### F17. Master Track Header
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `addInstrumentTrack()` action that:
+     1. Creates track with type `'instrument'`
+     2. Opens plugin browser filtered to instruments only
+     3. On plugin select: calls `loadInstrument(trackId, vstPath)` (already exists in backend)
+     4. Arms track for MIDI, enables input monitoring
+2. **PluginBrowser.tsx**: Add `filterType: 'all' | 'effects' | 'instruments'` prop
+3. **Insert menu**: "Virtual Instrument on New Track..." item
+4. **Backend**: `loadInstrument()` already implemented
 
-**Complexity:** LOW | **Backend Dependency:** None
+#### Time Signature / Tempo Change Markers
+**Priority:** MEDIUM | **Complexity:** HIGH | **Backend:** MEDIUM
 
-- [ ] Add `MasterTrackHeader.tsx` component
-- [ ] Position at bottom of track headers list when `showMasterTrack` is true
-- [ ] Show master volume fader, mute button
-- [ ] FX button to open master FX chain
+Place tempo/time-signature changes at specific positions on the timeline, creating a tempo map.
 
----
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `tempoMarkers: Array<{ id: string; time: number; bpm: number; timeSigNum: number; timeSigDen: number; curveType: 'instant' | 'linear' }>`
+   - Add `addTempoMarker(time, bpm, timeSig)`, `removeTempoMarker(id)`, `updateTempoMarker(id, updates)` actions
+   - Modify `getTempoAtTime(time)` utility to interpolate between markers
+2. **Timeline** (`Timeline.tsx`):
+   - Render tempo markers as distinct icons on the ruler (different color from regular markers)
+   - Double-click to edit tempo/time-sig values
+3. **Backend**: Update metronome and PlaybackEngine to read from tempo map instead of single global BPM
+4. **Grid calculation**: `snapToGrid.ts` must account for variable tempo
 
-## Implementation Summary (as of 2026-01-29)
+#### Insert Multiple Tracks
+**Priority:** LOW | **Complexity:** LOW | **Backend:** None
 
-### ✅ Fully Completed Features
+Dialog to create N tracks at once with naming pattern.
 
-#### F1. Undo/Redo System
-- Command pattern implementation with 50-step history
-- Supports: deleteClip, duplicateClip, resizeClip, setClipFades
-- Keyboard: Ctrl+Z (undo), Ctrl+Shift+Z (redo)
-- UI: Disabled state in Edit menu when no undo/redo available
+**Implementation Plan:**
+1. **Modal**: Input for count (1-100), track type dropdown, naming pattern (e.g., "Track %n")
+2. **Store**: Loop `addTrack()` N times with generated names
+3. **Insert menu**: "Insert Multiple Tracks..." item
 
-#### F2. Project Save/Load
-- .s13 JSON file format with plugin state serialization
-- Backend: getPluginState/setPluginState, showSaveDialog/showOpenDialog
-- Frontend: saveProject(), loadProject(), newProject() with confirmation
-- File menu: New, Open, Save, Save As fully functional
-- recentProjects array in store (max 10, localStorage) with UI submenu in File menu
-- ProjectSettingsModal for project metadata: name, notes, sample rate, bit depth, tempo, time signature
-- Project metadata saved/loaded with .s13 files
-- Keyboard: Alt+Enter to open Project Settings
+#### Track Spacer
+**Priority:** LOW | **Complexity:** LOW | **Backend:** None
 
-#### F3. Export/Render (Frontend Complete)
-- Comprehensive RenderModal.tsx with all options:
-  - Source: Master mix, Selected tracks, Stems
-  - Bounds: Entire project, Custom time range, Time selection
-  - Formats: WAV, AIFF, FLAC, MP3, OGG
-  - Sample rate: 44.1k-192k Hz
-  - Bit depth: 16/24/32-bit
-  - Channels: Stereo/Mono
-  - Normalize, Dither, Tail length options
-  - Progress bar UI
-- Menu integration: Ctrl+Alt+R in File and View menus
-- Backend C++ rendering implementation still needed
+Visual-only gap between tracks in the TCP for organization.
 
-#### F13. Tap Tempo
-- Smart BPM calculation from last 8 taps
-- Auto-reset after 2 seconds inactivity
-- BPM clamping (40-240)
-- UI: TAP button in TransportBar
-- Keyboard: T key
-
-#### F14. Snap to Grid
-- Store: snapEnabled (default: true), gridSize (bar/beat/half_beat/quarter_beat)
-- Utility functions: snapToGrid(), snapToGridFloor(), snapToGridCeil(), getGridLines(), isSnappedToGrid()
-- UI: Toggle button in MainToolbar (blue when enabled)
-- View menu: "Snap Enabled" toggle + "Grid Size" submenu with checkmarks
-- Timeline: Visual snap grid lines (green dashed), snap applied to clip drag/resize operations
-
-#### F6. Markers & Regions (Timeline Visualization)
-- Store: Full CRUD for markers and regions (add/remove/update)
-- Timeline: Visual markers (yellow circles with vertical lines, names displayed in ruler)
-- Timeline: Visual regions (cyan overlays in ruler with borders and names)
-- Insert menu: Marker at playhead (M), Marker with name (Shift+M), Region from selection (Shift+R)
-- Keyboard shortcuts integrated
-
-#### F12. Loop Selected Range
-- Store: timeSelection state with setTimeSelection()/clearTimeSelection()/setLoopToSelection()
-- Timeline: Shift+drag to create time selection with visual blue overlay
-- Keyboard: L (toggle loop), Ctrl+L (set loop to selection), Shift+drag (time selection)
-- View menu integration with loop controls
-
-### ⏳ Partially Completed Features
-
-#### F4. File Menu
-- ✅ New, Open, Save, Save As, Render, Quit
-- ✅ Project Settings (opens ProjectSettingsModal)
-- ✅ Recent Projects submenu (shows last 10 projects, click to load, "Clear Recent Projects" option)
-- ⏳ Close Project (deferred)
-
-#### F5. Edit Menu
-- ✅ Core operations: Undo, Redo, Cut, Copy, Paste, Duplicate, Delete
-- ✅ Selection: Select All Tracks, Deselect All
-- ⏳ Advanced: Cut/Copy within time selection, Nudge, Undo History panel
-
-#### F6. Insert Menu
-- ✅ New Audio Track (Ctrl+T), New MIDI Track (Ctrl+Shift+T)
-- ✅ Marker at Playhead (M), Marker with name (Shift+M)
-- ✅ Region from selection (Shift+R)
-- ✅ Store: Full CRUD for markers and regions
-- ✅ Timeline visualization of markers/regions complete
-- ✅ Media Import (F10 - frontend complete, backend pending)
-
-#### F8. View Menu
-- ✅ Show Mixer (Ctrl+M), Audio Settings, Render
-- ✅ Show Virtual MIDI Keyboard (Alt+B) - On-screen piano with 2 octaves
-- ✅ Zoom In/Out/Fit (Ctrl++/-/0)
-- ✅ Loop Enabled (L), Set Loop to Selection (Ctrl+L)
-- ✅ Snap/Grid settings (F14 - completed)
-
-#### F12. Loop Selected Range
-- ✅ Store: timeSelection state, setTimeSelection(), clearTimeSelection(), setLoopToSelection()
-- ✅ Keyboard: L (toggle), Ctrl+L (set to selection), Shift+drag (create time selection)
-- ✅ View menu integration
-- ✅ Timeline UI: Shift+drag time selection creation and visualization (blue overlay)
-
-#### F10. Import Media
-- ✅ Frontend: importMedia() action, importMediaFile() bridge method, Insert menu item, Insert key shortcut
-- ✅ Auto-detect target track (selected track or first audio track)
-- ✅ Import at playhead position
-- ⏳ Backend: FFmpeg video extraction, format support (WAV/AIFF/FLAC/MP3/OGG/MP4/MOV/AVI/MKV)
-
-### 📋 Not Started
-
-- F7. Actions Menu (Command Palette)
-- F9. Help Menu (About, Keyboard Shortcuts modal)
-- F11. Clip Editing Actions (resize, fade handles, split, mute, lock)
-- F15. Live Peak Graph During Recording
-- F16. Master Channel FX Chain UI
-- F17. Master Track Header
-
-### 🎹 Keyboard Shortcuts Added
-
-| Key | Action |
-|-----|--------|
-| T | Tap Tempo |
-| M | Add Marker at Playhead |
-| Shift+M | Add Marker with Name |
-| Shift+R | Create Region from Selection |
-| L | Toggle Loop |
-| Ctrl+L | Set Loop to Selection |
-| Alt+Enter | Open Project Settings |
-| Alt+B | Toggle Virtual MIDI Keyboard |
-| Insert | Import Media File |
-| Ctrl+Alt+R | Open Render Modal |
-
-### 📁 Files Created/Modified
-
-**New Files:**
-- `frontend/src/components/RenderModal.tsx` (496 lines) - Comprehensive render/export UI
-- `frontend/src/components/ProjectSettingsModal.tsx` (283 lines) - Project metadata configuration modal
-- `frontend/src/components/VirtualPianoKeyboard.tsx` (230 lines) - On-screen MIDI keyboard with 2 octaves
-- `frontend/src/utils/snapToGrid.ts` (156 lines) - Snap to grid utilities with musical time calculations
-
-**Modified Files:**
-- `frontend/src/store/useDAWStore.ts` - Added: timeSelection, markers, regions, tapTimestamps, showRenderModal, snapEnabled, gridSize, projectName, projectNotes, projectSampleRate, projectBitDepth, showProjectSettings, showVirtualKeyboard, importMedia() action, recentProjects loading from localStorage, and all related actions (clearRecentProjects, setProjectName, setProjectNotes, setProjectSampleRate, setProjectBitDepth, openProjectSettings, closeProjectSettings, toggleVirtualKeyboard, setTimeSelection, clearTimeSelection)
-- `frontend/src/services/NativeBridge.ts` - Added: renderProject(), sendMidiNote() for virtual keyboard MIDI output, importMediaFile() for media import (F10)
-- `frontend/src/components/MenuBar.tsx` - Enhanced View and Insert menus with snap settings submenu, added Recent Projects submenu with dynamic list and "Clear Recent Projects" option, updated "Project Settings..." to open ProjectSettingsModal, added "Show Virtual MIDI Keyboard" (Alt+B) toggle, added "Media file..." (Insert) menu item for importing audio/video
-- `frontend/src/components/TransportBar.tsx` - Added TAP button for tap tempo
-- `frontend/src/components/MainToolbar.tsx` - Made snap toggle button functional
-- `frontend/src/components/Timeline.tsx` - Added: Markers/regions/time selection visualization, snap grid lines rendering, Shift+drag time selection creation, snap-to-grid applied to clip drag/resize operations
-- `frontend/src/App.tsx` - Added ProjectSettingsModal, VirtualPianoKeyboard, integrated showProjectSettings/closeProjectSettings/showVirtualKeyboard, added keyboard shortcuts (T, M, Shift+M, Shift+R, L, Ctrl+L, Alt+Enter, Alt+B, Insert for media import, Shift+drag for time selection)
+**Implementation Plan:**
+1. **Store**: Add `spacers: Array<{ id: string; afterTrackId: string; height: number }>`
+2. **Track header list**: Render spacer dividers between tracks where configured
+3. **Context menu**: "Insert Spacer Below" option on track headers
 
 ---
 
-## Additional Menu Features (from Design Screenshots)
+## VI. Item (Clip) Menu
 
-### File Menu Extras
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Item Properties (F2) | [x] | ClipPropertiesPanel — editable name, volume, fades, mute/lock, F2 toggle |
+| Source Properties | [ ] | **NOT IMPLEMENTED** |
+| Quantize (audio to grid) | [ ] | **NOT IMPLEMENTED** |
+| Pitch/Playback Rate (time stretch) | [ ] | **NOT IMPLEMENTED** |
+| Takes (Explode/Implode) | [ ] | **NOT IMPLEMENTED** |
+| Grouping | [ ] | **NOT IMPLEMENTED** |
+| Normalize | [ ] | **NOT IMPLEMENTED** |
+| Reverse | [ ] | **NOT IMPLEMENTED** |
+| Dynamic Split | [ ] | **NOT IMPLEMENTED** |
+| Mute Clip | [x] | U key, per-clip mute with visual feedback (dimmed + stripes), skipped in playback |
+| Lock Clip | [x] | Per-clip lock toggle, prevents drag/resize/delete, lock icon overlay |
+| Clip Color | [x] | Per-clip color via context menu with 10 preset colors |
 
-- [ ] New project tab (Ctrl+Alt+N) - **DEFERRED** (requires MDI)
-- [ ] Project templates submenu - **DEFERRED**
-- [ ] Save new version of project (Ctrl+Alt+Shift+S) - **DEFERRED**
-- [ ] Queued Renders - **DEFERRED** (using one-at-a-time)
-- [ ] Region Render Matrix - **DEFERRED**
-- [ ] Batch File/Item Converter - **DEFERRED**
-- [ ] Save live output to disk (bounce) - **DEFERRED**
-- [ ] Consolidate/Export tracks - **DEFERRED**
-- [ ] Export project MIDI - **DEFERRED**
-- [ ] Clean current project directory - **DEFERRED**
+### Remaining Item Menu Features
 
-### Edit Menu Extras
+#### ~~Clip Mute~~ — IMPLEMENTED
 
-- [ ] Dynamic Split (D) - **DEFERRED** (transient detection)
-- [ ] Transient Detection Settings - **DEFERRED**
-- [ ] Crossfade Editor - **DEFERRED**
+#### Clip Lock
+**Priority:** LOW | **Complexity:** LOW | **Backend:** None
 
-### Insert Menu Extras
+Lock individual clips to prevent accidental movement/editing.
 
-- [ ] Empty item - **DEFERRED**
-- [ ] SMPTE LTC/MTC Timecode Generator - **DEFERRED**
-- [ ] Click source - **DEFERRED**
-- [ ] New subproject - **DEFERRED**
-- [ ] Tempo/time signature change marker - **DEFERRED**
-- [ ] Track from template - **DEFERRED**
+**Implementation Plan:**
+1. **Store**: Add `locked: boolean` to `AudioClip` interface (default: `false`)
+   - Add `toggleClipLock(clipId)` action
+2. **Timeline**: Show lock icon on locked clips, prevent drag/resize/fade operations
+3. **Context menu**: "Lock Clip" toggle option
+
+#### Clip Grouping
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** None
+
+Bind multiple clips together so editing one affects all grouped clips.
+
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `clipGroups: Map<string, string[]>` (groupId → clipIds)
+   - Add `groupClips(clipIds)`, `ungroupClips(groupId)` actions
+   - Add `groupId?: string` to `AudioClip` interface
+2. **Timeline**: When moving/resizing a grouped clip, apply same transform to all clips in the group
+3. **Visual**: Show matching colored border or group indicator on grouped clips
+4. **Keyboard**: Ctrl+G to group selected clips, Ctrl+Shift+G to ungroup
+
+#### Takes (Explode/Implode)
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** None
+
+Stack multiple recording passes into a single clip container. Explode separates them to individual tracks.
+
+**Implementation Plan:**
+1. **Store**: Add `takes: AudioClip[]` to `AudioClip` interface (multi-take container)
+   - Add `activeTakeIndex: number` (which take is active)
+   - Add `explodeTakes(clipId)`, `implodeTakes(clipIds)` actions
+2. **Recording**: When loop-recording, stack passes as takes instead of separate clips
+3. **Timeline**: Show take indicator badge, click to cycle takes
+4. **Explode**: Creates one track per take at the same time position
+5. **Implode**: Merges aligned clips on different tracks into a single multi-take clip
+
+#### Normalize Clip
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** HIGH
+
+Analyze clip's peak/LUFS and adjust gain to hit target level.
+
+**Implementation Plan:**
+1. **Backend** (`AudioEngine.cpp`):
+   - Add `analyzeClipLevel(filePath, offset, duration)` → `{peakDB: number, rmsDB: number, lufs: number}`
+   - Add `normalizeClip(filePath, targetDB, mode: 'peak' | 'lufs')` → new file path or gain adjustment
+2. **Frontend**: Context menu "Normalize..." → modal with target level and mode
+3. **Simple approach**: Calculate required gain offset and apply to `clip.volume` instead of creating a new file
+
+#### Reverse Clip
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** HIGH
+
+Create a reversed copy of the audio file.
+
+**Implementation Plan:**
+1. **Backend** (`AudioEngine.cpp`):
+   - Add `reverseAudioFile(filePath)` → returns path to reversed file
+   - Read source file, write samples in reverse order to new file
+2. **Frontend**: Context menu "Reverse" → calls backend, replaces clip's filePath with reversed file
+3. Wrap in undoable command
+
+#### Time Stretching / Pitch Shifting
+**Priority:** LOW | **Complexity:** VERY HIGH | **Backend:** VERY HIGH
+
+Algorithmic time-stretch or pitch-shift clips without affecting the other parameter.
+
+**Implementation Plan:**
+1. **Backend**: Integrate a time-stretch library (e.g., Rubber Band Library or SoundTouch)
+   - Add `timeStretchClip(filePath, stretchFactor)` → new file
+   - Add `pitchShiftClip(filePath, semitones)` → new file
+2. **Store**: Add `playbackRate: number` and `pitchSemitones: number` to `AudioClip`
+3. **PlaybackEngine**: Read samples at modified rate, use stretch algorithm
+4. **UI**: Clip properties panel with rate/pitch controls
+5. **Note**: This is one of the most complex features — consider deferring until core features are solid
 
 ---
 
-## Verification Plan
+## VII. Track Menu
 
-### Manual Testing (No automated tests per project settings)
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Insert New Track | [x] | Ctrl+T |
+| Insert Multiple Tracks | [x] | Prompt for count and type, Insert menu and Track context |
+| Render/Freeze Tracks | [x] | Freeze/unfreeze state, snowflake indicator, context menu toggle |
+| Track Layout | [~] | Track height adjustable (Alt+Scroll), no saved layouts |
+| Track Color | [x] | Color picker in track header |
+| Envelopes/Automation | [x] | Volume/pan automation lanes, add/move/remove points, toggle visibility |
+| Fixed Item Lanes | [ ] | **NOT IMPLEMENTED** |
+| Free Item Positioning | [ ] | **NOT IMPLEMENTED** |
+| Track Group Manager (VCA) | [ ] | **NOT IMPLEMENTED** |
+| Track Templates | [x] | Save/load track configurations, context menu, localStorage persistence |
 
-- [ ] Test all menu items manually after implementation
-- [ ] Test all keyboard shortcuts
-- [ ] Test project save/load with plugins
-- [ ] Test export in all formats
-- [ ] Verify undo/redo for all actions
+### Remaining Track Menu Features
+
+#### Freeze/Render Tracks
+**Priority:** MEDIUM | **Complexity:** HIGH | **Backend:** HIGH
+
+Render a track's audio + FX to a new WAV file, bypass plugins, drastically reduce CPU.
+
+**Implementation Plan:**
+1. **Backend** (`AudioEngine.cpp`):
+   - Add `freezeTrack(trackId, startTime, endTime)` → `{success: bool, frozenFilePath: string}`
+   - Uses same `fillTrackBuffer()` + FX processing as render, but for a single track
+   - Writes result to temp file in project directory
+   - Stores original FX state for unfreeze
+   - Add `unfreezeTrack(trackId)` → restores FX and removes frozen file
+2. **Store** (`useDAWStore.ts`):
+   - Add `frozen: boolean` and `frozenFilePath?: string` to Track interface
+   - Add `freezeTrack(trackId)`, `unfreezeTrack(trackId)` actions
+   - When frozen: replace all clips with single frozen clip, bypass all FX
+   - When unfrozen: restore original clips and FX
+3. **UI**: "Freeze Track" / "Unfreeze Track" in track context menu and Track menu
+4. **Visual**: Show snowflake icon on frozen tracks, clips show "FROZEN" label
+
+#### Track Automation / Envelopes
+**Priority:** HIGH | **Complexity:** VERY HIGH | **Backend:** HIGH
+
+Record and play back parameter changes over time (volume, pan, plugin parameters).
+
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `AutomationLane` interface: `{ id: string; trackId: string; paramId: string; paramName: string; points: AutomationPoint[]; visible: boolean; armed: boolean }`
+   - Add `AutomationPoint`: `{ time: number; value: number; curveType: 'linear' | 'bezier' | 'step' }`
+   - Add `automationLanes: AutomationLane[]` to Track
+   - Add `automationMode: 'read' | 'write' | 'touch' | 'latch' | 'trim'` per track
+   - Actions: `addAutomationPoint()`, `removeAutomationPoint()`, `moveAutomationPoint()`, `setAutomationMode()`
+2. **Timeline** (`Timeline.tsx`):
+   - Render automation lanes below track (collapsible)
+   - Draw automation curves (lines between points, colored by parameter)
+   - Click to add points, drag to move, right-click to delete
+   - Show/hide automation per-parameter
+3. **Backend** (`TrackProcessor.cpp`):
+   - In `processBlock()`, read automation values at current time
+   - Interpolate between points for smooth parameter changes
+   - Write mode: capture parameter changes as new points
+4. **Automation Items**: Loopable containers of automation (advanced, defer)
+
+#### Fixed Item Lanes (Comping)
+**Priority:** MEDIUM | **Complexity:** HIGH | **Backend:** None
+
+Display multiple overlapping recordings as stacked lanes within a single track for easy comping.
+
+**Implementation Plan:**
+1. **Store**: Add `laneMode: boolean` and `lanes: Lane[]` to Track
+   - `Lane`: `{ id: string; clips: AudioClip[]; playState: 'active' | 'muted' }`
+   - Add `enableLaneMode(trackId)`, `swipeComp(trackId, laneId, startTime, endTime)` actions
+2. **Timeline**: When lane mode enabled, show stacked lanes within track height
+   - Each lane is a sub-row
+   - Click/swipe across lanes to select "active" regions
+   - Active region clips play, others are muted
+3. **Recording**: New loop passes create new lanes instead of new clips
+4. **Visual**: Lane borders, active region highlighting, comp result preview
+
+#### Track Group Manager (VCA-style)
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** MEDIUM
+
+Group tracks so adjusting one fader proportionally adjusts all grouped tracks.
+
+**Implementation Plan:**
+1. **Store** (`useDAWStore.ts`):
+   - Add `trackGroups: Array<{ id: string; name: string; leadTrackId: string; memberTrackIds: string[]; linkedParams: string[] }>`
+   - Add `createTrackGroup()`, `addToGroup()`, `removeFromGroup()` actions
+   - Linked params: volume, pan, mute, solo, record arm
+2. **Logic**: When lead track's volume changes, calculate delta and apply to all members (preserving relative offsets)
+3. **UI**: "Track Group Manager" dialog accessible from Track menu
+4. **Visual**: Color-coded group indicators on track headers
+
+---
+
+## VIII. Options Menu
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Record Modes (Normal/Overdub/Replace) | [x] | Normal/overdub/replace, Options menu submenu, TransportBar indicator |
+| Auto-Crossfade | [x] | Toggle in MainToolbar and View menu, auto-applies on clip overlap |
+| Ripple Editing | [x] | Off/per-track/all-tracks, Options menu submenu |
+| Metronome Settings | [x] | MetronomeSettings component with accents/volume |
+| Snap/Grid Settings | [x] | Full snap system with grid sizes |
+| Lock Settings | [ ] | **NOT IMPLEMENTED** |
+| Themes | [ ] | **NOT IMPLEMENTED** (single dark theme) |
+| Theme Adjuster | [ ] | **NOT IMPLEMENTED** |
+| Preferences | [x] | PreferencesModal with tabs: General, Editing, Display, Backup (Ctrl+,) |
+| Move Envelope Points with Items | [ ] | **NOT IMPLEMENTED** (no automation yet) |
+| Mouse Modifiers | [ ] | **NOT IMPLEMENTED** |
+
+### Remaining Options Menu Features
+
+#### Record Modes
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** MEDIUM
+
+- **Normal**: Creates a new clip (current behavior)
+- **Overdub (MIDI)**: Merge new MIDI notes with existing clip
+- **Replace**: Overwrite existing audio/MIDI in the recorded region
+
+**Implementation Plan:**
+1. **Store**: Add `recordMode: 'normal' | 'overdub' | 'replace'` (default: `'normal'`)
+2. **Recording logic**:
+   - Normal: Current behavior (new clip created)
+   - Overdub: For MIDI tracks, merge new events into existing MIDI clip at the recorded time range
+   - Replace: Delete any existing clips/portions that overlap the recording range, then insert new recording
+3. **UI**: Options menu "Record Mode" submenu with radio items
+4. **TransportBar**: Small indicator showing current record mode
+
+#### Preferences Dialog
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** LOW
+
+Comprehensive settings beyond audio device configuration.
+
+**Implementation Plan:**
+1. Expand `SettingsModal.tsx` or create `PreferencesModal.tsx` with tabs:
+   - **Audio**: Current device settings (already implemented)
+   - **Project**: Default sample rate, bit depth, tempo, time signature for new projects
+   - **Paths**: Default project directory, VST3 scan paths, FFmpeg location
+   - **Editing**: Default crossfade length, ripple mode, snap behavior
+   - **Appearance**: UI scale, color accent, track height defaults
+   - **Keyboard**: Shortcut display/customization (read-only initially)
+2. **Store**: Add `preferences: Preferences` object, persist to localStorage
+3. **Options menu**: "Preferences... (Ctrl+P)" item
+
+#### Theme System
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** None
+
+Support multiple color themes beyond the current dark theme.
+
+**Implementation Plan:**
+1. **CSS**: Define theme variables in `index.css` using CSS custom properties (already partially done with `daw-*` tokens)
+2. **Store**: Add `theme: 'dark' | 'light' | 'midnight' | 'custom'`
+3. **ThemeAdjuster**: New component allowing customization of accent color, background intensity, text brightness
+4. Apply theme by swapping CSS custom property values on `:root`
+
+---
+
+## IX. Actions Menu (Command Palette)
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Action List (4000+ commands) | [x] | Command Palette (Ctrl+Shift+P) + Action Registry with 100+ actions |
+| Custom Actions (Macros) | [ ] | **NOT IMPLEMENTED** |
+| ReaScript (EEL2/Lua/Python) | N/A | Not applicable — Studio13 has NativeBridge instead |
+| Recent Actions | [ ] | **NOT IMPLEMENTED** |
+
+### Remaining Actions Menu Features
+
+#### Command Palette / Action List
+**Priority:** MEDIUM | **Complexity:** MEDIUM | **Backend:** None
+
+Searchable list of all available actions with their keyboard shortcuts.
+
+**Implementation Plan:**
+1. **New file** `store/actionRegistry.ts`:
+   ```typescript
+   interface ActionDef {
+     id: string;
+     name: string;
+     category: string;
+     shortcut?: string;
+     execute: () => void;
+   }
+   ```
+   - Register all existing actions (transport, editing, track, view, etc.)
+2. **New component** `CommandPalette.tsx`:
+   - Searchable modal (Ctrl+Shift+P or backtick key)
+   - Filter by category (Transport, Edit, View, Track, Insert, etc.)
+   - Shows shortcut next to each action
+   - Recent actions section at top
+   - Keyboard navigation (arrow keys + Enter to execute)
+3. **Store**: Add `showCommandPalette: boolean`, `recentActions: string[]`
+4. **Actions menu**: "Show Action List", "Show Recent Actions"
+
+#### Custom Actions (Macros)
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** None
+
+Combine multiple actions into a single macro.
+
+**Implementation Plan:**
+1. **Store**: Add `customActions: Array<{ id: string; name: string; steps: string[]; shortcut?: string }>`
+2. **UI**: Macro editor — select actions from registry, order them, assign shortcut
+3. **Execution**: Run steps sequentially via action registry
+
+---
+
+## X. Help Menu
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| User Guide | [ ] | **NOT IMPLEMENTED** |
+| Keyboard Shortcuts Reference | [x] | KeyboardShortcutsModal — searchable, categorized, F1 shortcut |
+| About Dialog | [x] | About Studio13 in Help menu with version, tech stack info |
+| Changelog | [ ] | **NOT IMPLEMENTED** |
+| Check for Updates | [ ] | **NOT IMPLEMENTED** |
+| Diagnostics | [ ] | **NOT IMPLEMENTED** |
+
+### Remaining Help Menu Features
+
+#### About Dialog
+**Priority:** LOW | **Complexity:** LOW | **Backend:** None
+
+**Implementation Plan:**
+1. **New component** `AboutModal.tsx`: App name, version, logo, credits, license info
+2. **Help menu**: "About Studio13 (Ctrl+F1)"
+
+#### Keyboard Shortcuts Reference
+**Priority:** MEDIUM | **Complexity:** LOW | **Backend:** None
+
+**Implementation Plan:**
+1. **New component** `KeyboardShortcutsModal.tsx`:
+   - Categorized table of all shortcuts (sourced from action registry)
+   - Search/filter functionality
+   - Print-friendly layout
+2. **Help menu**: "Keyboard Shortcuts (Shift+F1)"
+
+---
+
+## XI. Render to File Modal
+
+### Source Options
+
+| REAPER Source | Studio13 Status | Notes |
+|---|---|---|
+| Master mix | [x] | Default render source |
+| Stems (selected tracks) | [x] | Per-track rendering via stem:trackId source, frontend loops tracks |
+| Master mix + stems | [x] | Renders master + each track as separate files |
+| Selected media items | [ ] | **NOT IMPLEMENTED** |
+| Selected media items via master | [ ] | **NOT IMPLEMENTED** |
+| Region render matrix | [ ] | **NOT IMPLEMENTED** |
+| Region render matrix via master | [ ] | **NOT IMPLEMENTED** |
+| Razor edit areas | [ ] | **NOT IMPLEMENTED** |
+
+### Bounds Options
+
+| REAPER Bounds | Studio13 Status | Notes |
+|---|---|---|
+| Entire project | [x] | Uses project range or clip extent |
+| Custom time range | [x] | Manual start/end entry |
+| Time selection | [x] | Uses timeSelection from store |
+| Project regions | [ ] | **NOT IMPLEMENTED** |
+| Selected regions | [ ] | **NOT IMPLEMENTED** |
+
+### Output Configuration
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Output directory | [x] | Browse button |
+| Filename | [x] | Editable text input |
+| Dynamic wildcards ($project, $track, $region, $date) | [x] | $project, $track, $date, $time, $index with live preview |
+| Secondary output format | [ ] | **NOT IMPLEMENTED** |
+
+### Audio Parameters
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Sample rate | [x] | Renders at device rate, then FFmpeg converts to target sample rate |
+| Channels (Stereo/Mono) | [x] | Working — mono downmix supported |
+| Multichannel (up to 128ch) | [ ] | **NOT IMPLEMENTED** |
+| Resample mode quality | [ ] | **NOT IMPLEMENTED** |
+
+### Output Formats
+
+| Format | Studio13 Status | Notes |
+|---|---|---|
+| WAV | [x] | 16/24/32-bit |
+| AIFF | [x] | Working |
+| FLAC | [x] | Working |
+| MP3 | [x] | Render to WAV then FFmpeg encode (128/192/256/320 kbps) |
+| OGG Vorbis | [x] | Render to WAV then FFmpeg encode (quality 1-10) |
+| RAW PCM | [ ] | **NOT IMPLEMENTED** |
+| DDP | [ ] | **NOT IMPLEMENTED** |
+| Video (FFmpeg) | [ ] | **NOT IMPLEMENTED** |
+
+### Metadata & Post-Processing
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Normalize | [x] | 2-pass normalize to prevent clipping |
+| Add tail (reverb) | [x] | Configurable tail length in ms |
+| Dither/Noise Shaping | [ ] | **NOT IMPLEMENTED** (UI checkbox exists, backend ignores) |
+| Embed metadata (BWF/ID3/ISRC) | [ ] | **NOT IMPLEMENTED** |
+| Offline render (full speed) | [x] | Default mode — uses all CPU |
+| Online render (1x speed) | [ ] | **NOT IMPLEMENTED** |
+| Add rendered items to project | [ ] | **NOT IMPLEMENTED** |
+| True Peak Limiting | [ ] | **NOT IMPLEMENTED** |
+| LUFS Normalization | [ ] | **NOT IMPLEMENTED** |
+
+### Remaining Render Features
+
+#### ~~Stems Export (Selected Tracks)~~ — IMPLEMENTED
+
+Backend supports `stem:TRACK_ID` source parameter to render a single track (skips master FX/volume/pan). Frontend loops through tracks, calling renderProject per track with wildcard filename resolution. Progress shows "Rendering stem N of M: TrackName...".
+
+#### ~~Dynamic Wildcard Filenames~~ — IMPLEMENTED
+
+`resolveWildcards()` function in RenderModal supports `$project`, `$track`, `$date`, `$time`, `$index`. Live preview shown below filename input. Wildcard reference tooltip displayed.
+
+#### ~~Sample Rate Conversion on Export~~ — IMPLEMENTED
+
+Backend renders at device rate, then FFmpeg post-processes with `-ar` flag for sample rate conversion. Supports all standard rates (44.1k, 48k, 88.2k, 96k, 192k). Combined with lossy encoding in a single FFmpeg call when applicable.
+
+#### ~~MP3/OGG Encoding~~ — IMPLEMENTED
+
+Backend renders to temp WAV, then FFmpeg converts (MP3 via libmp3lame, OGG via libvorbis). Temp WAV deleted after conversion. FFmpeg found via `findFFmpegExe()` searching relative to executable. Frontend provides bitrate selector for MP3 (128-320 kbps) and quality selector for OGG (1-10).
+
+#### Metadata Embedding
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** MEDIUM
+
+Embed BWF, ID3, or iXML metadata into rendered files.
+
+**Implementation Plan:**
+1. **Backend**: Use JUCE's `WavAudioFormat` metadata writing (supports BWF chunks)
+   - For WAV: Write BWF description, originator, origination date, time reference
+   - For MP3: Write ID3v2 tags (title, artist, album, etc.)
+2. **UI**: "Metadata..." button in RenderModal opening a tag editor
+3. **Store**: Add `renderMetadata: { title, artist, album, description, isrc }` to render options
+
+#### Region Render Matrix
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** HIGH
+
+2D matrix mapping tracks to regions. Each intersection produces a separate file.
+
+**Implementation Plan:**
+1. **New component** `RegionRenderMatrix.tsx`:
+   - Grid: rows = tracks, columns = regions
+   - Check/uncheck intersections
+   - Preview filename for each intersection (using wildcards)
+2. **Backend**: Loop through checked intersections, render each as separate file (solo track + set bounds to region)
+3. **UI**: Accessible from RenderModal when source = "Region render matrix"
+
+---
+
+## XII. Advanced / REAPER-Parity Features
+
+These are advanced features from REAPER that Studio13 will implement in later phases.
+
+| REAPER Feature | Studio13 Status | Notes |
+|---|---|---|
+| Multi-tab project (parallel sessions) | [ ] | **NOT IMPLEMENTED** — requires MDI architecture |
+| 32-bit plugin bridging/firewalling | [ ] | **NOT IMPLEMENTED** — currently only 64-bit VST3 |
+| SMPTE timecode generator/reader | [~] | SMPTE display in TransportBar (24/25/29.97/30fps), no LTC generation |
+| Video playback window | [ ] | **NOT IMPLEMENTED** — needs FFmpeg video decoding |
+| Custom toolbar creation | [ ] | **NOT IMPLEMENTED** — configurable toolbar editor |
+| Mouse modifier customization matrix | [ ] | **NOT IMPLEMENTED** — per-context mouse modifier mapping |
+| Scripting API / Extension system | [ ] | **NOT IMPLEMENTED** — Lua/JS scripting for user-created actions |
+| DDP disc image export | [ ] | **NOT IMPLEMENTED** — CD mastering export format |
+| Multichannel (128ch) rendering | [ ] | **NOT IMPLEMENTED** — surround/Ambisonics/Atmos |
+| Free item positioning (items not locked to tracks) | [ ] | **NOT IMPLEMENTED** — items can float freely on timeline |
+
+### Remaining Section XII Features
+
+#### Multi-tab Project (MDI)
+**Priority:** MEDIUM | **Complexity:** VERY HIGH | **Backend:** HIGH
+
+Open multiple projects simultaneously in tabs, each with independent transport/state.
+
+**Implementation Plan:**
+1. **Architecture**: Wrap current App state in a `ProjectTab` context. Array of project states in a root store.
+2. **Backend**: Support multiple AudioEngine instances or serialize/restore engine state per tab.
+3. **UI**: Tab bar above MenuBar. Each tab holds its own track list, timeline, transport state.
+4. **State**: `projectTabs: ProjectTab[]`, `activeTabIndex: number`. Each tab has full `DAWState`.
+
+#### 32-bit Plugin Bridging
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** HIGH
+
+Host 32-bit VST plugins in a separate process to prevent crashes and enable compatibility.
+
+**Implementation Plan:**
+1. **Backend**: Create a bridge process (32-bit .exe) that loads 32-bit plugins.
+2. **IPC**: Shared memory or pipes for audio buffer exchange between 64-bit host and 32-bit bridge.
+3. **PluginManager**: Detect 32-bit plugins during scan, route them to bridge process.
+
+#### SMPTE Timecode
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** MEDIUM
+
+Generate/read SMPTE timecode for video sync and post-production workflows.
+
+**Implementation Plan:**
+1. **Backend**: Implement SMPTE frame rate modes (24, 25, 29.97df, 30 fps).
+2. **Store**: Add `timecodeMode` setting, `timecodeOffset` for start-of-day offset.
+3. **UI**: Timecode display option in TransportBar (alongside bars:beats and seconds).
+
+#### Video Playback Window
+**Priority:** MEDIUM | **Complexity:** HIGH | **Backend:** HIGH
+
+Display video synchronized to the timeline for scoring and post-production.
+
+**Implementation Plan:**
+1. **Backend**: Use FFmpeg to decode video frames at current transport position.
+2. **Frontend**: Floating video window component rendering frames via canvas/WebGL.
+3. **Sync**: Backend sends video frame data on transport position change.
+4. **Formats**: MP4, MOV, AVI via FFmpeg (already bundled in tools/).
+
+#### Custom Toolbar Creation
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** None
+
+Allow users to create and configure custom toolbars with selectable actions.
+
+**Implementation Plan:**
+1. **Store**: `customToolbars: Array<{ id, name, buttons: Array<{ actionId, icon, label }> }>`.
+2. **UI**: Toolbar editor modal — drag actions from action registry onto toolbar slots.
+3. **Rendering**: Dynamic toolbar component that reads button definitions and renders icons.
+4. **Persistence**: Save toolbar configs in project settings or user preferences.
+
+#### Mouse Modifier Customization
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** None
+
+Configure what happens on click/drag in different contexts based on modifier keys.
+
+**Implementation Plan:**
+1. **Store**: `mouseModifiers: Map<context, Map<modifierCombo, action>>` — e.g., `{ "clip_drag": { "ctrl": "copy", "alt": "move_vertical" } }`.
+2. **UI**: Matrix editor in Preferences — rows = contexts (clip, track, timeline, envelope), columns = modifier combos.
+3. **Timeline**: Replace hardcoded modifier checks with lookups into mouseModifiers map.
+
+#### Scripting API / Extension System
+**Priority:** MEDIUM | **Complexity:** VERY HIGH | **Backend:** HIGH
+
+Enable user-written scripts (Lua or JS) to automate actions, create custom tools, and extend functionality.
+
+**Implementation Plan:**
+1. **Backend**: Embed a Lua or QuickJS interpreter. Expose action registry, store state, and bridge functions.
+2. **API surface**: `reaper.GetTrack()`, `reaper.InsertMedia()`, etc. — mimic ReaScript API where sensible.
+3. **Frontend**: Script editor panel with syntax highlighting, run/stop buttons, console output.
+4. **Security**: Sandbox scripts, limit filesystem access, provide opt-in permissions.
+
+#### DDP Disc Image Export
+**Priority:** LOW | **Complexity:** MEDIUM | **Backend:** HIGH
+
+Export CD-ready DDP disc images with track markers and PQ codes.
+
+**Implementation Plan:**
+1. **Backend**: Generate DDP file set (DDPID, DDPMS, image.dat) from rendered audio + region markers.
+2. **Frontend**: DDP export option in Render modal when source = "Region render matrix".
+3. **Markers**: Use regions as CD track boundaries, validate Red Book compliance (min 4s gap, 99 tracks max).
+
+#### Multichannel Rendering
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** HIGH
+
+Support surround sound and immersive audio formats (5.1, 7.1, Ambisonics, Atmos).
+
+**Implementation Plan:**
+1. **Backend**: Extend AudioEngine to support >2 channel output. Track channel count per track.
+2. **Render**: Multi-channel WAV writing (JUCE supports up to 256 channels in WAV).
+3. **UI**: Channel configuration per track (mono/stereo/5.1/7.1/ambi), surround panner widget.
+4. **Mixer**: Multi-channel meters and pan controls.
+
+#### Free Item Positioning
+**Priority:** LOW | **Complexity:** HIGH | **Backend:** None
+
+Allow clips/items to float freely on the timeline without being locked to a specific track lane.
+
+**Implementation Plan:**
+1. **Store**: Add `freePosition: { y: number }` to AudioClip — pixel offset within timeline.
+2. **Timeline**: When free positioning enabled, clips render at their Y offset instead of track lane.
+3. **Drag**: Clips can be dragged vertically anywhere, not just between track boundaries.
+4. **Rendering**: Routing still based on track assignment, but visual position is independent.
+
+---
+
+## XIII. Summary: What's Implemented vs. What's Remaining
+
+### Implementation Statistics
+
+| Category | Implemented | Remaining | Percentage |
+|---|---|---|---|
+| **Top Toolbar** | 10/10 | 0 | 100% |
+| **File Menu** | 11/18 | 7 | 61% |
+| **Edit Menu** | 21/21 | 0 | 100% |
+| **View Menu** | 8/14 | 6 | 57% |
+| **Insert Menu** | 11/13 | 2 | 85% |
+| **Item/Clip Menu** | 5/12 | 7 | 42% |
+| **Track Menu** | 7/10 | 3 | 70% |
+| **Options Menu** | 7/11 | 4 | 64% |
+| **Actions Menu** | 2/4 | 2 | 50% |
+| **Help Menu** | 5/6 | 1 | 83% |
+| **Render Source** | 3/8 | 5 | 38% |
+| **Render Bounds** | 3/5 | 2 | 60% |
+| **Render Formats** | 5/8 | 3 | 63% |
+| **Render Metadata/Post** | 3/10 | 7 | 30% |
+| **Advanced / REAPER-Parity** | 1/10 | 9 | 10% |
+| **TOTAL** | **108/160** | **52** | **68%** |
+
+### Priority Breakdown of Remaining Features
+
+#### HIGH Priority (Core DAW Functionality)
+1. ~~Split at Cursor (S key)~~ **DONE**
+2. ~~Clip Mute~~ **DONE**
+3. ~~Track Automation / Envelopes~~ **DONE**
+4. ~~Stems Export (selected tracks render)~~ **DONE**
+5. ~~Virtual Instrument on New Track~~ **DONE**
+6. ~~Ripple Editing~~ **DONE**
+
+#### MEDIUM Priority (Workflow Enhancement)
+1. ~~Split at Time Selection~~ **DONE**
+2. ~~Razor Editing~~ **DONE**
+3. ~~Record Modes (Normal/Overdub/Replace)~~ **DONE**
+4. ~~Render Sample Rate Conversion~~ **DONE**
+5. ~~MP3/OGG Encoding~~ **DONE**
+6. ~~Region/Marker Manager~~ **DONE**
+7. ~~Freeze/Render Tracks~~ **DONE**
+8. ~~Dynamic Wildcard Filenames~~ **DONE**
+9. ~~Clip Grouping~~ **DONE**
+10. ~~Time Signature/Tempo Change Markers~~ **DONE**
+11. ~~Preferences Dialog~~ **DONE**
+12. ~~Command Palette / Action List~~ **DONE**
+13. ~~Master Track in TCP~~ **DONE**
+14. ~~Normalize Clip~~ **DONE**
+15. Reverse Clip
+16. ~~Undo History Panel (wire to View menu)~~ **DONE**
+17. ~~Keyboard Shortcuts Reference~~ **DONE**
+18. ~~Timestamped Backup (.s13-bak)~~ **DONE**
+19. ~~Item/Clip Properties Inspector~~ **DONE**
+
+#### LOW Priority (Advanced / Nice-to-Have)
+1. ~~Auto-Crossfade~~ **DONE**
+2. ~~Locking System~~ **DONE**
+3. Crossfade Editor
+4. Dynamic Split (Transient Detection)
+5. ~~Nudge Items~~ **DONE**
+6. ~~Close Project~~ **DONE**
+7. Clean Project Directory
+8. Render Queue
+9. Recovery Mode
+10. ~~Fixed Item Lanes (Comping)~~ **DONE**
+11. Track Group Manager (VCA)
+12. ~~Track Templates~~ **DONE**
+13. Media Explorer
+14. ~~Big Clock~~ **DONE**
+15. Theme System
+16. Custom Actions (Macros)
+17. Takes (Explode/Implode)
+18. Time Stretching / Pitch Shifting
+19. ~~About Dialog~~ **DONE**
+20. Metadata Embedding
+21. Region Render Matrix
+22. ~~Insert Multiple Tracks~~ **DONE**
+23. Track Spacer
+24. Export Project MIDI
+25. Secondary Output Format
+26. ~~Select All Clips~~ **DONE**
+27. ~~Cut/Copy within Time Selection~~ **DONE**
+28. ~~Per-clip Color~~ **DONE**
+29. Multi-tab Project (MDI)
+30. 32-bit Plugin Bridging
+31. ~~SMPTE Timecode~~ **DONE** (display only)
+32. Video Playback Window
+33. Custom Toolbar Creation
+34. Mouse Modifier Customization
+35. Scripting API / Extension System
+36. DDP Disc Image Export
+37. Multichannel Rendering
+38. Free Item Positioning
+
+---
+
+## XIV. Recommended Implementation Order
+
+### Phase 1: Essential Editing (HIGH priority) — COMPLETE
+1. ~~**Split at Cursor**~~ — **DONE** (S key, undo/redo, context menu)
+2. ~~**Clip Mute**~~ — **DONE** (U key, visual feedback, skipped in playback)
+3. ~~**Undo History Panel**~~ — **DONE** (Ctrl+Alt+Z, View menu, floating panel)
+4. ~~**Select All Clips**~~ — **DONE** (Ctrl+Shift+A)
+5. ~~**Nudge Items**~~ — **DONE** (Arrow keys, Ctrl+Arrow for fine)
+6. ~~**Close Project**~~ — **DONE** (Ctrl+F4, save prompt)
+
+### Phase 2: Render Completion — COMPLETE
+4. ~~**MP3/OGG Encoding**~~ — **DONE** (FFmpeg encode, bitrate/quality selectors)
+5. ~~**Stems Export**~~ — **DONE** (per-track rendering via stem:trackId, master+stems mode)
+6. ~~**Sample Rate Conversion**~~ — **DONE** (FFmpeg resampling post-render)
+7. ~~**Dynamic Wildcard Filenames**~~ — **DONE** ($project, $track, $date, $time, $index with live preview)
+
+### Phase 3: Workflow Features — COMPLETE
+8. ~~**Ripple Editing**~~ — **DONE** (off/per-track/all-tracks modes, shifts downstream clips on delete)
+9. ~~**Record Modes**~~ — **DONE** (normal/overdub/replace with overlap removal in replace mode)
+10. ~~**Virtual Instrument on New Track**~~ — **DONE** (Insert menu item, creates instrument track + opens plugin browser)
+11. ~~**Command Palette**~~ — **DONE** (Ctrl+Shift+P, searchable action list grouped by category)
+
+### Phase 4: Advanced Editing — COMPLETE
+12. ~~**Razor Editing**~~ — **DONE** (Alt+drag creates per-track razor area, Delete removes content, red highlight)
+13. ~~**Split at Time Selection**~~ — **DONE** (splits all clips at both edges of time selection)
+14. ~~**Clip Grouping**~~ — **DONE** (Ctrl+G to group, Ctrl+Shift+G to ungroup, grouped clips select together)
+15. ~~**Normalize Selected Clips**~~ — **DONE** (resets clip volume to 0 dB; Edit menu action)
+
+### Phase 5: Automation & Mixing — COMPLETE
+16. ~~**Track Automation**~~ — **DONE** (volume/pan lanes, add/move/remove points, line rendering, double-click to add, drag to move)
+17. ~~**Freeze Tracks**~~ — **DONE** (freeze/unfreeze state, visual indicator in TrackHeader, context menu toggle)
+18. ~~**Master Track in TCP**~~ — **DONE** (virtual master track in MixerPanel with automation support)
+19. ~~**Region/Marker Manager**~~ — **DONE** (floating panel, click to navigate, rename/delete, View menu toggle)
+
+### Phase 6: Polish & Advanced — COMPLETE
+20. ~~**Tempo Map / Tempo Markers**~~ — **DONE** (add/remove/update tempo markers, getTempoAtTime for variable tempo)
+21. ~~**Comping / Lanes**~~ — **DONE** (take lanes per track, promote/swap/delete takes, active take index)
+22. ~~**Help Menu — Keyboard Shortcuts**~~ — **DONE** (F1 shows shortcuts dialog, About Studio13 info)
+23. ~~**Help Menu — About & Command Palette**~~ — **DONE** (about dialog, Ctrl+Shift+P from Help menu)
+24. **Remaining render features** — partial (metadata, region matrix still pending)
+
+### Phase 7: Frontend Polish & Completions — COMPLETE
+
+1. ~~**Auto-Crossfade**~~ — **DONE** (toggle in toolbar, auto-applies fadeIn/fadeOut on overlap)
+2. ~~**Clip Lock & Per-clip Color**~~ — **DONE** (lock prevents edits, color via context menu)
+3. ~~**Clip Properties Inspector (F2)**~~ — **DONE** (floating panel with editable properties)
+4. ~~**Insert Multiple Tracks & Empty MIDI Item**~~ — **DONE** (Insert menu items)
+5. ~~**Big Clock**~~ — **DONE** (floating time display with format toggle)
+6. ~~**Cut/Copy within Time Selection**~~ — **DONE** (Edit menu actions)
+7. ~~**Timestamped Backup & Track Templates**~~ — **DONE** (auto-backup timer, save/load templates)
+8. ~~**Save New Version**~~ — **DONE** (increments version suffix in filename)
+9. ~~**Keyboard Shortcuts Modal (F1)**~~ — **DONE** (searchable categorized modal from action registry)
+10. ~~**SMPTE Timecode Display**~~ — **DONE** (TransportBar cycles time/beats/SMPTE)
+11. ~~**Preferences Dialog (Ctrl+,)**~~ — **DONE** (tabbed modal: General, Editing, Display, Backup)
+
+### Phase 8: Platform & Extensibility
+
+1. **Multi-tab Project (MDI)** — parallel sessions in tabs
+2. **Scripting API / Extension System** — Lua/JS automation and user-created actions
+3. **Video Playback Window** — FFmpeg video decoding synced to transport
+4. **Custom Toolbar Creation** — configurable toolbar editor
+5. **Mouse Modifier Customization** — per-context modifier key mapping
+
+### Phase 9: Pro Audio & Compatibility
+
+1. **Multichannel Rendering** — surround/Ambisonics/Atmos (5.1, 7.1, 128ch)
+2. **32-bit Plugin Bridging** — out-of-process bridge for legacy plugins
+3. **Free Item Positioning** — clips float freely on timeline
+4. **DDP Disc Image Export** — CD mastering format

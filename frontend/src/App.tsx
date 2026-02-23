@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useShallow } from "zustand/shallow";
+import { X } from "lucide-react";
 import { nativeBridge } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { Button } from "./components/ui";
@@ -12,7 +13,29 @@ import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
 import { RenderModal } from "./components/RenderModal";
 import { VirtualPianoKeyboard } from "./components/VirtualPianoKeyboard";
 import { PianoRoll } from "./components/PianoRoll";
+import { UndoHistoryPanel } from "./components/UndoHistoryPanel";
+import { CommandPalette } from "./components/CommandPalette";
+import { RegionMarkerManager } from "./components/RegionMarkerManager";
+import { ClipPropertiesPanel } from "./components/ClipPropertiesPanel";
+import { BigClock } from "./components/BigClock";
+import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
+import { PreferencesModal } from "./components/PreferencesModal";
 import { MenuBar } from "./components/MenuBar";
+import { MasterTrackHeader } from "./components/MasterTrackHeader";
+import { RenderQueuePanel } from "./components/RenderQueuePanel";
+import { DynamicSplitModal } from "./components/DynamicSplitModal";
+import { RegionRenderMatrix } from "./components/RegionRenderMatrix";
+import { RoutingMatrix } from "./components/RoutingMatrix";
+import { MediaExplorer } from "./components/MediaExplorer";
+import { CleanProjectModal } from "./components/CleanProjectModal";
+import { BatchConverterModal } from "./components/BatchConverterModal";
+import { CrossfadeEditor } from "./components/CrossfadeEditor";
+import { ThemeEditor } from "./components/ThemeEditor";
+import { VideoWindow } from "./components/VideoWindow";
+import { ScriptEditor } from "./components/ScriptEditor";
+import { ProjectTabBar } from "./components/ProjectTabBar";
+import { ToolbarEditor, CustomToolbarStrip } from "./components/ToolbarEditor";
+import { DDPExportModal } from "./components/DDPExportModal";
 import { SortableTrackHeader } from "./components/SortableTrackHeader";
 import {
   DndContext,
@@ -32,6 +55,7 @@ function App() {
     tracks,
     addTrack,
     showMixer,
+    showMasterTrackInTCP,
     toggleMixer,
     showSettings,
     showProjectSettings,
@@ -41,23 +65,38 @@ function App() {
     closeSettings,
     closeProjectSettings,
     closeRenderModal,
-    setTrackMeterLevel,
-    setMasterLevel,
+    batchUpdateMeterLevels,
     reorderTrack,
     setCurrentTime,
     showPianoRoll,
     pianoRollTrackId,
     pianoRollClipId,
     closePianoRoll,
-    trackHeight,
-    setTrackHeight,
-    pixelsPerSecond,
-    setZoom,
+    showUndoHistory,
+    showCommandPalette,
+    showRegionMarkerManager,
+    showClipProperties,
+    showBigClock,
+    showKeyboardShortcuts,
+    showPreferences,
+    showRenderQueue,
+    showDynamicSplit,
+    showRegionRenderMatrix,
+    showRoutingMatrix,
+    showMediaExplorer,
+    showCleanProject,
+    showBatchConverter,
+    showCrossfadeEditor,
+    showThemeEditor,
+    showScriptEditor,
+    showToolbarEditor,
+    showDDPExport,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
       addTrack: state.addTrack,
       showMixer: state.showMixer,
+      showMasterTrackInTCP: state.showMasterTrackInTCP,
       toggleMixer: state.toggleMixer,
       showSettings: state.showSettings,
       showProjectSettings: state.showProjectSettings,
@@ -67,23 +106,41 @@ function App() {
       closeSettings: state.closeSettings,
       closeProjectSettings: state.closeProjectSettings,
       closeRenderModal: state.closeRenderModal,
-      setTrackMeterLevel: state.setTrackMeterLevel,
-      setMasterLevel: state.setMasterLevel,
+      batchUpdateMeterLevels: state.batchUpdateMeterLevels,
       reorderTrack: state.reorderTrack,
       setCurrentTime: state.setCurrentTime,
       showPianoRoll: state.showPianoRoll,
       pianoRollTrackId: state.pianoRollTrackId,
       pianoRollClipId: state.pianoRollClipId,
       closePianoRoll: state.closePianoRoll,
-      trackHeight: state.trackHeight,
-      setTrackHeight: state.setTrackHeight,
-      pixelsPerSecond: state.pixelsPerSecond,
-      setZoom: state.setZoom,
+      showUndoHistory: state.showUndoHistory,
+      showCommandPalette: state.showCommandPalette,
+      showRegionMarkerManager: state.showRegionMarkerManager,
+      showClipProperties: state.showClipProperties,
+      showBigClock: state.showBigClock,
+      showKeyboardShortcuts: state.showKeyboardShortcuts,
+      showPreferences: state.showPreferences,
+      showRenderQueue: state.showRenderQueue,
+      showDynamicSplit: state.showDynamicSplit,
+      showRegionRenderMatrix: state.showRegionRenderMatrix,
+      showRoutingMatrix: state.showRoutingMatrix,
+      showMediaExplorer: state.showMediaExplorer,
+      showCleanProject: state.showCleanProject,
+      showBatchConverter: state.showBatchConverter,
+      showCrossfadeEditor: state.showCrossfadeEditor,
+      showThemeEditor: state.showThemeEditor,
+      showScriptEditor: state.showScriptEditor,
+      showToolbarEditor: state.showToolbarEditor,
+      showDDPExport: state.showDDPExport,
     }))
   );
 
   // Ref for workspace wheel handling
   const workspaceRef = useRef<HTMLDivElement>(null);
+
+  // Project loading state (separate selector to avoid unnecessary re-renders)
+  const isProjectLoading = useDAWStore((state) => state.isProjectLoading);
+  const projectLoadingMessage = useDAWStore((state) => state.projectLoadingMessage);
 
   // Subscribe only to isPlaying to avoid re-rendering App on every time update
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
@@ -103,7 +160,17 @@ function App() {
 
       const currentState = useDAWStore.getState();
       if (currentState.transport.isPlaying) {
-        currentState.setCurrentTime(currentState.transport.currentTime + dt);
+        let newTime = currentState.transport.currentTime + dt;
+
+        // Loop: wrap back to loopStart when reaching loopEnd
+        const { loopEnabled, loopStart, loopEnd } = currentState.transport;
+        if (loopEnabled && loopEnd > loopStart && newTime >= loopEnd) {
+          newTime = loopStart + (newTime - loopEnd);
+          // Sync backend position on loop wrap
+          nativeBridge.setTransportPosition(newTime);
+        }
+
+        currentState.setCurrentTime(newTime);
       }
 
       frameId = requestAnimationFrame(loop);
@@ -114,28 +181,47 @@ function App() {
     return () => cancelAnimationFrame(frameId);
   }, [isPlaying, setCurrentTime]);
 
+  // Auto-backup timer
+  useEffect(() => {
+    const state = useDAWStore.getState();
+    if (!state.autoBackupEnabled) return;
+
+    const interval = setInterval(() => {
+      const s = useDAWStore.getState();
+      if (s.isModified && s.projectPath) {
+        s.saveProject(false).then((ok) => {
+          if (ok) console.log("[App] Auto-backup saved");
+        });
+      }
+    }, state.autoBackupInterval);
+
+    return () => clearInterval(interval);
+  }, []);
+
   const syncedRef = useRef(false);
 
-  // Sync frontend state to backend when tracks are loaded
+  // Sync frontend state to backend when tracks are loaded.
+  // Uses the correct track ID so C++ trackMap and Zustand stay in sync.
+  // Tracks are not persisted to localStorage so this only fires when the store
+  // first becomes non-empty (e.g. loadProject restores tracks from a file).
   useEffect(() => {
     if (syncedRef.current) return;
     if (tracks.length === 0) return; // Wait for tracks
 
-    console.log(
-      "[App] Frontend tracks detected:",
-      tracks.length,
-      "- Syncing to backend",
-    );
     syncedRef.current = true;
 
     const syncBackend = async () => {
-      console.log("[App] Syncing backend state with", tracks.length, "tracks");
-      for (const _ of tracks) {
+      console.log("[App] Syncing", tracks.length, "track(s) to C++ backend");
+      for (const track of tracks) {
         try {
-          await nativeBridge.addTrack();
-          console.log("[App] Synced track to backend");
+          // Pass the explicit track ID so C++ trackMap uses the same UUID as Zustand.
+          // Without the ID, C++ generates a fresh UUID → arm/record calls are silently ignored.
+          await nativeBridge.addTrack(track.id);
+          if (track.armed)   await nativeBridge.setTrackRecordArm(track.id, true);
+          if (track.muted)   await nativeBridge.setTrackMute(track.id, true);
+          if (track.soloed)  await nativeBridge.setTrackSolo(track.id, true);
         } catch (e) {
-          console.error("[App] Failed to sync track:", e);
+          console.error("[App] Failed to sync track to backend:", e);
         }
       }
     };
@@ -143,23 +229,16 @@ function App() {
     setTimeout(syncBackend, 500);
   }, [tracks]); // Run when tracks available
 
-  // Event-based metering (replaces polling)
+  // Event-based metering — single batched store update for all tracks + master
   useEffect(() => {
     nativeBridge.onMeterUpdate((data) => {
-      // Update track meter levels - data.trackLevels is now an object with trackId -> level
-      if (data.trackLevels && typeof data.trackLevels === "object") {
-        // Iterate over track IDs in the meter data
-        Object.entries(data.trackLevels).forEach(([trackId, level]) => {
-          setTrackMeterLevel(trackId, level as number);
-        });
-      }
-
-      // Update master level
-      if (typeof data.masterLevel === "number") {
-        setMasterLevel(data.masterLevel);
-      }
+      const trackLevels: Record<string, number> = data.trackLevels && typeof data.trackLevels === "object" && !Array.isArray(data.trackLevels)
+        ? data.trackLevels
+        : {};
+      const masterLevel = typeof data.masterLevel === "number" ? data.masterLevel : 0;
+      batchUpdateMeterLevels(trackLevels, masterLevel);
     });
-  }, [setTrackMeterLevel, setMasterLevel]);
+  }, [batchUpdateMeterLevels]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -215,9 +294,25 @@ function App() {
         if (state.selectedTrackIds.length > 0) {
           // Delete selected tracks
           state.deleteSelectedTracks();
-        } else if (state.selectedClipId) {
-          state.deleteClip(state.selectedClipId);
+        } else if (state.selectedClipIds.length > 0) {
+          state.selectedClipIds.forEach((id) => state.deleteClip(id));
         }
+      }
+
+      // Arrow Left/Right: Nudge selected clips (Ctrl = fine nudge)
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.shiftKey && !e.altKey) {
+        const state = useDAWStore.getState();
+        if (state.selectedClipIds.length > 0) {
+          e.preventDefault();
+          state.nudgeClips(e.key === "ArrowRight" ? "right" : "left", e.ctrlKey);
+        }
+      }
+
+      // Ctrl+Shift+A: Select all clips
+      if (e.key === "a" && e.ctrlKey && e.shiftKey) {
+        e.preventDefault();
+        useDAWStore.getState().selectAllClips();
+        return; // Don't fall through to Ctrl+A
       }
 
       // Ctrl+A: Select all tracks
@@ -227,30 +322,30 @@ function App() {
         state.selectAllTracks();
       }
 
-      // Ctrl+C: Copy selected clip
+      // Ctrl+C: Copy selected clips
       if (e.key === "c" && e.ctrlKey) {
         const state = useDAWStore.getState();
-        if (state.selectedClipId) {
+        if (state.selectedClipIds.length > 0) {
           e.preventDefault();
-          state.copyClip(state.selectedClipId);
+          state.copySelectedClips();
         }
       }
 
-      // Ctrl+X: Cut selected clip
+      // Ctrl+X: Cut selected clips
       if (e.key === "x" && e.ctrlKey) {
         const state = useDAWStore.getState();
-        if (state.selectedClipId) {
+        if (state.selectedClipIds.length > 0) {
           e.preventDefault();
-          state.cutClip(state.selectedClipId);
+          state.cutSelectedClips();
         }
       }
 
-      // Ctrl+D: Duplicate selected clip
+      // Ctrl+D: Duplicate selected clips
       if (e.key === "d" && e.ctrlKey) {
         const state = useDAWStore.getState();
-        if (state.selectedClipId) {
+        if (state.selectedClipIds.length > 0) {
           e.preventDefault();
-          state.duplicateClip(state.selectedClipId);
+          state.selectedClipIds.forEach((id) => state.duplicateClip(id));
         }
       }
 
@@ -264,6 +359,21 @@ function App() {
       if (e.key === "z" && e.ctrlKey && e.shiftKey) {
         e.preventDefault();
         useDAWStore.getState().redo();
+      }
+
+      // U: Toggle mute on selected clips
+      if (e.key === "u" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        const state = useDAWStore.getState();
+        if (state.selectedClipIds.length > 0) {
+          state.selectedClipIds.forEach((id) => state.toggleClipMute(id));
+        }
+      }
+
+      // S: Split clips at cursor
+      if (e.key === "s" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().splitClipAtPlayhead();
       }
 
       // T: Tap Tempo
@@ -313,6 +423,18 @@ function App() {
         }
       }
 
+      // Ctrl+Shift+P: Command Palette
+      if (e.key === "P" && e.ctrlKey && e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().toggleCommandPalette();
+      }
+
+      // Ctrl+Alt+Z: Toggle Undo History Panel
+      if (e.key === "z" && e.ctrlKey && e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        useDAWStore.getState().toggleUndoHistory();
+      }
+
       // Alt+Enter: Open Project Settings
       if (e.key === "Enter" && e.altKey && !e.ctrlKey && !e.shiftKey) {
         e.preventDefault();
@@ -323,6 +445,42 @@ function App() {
       if (e.key === "b" && e.altKey && !e.ctrlKey && !e.shiftKey) {
         e.preventDefault();
         useDAWStore.getState().toggleVirtualKeyboard();
+      }
+
+      // Ctrl+,: Open Preferences
+      if (e.key === "," && e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().togglePreferences();
+      }
+
+      // F1: Toggle Keyboard Shortcuts Modal
+      if (e.key === "F1" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().toggleKeyboardShortcuts();
+      }
+
+      // F2: Toggle Clip Properties Panel
+      if (e.key === "F2" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().toggleClipProperties();
+      }
+
+      // Ctrl+Shift+O: Open Project (Safe Mode)
+      if (e.key === "O" && e.ctrlKey && e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        void useDAWStore.getState().loadProject(undefined, { bypassFX: true });
+      }
+
+      // Ctrl+Shift+1-3: Save Screensets
+      if (e.ctrlKey && e.shiftKey && !e.altKey && ["1", "2", "3"].includes(e.key)) {
+        e.preventDefault();
+        useDAWStore.getState().saveScreenset(Number.parseInt(e.key, 10) - 1);
+      }
+
+      // Ctrl+1-3: Load Screensets (without Shift)
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && ["1", "2", "3"].includes(e.key)) {
+        e.preventDefault();
+        useDAWStore.getState().loadScreenset(Number.parseInt(e.key, 10) - 1);
       }
 
       // Escape: Close Piano Roll (and other modals)
@@ -379,41 +537,113 @@ function App() {
     };
   }, []);
 
-  // Workspace wheel handler for zoom (covers both TCP and Timeline)
-  // Use capture phase to intercept before children handle the event
+  // Handle audio files dropped from OS file explorer via HTML5 drag-and-drop.
+  // WebView2 intercepts OLE drag-drop before JUCE can see it, so we handle it
+  // entirely in JS: read file data → send to C++ to save to disk → import.
+  useEffect(() => {
+    const MEDIA_EXTENSIONS = new Set([
+      // Audio
+      ".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".wma", ".m4a", ".aac",
+      // Video (audio will be extracted via FFmpeg)
+      ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv", ".m4v",
+    ]);
+    const MAX_DROP_SIZE = 500 * 1024 * 1024; // 500MB limit for base64 transfer
+
+    const handleDragOver = (e: DragEvent) => {
+      // Must preventDefault on dragover to allow the drop event to fire
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "copy";
+      }
+    };
+
+    const handleDrop = async (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const files = e.dataTransfer?.files;
+      if (!files || files.length === 0) return;
+
+      // Filter to supported media files
+      const mediaFiles: File[] = [];
+      for (const file of files) {
+        const ext = "." + file.name.split(".").pop()?.toLowerCase();
+        if (MEDIA_EXTENSIONS.has(ext)) {
+          if (file.size > MAX_DROP_SIZE) {
+            console.warn(`[App] Skipping "${file.name}" — too large (${Math.round(file.size / 1024 / 1024)}MB, max ${MAX_DROP_SIZE / 1024 / 1024}MB)`);
+            continue;
+          }
+          mediaFiles.push(file);
+        }
+      }
+
+      if (mediaFiles.length === 0) return;
+      console.log(`[App] ${mediaFiles.length} media file(s) dropped from OS`);
+
+      for (const file of mediaFiles) {
+        try {
+          // Read file data and convert to base64 (chunked for performance)
+          const arrayBuffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(arrayBuffer);
+          const CHUNK = 0x8000; // 32KB chunks
+          const chunks: string[] = [];
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            chunks.push(String.fromCodePoint(...bytes.subarray(i, i + CHUNK)));
+          }
+          const base64 = btoa(chunks.join(""));
+
+          // Save to disk via C++ backend
+          const savedPath = await nativeBridge.saveDroppedFile(file.name, base64);
+          if (!savedPath) {
+            console.error(`[App] Failed to save dropped file: ${file.name}`);
+            continue;
+          }
+
+          // Create a new track for this file
+          const { tracks, transport, importMedia } = useDAWStore.getState();
+          const result = await nativeBridge.addTrack();
+          const trackId = typeof result === "string" ? result : `${Date.now()}`;
+          const trackName = file.name.replace(/\.[^.]+$/, "");
+
+          addTrack({
+            id: trackId,
+            name: trackName,
+            color: `hsl(${(tracks.length * 60) % 360}, 60%, 50%)`,
+          });
+
+          // Import from the saved path
+          await importMedia(savedPath, trackId, transport.currentTime);
+          console.log(`[App] Imported dropped file: ${file.name} → track ${trackId}`);
+        } catch (error) {
+          console.error(`[App] Failed to import dropped file: ${file.name}`, error);
+        }
+      }
+    };
+
+    document.addEventListener("dragover", handleDragOver);
+    document.addEventListener("drop", handleDrop);
+    return () => {
+      document.removeEventListener("dragover", handleDragOver);
+      document.removeEventListener("drop", handleDrop);
+    };
+  }, [addTrack]);
+
+  // Workspace wheel handler — only prevents browser default zoom (Ctrl+scroll).
+  // Actual zoom logic is handled by Timeline's RAF-batched handler.
   useEffect(() => {
     const workspace = workspaceRef.current;
     if (!workspace) return;
 
-    const MIN_PIXELS_PER_SECOND = 10;
-    const MAX_PIXELS_PER_SECOND = 200;
-
     const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        // Horizontal Zoom (Time Scale)
+      if (e.ctrlKey || e.metaKey || e.altKey) {
+        // Prevent browser zoom / native scroll — let Timeline handle the rest
         e.preventDefault();
-        e.stopPropagation();
-        const delta = e.deltaY > 0 ? 0.9 : 1.1;
-        const newZoom = Math.max(
-          MIN_PIXELS_PER_SECOND,
-          Math.min(MAX_PIXELS_PER_SECOND, pixelsPerSecond * delta)
-        );
-        setZoom(newZoom);
-      } else if (e.altKey) {
-        // Vertical Zoom (Track Height)
-        e.preventDefault();
-        e.stopPropagation();
-        const delta = e.deltaY > 0 ? 0.9 : 1.1;
-        const newHeight = Math.max(80, Math.min(500, trackHeight * delta));
-        setTrackHeight(newHeight);
       }
-      // Normal scroll: let native scroll handle it
     };
 
-    // Use capture: true to intercept before children handle the event
     workspace.addEventListener("wheel", handleWheel, { passive: false, capture: true });
     return () => workspace.removeEventListener("wheel", handleWheel, { capture: true });
-  }, [pixelsPerSecond, trackHeight, setZoom, setTrackHeight]);
+  }, []);
 
   const handleAddTrack = async () => {
     try {
@@ -450,6 +680,8 @@ function App() {
 
   return (
     <div className="app-container">
+      {/* Project Tab Bar (Phase 15C) */}
+      <ProjectTabBar />
       {/* Menu Bar */}
       <MenuBar />
       {/* Main Toolbar with Mixer Toggle */}
@@ -459,10 +691,25 @@ function App() {
         showMixer={showMixer}
       />
 
-      {/* Main Workspace */}
-      <div ref={workspaceRef} className="workspace">
+      {/* Custom Toolbars (Phase 15D) */}
+      <CustomToolbarStrip />
+
+      {/* Media Explorer (left panel) + Main Workspace */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+      {showMediaExplorer && (
+        <MediaExplorer
+          isVisible={showMediaExplorer}
+          onClose={() => useDAWStore.getState().toggleMediaExplorer()}
+        />
+      )}
+      <div ref={workspaceRef} className="workspace flex-1">
         {/* Track Control Panel (Left Sidebar) */}
-        <div className="track-control-panel">
+        <div className="track-control-panel" onClick={(e) => {
+          // Click on empty space (not a track header) → deselect all
+          if (e.target === e.currentTarget) {
+            useDAWStore.getState().deselectAllTracks();
+          }
+        }}>
           <div className="tcp-header sticky top-0 z-100">
             <Button
               variant="primary"
@@ -474,7 +721,11 @@ function App() {
             </Button>
           </div>
 
-          <div className="tcp-tracks z-20">
+          <div className="tcp-tracks z-20" onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              useDAWStore.getState().deselectAllTracks();
+            }
+          }}>
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
@@ -484,17 +735,56 @@ function App() {
                 items={tracks.map((t) => t.id)}
                 strategy={verticalListSortingStrategy}
               >
-                {tracks.map((track) => (
-                  <SortableTrackHeader key={track.id} track={track} />
-                ))}
+                {tracks.map((track) => {
+                  const spacer = useDAWStore.getState().spacers.find(
+                    (s) => s.afterTrackId === track.id
+                  );
+                  return (
+                    <div key={track.id}>
+                      <SortableTrackHeader track={track} />
+                      {spacer && (
+                        <div
+                          className="bg-daw-darker border-b border-daw-border cursor-row-resize group relative"
+                          style={{ height: spacer.height }}
+                          onDoubleClick={() =>
+                            useDAWStore.getState().removeSpacer(spacer.id)
+                          }
+                          onMouseDown={(e) => {
+                            const startY = e.clientY;
+                            const startHeight = spacer.height;
+                            const onMove = (me: MouseEvent) => {
+                              const delta = me.clientY - startY;
+                              useDAWStore
+                                .getState()
+                                .setSpacerHeight(spacer.id, startHeight + delta);
+                            };
+                            const onUp = () => {
+                              window.removeEventListener("mousemove", onMove);
+                              window.removeEventListener("mouseup", onUp);
+                            };
+                            window.addEventListener("mousemove", onMove);
+                            window.addEventListener("mouseup", onUp);
+                          }}
+                          title="Drag to resize, double-click to remove"
+                        >
+                          <div className="absolute inset-x-0 bottom-0 h-0.5 bg-daw-border group-hover:bg-daw-accent transition-colors" />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </SortableContext>
             </DndContext>
           </div>
+
+          {/* Master Track in TCP */}
+          {showMasterTrackInTCP && <MasterTrackHeader />}
         </div>
 
         {/* Timeline (Canvas-based) */}
         <Timeline tracks={tracks} />
       </div>
+      </div>{/* Close Media Explorer + Workspace wrapper */}
 
       {/* Transport Bar (above Mixer like Reaper) */}
       <BottomTransportBar />
@@ -504,7 +794,7 @@ function App() {
 
       {/* Piano Roll Editor Modal */}
       {showPianoRoll && pianoRollTrackId && pianoRollClipId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+        <div className="fixed inset-0 z-2000 flex items-center justify-center bg-black/60">
           <div className="relative w-[90vw] h-[80vh] bg-neutral-900 rounded-lg shadow-2xl border border-neutral-700 flex flex-col overflow-hidden">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-2 bg-neutral-800 border-b border-neutral-700">
@@ -515,7 +805,7 @@ function App() {
                 onClick={closePianoRoll}
                 title="Close (Esc)"
               >
-                ✕
+                <X size={16} />
               </Button>
             </div>
             {/* Piano Roll Content */}
@@ -525,6 +815,65 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Undo History Panel */}
+      {showUndoHistory && (
+        <div className="fixed right-2 top-20 z-1000">
+          <UndoHistoryPanel />
+        </div>
+      )}
+
+      {/* Big Clock */}
+      {showBigClock && (
+        <div className="fixed left-1/2 top-16 -translate-x-1/2 z-1000">
+          <BigClock />
+        </div>
+      )}
+
+      {/* Clip Properties Panel */}
+      {showClipProperties && (
+        <div className="fixed left-2 top-20 z-1000">
+          <ClipPropertiesPanel />
+        </div>
+      )}
+
+      {/* Region/Marker Manager */}
+      {showRegionMarkerManager && (
+        <div className="fixed right-2 top-20 z-1000 w-72 h-96 rounded border border-daw-border shadow-lg overflow-hidden">
+          <RegionMarkerManager />
+        </div>
+      )}
+
+      {/* Render Queue Panel */}
+      {showRenderQueue && (
+        <div className="fixed right-2 bottom-16 z-1000">
+          <RenderQueuePanel />
+        </div>
+      )}
+
+      {/* Preferences Modal */}
+      <PreferencesModal
+        isOpen={showPreferences}
+        onClose={() => useDAWStore.getState().togglePreferences()}
+      />
+
+      {/* Keyboard Shortcuts Modal */}
+      <KeyboardShortcutsModal
+        isOpen={showKeyboardShortcuts}
+        onClose={() => useDAWStore.getState().toggleKeyboardShortcuts()}
+      />
+
+      {/* Command Palette */}
+      <CommandPalette
+        isOpen={showCommandPalette}
+        onClose={() => useDAWStore.getState().toggleCommandPalette()}
+      />
+
+      {/* Dynamic Split Modal (Phase 9B) */}
+      <DynamicSplitModal
+        isOpen={showDynamicSplit}
+        onClose={() => useDAWStore.getState().closeDynamicSplit()}
+      />
 
       {/* Mixer Panel */}
       <MixerPanel isVisible={showMixer} onClose={toggleMixer} />
@@ -541,6 +890,72 @@ function App() {
 
       {/* Render Modal */}
       <RenderModal isOpen={showRenderModal} onClose={closeRenderModal} />
+
+      {/* Routing Matrix (Phase 11B) */}
+      <RoutingMatrix
+        isOpen={showRoutingMatrix}
+        onClose={() => useDAWStore.getState().toggleRoutingMatrix()}
+      />
+
+      {/* Region Render Matrix (Phase 10A) */}
+      <RegionRenderMatrix
+        isOpen={showRegionRenderMatrix}
+        onClose={() => useDAWStore.getState().toggleRegionRenderMatrix()}
+      />
+
+      {/* Clean Project Directory (Phase 12B) */}
+      <CleanProjectModal
+        isOpen={showCleanProject}
+        onClose={() => useDAWStore.getState().toggleCleanProject()}
+      />
+
+      {/* Batch File Converter (Phase 12E) */}
+      <BatchConverterModal
+        isOpen={showBatchConverter}
+        onClose={() => useDAWStore.getState().toggleBatchConverter()}
+      />
+
+      {/* Crossfade Editor (Phase 13A) */}
+      <CrossfadeEditor
+        isOpen={showCrossfadeEditor}
+        onClose={() => useDAWStore.getState().closeCrossfadeEditor()}
+      />
+
+      {/* Theme Editor (Phase 14A+B) */}
+      <ThemeEditor
+        isOpen={showThemeEditor}
+        onClose={() => useDAWStore.getState().toggleThemeEditor()}
+      />
+
+      {/* Video Window (Phase 15A) */}
+      <VideoWindow />
+
+      {/* Script Editor (Phase 15B) */}
+      {showScriptEditor && <ScriptEditor />}
+
+      {/* Toolbar Editor (Phase 15D) */}
+      <ToolbarEditor
+        isOpen={showToolbarEditor}
+        onClose={() => useDAWStore.getState().toggleToolbarEditor()}
+      />
+
+      {/* DDP Export (Phase 16C) */}
+      <DDPExportModal
+        isOpen={showDDPExport}
+        onClose={() => useDAWStore.getState().toggleDDPExport()}
+      />
+
+      {/* Project Loading Overlay */}
+      {isProjectLoading && (
+        <div className="fixed inset-0 z-10000 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-4">
+            <div className="w-10 h-10 border-3 border-daw-accent border-t-transparent rounded-full animate-spin" />
+            <p className="text-sm text-neutral-300 font-medium">
+              {projectLoadingMessage || "Loading project..."}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input, Select } from "./ui";
@@ -28,6 +30,7 @@ export function PluginBrowser({
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
+  const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
 
   useEffect(() => {
     loadPlugins();
@@ -58,6 +61,7 @@ export function PluginBrowser({
   };
 
   const handleAddPlugin = async (plugin: Plugin) => {
+    setAddingPlugin(plugin.fileOrIdentifier);
     try {
       let success = false;
       if (targetChain === "instrument") {
@@ -93,6 +97,8 @@ export function PluginBrowser({
       }
     } catch (e) {
       console.error("[PluginBrowser] Failed to add plugin:", e);
+    } finally {
+      setAddingPlugin(null);
     }
   };
 
@@ -186,8 +192,9 @@ export function PluginBrowser({
                 variant="primary"
                 size="sm"
                 onClick={() => handleAddPlugin(plugin)}
+                disabled={addingPlugin !== null}
               >
-                Add
+                {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
               </Button>
             </div>
           ))
@@ -201,10 +208,10 @@ export function PluginBrowser({
     return <div className="flex flex-col h-full">{content}</div>;
   }
 
-  // Modal mode: render with overlay
-  return (
+  // Modal mode: render with overlay via portal
+  return createPortal(
     <div
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-[1000]"
+      className="fixed inset-0 bg-black/80 flex items-center justify-center z-2000"
       onClick={onClose}
     >
       <div
@@ -220,11 +227,12 @@ export function PluginBrowser({
             size="icon-md"
             onClick={onClose}
           >
-            ×
+            <X size={18} />
           </Button>
         </div>
         {content}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

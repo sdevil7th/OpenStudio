@@ -1,6 +1,10 @@
 #include <JuceHeader.h>
 #include "MainComponent.h"
 
+#if JUCE_WINDOWS
+ #include <dwmapi.h>
+#endif
+
 //==============================================================================
 class Studio13Application  : public juce::JUCEApplication
 {
@@ -15,6 +19,7 @@ public:
     //==============================================================================
     void initialise (const juce::String& commandLine) override
     {
+        juce::ignoreUnused (commandLine);
         // Debug Logging
         auto logFile = juce::File::getSpecialLocation(juce::File::SpecialLocationType::currentApplicationFile)
                                 .getSiblingFile("Studio13_Debug.log");
@@ -48,9 +53,7 @@ public:
 
     void anotherInstanceStarted (const juce::String& commandLine) override
     {
-        // When another instance of the app is launched while this one is running,
-        // this method is invoked, and the commandLine parameter tells you what
-        // the other instance's command-line arguments were.
+        juce::ignoreUnused (commandLine);
     }
 
     //==============================================================================
@@ -58,16 +61,17 @@ public:
         This class implements the desktop window that contains an instance of
         our MainComponent class.
     */
-    class MainWindow    : public juce::DocumentWindow
+    class MainWindow    : public juce::DocumentWindow,
+                          private juce::Timer
     {
     public:
         MainWindow (juce::String name)
             : DocumentWindow (name,
-                              juce::Desktop::getInstance().getDefaultLookAndFeel()
-                                                          .findColour (juce::ResizableWindow::backgroundColourId),
-                              DocumentWindow::allButtons)
+                              juce::Colours::black,
+                              0)  // No JUCE title bar buttons — custom controls in React
         {
-            setUsingNativeTitleBar (true);
+            setUsingNativeTitleBar (false);
+            setTitleBarHeight (0);
             setContentOwned (new MainComponent(), true);
 
            #if JUCE_IOS || JUCE_ANDROID
@@ -75,28 +79,61 @@ public:
            #else
             setResizable (true, true);
             setResizeLimits (800, 600, 10000, 10000);
-            centreWithSize (1024, 768);
+            centreWithSize (1280, 800);
            #endif
 
             setVisible (true);
+
+           #if JUCE_WINDOWS
+            if (auto* peer = getPeer())
+            {
+                auto hwnd = static_cast<HWND> (peer->getNativeHandle());
+
+                // Add native resize frame (WS_THICKFRAME) — drawn outside client area,
+                // no clipping.  Also enables Windows Snap (drag-to-edge tiling).
+                auto style = ::GetWindowLongPtr (hwnd, GWL_STYLE);
+                style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+                ::SetWindowLongPtr (hwnd, GWL_STYLE, style);
+                ::SetWindowPos (hwnd, nullptr, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+                // DWMWA_USE_IMMERSIVE_DARK_MODE (attribute 20) — dark window shadow
+                BOOL useDarkMode = TRUE;
+                ::DwmSetWindowAttribute (hwnd, 20, &useDarkMode, sizeof (useDarkMode));
+            }
+           #endif
+
+            // WebView2 creates its native control asynchronously (typically
+            // 200-500ms after construction).  We need to force a resize AFTER
+            // the control exists so it picks up the correct window dimensions.
+            // A one-shot timer handles this reliably across platforms.
+            startTimer (600);
         }
 
         void closeButtonPressed() override
         {
-            // This is called when the user tries to close this window. Here, we'll just
-            // ask the app to quit when this happens, but you can change this to do
-            // whatever you need.
             JUCEApplication::getInstance()->systemRequestedQuit();
         }
 
-        /* Note: Be careful if you override any DocumentWindow methods - the base
-           class uses a lot of them, so by overriding you might break its functionality.
-           It's best to do all your work in your content component instead, but if
-           you really have to override any DocumentWindow methods, make sure your
-           subclass also calls the superclass's method.
-        */
+        // Return zero borders so the content fills the full client area.
+        // Native resize is handled by WS_THICKFRAME (outside the client area).
+        juce::BorderSize<int> getBorderThickness() const override { return { 0, 0, 0, 0 }; }
+        juce::BorderSize<int> getContentComponentBorder() const override { return { 0, 0, 0, 0 }; }
 
     private:
+        void timerCallback() override
+        {
+            stopTimer();
+
+            // Force a real resize cycle by nudging the size ±1px.
+            // This triggers WM_SIZE → DocumentWindow::resized() →
+            // MainComponent::resized() → webView.setBounds(), which
+            // now reaches the fully-initialised WebView2 native control.
+            auto b = getBounds();
+            setBounds (b.withWidth (b.getWidth() + 1));
+            setBounds (b);
+        }
+
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
     };
 

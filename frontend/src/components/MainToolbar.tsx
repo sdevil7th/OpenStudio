@@ -1,3 +1,4 @@
+import { Mic, Repeat, Circle, Play, Square, Undo2, Redo2, Grid3x3, SlidersHorizontal, SlidersVertical, Settings, Blend, MousePointer, Scissors } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
 
@@ -12,7 +13,7 @@ export function MainToolbar({
   onToggleMixer,
   showMixer,
 }: MainToolbarProps) {
-  const { transport, play, stop, toggleLoop, tracks, snapEnabled, toggleSnap } =
+  const { transport, play, stop, toggleLoop, tracks, snapEnabled, toggleSnap, undo, redo, canUndo, canRedo, autoCrossfade, toggleAutoCrossfade, toolMode, setToolMode, toggleSplitTool } =
     useDAWStore();
   const { isPlaying, loopEnabled } = transport;
   const hasArmedTracks = tracks.some((t) => t.armed);
@@ -29,7 +30,7 @@ export function MainToolbar({
             hasArmedTracks ? "Tracks armed for recording" : "No tracks armed"
           }
         >
-          🎙️
+          <Mic size={16} />
         </Button>
         <Button
           variant="purple"
@@ -38,7 +39,7 @@ export function MainToolbar({
           onClick={toggleLoop}
           title="Toggle Loop"
         >
-          🔁
+          <Repeat size={16} />
         </Button>
         <Button
           variant="danger"
@@ -47,7 +48,7 @@ export function MainToolbar({
           onClick={play}
           title={hasArmedTracks ? "Record" : "Arm tracks to record"}
         >
-          ●
+          <Circle size={16} fill="currentColor" />
         </Button>
         <Button
           variant="success"
@@ -56,7 +57,7 @@ export function MainToolbar({
           onClick={play}
           title="Play"
         >
-          ▶
+          <Play size={16} fill="currentColor" />
         </Button>
         <Button
           variant="default"
@@ -64,7 +65,7 @@ export function MainToolbar({
           onClick={stop}
           title="Stop"
         >
-          ■
+          <Square size={14} fill="currentColor" />
         </Button>
       </div>
 
@@ -75,21 +76,23 @@ export function MainToolbar({
         <Button
           variant="default"
           size="icon-lg"
-          disabled
-          title="Undo (TODO)"
+          disabled={!canUndo}
+          onClick={undo}
+          title="Undo (Ctrl+Z)"
         >
-          ↶
+          <Undo2 size={16} />
         </Button>
         <Button
           variant="default"
           size="icon-lg"
-          disabled
-          title="Redo (TODO)"
+          disabled={!canRedo}
+          onClick={redo}
+          title="Redo (Ctrl+Shift+Z)"
         >
-          ↷
+          <Redo2 size={16} />
         </Button>
         <Button
-          variant="primary"
+          variant="default"
           size="icon-lg"
           active={snapEnabled}
           onClick={toggleSnap}
@@ -99,7 +102,44 @@ export function MainToolbar({
               : "Snap Disabled (Click to enable)"
           }
         >
-          ▦
+          <Grid3x3 size={16} />
+        </Button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          active={autoCrossfade}
+          onClick={toggleAutoCrossfade}
+          title={
+            autoCrossfade
+              ? "Auto-Crossfade On (Click to disable)"
+              : "Auto-Crossfade Off (Click to enable)"
+          }
+        >
+          <Blend size={16} />
+        </Button>
+      </div>
+
+      <div className="w-px h-6 bg-neutral-700"></div>
+
+      {/* Tool Mode */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant="default"
+          size="icon-lg"
+          active={toolMode === "select"}
+          onClick={() => setToolMode("select")}
+          title="Select Tool (V)"
+        >
+          <MousePointer size={16} />
+        </Button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          active={toolMode === "split"}
+          onClick={toggleSplitTool}
+          title="Split Tool (B)"
+        >
+          <Scissors size={16} />
         </Button>
       </div>
 
@@ -108,13 +148,13 @@ export function MainToolbar({
       {/* View Toggles - Mixer Now Works! */}
       <div className="flex items-center gap-1">
         <Button
-          variant="primary"
+          variant="default"
           size="icon-lg"
           active={showMixer}
           onClick={onToggleMixer}
           title="Toggle Mixer"
         >
-          🎚️
+          <SlidersHorizontal size={16} />
         </Button>
         <Button
           variant="default"
@@ -122,7 +162,7 @@ export function MainToolbar({
           disabled
           title="FX Browser (TODO)"
         >
-          🎛️
+          <SlidersVertical size={16} />
         </Button>
       </div>
 
@@ -136,7 +176,7 @@ export function MainToolbar({
           onClick={onOpenSettings}
           title="Audio Settings"
         >
-          ⚙️
+          <Settings size={16} />
         </Button>
       </div>
     </div>

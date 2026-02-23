@@ -139,34 +139,44 @@ juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
     return plugins;
 }
 
-std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::PluginDescription& description)
+std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::PluginDescription& description,
+                                                               double sampleRate, int blockSize)
 {
     juce::String errorMessage;
-    
-    auto plugin = formatManager.createPluginInstance(description, 44100.0, 512, errorMessage);
-    
+
+    // Clamp block size to at least 512 — ASIO buffers can be as small as 32 samples,
+    // but createPluginInstance uses this to initialise the plugin's internal DSP sizing.
+    int safeBlockSize = juce::jmax(blockSize, 512);
+    auto plugin = formatManager.createPluginInstance(description, sampleRate, safeBlockSize, errorMessage);
+
     if (plugin == nullptr)
     {
         juce::Logger::writeToLog("PluginManager: Failed to load plugin: " + errorMessage);
     }
     else
     {
-        juce::Logger::writeToLog("PluginManager: Successfully loaded: " + description.name);
+        // Don't force a bus layout here — let the plugin use its default
+        // (e.g. mono-in/stereo-out for guitar amp sims like Amplitube).
+        // The TrackProcessor::safeProcessFX wrapper handles any channel mismatch.
+        juce::Logger::writeToLog("PluginManager: Successfully loaded: " + description.name +
+                                 " (inCh=" + juce::String(plugin->getTotalNumInputChannels()) +
+                                 " outCh=" + juce::String(plugin->getTotalNumOutputChannels()) + ")");
     }
-    
+
     return plugin;
 }
 
-std::unique_ptr<juce::AudioProcessor> PluginManager::loadPluginFromFile(const juce::String& filePath)
+std::unique_ptr<juce::AudioProcessor> PluginManager::loadPluginFromFile(const juce::String& filePath,
+                                                                       double sampleRate, int blockSize)
 {
     juce::Logger::writeToLog("PluginManager: Loading plugin from: " + filePath);
-    
+
     // Find the plugin description
     for (const auto& desc : knownPluginList.getTypes())
     {
         if (desc.fileOrIdentifier == filePath)
         {
-            return loadPlugin(desc);
+            return loadPlugin(desc, sampleRate, blockSize);
         }
     }
     

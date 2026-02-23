@@ -11,17 +11,51 @@ import time
 vite_process = None
 cpp_process = None
 
+def kill_process_tree(pid):
+    """Kill a process and all its child processes (Windows: taskkill /T)"""
+    if platform.system() == "Windows":
+        # /T = kill child processes, /F = force
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+def kill_orphaned_studio13():
+    """Kill any leftover Studio13.exe and its WebView2 child processes from previous runs"""
+    if platform.system() == "Windows":
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Studio13.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.strip().splitlines():
+            if "Studio13.exe" in line:
+                parts = line.split(",")
+                if len(parts) >= 2:
+                    pid = parts[1].strip('"')
+                    print(f"  Killing orphaned Studio13.exe (PID {pid}) and its child processes...")
+                    kill_process_tree(int(pid))
+                    time.sleep(0.5)
+
 def cleanup():
-    """Kill background processes on exit"""
+    """Kill background processes on exit (including child process trees)"""
     global vite_process, cpp_process
-    if vite_process:
-        print("\nStopping Vite dev server...")
-        vite_process.terminate()
-        vite_process.wait()
-    if cpp_process:
-        print("Stopping C++ app...")
-        cpp_process.terminate()
-        cpp_process.wait()
+    if cpp_process and cpp_process.poll() is None:
+        print("\nStopping C++ app (and WebView2 child processes)...")
+        kill_process_tree(cpp_process.pid)
+        try:
+            cpp_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    if vite_process and vite_process.poll() is None:
+        print("Stopping Vite dev server...")
+        kill_process_tree(vite_process.pid)
+        try:
+            vite_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 # Register cleanup handler
 atexit.register(cleanup)
@@ -113,6 +147,10 @@ def main():
             print("\n" + "="*50)
             print("SINGLE COMMAND DEV MODE")
             print("="*50)
+            # Kill any orphaned Studio13 processes (and their WebView2 children)
+            # from previous runs that weren't cleaned up properly
+            print("Checking for orphaned processes...")
+            kill_orphaned_studio13()
             start_vite_server()
             run_cpp_app()
         else:

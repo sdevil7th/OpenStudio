@@ -20,8 +20,10 @@ FetchContent_MakeAvailable(juce)
 
 # Define the JUCE applicati# Add our executable
 juce_add_gui_app(Studio13_v2
-    PRODUCT_NAME "Studio13" # The app name can remain cosmetic
+    PRODUCT_NAME "Studio13"
     VERSION 0.0.1
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-256x256.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-16x16.png"
 )
 
 # Source files
@@ -31,6 +33,7 @@ target_sources(Studio13_v2 PRIVATE
     Source/AudioEngine.cpp
     Source/AudioRecorder.cpp
     Source/PlaybackEngine.cpp
+    Source/PeakCache.cpp
     Source/AudioConverter.cpp
     Source/MIDIManager.cpp
     Source/MIDIClip.cpp
@@ -38,6 +41,7 @@ target_sources(Studio13_v2 PRIVATE
     Source/PluginWindowManager.cpp
     Source/TrackProcessor.cpp
     Source/Metronome.cpp
+    Source/AudioAnalyzer.cpp
 )
 
 # Include directories
@@ -93,10 +97,11 @@ target_include_directories(Studio13_v2 PRIVATE
     "${webview2_SOURCE_DIR}/build/native/include"
 )
 
-# Link WebView2 Static Lib
+# Link WebView2 Static Lib + DWM API for dark title bar
 if(MSVC)
     target_link_libraries(Studio13_v2 PRIVATE
         "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
+        dwmapi
     )
 endif()
 
@@ -108,6 +113,19 @@ if(MSVC)
     target_compile_options(Studio13_v2 PRIVATE /W4)
 else()
     target_compile_options(Studio13_v2 PRIVATE -Wall -Wextra)
+endif()
+
+# Copy bundled FFmpeg to build output (next to the executable)
+set(FFMPEG_EXE "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg.exe")
+if(EXISTS "${FFMPEG_EXE}")
+    add_custom_command(TARGET Studio13_v2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FFMPEG_EXE}"
+            "$<TARGET_FILE_DIR:Studio13_v2>/ffmpeg.exe"
+        COMMENT "Copying bundled ffmpeg.exe to output directory"
+    )
+else()
+    message(WARNING "tools/ffmpeg.exe not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
 endif()
 
 # Prepare for BinaryData (Frontend assets)

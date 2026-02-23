@@ -79,4 +79,9 @@ export interface SliderProps extends Omit<InputHTMLAttributes<HTMLInputElement>,
    * Additional custom class names
    */
   className?: string;
+
+  /**
+   * Default value to reset to on Ctrl+Click
+   */
+  defaultValue?: number;
 }

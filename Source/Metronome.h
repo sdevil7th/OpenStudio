@@ -30,6 +30,21 @@ public:
     void setAccentBeats(const std::vector<bool>& accents);
     bool isEnabled() const { return enabled; }
 
+    // Custom click sounds (Phase 9C)
+    bool setClickSound(const juce::String& filePath);    // Load custom WAV for regular beats
+    bool setAccentSound(const juce::String& filePath);   // Load custom WAV for accented beats
+    void resetToDefaultSounds();                          // Restore synthesized clicks
+
+    // Getters for offline rendering
+    const std::vector<bool>& getAccentBeats() const { return accentBeats; }
+    float getVolume() const { return volume; }
+    double getBpm() const { return bpm; }
+    int getNumerator() const { return numerator; }
+    int getDenominator() const { return denominator; }
+
+    // Render metronome audio to a WAV file offline (for export/render track)
+    bool renderToFile(const juce::File& outputFile, double startTimeSeconds, double endTimeSeconds);
+
 private:
     double sampleRate = 44100.0;
     double bpm = 120.0;
@@ -49,8 +64,16 @@ private:
     bool isHighClick = false;   // Is the current click a bar start (high pitch)?
     double lastSamplePosition = -1.0; // Track last position to detect playback restart
     
-    // Internal helper
+    // Internal helpers
     void generateClickSounds();
+    bool loadSoundFromFile(const juce::String& filePath, juce::AudioBuffer<float>& targetBuffer);
+
+    // Custom click sound state
+    bool usingCustomClick = false;
+    bool usingCustomAccent = false;
+    juce::String customClickPath;
+    juce::String customAccentPath;
+    juce::AudioFormatManager formatManager;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Metronome)
 };

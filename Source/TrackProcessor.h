@@ -43,6 +43,7 @@ public:
     
     // Custom methods - Metering
     float getRMSLevel() const { return currentRMS; }
+    void resetRMS() { currentRMS.store (0.0f, std::memory_order_relaxed); meterPeakAccum = 0.0f; meterSampleCount = 0; }
     
     // Recording & Monitoring (Phase 1)
     void setRecordArmed(bool armed) { isRecordArmed = armed; }
@@ -56,8 +57,11 @@ public:
     int getInputChannelCount() const { return inputChannelCount; }
     
     // FX Chain Management (Phase 3)
-    bool addInputFX(std::unique_ptr<juce::AudioProcessor> plugin);
-    bool addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin);
+    // sampleRate/blockSize: caller (AudioEngine) passes the known-correct device
+    // values so the plugin is always prepared at the right rate — avoids the 44100
+    // fallback that causes aliasing when getSampleRate() returns 0.
+    bool addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, double callerSampleRate = 0, int callerBlockSize = 0);
+    bool addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, double callerSampleRate = 0, int callerBlockSize = 0);
     void removeInputFX(int index);
     void removeTrackFX(int index);
     void bypassInputFX(int index, bool bypassed);
@@ -69,12 +73,24 @@ public:
     juce::AudioProcessor* getInputFXProcessor(int index);
     juce::AudioProcessor* getTrackFXProcessor(int index);
     
-    // Sends (Phase 4)
+    // Sends (Phase 4 / Phase 11)
+    int addSend(const juce::String& destTrackId);
+    void removeSend(int sendIndex);
     void setSendLevel(int sendIndex, float level);  // 0.0 to 1.0
     void setSendPan(int sendIndex, float pan);      // -1.0 (L) to 1.0 (R)
     void setSendEnabled(int sendIndex, bool enabled);
     void setSendPreFader(int sendIndex, bool preFader);
     int getNumSends() const { return static_cast<int>(sends.size()); }
+    juce::String getSendDestination(int sendIndex) const;
+    float getSendLevel(int sendIndex) const;
+    float getSendPan(int sendIndex) const;
+    bool getSendEnabled(int sendIndex) const;
+    bool getSendPreFader(int sendIndex) const;
+
+    /** Fill destBuffer with this track's send contribution (called by AudioEngine) */
+    void fillSendBuffer(int sendIndex, const juce::AudioBuffer<float>& preFaderBuf,
+                        const juce::AudioBuffer<float>& postFaderBuf,
+                        juce::AudioBuffer<float>& destBuffer, int numSamples) const;
     
     // Volume & Pan
     void setVolume(float newVolume);
@@ -85,10 +101,10 @@ public:
     // Mute/Solo
     void setMute(bool shouldMute);
     void setSolo(bool shouldSolo);
-    bool isMute() const { return isMuted; }
-    bool isSolo() const { return isSoloed; }
-    bool getMute() const { return isMuted; }  // Alias for compatibility
-    bool getSolo() const { return isSoloed; }  // Alias for compatibility
+    bool isMute() const { return isMuted.load(); }
+    bool isSolo() const { return isSoloed.load(); }
+    bool getMute() const { return isMuted.load(); }  // Alias for compatibility
+    bool getSolo() const { return isSoloed.load(); }  // Alias for compatibility
     
     // Track Type (Phase 2 - MIDI)
     void setTrackType(TrackType newType) { trackType = newType; }
@@ -106,7 +122,19 @@ public:
     juce::AudioPluginInstance* getInstrument() const { return instrumentPlugin.get(); }
 
 private:
+    // Current peak level (was named currentRMS but now holds peak — kept as-is
+    // to avoid changing the public getRMSLevel() / resetRMS() API used by AudioEngine).
     std::atomic<float> currentRMS { 0.0f };
+
+    // REAPER-style peak meter decimation: accumulate across callbacks and only
+    // write to currentRMS every METER_UPDATE_SAMPLES. At 32-sample ASIO blocks
+    // this reduces updates from 1378/sec to ~11/sec — matching the 10Hz metering
+    // timer that reads these values, so no visual information is lost while
+    // eliminating ~125× redundant per-callback work. Peak (max|sample|) instead
+    // of RMS avoids the costly sqrt entirely.
+    static constexpr int METER_UPDATE_SAMPLES = 4096; // ~11Hz at 44.1kHz / 32-sample blocks
+    int  meterSampleCount { 0 };
+    float meterPeakAccum  { 0.0f };
     
     // Recording state (Phase 1)
     bool isRecordArmed = false;
@@ -114,30 +142,37 @@ private:
     int inputStartChannel = 0;    // Hardware input start (0-based)
     int inputChannelCount = 2;     // Stereo by default
     
-    // Mute/Solo state
-    bool isMuted = false;
-    bool isSoloed = false;
+    // Mute/Solo state (atomic: set from message thread, read from audio thread)
+    std::atomic<bool> isMuted { false };
+    std::atomic<bool> isSoloed { false };
     
-    // FX Chains (Phase 3)
-    std::unique_ptr<juce::AudioProcessorGraph> inputFXChain;  // Pre-recording FX
-    std::unique_ptr<juce::AudioProcessorGraph> trackFXChain;  // Playback FX
-    std::vector<juce::AudioProcessorGraph::Node::Ptr> inputFXNodes;
-    std::vector<juce::AudioProcessorGraph::Node::Ptr> trackFXNodes;
+    // FX Chains (Phase 3) — stored directly, no AudioProcessorGraph wrapper
+    std::vector<std::unique_ptr<juce::AudioProcessor>> inputFXPlugins;  // Pre-recording FX
+    std::vector<std::unique_ptr<juce::AudioProcessor>> trackFXPlugins;  // Playback FX
     
-    // Sends (Phase 4)
+    // Sends (Phase 4 / Phase 11)
     struct SendConfig
     {
-        float level = 0.0f;
+        juce::String destTrackId;
+        float level = 0.5f;
         float pan = 0.0f;
-        bool enabled = false;
+        bool enabled = true;
         bool preFader = false;
-        int destinationTrack = -1;
     };
     std::vector<SendConfig> sends;
     
+    // Pre-allocated buffer for FX processing when plugin needs more channels
+    // than our 2-channel track buffer (avoids heap allocation on audio thread)
+    juce::AudioBuffer<float> fxProcessBuffer;
+
     // Mix (Phase 1)
     float trackVolumeDB = 0.0f;  // -60 to +12 dB
     float trackPan = 0.0f;        // -1.0 (L) to +1.0 (R)
+
+    // Cached pan gains — pre-computed in setPan()/setVolume(), avoids trig on audio thread
+    std::atomic<float> cachedPanL { 0.707107f };  // cos(pi/4) for center pan
+    std::atomic<float> cachedPanR { 0.707107f };  // sin(pi/4) for center pan
+    void recomputePanGains();
     
     // Track Type & MIDI (Phase 2)
     TrackType trackType = TrackType::Audio;

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ChevronRight } from "lucide-react";
 
 export interface MenuItem {
   label: string;
@@ -110,7 +111,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                   {item.shortcut}
                 </span>
               )}
-              {item.submenu && <span className="text-xs">▶</span>}
+              {item.submenu && <ChevronRight size={14} />}
             </div>
 
             {/* Submenu */}

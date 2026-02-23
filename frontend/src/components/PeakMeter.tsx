@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 interface PeakMeterProps {
   level: number;
@@ -11,11 +11,33 @@ interface PeakMeterProps {
 export function PeakMeter({
   level,
   peakHold = 0,
-  height = 140,
+  height,
   stereo = true,
   clipping = false,
 }: PeakMeterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [containerHeight, setContainerHeight] = useState(height || 140);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+
+  // Observe container size changes
+  const containerCallbackRef = useCallback((node: HTMLDivElement | null) => {
+    resizeObserverRef.current?.disconnect();
+    if (node) {
+      const observer = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const h = Math.floor(entry.contentRect.height);
+          if (h > 0) setContainerHeight(h);
+        }
+      });
+      observer.observe(node);
+      resizeObserverRef.current = observer;
+      // Initial measurement
+      const h = Math.floor(node.getBoundingClientRect().height);
+      if (h > 0) setContainerHeight(h);
+    }
+  }, []);
+
+  const canvasHeight = height || containerHeight;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -25,7 +47,6 @@ export function PeakMeter({
     if (!ctx) return;
 
     const width = canvas.width;
-    const canvasHeight = canvas.height;
     const channelWidth = stereo ? (width - 1) / 2 : width;
 
     // Clear canvas
@@ -72,9 +93,10 @@ export function PeakMeter({
     };
 
     if (stereo) {
-      // Simulate slight L/R variation for visual interest
-      const leftLevel = normalizedLevel * (0.95 + Math.random() * 0.1);
-      const rightLevel = normalizedLevel * (0.95 + Math.random() * 0.1);
+      // Slight deterministic L/R offset for visual interest (no Math.random() —
+      // random values differ every render, forcing unnecessary canvas redraws)
+      const leftLevel = normalizedLevel * 0.97;
+      const rightLevel = normalizedLevel * 1.03;
       drawChannel(0, channelWidth, leftLevel);
       drawChannel(channelWidth + 1, channelWidth, rightLevel);
 
@@ -99,14 +121,16 @@ export function PeakMeter({
       ctx.fillStyle = "#dc2626"; // Red 600
       ctx.fillRect(0, 0, width, 3);
     }
-  }, [level, peakHold, height, stereo, clipping]);
+  }, [level, peakHold, canvasHeight, stereo, clipping]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={stereo ? 16 : 10}
-      height={height}
-      className="rounded-sm border border-neutral-700"
-    />
+    <div ref={containerCallbackRef} className="h-full">
+      <canvas
+        ref={canvasRef}
+        width={stereo ? 16 : 10}
+        height={canvasHeight}
+        className="rounded-sm border border-neutral-700 h-full"
+      />
+    </div>
   );
 }

@@ -1,42 +1,86 @@
 import { useState, useEffect, memo } from "react";
 import classNames from "classnames";
 import { useShallow } from "zustand/shallow";
+import { SkipBack, Circle, Play, Square, Pause, Repeat, Settings } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { MetronomeSettings } from "./MetronomeSettings";
+import { MetronomeIcon } from "./icons";
 import { Button, Input, TimeSignatureInput } from "./ui";
+
+/**
+ * Format time as SMPTE timecode (HH:MM:SS:FF)
+ */
+function formatSMPTE(seconds: number, frameRate: number): string {
+  const totalFrames = Math.floor(seconds * frameRate);
+  const ff = totalFrames % Math.round(frameRate);
+  const totalSecs = Math.floor(totalFrames / Math.round(frameRate));
+  const ss = totalSecs % 60;
+  const totalMins = Math.floor(totalSecs / 60);
+  const mm = totalMins % 60;
+  const hh = Math.floor(totalMins / 60);
+  return `${hh.toString().padStart(2, "0")}:${mm.toString().padStart(2, "0")}:${ss.toString().padStart(2, "0")}:${ff.toString().padStart(2, "0")}`;
+}
 
 /**
  * Lightweight time display component - subscribes ONLY to currentTime.
  * This prevents the entire TransportBar from re-rendering 60fps.
+ * Supports three modes: time (MM:SS.ms), beats (BAR.BEAT.TICK), smpte (HH:MM:SS:FF)
  */
-const MusicalTimeDisplay = memo(function MusicalTimeDisplay() {
+const TimeDisplay = memo(function TimeDisplay() {
   const currentTime = useDAWStore((state) => state.transport.currentTime);
   const tempo = useDAWStore((state) => state.transport.tempo);
   const timeSignature = useDAWStore((state) => state.timeSignature);
+  const timecodeMode = useDAWStore((state) => state.timecodeMode);
+  const smpteFrameRate = useDAWStore((state) => state.smpteFrameRate);
 
-  const beatsPerSecond = tempo / 60;
-  const totalBeats = currentTime * beatsPerSecond;
-  const beatsPerBar = timeSignature.numerator;
-  const bars = Math.floor(totalBeats / beatsPerBar) + 1;
-  const beats = Math.floor(totalBeats % beatsPerBar) + 1;
-  const ticks = Math.floor((totalBeats % 1) * 100);
+  const cycleTimecodeMode = () => {
+    const modes: Array<"time" | "beats" | "smpte"> = ["time", "beats", "smpte"];
+    const idx = modes.indexOf(timecodeMode);
+    useDAWStore.getState().setTimecodeMode(modes[(idx + 1) % modes.length]);
+  };
 
-  return (
-    <div className="bg-neutral-950 text-sky-500 px-3 py-1 rounded text-sm min-w-[70px] text-center">
-      {`${bars}.${beats}.${ticks.toString().padStart(2, "0")}`}
-    </div>
-  );
-});
+  if (timecodeMode === "beats") {
+    const beatsPerSecond = tempo / 60;
+    const totalBeats = currentTime * beatsPerSecond;
+    const beatsPerBar = timeSignature.numerator;
+    const bars = Math.floor(totalBeats / beatsPerBar) + 1;
+    const beats = Math.floor(totalBeats % beatsPerBar) + 1;
+    const ticks = Math.floor((totalBeats % 1) * 100);
 
-const RealTimeDisplay = memo(function RealTimeDisplay() {
-  const currentTime = useDAWStore((state) => state.transport.currentTime);
+    return (
+      <div
+        className="bg-neutral-950 text-sky-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none"
+        onClick={cycleTimecodeMode}
+        title="Click to cycle: Beats → SMPTE → Time"
+      >
+        {`${bars}.${beats}.${ticks.toString().padStart(2, "0")}`}
+      </div>
+    );
+  }
 
+  if (timecodeMode === "smpte") {
+    return (
+      <div
+        className="bg-neutral-950 text-amber-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none font-mono"
+        onClick={cycleTimecodeMode}
+        title={`SMPTE ${smpteFrameRate}fps — Click to cycle`}
+      >
+        {formatSMPTE(currentTime, smpteFrameRate)}
+      </div>
+    );
+  }
+
+  // Default: time mode (MM:SS.ms)
   const mins = Math.floor(currentTime / 60);
   const secs = Math.floor(currentTime % 60);
   const ms = Math.floor((currentTime % 1) * 1000);
 
   return (
-    <div className="bg-neutral-950 text-emerald-500 px-3 py-1 rounded text-sm min-w-[80px] text-center">
+    <div
+      className="bg-neutral-950 text-emerald-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none"
+      onClick={cycleTimecodeMode}
+      title="Click to cycle: Time → Beats → SMPTE"
+    >
       {`${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`}
     </div>
   );
@@ -82,6 +126,8 @@ export function TransportBar() {
   const isRecording = useDAWStore((state) => state.transport.isRecording);
   const tempo = useDAWStore((state) => state.transport.tempo);
   const loopEnabled = useDAWStore((state) => state.transport.loopEnabled);
+  const recordMode = useDAWStore((state) => state.recordMode);
+  const rippleMode = useDAWStore((state) => state.rippleMode);
 
   // Local state for input fields (blur-based updates)
   const [tempTempo, setTempTempo] = useState(tempo.toString());
@@ -91,7 +137,6 @@ export function TransportBar() {
   useEffect(() => {
     setTempTempo(tempo.toString());
   }, [tempo]);
-
 
   const handlePlay = async () => {
     if (!isPlaying || isPaused) {
@@ -151,9 +196,7 @@ export function TransportBar() {
       <div className="h-10 bg-neutral-900 border-t border-neutral-700 border-b border-b-neutral-950 flex items-center px-4 justify-between shrink-0">
         {/* Left: Time Display */}
         <div className="flex items-center gap-2 font-mono">
-          <MusicalTimeDisplay />
-          <span className="text-neutral-500">/</span>
-          <RealTimeDisplay />
+          <TimeDisplay />
           <div
             className={classNames("text-xs px-2", {
               "text-red-500": isRecording,
@@ -162,6 +205,16 @@ export function TransportBar() {
           >
             [{getStatusText()}]
           </div>
+          {recordMode !== "normal" && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400 uppercase">
+              {recordMode}
+            </span>
+          )}
+          {rippleMode !== "off" && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-400">
+              Ripple: {rippleMode === "per_track" ? "Track" : "All"}
+            </span>
+          )}
         </div>
 
         {/* Center: Transport Controls */}
@@ -172,7 +225,7 @@ export function TransportBar() {
             onClick={handleGoToStart}
             title="Go to Start"
           >
-            ⏮
+            <SkipBack size={16} />
           </Button>
           <Button
             variant="danger"
@@ -182,7 +235,7 @@ export function TransportBar() {
             onClick={handleRecord}
             title={hasArmedTracks ? "Play & Record" : "Arm a track to record"}
           >
-            ●
+            <Circle size={16} fill="currentColor" />
           </Button>
           <Button
             variant="success"
@@ -192,7 +245,7 @@ export function TransportBar() {
             onClick={handlePlay}
             title="Play"
           >
-            ▶
+            <Play size={16} fill="currentColor" />
           </Button>
           <Button
             variant="default"
@@ -201,7 +254,7 @@ export function TransportBar() {
             onClick={handleStop}
             title="Stop"
           >
-            ■
+            <Square size={14} fill="currentColor" />
           </Button>
           <Button
             variant="primary"
@@ -211,7 +264,7 @@ export function TransportBar() {
             onClick={handlePause}
             title="Pause"
           >
-            ⏸
+            <Pause size={16} fill="currentColor" />
           </Button>
           <Button
             variant="purple"
@@ -220,7 +273,7 @@ export function TransportBar() {
             onClick={toggleLoop}
             title="Loop"
           >
-            🔁
+            <Repeat size={16} />
           </Button>
           <div className="w-2"></div>
           {/* Metronome */}
@@ -231,7 +284,7 @@ export function TransportBar() {
             onClick={toggleMetronome}
             title="Metronome Click"
           >
-            M
+            <MetronomeIcon size={16} />
           </Button>
         </div>
 
@@ -252,18 +305,7 @@ export function TransportBar() {
               onClick={() => setShowMetronomeSettings(true)}
               title="Metronome Settings"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-                className="w-4 h-4"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z"
-                  clipRule="evenodd"
-                />
-              </svg>
+              <Settings size={14} />
             </Button>
           </div>
           <div className="flex flex-col items-center gap-1">

@@ -69,7 +69,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
 
     const buttonClasses = classNames(
       // Base styles
-      'inline-flex items-center justify-center font-bold transition-all hover:cursor-pointer',
+      'inline-flex items-center justify-center font-bold transition-all hover:cursor-pointer active:scale-[0.97]',
 
       // Disable user select to prevent text selection on click
       'select-none',

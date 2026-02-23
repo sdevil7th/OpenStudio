@@ -1,5 +1,8 @@
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { X, GripVertical } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
+import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input, Select } from "./ui";
 import "./FXChainPanel.css";
 
@@ -29,9 +32,11 @@ export function FXChainPanel({
   chainType,
   onClose,
 }: FXChainPanelProps) {
+  const updateTrack = useDAWStore((s) => s.updateTrack);
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
 
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -44,6 +49,20 @@ export function FXChainPanel({
     loadAvailablePlugins();
   }, [trackId, chainType]);
 
+  // Sync FX counts to the store so track headers/channel strips can show indicators
+  const updateFxCounts = async () => {
+    try {
+      const inputFx = await nativeBridge.getTrackInputFX(trackId);
+      const trackFx = await nativeBridge.getTrackFX(trackId);
+      updateTrack(trackId, {
+        inputFxCount: inputFx.length,
+        trackFxCount: trackFx.length,
+      });
+    } catch (e) {
+      // Non-critical, ignore
+    }
+  };
+
   const loadPlugins = async () => {
     setLoading(true);
     try {
@@ -52,6 +71,8 @@ export function FXChainPanel({
           ? await nativeBridge.getTrackInputFX(trackId)
           : await nativeBridge.getTrackFX(trackId);
       setFxSlots(plugins);
+      // Update store FX counts
+      updateFxCounts();
     } catch (e) {
       console.error("[FXChain] Failed to load plugins:", e);
     } finally {
@@ -84,6 +105,7 @@ export function FXChainPanel({
   };
 
   const handleAddPlugin = async (plugin: Plugin) => {
+    setAddingPlugin(plugin.fileOrIdentifier);
     try {
       const success =
         chainType === "input"
@@ -96,6 +118,8 @@ export function FXChainPanel({
       }
     } catch (e) {
       console.error("[FXChain] Failed to add plugin:", e);
+    } finally {
+      setAddingPlugin(null);
     }
   };
 
@@ -178,8 +202,8 @@ export function FXChainPanel({
     return matchesSearch && matchesCategory;
   });
 
-  return (
-    <div className="fx-chain-overlay z-20" onClick={onClose}>
+  return createPortal(
+    <div className="fx-chain-overlay" onClick={onClose}>
       <div
         className="fx-chain-panel-two-column"
         onClick={(e) => e.stopPropagation()}
@@ -190,7 +214,7 @@ export function FXChainPanel({
             {trackName}
           </h3>
           <Button variant="ghost" size="icon-sm" onClick={onClose}>
-            ×
+            <X size={16} />
           </Button>
         </div>
 
@@ -226,7 +250,7 @@ export function FXChainPanel({
                     onClick={() => handleOpenEditor(fx.index)}
                   >
                     <div className="fx-drag-handle" title="Drag to reorder">
-                      ☰
+                      <GripVertical size={14} />
                     </div>
                     <div className="fx-slot-info">
                       <div className="fx-slot-number">{index + 1}</div>
@@ -245,7 +269,7 @@ export function FXChainPanel({
                       title="Remove plugin"
                       className="fx-remove-btn"
                     >
-                      ×
+                      <X size={14} />
                     </Button>
                   </div>
                 ))
@@ -319,8 +343,9 @@ export function FXChainPanel({
                       variant="primary"
                       size="sm"
                       onClick={() => handleAddPlugin(plugin)}
+                      disabled={addingPlugin !== null}
                     >
-                      Add
+                      {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
                     </Button>
                   </div>
                 ))
@@ -329,6 +354,7 @@ export function FXChainPanel({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

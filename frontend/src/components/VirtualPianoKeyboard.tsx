@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { X, AlertTriangle } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
@@ -143,8 +144,8 @@ export function VirtualPianoKeyboard() {
               → {midiTrack.name}
             </span>
           ) : (
-            <span className="text-xs text-yellow-500">
-              ⚠ No MIDI track selected
+            <span className="text-xs text-yellow-500 flex items-center gap-1">
+              <AlertTriangle size={12} /> No MIDI track selected
             </span>
           )}
         </div>
@@ -154,7 +155,7 @@ export function VirtualPianoKeyboard() {
           onClick={() => useDAWStore.getState().toggleVirtualKeyboard()}
           title="Close Virtual Keyboard"
         >
-          ✕
+          <X size={14} />
         </Button>
       </div>
 

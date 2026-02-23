@@ -2,6 +2,7 @@ import { useState } from "react";
 import classNames from "classnames";
 import { PeakMeter } from "./PeakMeter";
 import { useDAWStore, Track } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 import { FXChainPanel } from "./FXChainPanel";
 import { Button, Slider } from "./ui";
 
@@ -11,11 +12,33 @@ interface ChannelStripProps {
   isMaster?: boolean;
 }
 
+// dB marks with their positions as percentage from top
+// position = (12 - dB) / 72 * 100  (range is -60 to +12 = 72 dB)
+const DB_MARKS: { db: number; label: string }[] = [
+  { db: 12, label: "12" },
+  { db: 6, label: "6" },
+  { db: 0, label: "0" },
+  { db: -6, label: "-6" },
+  { db: -12, label: "-12" },
+  { db: -24, label: "-24" },
+  { db: -48, label: "-48" },
+  { db: -60, label: "-∞" },
+];
+
+function getDbPosition(db: number): number {
+  return ((12 - db) / 72) * 100;
+}
+
 export function ChannelStrip({
   track,
   trackIndex,
   isMaster = false,
 }: ChannelStripProps) {
+  // Subscribe to this track's meter level directly from the dedicated slice.
+  // This component re-renders at 10Hz for metering; keeping it isolated from
+  // the tracks array means Timeline/App never see those re-renders.
+  const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
+
   const {
     toggleTrackMute,
     toggleTrackSolo,
@@ -24,7 +47,15 @@ export function ChannelStrip({
     setTrackPan,
     setMasterVolume,
     setMasterPan,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    toggleTrackMute: s.toggleTrackMute,
+    toggleTrackSolo: s.toggleTrackSolo,
+    toggleTrackArmed: s.toggleTrackArmed,
+    setTrackVolume: s.setTrackVolume,
+    setTrackPan: s.setTrackPan,
+    setMasterVolume: s.setMasterVolume,
+    setMasterPan: s.setMasterPan,
+  })));
 
   const [phaseInverted, setPhaseInverted] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
@@ -60,6 +91,9 @@ export function ChannelStrip({
         ? `R${Math.round(Math.abs(track.pan * 100))}`
         : `L${Math.round(Math.abs(track.pan * 100))}`;
 
+  // Use fewer dB marks for track strips to save space
+  const dbMarks = isMaster ? DB_MARKS : DB_MARKS.filter(m => [12, 0, -12, -48, -60].includes(m.db));
+
   return (
     <div
       className={classNames(
@@ -85,12 +119,42 @@ export function ChannelStrip({
         {isMaster ? "● MASTER ●" : track.name}
       </div>
 
-      {/* Send Slot Placeholder */}
+      {/* Send Slots (Phase 11) */}
       {!isMaster && (
-        <div className="px-1 py-1 shrink-0">
+        <div className="px-1 pt-0.5 pb-0.5 shrink-0 space-y-0.5">
+          {track.sends.map((send, i) => {
+            const destTrack = useDAWStore.getState().tracks.find((t) => t.id === send.destTrackId);
+            return (
+              <div
+                key={i}
+                className={classNames(
+                  "h-3.5 rounded text-[7px] flex items-center justify-between px-1 cursor-pointer transition-colors",
+                  send.enabled
+                    ? "bg-neutral-800 border border-cyan-500 text-cyan-400"
+                    : "bg-neutral-800 border border-neutral-600 text-neutral-500"
+                )}
+                onClick={() => useDAWStore.getState().setTrackSendEnabled(track.id, i, !send.enabled)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  useDAWStore.getState().removeTrackSend(track.id, i);
+                }}
+                title={`Send → ${destTrack?.name || "?"} (${Math.round(send.level * 100)}%) — Right-click to remove`}
+              >
+                <span className="truncate max-w-[50px]">→ {destTrack?.name || "?"}</span>
+                <span>{Math.round(send.level * 100)}%</span>
+              </div>
+            );
+          })}
           <div
-            className="h-4 bg-neutral-800 border border-dashed border-neutral-600 rounded text-[7px] text-neutral-500 
-                                   flex items-center justify-center cursor-pointer hover:border-neutral-400 hover:text-neutral-400 transition-colors"
+            className="h-3.5 bg-neutral-800 border border-dashed border-neutral-600 rounded text-[7px] text-neutral-500
+                       flex items-center justify-center cursor-pointer hover:border-cyan-400 hover:text-cyan-400 transition-colors"
+            onClick={() => {
+              const otherTracks = useDAWStore.getState().tracks.filter((t) => t.id !== track.id);
+              if (otherTracks.length > 0) {
+                // Add send to first available track (user can change via routing matrix)
+                useDAWStore.getState().addTrackSend(track.id, otherTracks[0].id);
+              }
+            }}
           >
             + Send
           </div>
@@ -99,7 +163,7 @@ export function ChannelStrip({
 
       {/* Input Routing */}
       {!isMaster && (
-        <div className="px-1 pb-1 shrink-0">
+        <div className="px-1 pb-0.5 shrink-0">
           <div className="bg-emerald-700 text-[8px] text-white text-center py-0.5 rounded truncate cursor-pointer hover:bg-emerald-600 transition-colors">
             {track.inputChannelCount === 1
               ? `In ${track.inputStartChannel + 1}`
@@ -109,11 +173,14 @@ export function ChannelStrip({
       )}
 
       {/* FX Slot */}
-      <div className="px-1 pb-1 shrink-0">
+      <div className={classNames("px-1 shrink-0", isMaster ? "pb-1" : "pb-0.5")}>
         <div
           onClick={() => !isMaster && setShowFXChain(true)}
-          className="h-4 bg-neutral-800 border border-dashed border-neutral-600 rounded text-[7px] text-neutral-500 
-                               flex items-center justify-center cursor-pointer hover:border-green-500 hover:text-green-500 transition-colors"
+          className={
+            (track.inputFxCount + track.trackFxCount) > 0
+              ? "h-3.5 bg-neutral-800 border border-green-500 rounded text-[7px] text-green-400 flex items-center justify-center cursor-pointer shadow-[0_0_6px_rgba(34,197,94,0.4)] transition-colors"
+              : "h-3.5 bg-neutral-800 border border-dashed border-neutral-600 rounded text-[7px] text-neutral-500 flex items-center justify-center cursor-pointer hover:border-green-500 hover:text-green-500 transition-colors"
+          }
         >
           FX
         </div>
@@ -129,8 +196,8 @@ export function ChannelStrip({
         />
       )}
 
-      {/* Phase Invert */}
-      <div className="px-1 pb-1 shrink-0">
+      {/* Phase Invert - compact for track strips */}
+      <div className={classNames("px-1 shrink-0", isMaster ? "pb-1" : "pb-0.5")}>
         <Button
           variant="warning"
           size="xs"
@@ -143,8 +210,8 @@ export function ChannelStrip({
         </Button>
       </div>
 
-      {/* Pan Section - Horizontal Slider like Reaper */}
-      <div className="px-1 pb-1 shrink-0">
+      {/* Pan Section */}
+      <div className={classNames("px-1 shrink-0", isMaster ? "pb-1" : "pb-0.5")}>
         <div className="flex flex-col items-center gap-0.5">
           <Slider
             orientation="horizontal"
@@ -153,6 +220,7 @@ export function ChannelStrip({
             max={100}
             value={track.pan * 100}
             onChange={handlePanChange}
+            defaultValue={0}
             className="w-full"
             title={panDisplay}
           />
@@ -163,26 +231,32 @@ export function ChannelStrip({
       </div>
 
       {/* Meter + Fader Section - Main area */}
-      <div className="flex-1 flex gap-0.5 px-1 py-1 min-h-0">
-        {/* dB Scale */}
-        <div className="flex flex-col justify-between text-[6px] text-neutral-600 w-2 shrink-0">
-          <span>12</span>
-          <span>0</span>
-          <span>-12</span>
-          <span>-∞</span>
-        </div>
-
+      <div className="flex-1 flex gap-0.5 px-1 py-0.5 min-h-0 overflow-hidden">
         {/* VU Meter */}
-        <div className="shrink-0">
+        <div className="shrink-0 h-full">
           <PeakMeter
-            level={track.meterLevel}
-            height={isMaster ? 110 : 95}
+            level={meterLevel}
             stereo={true}
           />
         </div>
 
+        {/* dB Scale - inset to match fader thumb padding (5px = half of 10px thumb) */}
+        <div className="relative w-2 shrink-0 h-full">
+          <div className="absolute inset-x-0" style={{ top: 5, bottom: 5 }}>
+            {dbMarks.map(({ db, label }) => (
+              <span
+                key={db}
+                className="absolute text-[6px] text-neutral-400 leading-none right-0"
+                style={{ top: `${getDbPosition(db)}%`, transform: "translateY(-50%)" }}
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+
         {/* Vertical Fader */}
-        <div className="flex-1 flex justify-center">
+        <div className="flex-1 flex justify-center h-full">
           <Slider
             orientation="vertical"
             variant="fader"
@@ -191,7 +265,8 @@ export function ChannelStrip({
             step={0.1}
             value={track.volumeDB}
             onChange={handleVolumeChange}
-            height={isMaster ? "100px" : "75px"}
+            defaultValue={0}
+            height="100%"
             width="18px"
             title={`${formatVolume(track.volumeDB)} dB`}
           />
@@ -201,7 +276,7 @@ export function ChannelStrip({
       {/* Volume Display */}
       <div
         className={classNames(
-          "text-[9px] font-mono text-center py-1 shrink-0",
+          "text-[9px] font-mono text-center py-0.5 shrink-0",
           {
             "bg-slate-900 text-blue-400": isMaster,
             "bg-neutral-900 text-neutral-400": !isMaster,

@@ -13,9 +13,11 @@ import {
   horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 
+import { X } from "lucide-react";
 import { ChannelStrip } from "./ChannelStrip";
 import { SortableTrack } from "./SortableTrack";
 import { useDAWStore, Track } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "./ui";
 
 interface MixerPanelProps {
@@ -31,7 +33,14 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
     masterLevel,
     toggleMixer,
     reorderTrack,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    tracks: s.tracks,
+    masterVolume: s.masterVolume,
+    masterPan: s.masterPan,
+    masterLevel: s.masterLevel,
+    toggleMixer: s.toggleMixer,
+    reorderTrack: s.reorderTrack,
+  })));
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -71,9 +80,17 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
     inputChannelCount: 2,
     clips: [],
     midiClips: [],
+    inputFxCount: 0,
+    trackFxCount: 0,
     meterLevel: masterLevel,
     peakLevel: masterLevel,
     clipping: false,
+    automationLanes: [],
+    showAutomation: false,
+    frozen: false,
+    takes: [],
+    activeTakeIndex: 0,
+    sends: [],
   };
 
   return (
@@ -89,7 +106,7 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
           onClick={onClose || toggleMixer}
           title="Close Mixer"
         >
-          ×
+          <X size={14} />
         </Button>
       </div>
 

@@ -8,6 +8,8 @@
 #include "PluginWindowManager.h"
 #include "MIDIManager.h"
 #include "Metronome.h"
+#include "PeakCache.h"
+#include "AudioAnalyzer.h"
 #include <vector>
 #include <memory>
 // ... (skip lines) ...
@@ -73,9 +75,21 @@ public:
     bool isMetronomeEnabled() const;
     void setTimeSignature(int numerator, int denominator);
     void getTimeSignature(int& numerator, int& denominator) const;
-    
+
+    // Render metronome clicks to a WAV file for a given time range
+    juce::String renderMetronomeToFile(double startTime, double endTime);
+
+    // Custom metronome sounds (Phase 9C)
+    bool setMetronomeClickSound(const juce::String& filePath);
+    bool setMetronomeAccentSound(const juce::String& filePath);
+    void resetMetronomeSounds();
+
     // Get clips that were completed in the last recording session
     std::vector<AudioRecorder::CompletedRecording> getLastCompletedClips();
+
+    // Called on the message thread when a peak cache file finishes generating.
+    // Set by MainComponent to emit a JS "peaksReady" event.
+    std::function<void(const juce::String& filePath)> onPeaksReady;
     
     // Playback clip management - ID-based
     void addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration);
@@ -136,7 +150,41 @@ public:
     juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int numPixels);
     juce::var getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels);
 
+    // Offline Render/Export
+    bool renderProject(const juce::String& source, double startTime, double endTime,
+                       const juce::String& filePath, const juce::String& format,
+                       double renderSampleRate, int bitDepth, int numChannels,
+                       bool normalize, bool addTail, double tailLengthMs);
+
+    // Render with dither/noise shaping (Phase 9E)
+    bool renderProjectWithDither(const juce::String& source, double startTime, double endTime,
+                                 const juce::String& filePath, const juce::String& format,
+                                 double renderSampleRate, int bitDepth, int numChannels,
+                                 bool normalize, bool addTail, double tailLengthMs,
+                                 const juce::String& ditherType);
+
+    // Send/Bus Routing (Phase 11)
+    int addTrackSend(const juce::String& sourceTrackId, const juce::String& destTrackId);
+    void removeTrackSend(const juce::String& sourceTrackId, int sendIndex);
+    void setTrackSendLevel(const juce::String& sourceTrackId, int sendIndex, float level);
+    void setTrackSendPan(const juce::String& sourceTrackId, int sendIndex, float pan);
+    void setTrackSendEnabled(const juce::String& sourceTrackId, int sendIndex, bool enabled);
+    void setTrackSendPreFader(const juce::String& sourceTrackId, int sendIndex, bool preFader);
+    juce::var getTrackSends(const juce::String& trackId);
+
+    // Audio Analysis (Phase 9)
+    AudioAnalyzer& getAudioAnalyzer() { return audioAnalyzer; }
+
 private:
+    // FFmpeg helpers for lossy encoding and sample rate conversion
+    juce::File findFFmpegExe() const;
+    bool convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
+                           const juce::String& format, double targetSampleRate, int quality) const;
+    // Device settings persistence
+    void saveDeviceSettings();
+    void loadDeviceSettings();
+    juce::File getDeviceSettingsFile() const;
+
     // MIDI message routing (Phase 2)
     void handleMIDIMessage(const juce::String& deviceName, int channel, const juce::MidiMessage& message);
     
@@ -153,11 +201,14 @@ private:
     // Audio Recorder (Phase 2)
     AudioRecorder audioRecorder;
     PlaybackEngine playbackEngine;
-    bool isPlaying = false;
-    bool isRecordMode = false;
+    PeakCache peakCache;
+    std::atomic<bool> isPlaying { false };
+    std::atomic<bool> isRecordMode { false };
+    std::atomic<bool> isRendering { false };  // Blocks audio callback during offline render
     bool isLooping = false;
     double currentSamplePosition = 0.0;
     double currentSampleRate = 44100.0;
+    int currentBlockSize = 512;  // Device buffer size for re-preparing plugins after render
     double tempo = 120.0;  // BPM
     int timeSigNumerator = 4;
     int timeSigDenominator = 4;
@@ -180,7 +231,29 @@ private:
     std::vector<juce::AudioProcessorGraph::Node::Ptr> monitoringFXNodes;
     float masterVolume = 1.0f;
     float masterPan = 0.0f;
-    std::atomic<float> masterOutputLevel { 0.0f }; // RMS level of master output
+    std::atomic<float> masterOutputLevel { 0.0f }; // Peak level of master output
+
+    // REAPER-style master peak meter decimation — matches the 10Hz metering timer.
+    // At 32-sample ASIO blocks (1378 callbacks/sec), updating every 4096 samples
+    // gives ~11 updates/sec — one fresh value per timer tick with no wasted work.
+    static constexpr int MASTER_METER_UPDATE_SAMPLES = 4096;
+    int   masterMeterSampleCount { 0 };
+    float masterMeterPeakAccum   { 0.0f };
+
+    // Cached master pan gains — recalculated only when pan changes (avoids
+    // cos/sin every audio callback, ~94 trig calls/sec at 48kHz/512)
+    std::atomic<float> cachedMasterPanL { 0.707107f };  // cos(pi/4)
+    std::atomic<float> cachedMasterPanR { 0.707107f };  // sin(pi/4)
+
+    // Audio Analysis (Phase 9)
+    AudioAnalyzer audioAnalyzer;
+
+    // Pre-allocated buffers — avoids heap allocs on the audio thread
+    juce::AudioBuffer<float> reusableTrackBuffer;
+    juce::AudioBuffer<float> reusableMasterBuffer;
+
+    // Cached solo state — avoids scanning all tracks every callback
+    std::atomic<bool> cachedAnySoloed { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
 };

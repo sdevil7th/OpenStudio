@@ -1,9 +1,8 @@
 #include "AudioEngine.h"
 
-// Helper for file logging
+// Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
 {
-    // Use standard documents folder
     auto f = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
              .getChildFile("Studio13").getChildFile("debug_log.txt");
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
@@ -11,27 +10,27 @@ static void logToDisk(const juce::String& msg)
 
 AudioEngine::AudioEngine()
 {
-    // Initialize Audio Device Manager
-    // In a real app, we'd load settings from an XML or JSON file.
-    // For now, request default devices.
-    deviceManager.initialiseWithDefaultDevices (2, 2); // 2 inputs, 2 outputs
-    deviceManager.addAudioCallback (this);
-
-    // Initialize Graph
+    // Initialize graphs and managers BEFORE opening the audio device.
+    // addAudioCallback() (below) triggers audioDeviceAboutToStart() synchronously
+    // on an already-running device. audioDeviceAboutToStart() checks
+    // `if (mainProcessorGraph)` before doing any setup, so the graph must exist
+    // by the time addAudioCallback() is called — otherwise the null check
+    // short-circuits and reusableTrackBuffer/metronome/IO nodes are never set up.
     mainProcessorGraph = std::make_unique<juce::AudioProcessorGraph>();
-    
-    // Initialize Master & Monitoring FX Chains (Phase 5)
     masterFXChain = std::make_unique<juce::AudioProcessorGraph>();
     monitoringFXChain = std::make_unique<juce::AudioProcessorGraph>();
-    
+
     // Initialize MIDI Manager (Phase 2)
     midiManager = std::make_unique<MIDIManager>();
-    
-    // Set up MIDI message callback to route to tracks
     midiManager->setMessageCallback([this](const juce::String& deviceName, int channel, const juce::MidiMessage& message) {
         handleMIDIMessage(deviceName, channel, message);
     });
-    
+
+    // Now open the audio device and register the callback. This is done last so
+    // that all members above are valid when audioDeviceAboutToStart() fires.
+    loadDeviceSettings();
+    deviceManager.addAudioCallback (this);
+
     juce::Logger::writeToLog("AudioEngine: MIDI Manager initialized");
 }
 
@@ -40,9 +39,57 @@ AudioEngine::~AudioEngine()
     deviceManager.removeAudioCallback (this);
 }
 
+juce::File AudioEngine::getDeviceSettingsFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+             .getChildFile("Studio13")
+             .getChildFile("audio_device_settings.xml");
+}
+
+void AudioEngine::saveDeviceSettings()
+{
+    auto xml = deviceManager.createStateXml();
+    if (xml)
+    {
+        auto settingsFile = getDeviceSettingsFile();
+        settingsFile.getParentDirectory().createDirectory();
+        xml->writeTo(settingsFile);
+        juce::Logger::writeToLog("AudioEngine: Device settings saved to " + settingsFile.getFullPathName());
+    }
+}
+
+void AudioEngine::loadDeviceSettings()
+{
+    auto settingsFile = getDeviceSettingsFile();
+    if (settingsFile.existsAsFile())
+    {
+        auto xml = juce::XmlDocument::parse(settingsFile);
+        if (xml)
+        {
+            auto error = deviceManager.initialise(2, 2, xml.get(), true);
+            if (error.isEmpty())
+            {
+                juce::Logger::writeToLog("AudioEngine: Restored device settings from " + settingsFile.getFullPathName());
+                return;
+            }
+            juce::Logger::writeToLog("AudioEngine: Failed to restore settings: " + error + " - using defaults");
+        }
+    }
+
+    // No saved settings or failed to load - use defaults
+    deviceManager.initialiseWithDefaultDevices(2, 2);
+}
+
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
     logToDisk("AudioEngine: Device About To Start");
+    if (device == nullptr)
+    {
+        juce::Logger::writeToLog("AudioEngine ERROR: audioDeviceAboutToStart called with nullptr device!");
+        return;
+    }
+    currentSampleRate = device->getCurrentSampleRate();
+    currentBlockSize = device->getCurrentBufferSizeSamples();
     if (mainProcessorGraph)
     {
         // ... (keep existing config logic)
@@ -52,6 +99,11 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
                                                   device->getCurrentBufferSizeSamples());
         mainProcessorGraph->prepareToPlay (device->getCurrentSampleRate(),
                                            device->getCurrentBufferSizeSamples());
+
+        // Pre-allocate reusable buffers (avoids malloc on audio thread)
+        reusableTrackBuffer.setSize (2, device->getCurrentBufferSizeSamples());
+        reusableMasterBuffer.setSize (device->getActiveOutputChannels().countNumberOfSetBits(),
+                                      device->getCurrentBufferSizeSamples());
 
         // Metronome Init
         metronome.prepareToPlay(device->getCurrentSampleRate(), device->getCurrentBufferSizeSamples());
@@ -110,50 +162,61 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext& context)
 {
+    juce::ignoreUnused(context);
     // Clear outputs first
     for (int i = 0; i < numOutputChannels; ++i)
         juce::FloatVectorOperations::clear (outputChannelData[i], numSamples);
 
+    // During offline rendering, skip ALL processing to avoid sharing FX plugin
+    // instances between the audio callback and the render thread
+    if (isRendering.load())
+        return;
+
+    // Acquire the callback lock to safely access trackOrder, trackMap, masterFXNodes.
+    // Use TryLock so we never block the audio thread - if the lock is held
+    // (e.g. during addTrack/removeTrack), we skip this buffer (~5ms silence).
+    // This prevents crackling from data races when the graph is being modified.
+    const juce::ScopedTryLock sl(mainProcessorGraph->getCallbackLock());
+    if (!sl.isLocked())
+        return;  // Graph is being modified, output silence for this block
+
     // Update transport position if playing
-    
     if (isPlaying)
     {
         currentSamplePosition += numSamples;
     }
 
     // Mix Metronome (if enabled and transport is running)
-    // Note: Metronome handles its own 'enabled' check
-    if (isPlaying || isRecordMode) 
+    if (isPlaying || isRecordMode)
     {
-        // Wrap output pointers in an AudioBuffer
-        // The const_cast is necessary because audioDeviceIOCallbackWithContext provides const pointers 
-        // to the array of pointers, but the data itself is mutable in non-const context usually, 
-        // OR we should have outputChannelData as non-const?
-        // Method signature: float* const* outputChannelData.
-        // This means the array of pointers is const, but the float* (pointers to data) are NOT const?
-        // Wait: float* const* -> "pointer to const pointer to float". 
-        // NO. "float* const*" is "pointer to const pointer". 
-        // The data pointed to by "float*" is mutable.
-        // "const float* const*" is "pointer to const pointer to const float".
-        // Signature line 103: float* const* outputChannelData.
-        // So float* is mutable. The pointer to it is const (array structure fixed).
-        
         juce::AudioBuffer<float> outputBuffer(const_cast<float**>(outputChannelData), numOutputChannels, numSamples);
         metronome.getNextAudioBlock(outputBuffer, currentSamplePosition);
     }
 
-    // Process each track for input monitoring
-    
+    // Use cached solo state (updated when solo changes, avoids scanning every callback)
+    bool anySoloed = cachedAnySoloed.load();
+
+    // Process each track
     for (size_t i = 0; i < trackOrder.size(); ++i)
     {
         const auto& trackId = trackOrder[i];
-        if (trackMap.find(trackId) == trackMap.end()) continue;
-        
-        auto* track = trackMap[trackId];
+        auto trackIt = trackMap.find(trackId);  // Single lookup, reuse iterator
+        if (trackIt == trackMap.end()) continue;
+
+        auto* track = trackIt->second;
         if (!track)
             continue;
 
-        // Only monitor if armed and not muted
+        // Solo logic: if any track is soloed, skip non-soloed tracks entirely
+        // (recording still works because record-armed tracks should also be soloed,
+        //  and in practice users don't solo-off a track they're actively recording)
+        if (anySoloed && !track->getSolo())
+        {
+            track->resetRMS();
+            continue;
+        }
+
+        // Monitor hardware input when track is armed and not muted
         bool shouldMonitor = track->getRecordArmed() && !track->getMute();
         
 
@@ -174,12 +237,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // Skip this track if it's not playing clips and not monitoring
         // This prevents unarmed tracks from passing through input audio
         if (!isPlaying && !shouldMonitor)
+        {
+            track->resetRMS();  // Clear meter so it drops to zero when idle
             continue;
+        }
         
-        // Create temporary buffer for track processing
-        // ALWAYS use 2 channels (stereo) for proper pan support, regardless of input config
-        juce::AudioBuffer<float> trackBuffer (2, numSamples);
-        trackBuffer.clear(); // CRITICAL: Clear buffer to prevent noise from uninitialized memory
+        // Non-owning view of the pre-allocated buffer — avoids heap alloc on audio thread.
+        // ALWAYS 2 channels (stereo) for proper pan support.
+        //
+        // IMPORTANT: getWritePointer() is used (not getArrayOfWritePointers()) because
+        // it sets isClear=false on reusableTrackBuffer as a side effect. Without this,
+        // JUCE 8's isClear optimisation makes clear() a no-op when a previous iteration
+        // left isClear=true, and makes applyGain/getRMSLevel skip processing (they also
+        // guard on isClear), causing stale signal to accumulate across track iterations.
+        //
+        // Emergency guard: if the pre-allocated buffer is somehow undersized (shouldn't
+        // happen on ASIO but guards against unusual driver behaviour), resize it here.
+        // This heap-allocates only in that exceptional case.
+        if (reusableTrackBuffer.getNumSamples() < numSamples || reusableTrackBuffer.getNumChannels() < 2)
+            reusableTrackBuffer.setSize (2, numSamples, false, true);
+
+        float* trackChans[2] = { reusableTrackBuffer.getWritePointer (0),
+                                  reusableTrackBuffer.getWritePointer (1) };
+        juce::AudioBuffer<float> trackBuffer (trackChans, 2, numSamples);
+        trackBuffer.clear();
         
         // PLAYBACK MODE: Read from clips if transport is playing
         if (isPlaying)
@@ -259,69 +340,65 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Process master FX if any plugins are loaded
     if (!masterFXNodes.empty())
     {
-        juce::AudioBuffer<float> masterBuffer(numOutputChannels, numSamples);
-        
+        // Non-owning view of the pre-allocated master buffer — avoids heap alloc on audio thread.
+        // masterChans ensures we never ask for more channels than were pre-allocated.
+        const int masterChans = juce::jmin (numOutputChannels, reusableMasterBuffer.getNumChannels());
+        juce::AudioBuffer<float> masterBuffer (reusableMasterBuffer.getArrayOfWritePointers(), masterChans, numSamples);
+
         // Copy current mixed output to master buffer
-        for (int ch = 0; ch < numOutputChannels; ++ch)
-            masterBuffer.copyFrom(ch, 0, outputChannelData[ch], numSamples);
-        
+        for (int ch = 0; ch < masterChans; ++ch)
+            masterBuffer.copyFrom (ch, 0, outputChannelData[ch], numSamples);
+
         // Process through each FX plugin in sequence
         juce::MidiBuffer dummyMidi;
         for (auto& node : masterFXNodes)
         {
             if (node && node->getProcessor())
-                node->getProcessor()->processBlock(masterBuffer, dummyMidi);
+                node->getProcessor()->processBlock (masterBuffer, dummyMidi);
         }
-        
+
         // Copy processed audio back to output
-        for (int ch = 0; ch < numOutputChannels; ++ch)
-            juce::FloatVectorOperations::copy(outputChannelData[ch], masterBuffer.getReadPointer(ch), numSamples);
+        for (int ch = 0; ch < masterChans; ++ch)
+            juce::FloatVectorOperations::copy (outputChannelData[ch], masterBuffer.getReadPointer (ch), numSamples);
     }
     
     // ========== Apply Master Pan ==========
-    // Apply master pan using constant power law
+    // Uses pre-computed gains (updated in setMasterPan) — no trig on audio thread
     if (numOutputChannels >= 2)
     {
-        const float pi = juce::MathConstants<float>::pi;
-        float panAngle = (masterPan + 1.0f) * pi / 4.0f;
-        float leftGain = std::cos(panAngle);
-        float rightGain = std::sin(panAngle);
-        
+        const float leftGain  = cachedMasterPanL.load(std::memory_order_relaxed);
+        const float rightGain = cachedMasterPanR.load(std::memory_order_relaxed);
+
         juce::FloatVectorOperations::multiply(outputChannelData[0], leftGain, numSamples);
         juce::FloatVectorOperations::multiply(outputChannelData[1], rightGain, numSamples);
     }
     
     // ========== Calculate Master Output Metering ==========
-    // Measure RMS of final output AFTER FX and pan (so meters show final processed levels)
-    float masterRMSLeft = 0.0f;
-    float masterRMSRight = 0.0f;
-    
-    if (numOutputChannels >= 1)
+    // REAPER-style: use findMinAndMax (SIMD, no sqrt) instead of manual RMS loops.
+    // Visuals only need ~30Hz; we accumulate across callbacks and write to
+    // masterOutputLevel once per MASTER_METER_UPDATE_SAMPLES block.
     {
-        // Calculate RMS for left channel
-        float sumSquares = 0.0f;
-        for (int i = 0; i < numSamples; ++i)
+        float peakL = 0.0f, peakR = 0.0f;
+        if (numOutputChannels >= 1)
         {
-            float sample = outputChannelData[0][i];
-            sumSquares += sample * sample;
+            auto r = juce::FloatVectorOperations::findMinAndMax (outputChannelData[0], numSamples);
+            peakL = juce::jmax (-r.getStart(), r.getEnd());
         }
-        masterRMSLeft = std::sqrt(sumSquares / numSamples);
-    }
-    
-    if (numOutputChannels >= 2)
-    {
-        // Calculate RMS for right channel
-        float sumSquares = 0.0f;
-        for (int i = 0; i < numSamples; ++i)
+        if (numOutputChannels >= 2)
         {
-            float sample = outputChannelData[1][i];
-            sumSquares += sample * sample;
+            auto r = juce::FloatVectorOperations::findMinAndMax (outputChannelData[1], numSamples);
+            peakR = juce::jmax (-r.getStart(), r.getEnd());
         }
-        masterRMSRight = std::sqrt(sumSquares / numSamples);
+
+        masterMeterPeakAccum   = juce::jmax (masterMeterPeakAccum, juce::jmax (peakL, peakR));
+        masterMeterSampleCount += numSamples;
+        if (masterMeterSampleCount >= MASTER_METER_UPDATE_SAMPLES)
+        {
+            masterOutputLevel.store (masterMeterPeakAccum, std::memory_order_relaxed);
+            masterMeterPeakAccum   = 0.0f;
+            masterMeterSampleCount = 0;
+        }
     }
-    
-    // Store master levels (use max of L/R for metering display)
-    masterOutputLevel = std::max(masterRMSLeft, masterRMSRight);
     
     // ========== Apply Master Volume ==========
     // Apply master volume to all output channels
@@ -345,18 +422,37 @@ juce::String AudioEngine::addTrack(const juce::String& explicitId)
     // In a real app, use a proper lock
     const juce::ScopedLock sl (mainProcessorGraph->getCallbackLock());
 
+    // Guard: if an explicit ID is provided and already exists, return it without
+    // creating a duplicate.  Duplicate IDs in trackOrder cause the same
+    // TrackProcessor to be iterated (and its FX plugins called) twice per audio
+    // callback, producing severe distortion from the second processing pass.
+    if (explicitId.isNotEmpty() && trackMap.count(explicitId) > 0)
+    {
+        logToDisk("WARNING: addTrack called with already-existing ID " + explicitId + " — ignoring duplicate.");
+        return explicitId;
+    }
+
     auto newTrack = std::make_unique<TrackProcessor>();
     auto* rawTrackPtr = newTrack.get(); // Keep raw pointer for metering (owned by graph)
-    
+
+    // Prepare the TrackProcessor with the current device parameters before handing
+    // it to the graph. AudioProcessorGraph::addNode() does NOT call prepareToPlay()
+    // on newly-added nodes when the graph is already running, so we must do it here.
+    // Use jmax(currentBlockSize, 512) as the block-size hint — same rationale as
+    // for FX plugins (ASIO can use blocks as small as 32; preparing at that size
+    // forces plugins to resize convolution/FFT for tiny blocks → crackling).
+    if (currentSampleRate > 0 && currentBlockSize > 0)
+        rawTrackPtr->prepareToPlay (currentSampleRate, juce::jmax (currentBlockSize, 512));
+
     auto trackNode = mainProcessorGraph->addNode (std::move (newTrack));
-    
+
     if (trackNode)
     {
         juce::String trackId = explicitId.isNotEmpty() ? explicitId : juce::Uuid().toString();
-        
+
         trackMap[trackId] = rawTrackPtr;
         trackOrder.push_back(trackId);
-        
+
         logToDisk("Track added. ID: " + trackId + " Total: " + juce::String((int)trackOrder.size()));
 
         if (audioOutputNode)
@@ -438,20 +534,16 @@ int AudioEngine::getTrackIndex(const juce::String& trackId) const
 juce::var AudioEngine::getMeterLevels()
 {
     // Return an object with track IDs as keys for robust matching
-    // This ensures meter levels work correctly even after reordering
-    juce::DynamicObject* meterObj = new juce::DynamicObject();
+    juce::DynamicObject::Ptr meterObj (new juce::DynamicObject());
 
     for (const auto& trackId : trackOrder)
     {
-        if (trackMap.find(trackId) != trackMap.end())
-        {
-            auto* track = trackMap[trackId];
-            if (track)
-                meterObj->setProperty(juce::Identifier(trackId), track->getRMSLevel());
-        }
+        auto it = trackMap.find(trackId);
+        if (it != trackMap.end() && it->second)
+            meterObj->setProperty(juce::Identifier(trackId), it->second->getRMSLevel());
     }
-    
-    return meterObj;
+
+    return juce::var (meterObj.get());
 }
 
 //==============================================================================
@@ -552,8 +644,10 @@ bool AudioEngine::loadInstrument(const juce::String& trackId, const juce::String
     if (trackMap.find(trackId) == trackMap.end())
         return false;
     
-    // Load the VST instrument using PluginManager
-    auto plugin = pluginManager.loadPluginFromFile(vstPath);  // Changed from loadPlugin
+    // Load the VST instrument using PluginManager with actual device rate
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = currentBlockSize > 0 ? currentBlockSize : 512;
+    auto plugin = pluginManager.loadPluginFromFile(vstPath, sr, bs);
     if (!plugin)
     {
         juce::Logger::writeToLog("AudioEngine: Failed to load instrument: " + vstPath);
@@ -635,14 +729,8 @@ void AudioEngine::handleMIDIMessage(const juce::String& deviceName, int channel,
 
 float AudioEngine::getMasterLevel() const
 {
-    // For now, return max of all track levels
-    float maxLevel = 0.0f;
-    for (auto const& [id, track] : trackMap)
-    {
-        if (track)
-            maxLevel = std::max(maxLevel, track->getRMSLevel());
-    }
-    return maxLevel * masterVolume;
+    // Use the actual measured output level (computed in the audio callback after FX and pan)
+    return masterOutputLevel.load();
 }
 
 
@@ -821,6 +909,8 @@ void AudioEngine::setAudioDeviceSetup(const juce::String& type, const juce::Stri
     auto error = deviceManager.setAudioDeviceSetup(setup, true);
     if (error.isNotEmpty())
         juce::Logger::writeToLog("AudioEngine: Error setting device: " + error);
+    else
+        saveDeviceSettings();
 }
 
 //==============================================================================
@@ -919,8 +1009,14 @@ void AudioEngine::setTrackSolo(const juce::String& trackId, bool soloed)
         if (track)
         {
             track->setSolo(soloed);
-            juce::Logger::writeToLog("AudioEngine: Track " + trackId + 
+            juce::Logger::writeToLog("AudioEngine: Track " + trackId +
                                    " solo: " + (soloed ? "ON" : "OFF"));
+
+            // Update cached solo state so audio thread doesn't need to scan
+            bool anyNowSoloed = false;
+            for (const auto& pair : trackMap)
+                if (pair.second && pair.second->getSolo()) { anyNowSoloed = true; break; }
+            cachedAnySoloed.store(anyNowSoloed);
         }
     }
 }
@@ -999,7 +1095,8 @@ void AudioEngine::setTransportRecording(bool recording)
                 // (currentSampleRate is updated when device starts and should match device's actual rate)
                 logToDisk("Recording at sample rate: " + juce::String(currentSampleRate) + " Hz");
                 
-                bool started = audioRecorder.startRecording(trackId, outputFile, currentSampleRate, 2); // Stereo for now
+                int numChannels = track->getInputChannelCount();
+                bool started = audioRecorder.startRecording(trackId, outputFile, currentSampleRate, numChannels);
                 
                 if (started) {
                     // Set the recording start time to current transport position
@@ -1016,6 +1113,19 @@ void AudioEngine::setTransportRecording(bool recording)
         logToDisk("Record mode OFF - stopping recordings");
         lastCompletedClips = audioRecorder.stopAllRecordings(currentSampleRate);
         logToDisk("Recordings stopped. Completed " + juce::String(lastCompletedClips.size()) + " clips.");
+
+        // Generate peak caches for recorded files in background (REAPER-style).
+        // The onComplete callback fires on the message thread; MainComponent uses
+        // it to emit a "peaksReady" JS event so the Timeline refreshes waveforms.
+        for (const auto& clip : lastCompletedClips)
+        {
+            juce::String filePath = clip.file.getFullPathName();
+            peakCache.generateAsync(clip.file, [this, filePath]()
+            {
+                if (onPeaksReady)
+                    onPeaksReady(filePath);
+            });
+        }
     }
 }
 
@@ -1052,52 +1162,86 @@ juce::var AudioEngine::getAvailablePlugins()
 
 bool AudioEngine::addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath)
 {
-    if (trackMap.find(trackId) != trackMap.end())
+    // Load plugin BEFORE acquiring the lock (can take hundreds of ms).
+    // Use actual device sample rate so the plugin initialises at the correct rate.
+    // IMPORTANT: Use at least 512 for the max-block-size hint — ASIO buffers can be
+    // as small as 32 samples, but prepareToPlay(sr, 32) forces plugins like Amplitube
+    // to resize their internal DSP (FFT/convolution/cab sim) for tiny blocks, producing
+    // crackling and distortion.  The plugin can still process 32-sample blocks fine when
+    // prepared with a larger maximumExpectedSamplesPerBlock.
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = juce::jmax(currentBlockSize > 0 ? currentBlockSize : 512, 512);
+    auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
+    if (!plugin)
+        return false;
+
+    bool success = false;
+    int fxIndex = -1;
     {
-        auto* track = trackMap[trackId];
-        if (track)
+        // Hold the callback lock while modifying the FX node vectors
+        // (audio thread iterates these in processBlock)
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        if (it != trackMap.end() && it->second)
         {
-            auto plugin = pluginManager.loadPluginFromFile(pluginPath);
-            if (plugin)
-            {
-                bool success = track->addInputFX(std::move(plugin));
-                if (success)
-                {
-                    // Automatically open the editor for the newly added plugin
-                    int fxIndex = track->getNumInputFX() - 1;
-                    openPluginEditor(trackId, fxIndex, true);
-                    juce::Logger::writeToLog("AudioEngine: Added input FX and opened editor");
-                }
-                return success;
-            }
+            success = it->second->addInputFX(std::move(plugin), sr, bs);
+            if (success)
+                fxIndex = it->second->getNumInputFX() - 1;
         }
     }
-    return false;
+
+    if (success && fxIndex >= 0)
+    {
+        openPluginEditor(trackId, fxIndex, true);
+        juce::Logger::writeToLog("AudioEngine: Added input FX and opened editor");
+    }
+    return success;
 }
 
 bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pluginPath)
 {
-    if (trackMap.find(trackId) != trackMap.end())
+    // Load plugin BEFORE acquiring the lock (can take hundreds of ms).
+    // Use actual device sample rate so the plugin initialises at the correct rate.
+    // IMPORTANT: Clamp max-block-size to at least 512 — same rationale as addTrackInputFX.
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = juce::jmax(currentBlockSize > 0 ? currentBlockSize : 512, 512);
+
+    logToDisk("AudioEngine::addTrackFX DIAGNOSTIC");
+    logToDisk("  currentSampleRate=" + juce::String(currentSampleRate) +
+              " currentBlockSize=" + juce::String(currentBlockSize));
+    logToDisk("  creating plugin at sr=" + juce::String(sr) + " bs=" + juce::String(bs));
+
+    auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
+    if (!plugin)
+        return false;
+
+    logToDisk("  plugin created: " + plugin->getName() +
+              " inCh=" + juce::String(plugin->getTotalNumInputChannels()) +
+              " outCh=" + juce::String(plugin->getTotalNumOutputChannels()) +
+              " pluginSr=" + juce::String(plugin->getSampleRate()) +
+              " pluginBs=" + juce::String(plugin->getBlockSize()));
+
+    bool success = false;
+    int fxIndex = -1;
     {
-        auto* track = trackMap[trackId];
-        if (track)
+        // Hold the callback lock while modifying the FX node vectors
+        // (audio thread iterates these in processBlock)
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        if (it != trackMap.end() && it->second)
         {
-            auto plugin = pluginManager.loadPluginFromFile(pluginPath);
-            if (plugin)
-            {
-                bool success = track->addTrackFX(std::move(plugin));
-                if (success)
-                {
-                    // Automatically open the editor for the newly added plugin
-                    int fxIndex = track->getNumTrackFX() - 1;
-                    openPluginEditor(trackId, fxIndex, false);
-                    juce::Logger::writeToLog("AudioEngine: Added track FX and opened editor");
-                }
-                return success;
-            }
+            success = it->second->addTrackFX(std::move(plugin), sr, bs);
+            if (success)
+                fxIndex = it->second->getNumTrackFX() - 1;
         }
     }
-    return false;
+
+    if (success && fxIndex >= 0)
+    {
+        openPluginEditor(trackId, fxIndex, false);
+        juce::Logger::writeToLog("AudioEngine: Added track FX and opened editor");
+    }
+    return success;
 }
 
 //==============================================================================
@@ -1176,14 +1320,14 @@ void AudioEngine::closePluginEditor(const juce::String& trackId, int fxIndex, bo
 juce::var AudioEngine::getTrackInputFX(const juce::String& trackId)
 {
     juce::Array<juce::var> fxList;
-    
+
     if (trackMap.find(trackId) == trackMap.end())
         return fxList;
-    
+
     auto* track = trackMap[trackId];
     if (!track)
         return fxList;
-    
+
     int numFX = track->getNumInputFX();
     for (int i = 0; i < numFX; ++i)
     {
@@ -1193,24 +1337,30 @@ juce::var AudioEngine::getTrackInputFX(const juce::String& trackId)
             juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
             fxInfo->setProperty("index", i);
             fxInfo->setProperty("name", processor->getName());
+            // Include plugin file path for save/restore
+            if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processor))
+            {
+                auto desc = pluginInstance->getPluginDescription();
+                fxInfo->setProperty("pluginPath", desc.fileOrIdentifier);
+            }
             fxList.add(juce::var(fxInfo.get()));
         }
     }
-    
+
     return fxList;
 }
 
 juce::var AudioEngine::getTrackFX(const juce::String& trackId)
 {
     juce::Array<juce::var> fxList;
-    
+
     if (trackMap.find(trackId) == trackMap.end())
         return fxList;
-    
+
     auto* track = trackMap[trackId];
     if (!track)
         return fxList;
-    
+
     int numFX = track->getNumTrackFX();
     for (int i = 0; i < numFX; ++i)
     {
@@ -1220,103 +1370,95 @@ juce::var AudioEngine::getTrackFX(const juce::String& trackId)
             juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
             fxInfo->setProperty("index", i);
             fxInfo->setProperty("name", processor->getName());
+            // Include plugin file path for save/restore
+            if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processor))
+            {
+                auto desc = pluginInstance->getPluginDescription();
+                fxInfo->setProperty("pluginPath", desc.fileOrIdentifier);
+            }
             fxList.add(juce::var(fxInfo.get()));
         }
     }
-    
+
     return fxList;
 }
 
 void AudioEngine::removeTrackInputFX(const juce::String& trackId, int fxIndex)
 {
-    if (trackMap.find(trackId) != trackMap.end())
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
     {
-        auto* track = trackMap[trackId];
-        if (track)
-        {
-            track->removeInputFX(fxIndex);
-            juce::Logger::writeToLog("AudioEngine: Removed input FX " + juce::String(fxIndex) + " from track " + trackId);
-        }
+        it->second->removeInputFX(fxIndex);
+        juce::Logger::writeToLog("AudioEngine: Removed input FX " + juce::String(fxIndex) + " from track " + trackId);
     }
 }
 
 void AudioEngine::removeTrackFX(const juce::String& trackId, int fxIndex)
 {
-    if (trackMap.find(trackId) != trackMap.end())
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
     {
-        auto* track = trackMap[trackId];
-        if (track)
-        {
-            track->removeTrackFX(fxIndex);
-            juce::Logger::writeToLog("AudioEngine: Removed track FX " + juce::String(fxIndex) + " from track " + trackId);
-        }
+        it->second->removeTrackFX(fxIndex);
+        juce::Logger::writeToLog("AudioEngine: Removed track FX " + juce::String(fxIndex) + " from track " + trackId);
     }
 }
 
 void AudioEngine::bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed)
 {
-    if (trackMap.find(trackId) != trackMap.end())
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
     {
-        auto* track = trackMap[trackId];
-        if (track)
-        {
-            track->bypassInputFX(fxIndex, bypassed);
-            juce::Logger::writeToLog("AudioEngine: " + juce::String(bypassed ? "Bypassed" : "Unbypassed") + 
-                                   " input FX " + juce::String(fxIndex) + " on track " + trackId);
-        }
+        it->second->bypassInputFX(fxIndex, bypassed);
+        juce::Logger::writeToLog("AudioEngine: " + juce::String(bypassed ? "Bypassed" : "Unbypassed") +
+                               " input FX " + juce::String(fxIndex) + " on track " + trackId);
     }
 }
 
 void AudioEngine::bypassTrackFX(const juce::String& trackId, int fxIndex, bool bypassed)
 {
-    if (trackMap.find(trackId) != trackMap.end())
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
     {
-        auto* track = trackMap[trackId];
-        if (track)
-        {
-            track->bypassTrackFX(fxIndex, bypassed);
-            juce::Logger::writeToLog("AudioEngine: " + juce::String(bypassed ? "Bypassed" : "Unbypassed") + 
-                                   " track FX " + juce::String(fxIndex) + " on track " + trackId);
-        }
+        it->second->bypassTrackFX(fxIndex, bypassed);
+        juce::Logger::writeToLog("AudioEngine: " + juce::String(bypassed ? "Bypassed" : "Unbypassed") +
+                               " track FX " + juce::String(fxIndex) + " on track " + trackId);
     }
 }
 
 bool AudioEngine::reorderTrackInputFX(const juce::String& trackId, int fromIndex, int toIndex)
 {
-    if (trackMap.find(trackId) == trackMap.end())
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
         return false;
-    
-    auto* track = trackMap[trackId];
-    if (track)
+
+    bool success = it->second->reorderInputFX(fromIndex, toIndex);
+    if (success)
     {
-        bool success = track->reorderInputFX(fromIndex, toIndex);
-        if (success)
-        {
-            juce::Logger::writeToLog("AudioEngine: Reordered input FX on track " + trackId +
-                                   " from " + juce::String(fromIndex) + " to " + juce::String(toIndex));
-        }
-        return success;
+        juce::Logger::writeToLog("AudioEngine: Reordered input FX on track " + trackId +
+                               " from " + juce::String(fromIndex) + " to " + juce::String(toIndex));
     }
-    return false;
+    return success;
 }
 
 bool AudioEngine::reorderTrackFX(const juce::String& trackId, int fromIndex, int toIndex)
 {
-    if (trackMap.find(trackId) == trackMap.end())
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
         return false;
-    
-    auto* track = trackMap[trackId];
-    if (track)
+
+    bool success = it->second->reorderTrackFX(fromIndex, toIndex);
+    if (success)
     {
-        bool success = track->reorderTrackFX(fromIndex, toIndex);
-        if (success)
-        {
-            juce::Logger::writeToLog("AudioEngine: Reordered track FX on track " + trackId +
-                                   " from " + juce::String(fromIndex) + " to " + juce::String(toIndex));
-        }
-        return success;
+        juce::Logger::writeToLog("AudioEngine: Reordered track FX on track " + trackId +
+                               " from " + juce::String(fromIndex) + " to " + juce::String(toIndex));
     }
-    return false;
+    return success;
 }
 
 //==============================================================================
@@ -1326,29 +1468,33 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
 {
     juce::Logger::writeToLog("AudioEngine: addMasterFX called with: " + pluginPath);
     
-    // Load the plugin
-    auto plugin = pluginManager.loadPluginFromFile(pluginPath);
+    // Load the plugin with actual device sample rate & block size
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = currentBlockSize > 0 ? currentBlockSize : 512;
+    auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
     if (!plugin)
     {
         juce::Logger::writeToLog("AudioEngine: Failed to load plugin for master FX");
         return false;
     }
-    
-    // Prepare the plugin with current audio settings
+
+    // Plugin was already created at the correct rate by loadPluginFromFile,
+    // but re-prepare in case the device has changed since then.
+    // Clamp max-block-size to at least 512 (same rationale as track FX).
     auto* device = deviceManager.getCurrentAudioDevice();
     if (device)
     {
-        plugin->prepareToPlay(device->getCurrentSampleRate(), device->getCurrentBufferSizeSamples());
-    }
-    else
-    {
-        plugin->prepareToPlay(44100.0, 512); // Fallback defaults
+        plugin->prepareToPlay(device->getCurrentSampleRate(),
+                              juce::jmax(device->getCurrentBufferSizeSamples(), 512));
     }
     
     // Add to master FX chain graph
     auto node = masterFXChain->addNode(std::move(plugin));
     if (node != nullptr)
     {
+        // Acquire callback lock to safely modify masterFXNodes
+        // (audio callback reads this vector under the same lock)
+        const juce::ScopedLock lockSl(mainProcessorGraph->getCallbackLock());
         masterFXNodes.push_back(node);
         juce::Logger::writeToLog("AudioEngine: Added plugin to master FX chain (total: " + juce::String((int)masterFXNodes.size()) + ")");
         return true;
@@ -1367,6 +1513,11 @@ void AudioEngine::setMasterVolume(float volume)
 void AudioEngine::setMasterPan(float pan)
 {
     masterPan = juce::jlimit(-1.0f, 1.0f, pan);
+
+    // Pre-compute pan gains so the audio callback uses cheap loads instead of trig
+    const float angle = (masterPan + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
+    cachedMasterPanL.store(std::cos(angle), std::memory_order_relaxed);
+    cachedMasterPanR.store(std::sin(angle), std::memory_order_relaxed);
 }
 
 bool AudioEngine::addMonitoringFX(const juce::String& pluginPath)
@@ -1374,8 +1525,10 @@ bool AudioEngine::addMonitoringFX(const juce::String& pluginPath)
     // TODO: Implement monitoring FX chain when needed
     juce::Logger::writeToLog("addMonitoringFX called with: " + pluginPath);
     
-    // Load the plugin  
-    auto plugin = pluginManager.loadPluginFromFile(pluginPath);
+    // Load the plugin with actual device rate
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = currentBlockSize > 0 ? currentBlockSize : 512;
+    auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
     if (!plugin)
     {
         juce::Logger::writeToLog("Failed to load plugin for monitoring FX");
@@ -1431,75 +1584,24 @@ void AudioEngine::clearTrackPlaybackClips(const juce::String& trackId)
 
 juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int numPixels)
 {
-    juce::Array<juce::var> peakData;
-    
+    // REAPER-inspired: read from pre-computed peak cache (.s13peaks) instead of audio file.
+    // If cache doesn't exist, generate it synchronously (first-time cost, then instant).
     juce::File audioFile(filePath);
     if (!audioFile.existsAsFile())
     {
         juce::Logger::writeToLog("getWaveformPeaks: File not found: " + filePath);
-        return peakData;
+        return juce::Array<juce::var>();
     }
-    
-    // Create audio format manager and register formats
-    juce::AudioFormatManager formatManager;
-    formatManager.registerBasicFormats();
-    
-    // Create reader for the audio file
-    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(audioFile));
-    if (!reader)
+
+    // Generate peak cache if it doesn't exist (first time only)
+    if (!peakCache.hasCachedPeaks(audioFile))
     {
-        juce::Logger::writeToLog("getWaveformPeaks: Could not create reader for: " + filePath);
-        return peakData;
+        juce::Logger::writeToLog("getWaveformPeaks: Generating peak cache for: " + audioFile.getFileName());
+        peakCache.generateSync(audioFile);
     }
-    
-    // Read samples and compute peaks
-    const int numChannels = static_cast<int>(reader->numChannels);
-    const juce::int64 totalSamples = reader->lengthInSamples;
-    
-    // Create buffer for reading samples
-    juce::AudioBuffer<float> buffer(numChannels, samplesPerPixel);
-    
-    for (int pixel = 0; pixel < numPixels; ++pixel)
-    {
-        juce::int64 startSample = static_cast<juce::int64>(pixel) * samplesPerPixel;
-        
-        if (startSample >= totalSamples)
-            break;
-        
-        // Calculate how many samples to read
-        int samplesToRead = std::min(samplesPerPixel, static_cast<int>(totalSamples - startSample));
-        
-        buffer.clear();
-        reader->read(&buffer, 0, samplesToRead, startSample, true, true);
-        
-        // Calculate min/max for each channel separately
-        juce::DynamicObject::Ptr peakObj = new juce::DynamicObject();
-        juce::Array<juce::var> channels;
-        
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            float minVal = 0.0f;
-            float maxVal = 0.0f;
-            
-            const float* channelData = buffer.getReadPointer(ch);
-            for (int s = 0; s < samplesToRead; ++s)
-            {
-                float sample = channelData[s];
-                if (sample < minVal) minVal = sample;
-                if (sample > maxVal) maxVal = sample;
-            }
-            
-            juce::DynamicObject::Ptr channelPeak = new juce::DynamicObject();
-            channelPeak->setProperty("min", minVal);
-            channelPeak->setProperty("max", maxVal);
-            channels.add(juce::var(channelPeak.get()));
-        }
-        
-        peakObj->setProperty("channels", channels);
-        peakData.add(juce::var(peakObj.get()));
-    }
-    
-    return peakData;
+
+    // Read from peak cache (instant — memory-cached mipmap lookup)
+    return peakCache.getPeaks(audioFile, samplesPerPixel, numPixels);
 }
 
 juce::var AudioEngine::getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels)
@@ -1547,6 +1649,114 @@ void AudioEngine::getTimeSignature(int& numerator, int& denominator) const
 {
     numerator = timeSigNumerator;
     denominator = timeSigDenominator;
+}
+
+// Custom metronome sounds (Phase 9C)
+bool AudioEngine::setMetronomeClickSound(const juce::String& filePath)
+{
+    return metronome.setClickSound(filePath);
+}
+
+bool AudioEngine::setMetronomeAccentSound(const juce::String& filePath)
+{
+    return metronome.setAccentSound(filePath);
+}
+
+void AudioEngine::resetMetronomeSounds()
+{
+    metronome.resetToDefaultSounds();
+}
+
+//==============================================================================
+// Send/Bus Routing (Phase 11)
+
+int AudioEngine::addTrackSend(const juce::String& sourceTrackId, const juce::String& destTrackId)
+{
+    if (trackMap.find(sourceTrackId) == trackMap.end()) return -1;
+    return trackMap[sourceTrackId]->addSend(destTrackId);
+}
+
+void AudioEngine::removeTrackSend(const juce::String& sourceTrackId, int sendIndex)
+{
+    if (trackMap.find(sourceTrackId) != trackMap.end())
+        trackMap[sourceTrackId]->removeSend(sendIndex);
+}
+
+void AudioEngine::setTrackSendLevel(const juce::String& sourceTrackId, int sendIndex, float level)
+{
+    if (trackMap.find(sourceTrackId) != trackMap.end())
+        trackMap[sourceTrackId]->setSendLevel(sendIndex, level);
+}
+
+void AudioEngine::setTrackSendPan(const juce::String& sourceTrackId, int sendIndex, float pan)
+{
+    if (trackMap.find(sourceTrackId) != trackMap.end())
+        trackMap[sourceTrackId]->setSendPan(sendIndex, pan);
+}
+
+void AudioEngine::setTrackSendEnabled(const juce::String& sourceTrackId, int sendIndex, bool enabled)
+{
+    if (trackMap.find(sourceTrackId) != trackMap.end())
+        trackMap[sourceTrackId]->setSendEnabled(sendIndex, enabled);
+}
+
+void AudioEngine::setTrackSendPreFader(const juce::String& sourceTrackId, int sendIndex, bool preFader)
+{
+    if (trackMap.find(sourceTrackId) != trackMap.end())
+        trackMap[sourceTrackId]->setSendPreFader(sendIndex, preFader);
+}
+
+juce::var AudioEngine::getTrackSends(const juce::String& trackId)
+{
+    juce::Array<juce::var> result;
+    if (trackMap.find(trackId) == trackMap.end()) return result;
+
+    auto* track = trackMap[trackId];
+    for (int i = 0; i < track->getNumSends(); ++i)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("destTrackId", track->getSendDestination(i));
+        obj->setProperty("level", track->getSendLevel(i));
+        obj->setProperty("pan", track->getSendPan(i));
+        obj->setProperty("enabled", track->getSendEnabled(i));
+        obj->setProperty("preFader", track->getSendPreFader(i));
+        result.add(obj);
+    }
+    return result;
+}
+
+juce::String AudioEngine::renderMetronomeToFile(double startTime, double endTime)
+{
+    // Create output file in Studio13/Audio directory
+    auto docsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    auto audioFolder = docsDir.getChildFile("Studio13").getChildFile("Audio");
+
+    if (!audioFolder.exists())
+        audioFolder.createDirectory();
+
+    auto timestamp = juce::Time::getCurrentTime().toMilliseconds();
+    auto filename = "Metronome_" + juce::String(timestamp) + ".wav";
+    auto outputFile = audioFolder.getChildFile(filename);
+
+    // Create a dedicated Metronome instance for offline rendering
+    // (to avoid interfering with the real-time metronome)
+    Metronome renderMetronome;
+    renderMetronome.prepareToPlay(currentSampleRate, 512);
+    renderMetronome.setBpm(tempo);
+    renderMetronome.setTimeSignature(timeSigNumerator, timeSigDenominator);
+    renderMetronome.setVolume(metronome.getVolume());
+    renderMetronome.setAccentBeats(metronome.getAccentBeats());
+
+    bool success = renderMetronome.renderToFile(outputFile, startTime, endTime);
+
+    if (success)
+    {
+        juce::Logger::writeToLog("AudioEngine: Rendered metronome to: " + outputFile.getFullPathName());
+        return outputFile.getFullPathName();
+    }
+
+    juce::Logger::writeToLog("AudioEngine: Failed to render metronome");
+    return {};
 }
 
 //==============================================================================
@@ -1642,17 +1852,690 @@ bool AudioEngine::setMasterPluginState(int fxIndex, const juce::String& base64St
 {
     if (fxIndex < 0 || fxIndex >= static_cast<int>(masterFXNodes.size()))
         return false;
-    
+
     auto& node = masterFXNodes[fxIndex];
     if (!node || !node->getProcessor())
         return false;
-    
+
     juce::MemoryBlock stateData;
     if (!stateData.fromBase64Encoding(base64State))
         return false;
-    
+
     node->getProcessor()->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
-    
+
     juce::Logger::writeToLog("AudioEngine: Restored master plugin state for FX " + juce::String(fxIndex));
+    return true;
+}
+
+//==============================================================================
+// FFmpeg Helpers
+
+juce::File AudioEngine::findFFmpegExe() const
+{
+    // Search for ffmpeg.exe in common locations relative to the executable
+    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+
+    // 1. Same directory as executable
+    auto ffmpeg = exeDir.getChildFile("ffmpeg.exe");
+    if (ffmpeg.existsAsFile()) return ffmpeg;
+
+    // 2. tools/ subdirectory
+    ffmpeg = exeDir.getChildFile("tools").getChildFile("ffmpeg.exe");
+    if (ffmpeg.existsAsFile()) return ffmpeg;
+
+    // 3. ../tools/ (one level up)
+    ffmpeg = exeDir.getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
+    if (ffmpeg.existsAsFile()) return ffmpeg;
+
+    // 4. ../../tools/ (two levels up, for build/Studio13_artefacts/Release/)
+    ffmpeg = exeDir.getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
+    if (ffmpeg.existsAsFile()) return ffmpeg;
+
+    // 5. ../../../tools/ (three levels up, for deeper build paths)
+    ffmpeg = exeDir.getParentDirectory().getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
+    if (ffmpeg.existsAsFile()) return ffmpeg;
+
+    return juce::File(); // Not found
+}
+
+bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
+                                     const juce::String& format, double targetSampleRate, int quality) const
+{
+    auto ffmpeg = findFFmpegExe();
+    if (!ffmpeg.existsAsFile())
+    {
+        logToDisk("convertWithFFmpeg: FAIL - ffmpeg.exe not found");
+        return false;
+    }
+
+    // Build ffmpeg command
+    juce::StringArray args;
+    args.add(ffmpeg.getFullPathName());
+    args.add("-y");                                // Overwrite output
+    args.add("-i");
+    args.add(inputFile.getFullPathName());         // Input file
+
+    // Sample rate conversion (if target differs from source)
+    if (targetSampleRate > 0)
+    {
+        args.add("-ar");
+        args.add(juce::String((int)targetSampleRate));
+    }
+
+    juce::String formatLower = format.toLowerCase();
+
+    if (formatLower == "mp3")
+    {
+        args.add("-codec:a");
+        args.add("libmp3lame");
+        // quality = bitrate in kbps (128, 192, 256, 320)
+        int bitrate = (quality > 0) ? quality : 320;
+        args.add("-b:a");
+        args.add(juce::String(bitrate) + "k");
+    }
+    else if (formatLower == "ogg")
+    {
+        args.add("-codec:a");
+        args.add("libvorbis");
+        // quality = vorbis quality level (0-10, default 6)
+        int q = (quality > 0) ? quality : 6;
+        args.add("-q:a");
+        args.add(juce::String(q));
+    }
+    else
+    {
+        // WAV/AIFF/FLAC sample rate conversion only — keep format as-is
+        // ffmpeg auto-detects output format from extension
+    }
+
+    args.add(outputFile.getFullPathName());        // Output file
+
+    logToDisk("convertWithFFmpeg: Running: " + args.joinIntoString(" "));
+
+    // Run ffmpeg as child process
+    juce::ChildProcess process;
+    if (!process.start(args))
+    {
+        logToDisk("convertWithFFmpeg: FAIL - could not start ffmpeg process");
+        return false;
+    }
+
+    // Wait for completion (up to 5 minutes for large files)
+    if (!process.waitForProcessToFinish(300000))
+    {
+        logToDisk("convertWithFFmpeg: FAIL - ffmpeg timed out after 5 minutes");
+        process.kill();
+        return false;
+    }
+
+    int exitCode = process.getExitCode();
+    if (exitCode != 0)
+    {
+        juce::String errOutput = process.readAllProcessOutput();
+        logToDisk("convertWithFFmpeg: FAIL - ffmpeg exit code " + juce::String(exitCode) + " output: " + errOutput);
+        return false;
+    }
+
+    if (!outputFile.existsAsFile())
+    {
+        logToDisk("convertWithFFmpeg: FAIL - output file not created");
+        return false;
+    }
+
+    logToDisk("convertWithFFmpeg: SUCCESS - " + outputFile.getFullPathName() +
+              " (" + juce::String(outputFile.getSize() / 1024) + " KB)");
+    return true;
+}
+
+//==============================================================================
+// Offline Render/Export
+
+bool AudioEngine::renderProject(const juce::String& source, double startTime, double endTime,
+                                const juce::String& filePath, const juce::String& format,
+                                double renderSampleRate, int bitDepth, int numChannels,
+                                bool normalize, bool addTail, double tailLengthMs)
+{
+    logToDisk("renderProject: START - file=" + filePath + " format=" + format +
+              " range=" + juce::String(startTime) + "-" + juce::String(endTime) +
+              " sr=" + juce::String(renderSampleRate) + " bits=" + juce::String(bitDepth) +
+              " ch=" + juce::String(numChannels) +
+              " normalize=" + juce::String(normalize ? "true" : "false") +
+              " addTail=" + juce::String(addTail ? "true" : "false") +
+              " tailMs=" + juce::String(tailLengthMs));
+
+    // ========== 1. Validate inputs ==========
+    if (endTime <= startTime)
+    {
+        logToDisk("renderProject: FAIL - endTime (" + juce::String(endTime) +
+                  ") <= startTime (" + juce::String(startTime) + ")");
+        return false;
+    }
+    // For V1, always render at the device sample rate (= rate audio was recorded at).
+    // Sample rate conversion is not yet implemented, so ignore renderSampleRate.
+    double actualSampleRate = currentSampleRate;
+    if (actualSampleRate <= 0) actualSampleRate = 44100.0;
+    if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 24;
+    if (numChannels < 1 || numChannels > 2) numChannels = 2;
+
+    // Determine if we need post-processing (lossy encoding or sample rate conversion)
+    juce::String formatLower = format.toLowerCase();
+    bool isLossyFormat = (formatLower == "mp3" || formatLower == "ogg");
+    bool needsSampleRateConversion = (renderSampleRate > 0 && renderSampleRate != actualSampleRate);
+    bool needsFFmpegPostProcess = isLossyFormat || needsSampleRateConversion;
+
+    // For lossy formats, bitDepth holds codec quality:
+    //   MP3: bitrate in kbps (128, 192, 256, 320)
+    //   OGG: quality level (1-10)
+    int codecQuality = isLossyFormat ? bitDepth : 0;
+    if (isLossyFormat) bitDepth = 24; // Render intermediate WAV at 24-bit
+
+    // Parse stem track filter from source (e.g., "stem:trackId123")
+    juce::String stemTrackId;
+    bool isStemRender = source.startsWith("stem:");
+    if (isStemRender)
+        stemTrackId = source.substring(5); // After "stem:"
+
+    logToDisk("renderProject: Using actualSampleRate=" + juce::String(actualSampleRate) +
+              (needsSampleRateConversion ? " (will convert to " + juce::String(renderSampleRate) + " via ffmpeg)" : " (device rate)"));
+    if (isLossyFormat)
+        logToDisk("renderProject: Lossy format=" + formatLower + " codecQuality=" + juce::String(codecQuality));
+    if (isStemRender)
+        logToDisk("renderProject: Stem render for trackId=" + stemTrackId);
+
+    // ========== 2. Stop real-time playback and block audio callback ==========
+    bool wasPlaying = isPlaying.load();
+    bool wasRecording = isRecordMode.load();
+    if (wasPlaying) isPlaying = false;
+    if (wasRecording) isRecordMode = false;
+    isRendering = true;  // Block audio callback from processing FX plugins
+    juce::Thread::sleep(100); // Let audio callback finish current block
+
+    // ========== 3. Snapshot clip data ==========
+    auto clipSnapshot = playbackEngine.getClipSnapshot();
+    logToDisk("renderProject: Clip snapshot has " + juce::String((int)clipSnapshot.size()) + " clips");
+
+    if (clipSnapshot.empty())
+    {
+        logToDisk("renderProject: WARNING - No clips in playback engine! Render will be silent.");
+    }
+
+    // Log each clip for debugging
+    for (size_t i = 0; i < clipSnapshot.size(); ++i)
+    {
+        const auto& clip = clipSnapshot[i];
+        logToDisk("  Clip " + juce::String((int)i) + ": track=" + clip.trackId +
+                  " file=" + clip.audioFile.getFileName() +
+                  " start=" + juce::String(clip.startTime) +
+                  " dur=" + juce::String(clip.duration) +
+                  " offset=" + juce::String(clip.offset) +
+                  " active=" + juce::String(clip.isActive ? "true" : "false"));
+    }
+
+    // ========== 4. Snapshot track params ==========
+    struct TrackSnapshot {
+        juce::String id;
+        float volumeDB;
+        float pan;
+        bool muted;
+        bool soloed;
+    };
+    std::vector<TrackSnapshot> trackSnapshots;
+    bool anySoloed = false;
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        for (const auto& trackId : trackOrder)
+        {
+            auto it = trackMap.find(trackId);
+            if (it == trackMap.end() || !it->second) continue;
+            auto* track = it->second;
+            TrackSnapshot snap;
+            snap.id = trackId;
+            snap.volumeDB = track->getVolume();
+            snap.pan = track->getPan();
+            snap.muted = track->getMute();
+            snap.soloed = track->getSolo();
+            if (snap.soloed) anySoloed = true;
+            trackSnapshots.push_back(snap);
+            logToDisk("  Track " + trackId + ": vol=" + juce::String(snap.volumeDB) +
+                      "dB pan=" + juce::String(snap.pan) +
+                      " mute=" + juce::String(snap.muted ? "true" : "false") +
+                      " solo=" + juce::String(snap.soloed ? "true" : "false"));
+        }
+    }
+
+    logToDisk("renderProject: " + juce::String((int)trackSnapshots.size()) + " tracks, anySoloed=" + juce::String(anySoloed ? "true" : "false"));
+
+    // ========== 5. Create format writer ==========
+    // For lossy formats (mp3/ogg) or sample rate conversion, render to temp WAV first
+    juce::File outputFile(filePath);
+    juce::File renderFile = outputFile; // File we actually write to (may be temp WAV)
+
+    if (needsFFmpegPostProcess)
+    {
+        // Create temp WAV file next to the output
+        renderFile = outputFile.getParentDirectory().getChildFile(
+            outputFile.getFileNameWithoutExtension() + "_temp_render.wav");
+    }
+
+    std::unique_ptr<juce::AudioFormat> audioFormat;
+    juce::String renderFormatLower = needsFFmpegPostProcess ? "wav" : formatLower;
+
+    if (renderFormatLower == "wav")
+        audioFormat = std::make_unique<juce::WavAudioFormat>();
+    else if (renderFormatLower == "aiff" || renderFormatLower == "aif")
+        audioFormat = std::make_unique<juce::AiffAudioFormat>();
+    else if (renderFormatLower == "flac")
+    {
+        audioFormat = std::make_unique<juce::FlacAudioFormat>();
+        if (bitDepth > 24) bitDepth = 24; // FLAC max 24-bit
+    }
+    else
+    {
+        logToDisk("renderProject: FAIL - unsupported format: " + format);
+        isRendering = false;
+        return false;
+    }
+
+    renderFile.getParentDirectory().createDirectory();
+    if (renderFile.existsAsFile())
+        renderFile.deleteFile();
+    if (outputFile.existsAsFile())
+        outputFile.deleteFile();
+
+    auto fileStream = std::make_unique<juce::FileOutputStream>(renderFile);
+    if (fileStream->failedToOpen())
+    {
+        logToDisk("renderProject: FAIL - could not open output file: " + renderFile.getFullPathName());
+        isRendering = false;
+        return false;
+    }
+
+    // Determine writer channels (always render in stereo internally, downmix to mono if needed)
+    int writerChannels = numChannels;
+
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        audioFormat->createWriterFor(fileStream.get(),
+                                     actualSampleRate,
+                                     writerChannels,
+                                     bitDepth,
+                                     {}, // metadata
+                                     0)); // quality
+    if (!writer)
+    {
+        logToDisk("renderProject: FAIL - could not create writer (sr=" +
+                  juce::String(actualSampleRate) + " bits=" + juce::String(bitDepth) +
+                  " ch=" + juce::String(writerChannels) + ")");
+        isRendering = false;
+        return false;
+    }
+    fileStream.release(); // Writer owns the stream now
+
+    // ========== 6. Calculate total samples ==========
+    double tailSeconds = addTail ? (tailLengthMs / 1000.0) : 0.0;
+    double totalDuration = (endTime - startTime) + tailSeconds;
+    juce::int64 totalSamples = (juce::int64)(totalDuration * actualSampleRate);
+    const int blockSize = 512;
+
+    logToDisk("renderProject: totalDuration=" + juce::String(totalDuration) +
+              "s totalSamples=" + juce::String(totalSamples) +
+              " blockSize=" + juce::String(blockSize));
+
+    // ========== 6b. Save plugin state & prepare plugins for offline rendering ==========
+    // Plugins were prepared for the device's buffer size (e.g. 128/256). The render
+    // uses 512-sample blocks. We must re-prepare all FX plugins with the render block
+    // size, otherwise plugins like Amplitube overflow internal buffers → noise/crash.
+    // We also reset() to clear stale state from real-time playback.
+
+    // Collect all FX processors that will be used during render
+    struct PluginStateBackup {
+        juce::AudioProcessor* processor;
+        juce::MemoryBlock savedState;
+    };
+    std::vector<PluginStateBackup> pluginBackups;
+
+    // Lambda to save state, prepare, and reset a processor for render
+    auto prepareProcessorForRender = [&](juce::AudioProcessor* proc) {
+        if (!proc) return;
+        // Save current state
+        PluginStateBackup backup;
+        backup.processor = proc;
+        proc->getStateInformation(backup.savedState);
+        pluginBackups.push_back(std::move(backup));
+        // Re-prepare for render block size
+        proc->prepareToPlay(actualSampleRate, blockSize);
+        proc->reset();
+    };
+
+    // Prepare track FX plugins
+    for (const auto& snap : trackSnapshots)
+    {
+        auto it = trackMap.find(snap.id);
+        if (it == trackMap.end() || !it->second) continue;
+        auto* track = it->second;
+        for (int fx = 0; fx < track->getNumInputFX(); ++fx)
+            prepareProcessorForRender(track->getInputFXProcessor(fx));
+        for (int fx = 0; fx < track->getNumTrackFX(); ++fx)
+            prepareProcessorForRender(track->getTrackFXProcessor(fx));
+    }
+
+    // Prepare master FX plugins
+    for (auto& node : masterFXNodes)
+    {
+        if (node && node->getProcessor())
+            prepareProcessorForRender(node->getProcessor());
+    }
+
+    logToDisk("renderProject: Saved & prepared " + juce::String((int)pluginBackups.size()) + " FX plugins for render");
+
+    // ========== 7 & 8. Render loop (with optional 2-pass normalization) ==========
+    int numPasses = normalize ? 2 : 1;
+    float normGain = 1.0f;
+    float peakLevel = 0.0f;
+
+    // Check if metronome was enabled for render
+    bool renderMetronomeAudio = metronome.isEnabled();
+
+    for (int pass = 0; pass < numPasses; ++pass)
+    {
+        logToDisk("renderProject: Pass " + juce::String(pass + 1) + " of " + juce::String(numPasses));
+
+        // Reset all FX plugins at the start of each pass so they begin from a clean state.
+        // This is critical for 2-pass normalization: pass 2 must produce identical output
+        // to pass 1, which requires identical initial plugin state.
+        for (auto& backup : pluginBackups)
+        {
+            if (backup.processor)
+            {
+                backup.processor->setStateInformation(backup.savedState.getData(),
+                                                       (int)backup.savedState.getSize());
+                backup.processor->reset();
+            }
+        }
+
+        // Create fresh offline playback engine for each pass (deterministic reads)
+        PlaybackEngine passPlayback;
+        for (const auto& clip : clipSnapshot)
+        {
+            passPlayback.addClip(clip.audioFile, clip.startTime, clip.duration,
+                                 clip.trackId, clip.offset, clip.volumeDB,
+                                 clip.fadeIn, clip.fadeOut);
+        }
+
+        // Create fresh metronome for each pass
+        Metronome renderMet;
+        if (renderMetronomeAudio)
+        {
+            renderMet.prepareToPlay(actualSampleRate, blockSize);
+            renderMet.setBpm(tempo);
+            renderMet.setTimeSignature(timeSigNumerator, timeSigDenominator);
+            renderMet.setVolume(metronome.getVolume());
+            renderMet.setAccentBeats(metronome.getAccentBeats());
+            renderMet.setEnabled(true);
+        }
+
+        if (pass == 1)
+        {
+            // Second pass: calculate normalization gain
+            if (peakLevel > 0.0f)
+                normGain = 1.0f / peakLevel;
+            else
+                normGain = 1.0f;
+            logToDisk("renderProject: Normalize gain = " + juce::String(normGain) +
+                      " (peak was " + juce::String(peakLevel) + ")");
+        }
+
+        juce::int64 samplesRemaining = totalSamples;
+        double currentTimeSeconds = startTime;
+        double samplePositionForMetronome = startTime * actualSampleRate;
+        float passPeak = 0.0f; // Track peak for this pass
+
+        while (samplesRemaining > 0)
+        {
+            int samplesThisBlock = (int)std::min((juce::int64)blockSize, samplesRemaining);
+
+            // Master buffer (always stereo internally)
+            juce::AudioBuffer<float> masterBuffer(2, samplesThisBlock);
+            masterBuffer.clear();
+
+            // Add metronome if enabled
+            if (renderMetronomeAudio)
+            {
+                renderMet.getNextAudioBlock(masterBuffer, samplePositionForMetronome);
+            }
+
+            // Process each track
+            for (const auto& snap : trackSnapshots)
+            {
+                // Stem rendering: only process the specified track
+                if (isStemRender && snap.id != stemTrackId) continue;
+
+                // Skip muted tracks (unless stem render — always render the target track)
+                if (!isStemRender && snap.muted) continue;
+                // If any track is soloed, skip non-soloed tracks (unless stem render)
+                if (!isStemRender && anySoloed && !snap.soloed) continue;
+
+                // Fill track buffer from clips
+                juce::AudioBuffer<float> trackBuffer(2, samplesThisBlock);
+                trackBuffer.clear();
+                passPlayback.fillTrackBuffer(snap.id, trackBuffer, currentTimeSeconds,
+                                             samplesThisBlock, actualSampleRate);
+
+                // Process track FX chain BEFORE volume/pan (matches real-time signal flow)
+                // Channel-safe: expand buffer if plugin needs more channels than our stereo buffer
+                {
+                    auto it = trackMap.find(snap.id);
+                    if (it != trackMap.end() && it->second)
+                    {
+                        auto* track = it->second;
+                        int numInputFX = track->getNumInputFX();
+                        int numTrackFX = track->getNumTrackFX();
+                        if (numInputFX > 0 || numTrackFX > 0)
+                        {
+                            juce::MidiBuffer midiMessages;
+                            auto safeRenderFX = [&](juce::AudioProcessor* proc) {
+                                int pluginCh = juce::jmax(proc->getTotalNumInputChannels(),
+                                                          proc->getTotalNumOutputChannels());
+                                if (pluginCh <= trackBuffer.getNumChannels())
+                                {
+                                    proc->processBlock(trackBuffer, midiMessages);
+                                }
+                                else
+                                {
+                                    // Expand buffer for this plugin (render thread — allocation OK)
+                                    juce::AudioBuffer<float> expanded(pluginCh, samplesThisBlock);
+                                    expanded.clear();
+                                    for (int ch = 0; ch < trackBuffer.getNumChannels(); ++ch)
+                                        expanded.copyFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
+                                    proc->processBlock(expanded, midiMessages);
+                                    for (int ch = 0; ch < trackBuffer.getNumChannels(); ++ch)
+                                        trackBuffer.copyFrom(ch, 0, expanded, ch, 0, samplesThisBlock);
+                                }
+                            };
+                            for (int fx = 0; fx < numInputFX; ++fx)
+                            {
+                                auto* proc = track->getInputFXProcessor(fx);
+                                if (proc) safeRenderFX(proc);
+                            }
+                            for (int fx = 0; fx < numTrackFX; ++fx)
+                            {
+                                auto* proc = track->getTrackFXProcessor(fx);
+                                if (proc) safeRenderFX(proc);
+                            }
+                        }
+                    }
+                }
+
+                // Apply per-track volume/pan AFTER FX (matches real-time signal flow)
+                float volumeGain = juce::Decibels::decibelsToGain(snap.volumeDB);
+                const float pi = juce::MathConstants<float>::pi;
+                float panAngle = (snap.pan + 1.0f) * pi / 4.0f;
+                float leftGain = std::cos(panAngle) * volumeGain;
+                float rightGain = std::sin(panAngle) * volumeGain;
+
+                juce::FloatVectorOperations::multiply(trackBuffer.getWritePointer(0), leftGain, samplesThisBlock);
+                juce::FloatVectorOperations::multiply(trackBuffer.getWritePointer(1), rightGain, samplesThisBlock);
+
+                // Mix into master buffer
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    masterBuffer.addFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
+                }
+            }
+
+            // Process master FX chain (channel-safe, render thread — allocation OK)
+            // Skip master FX for stem renders (export raw track output)
+            if (!isStemRender && !masterFXNodes.empty())
+            {
+                juce::MidiBuffer dummyMidi;
+                for (auto& node : masterFXNodes)
+                {
+                    if (node && node->getProcessor())
+                    {
+                        auto* proc = node->getProcessor();
+                        int pluginCh = juce::jmax(proc->getTotalNumInputChannels(),
+                                                   proc->getTotalNumOutputChannels());
+                        if (pluginCh <= masterBuffer.getNumChannels())
+                        {
+                            proc->processBlock(masterBuffer, dummyMidi);
+                        }
+                        else
+                        {
+                            juce::AudioBuffer<float> expanded(pluginCh, samplesThisBlock);
+                            expanded.clear();
+                            for (int ch = 0; ch < masterBuffer.getNumChannels(); ++ch)
+                                expanded.copyFrom(ch, 0, masterBuffer, ch, 0, samplesThisBlock);
+                            proc->processBlock(expanded, dummyMidi);
+                            for (int ch = 0; ch < masterBuffer.getNumChannels(); ++ch)
+                                masterBuffer.copyFrom(ch, 0, expanded, ch, 0, samplesThisBlock);
+                        }
+                    }
+                }
+            }
+
+            // Apply master pan (constant power law) — skip for stem renders
+            if (!isStemRender)
+            {
+                const float pi = juce::MathConstants<float>::pi;
+                float panAngle = (masterPan + 1.0f) * pi / 4.0f;
+                float leftGain = std::cos(panAngle);
+                float rightGain = std::sin(panAngle);
+
+                juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(0), leftGain, samplesThisBlock);
+                juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(1), rightGain, samplesThisBlock);
+            }
+
+            // Apply master volume — skip for stem renders
+            if (!isStemRender)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(ch), masterVolume, samplesThisBlock);
+                }
+            }
+
+            // Apply normalization gain (pass 2 only)
+            if (pass == 1 && normGain != 1.0f)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(ch), normGain, samplesThisBlock);
+                }
+            }
+
+            // Measure peak level
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                auto range = masterBuffer.findMinMax(ch, 0, samplesThisBlock);
+                float chPeak = std::max(std::abs(range.getStart()), std::abs(range.getEnd()));
+                if (chPeak > passPeak) passPeak = chPeak;
+            }
+
+            if (pass == 0 && normalize)
+            {
+                // Pass 1: accumulate peak for normalization
+                if (passPeak > peakLevel) peakLevel = passPeak;
+            }
+
+            // Write to file (final pass only)
+            bool isFinalPass = (pass == numPasses - 1);
+            if (isFinalPass)
+            {
+                if (numChannels == 1)
+                {
+                    // Mono downmix: average L+R
+                    juce::AudioBuffer<float> monoBuffer(1, samplesThisBlock);
+                    monoBuffer.clear();
+                    monoBuffer.addFrom(0, 0, masterBuffer, 0, 0, samplesThisBlock, 0.5f);
+                    monoBuffer.addFrom(0, 0, masterBuffer, 1, 0, samplesThisBlock, 0.5f);
+                    writer->writeFromAudioSampleBuffer(monoBuffer, 0, samplesThisBlock);
+                }
+                else
+                {
+                    writer->writeFromAudioSampleBuffer(masterBuffer, 0, samplesThisBlock);
+                }
+            }
+
+            currentTimeSeconds += (double)samplesThisBlock / actualSampleRate;
+            samplePositionForMetronome += samplesThisBlock;
+            samplesRemaining -= samplesThisBlock;
+        }
+
+        logToDisk("renderProject: Pass " + juce::String(pass + 1) + " complete. Peak level: " + juce::String(passPeak));
+    }
+
+    // Flush and close
+    writer.reset();
+
+    // ========== 9. FFmpeg post-processing (lossy encoding / sample rate conversion) ==========
+    if (needsFFmpegPostProcess)
+    {
+        logToDisk("renderProject: Starting FFmpeg post-processing...");
+        double targetSR = needsSampleRateConversion ? renderSampleRate : 0;
+        bool ffmpegOk = convertWithFFmpeg(renderFile, outputFile, formatLower, targetSR, codecQuality);
+
+        // Clean up temp file
+        renderFile.deleteFile();
+
+        if (!ffmpegOk)
+        {
+            logToDisk("renderProject: FAIL - FFmpeg post-processing failed");
+            // Restore plugins before returning (clamp max-block to at least 512)
+            for (auto& backup : pluginBackups)
+            {
+                if (backup.processor)
+                {
+                    backup.processor->prepareToPlay(currentSampleRate, juce::jmax(currentBlockSize, 512));
+                    backup.processor->setStateInformation(backup.savedState.getData(),
+                                                           (int)backup.savedState.getSize());
+                    backup.processor->reset();
+                }
+            }
+            isRendering = false;
+            return false;
+        }
+    }
+
+    // ========== 10. Restore plugin state for real-time playback ==========
+    // Re-prepare all FX plugins for the device's buffer size and restore their
+    // saved state so real-time playback continues as if render never happened.
+    // Clamp max-block to at least 512 (same rationale as track FX preparation).
+    for (auto& backup : pluginBackups)
+    {
+        if (backup.processor)
+        {
+            backup.processor->prepareToPlay(currentSampleRate, juce::jmax(currentBlockSize, 512));
+            backup.processor->setStateInformation(backup.savedState.getData(),
+                                                   (int)backup.savedState.getSize());
+            backup.processor->reset();
+        }
+    }
+    logToDisk("renderProject: Restored " + juce::String((int)pluginBackups.size()) + " FX plugins for real-time");
+
+    // Re-enable audio callback
+    isRendering = false;
+
+    logToDisk("renderProject: SUCCESS - " + outputFile.getFullPathName() +
+              " (" + juce::String(outputFile.getSize() / 1024) + " KB)");
+
     return true;
 }

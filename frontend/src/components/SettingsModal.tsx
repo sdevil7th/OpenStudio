@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, NativeSelect } from "./ui";
@@ -114,9 +116,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   if (!isOpen) return null;
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-[1000] backdrop-blur-[2px]"
+      className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-2000 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <div
@@ -130,7 +132,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             size="icon-md"
             onClick={onClose}
           >
-            ×
+            <X size={18} />
           </Button>
         </div>
 
@@ -281,6 +283,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

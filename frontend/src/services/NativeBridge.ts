@@ -10,6 +10,26 @@ export interface WaveformPeak {
   channels: ChannelPeak[]; // Per-channel peak data
 }
 
+// Parse flat peak array from C++: [numChannels, min_ch0_px0, max_ch0_px0, min_ch1_px0, ...]
+// into WaveformPeak[] objects.  V8 creates these JS objects orders of magnitude
+// faster than C++ DynamicObjects (~84K heap allocs eliminated per 5-min clip).
+function parseFlatPeaks(flat: number[]): WaveformPeak[] {
+  if (!flat || flat.length < 1) return [];
+  const numCh = flat[0];
+  const stride = numCh * 2;
+  const count = Math.floor((flat.length - 1) / stride);
+  const peaks: WaveformPeak[] = new Array(count);
+  for (let p = 0; p < count; p++) {
+    const base = 1 + p * stride;
+    const channels: ChannelPeak[] = new Array(numCh);
+    for (let ch = 0; ch < numCh; ch++) {
+      channels[ch] = { min: flat[base + ch * 2] || 0, max: flat[base + ch * 2 + 1] || 0 };
+    }
+    peaks[p] = { channels };
+  }
+  return peaks;
+}
+
 declare global {
   interface Window {
     __JUCE__?: {
@@ -69,6 +89,7 @@ declare global {
           denominator: number;
         }>;
         setMetronomeAccentBeats?: (accentBeats: boolean[]) => Promise<boolean>;
+        renderMetronomeToFile?: (startTime: number, endTime: number) => Promise<string>;
 
         // Recording
         getLastCompletedClips?: () => Promise<
@@ -229,6 +250,81 @@ declare global {
           format: string;
         }>;
 
+        // File drop support — save base64-encoded file to disk
+        saveDroppedFile?: (fileName: string, base64Data: string) => Promise<string>;
+
+        // Render/Export (F3)
+        showRenderSaveDialog?: (defaultFileName: string, formatExtension: string) => Promise<string>;
+        renderProject?: (
+          source: string, startTime: number, endTime: number,
+          filePath: string, format: string, sampleRate: number,
+          bitDepth: number, channels: number, normalize: boolean,
+          addTail: boolean, tailLength: number,
+        ) => Promise<boolean>;
+
+        // Phase 9: Audio Engine Enhancements
+        reverseAudioFile?: (filePath: string) => Promise<string>;
+        detectTransients?: (filePath: string, sensitivity: number, minGapMs: number) => Promise<number[]>;
+        setMetronomeClickSound?: (filePath: string) => Promise<boolean>;
+        setMetronomeAccentSound?: (filePath: string) => Promise<boolean>;
+        resetMetronomeSounds?: () => Promise<boolean>;
+        measureLUFS?: (filePath: string, startTime?: number, endTime?: number) => Promise<{
+          integrated: number;
+          shortTerm: number;
+          momentary: number;
+          truePeak: number;
+          range: number;
+        }>;
+
+        // Phase 11: Send/Bus Routing
+        addTrackSend?: (sourceTrackId: string, destTrackId: string) => Promise<number>;
+        removeTrackSend?: (sourceTrackId: string, sendIndex: number) => Promise<boolean>;
+        setTrackSendLevel?: (sourceTrackId: string, sendIndex: number, level: number) => Promise<boolean>;
+        setTrackSendPan?: (sourceTrackId: string, sendIndex: number, pan: number) => Promise<boolean>;
+        setTrackSendEnabled?: (sourceTrackId: string, sendIndex: number, enabled: boolean) => Promise<boolean>;
+        setTrackSendPreFader?: (sourceTrackId: string, sendIndex: number, preFader: boolean) => Promise<boolean>;
+        getTrackSends?: (trackId: string) => Promise<Array<{ destTrackId: string; level: number; pan: number; enabled: boolean; preFader: boolean }>>;
+
+        // Phase 12: Media & File Management
+        browseDirectory?: (path: string) => Promise<Array<{
+          name: string; path: string; size: number; isDirectory: boolean;
+          format: string; duration: number; sampleRate: number; numChannels: number;
+        }>>;
+        previewAudioFile?: (path: string) => Promise<boolean>;
+        stopPreview?: () => Promise<boolean>;
+        cleanProjectDirectory?: (projectDir: string, referencedFiles: string[]) => Promise<{
+          orphanedFiles: Array<{ path: string; size: number }>;
+          totalSize: number;
+        }>;
+        deleteFiles?: (filePaths: string[]) => Promise<{ deleted: number; errors: string[] }>;
+        exportProjectMIDI?: (filePath: string, midiTracks: any[]) => Promise<boolean>;
+        convertAudioFile?: (inputPath: string, outputPath: string, format: string, sampleRate: number, bitDepth: number, channels: number) => Promise<boolean>;
+        getHomeDirectory?: () => Promise<string>;
+
+        // Phase 13: Advanced Editing
+        timeStretchClip?: (filePath: string, factor: number) => Promise<string>;
+        pitchShiftClip?: (filePath: string, semitones: number) => Promise<string>;
+
+        // Phase 15: Platform & Extensibility
+        openVideoFile?: (filePath: string) => Promise<{ width: number; height: number; duration: number; fps: number }>;
+        getVideoFrame?: (time: number) => Promise<string>; // base64 image data
+        closeVideoFile?: () => void;
+        executeScript?: (code: string) => Promise<{ result: string; error: string }>;
+        loadScriptFile?: (filePath: string) => Promise<{ result: string; error: string }>;
+        setLTCOutput?: (enabled: boolean, channel: number, frameRate: number) => Promise<boolean>;
+
+        // Phase 16: Pro Audio & Compatibility
+        startLiveCapture?: (format: string) => Promise<string>; // returns filePath
+        stopLiveCapture?: () => Promise<{ filePath: string; duration: number }>;
+        exportDDP?: (outputDir: string, regions: any[]) => Promise<boolean>;
+
+        // Window Management
+        minimizeWindow?: () => Promise<void>;
+        maximizeWindow?: () => Promise<boolean>; // returns new isMaximized state
+        closeWindow?: () => Promise<void>;
+        isWindowMaximized?: () => Promise<boolean>;
+        startWindowDrag?: () => Promise<void>;
+
         // Event system
         addEventListener?: (
           eventId: string,
@@ -279,6 +375,20 @@ class NativeBridge {
         "NativeBridge: Running in browser mode (no JUCE), using mock data",
       );
     }
+  }
+
+  // Subscribe to peak-cache-ready events emitted by C++ after background peak generation.
+  // Returns an unsubscribe function (or no-op in dev mode).
+  onPeaksReady(callback: (filePath: string) => void): () => void {
+    const backend = window.__JUCE__?.backend;
+    if (this.isNative && backend?.addEventListener) {
+      const listener = backend.addEventListener(
+        "peaksReady",
+        (data: any) => callback(data?.filePath ?? ""),
+      );
+      return () => backend.removeEventListener(listener);
+    }
+    return () => {};
   }
 
   // Set callback for meter update events from C++
@@ -581,6 +691,22 @@ class NativeBridge {
     return true;
   }
 
+  async renderMetronomeToFile(
+    startTime: number,
+    endTime: number,
+  ): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.renderMetronomeToFile) {
+      return await window.__JUCE__.backend.renderMetronomeToFile(
+        startTime,
+        endTime,
+      );
+    }
+    console.log(
+      `[NativeBridge] Mock renderMetronomeToFile: ${startTime} - ${endTime}`,
+    );
+    return "";
+  }
+
   // Recording
   async getLastCompletedClips(): Promise<
     Array<{
@@ -603,11 +729,12 @@ class NativeBridge {
     numPixels: number,
   ): Promise<WaveformPeak[]> {
     if (this.isNative && window.__JUCE__?.backend.getRecordingPeaks) {
-      return await window.__JUCE__.backend.getRecordingPeaks(
+      const flat = await window.__JUCE__.backend.getRecordingPeaks(
         trackId,
         samplesPerPixel,
         numPixels,
       );
+      return parseFlatPeaks(flat as unknown as number[]);
     } else {
       // Mock: generate fake live recording waveform data
       const peaks: WaveformPeak[] = [];
@@ -779,11 +906,12 @@ class NativeBridge {
     numPixels: number,
   ): Promise<WaveformPeak[]> {
     if (this.isNative && window.__JUCE__?.backend.getWaveformPeaks) {
-      return await window.__JUCE__.backend.getWaveformPeaks(
+      const flat = await window.__JUCE__.backend.getWaveformPeaks(
         filePath,
         samplesPerPixel,
         numPixels,
       );
+      return parseFlatPeaks(flat as unknown as number[]);
     } else {
       // Mock: generate fake waveform data for testing
       const peaks: WaveformPeak[] = [];
@@ -944,6 +1072,14 @@ class NativeBridge {
   }
 
   // Render/Export (F3)
+  async showRenderSaveDialog(defaultFileName: string, formatExtension: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.showRenderSaveDialog) {
+      return await window.__JUCE__.backend.showRenderSaveDialog(defaultFileName, formatExtension);
+    }
+    console.log("[NativeBridge] Mock showRenderSaveDialog");
+    return "";
+  }
+
   async renderProject(options: {
     source: string;
     startTime: number;
@@ -1024,6 +1160,15 @@ class NativeBridge {
               filePath.endsWith('.mp3') ? 'MP3' :
               filePath.endsWith('.mp4') ? 'MP4' : 'Unknown',
     };
+  }
+
+  // Save a dropped file (base64 encoded) to disk via the backend
+  async saveDroppedFile(fileName: string, base64Data: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.saveDroppedFile) {
+      return await window.__JUCE__.backend.saveDroppedFile(fileName, base64Data);
+    }
+    console.log(`[NativeBridge] Mock saveDroppedFile: ${fileName}`);
+    return "";
   }
 
   // Plugin State Management (F2)
@@ -1174,6 +1319,311 @@ class NativeBridge {
       `[NativeBridge] Mock reorderTrackFX: track ${trackId}, from ${fromIndex} to ${toIndex}`,
     );
     return true;
+  }
+
+  // Phase 9: Audio Engine Enhancements
+  async reverseAudioFile(filePath: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.reverseAudioFile) {
+      return await window.__JUCE__.backend.reverseAudioFile(filePath);
+    }
+    console.log(`[NativeBridge] Mock reverseAudioFile: ${filePath}`);
+    return filePath; // Mock: return same path
+  }
+
+  async detectTransients(filePath: string, sensitivity: number, minGapMs: number): Promise<number[]> {
+    if (this.isNative && window.__JUCE__?.backend.detectTransients) {
+      return await window.__JUCE__.backend.detectTransients(filePath, sensitivity, minGapMs);
+    }
+    console.log(`[NativeBridge] Mock detectTransients: ${filePath}, sensitivity=${sensitivity}, minGap=${minGapMs}`);
+    // Mock: return some fake transient times
+    return [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+  }
+
+  async setMetronomeClickSound(filePath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMetronomeClickSound) {
+      return await window.__JUCE__.backend.setMetronomeClickSound(filePath);
+    }
+    console.log(`[NativeBridge] Mock setMetronomeClickSound: ${filePath}`);
+    return true;
+  }
+
+  async setMetronomeAccentSound(filePath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMetronomeAccentSound) {
+      return await window.__JUCE__.backend.setMetronomeAccentSound(filePath);
+    }
+    console.log(`[NativeBridge] Mock setMetronomeAccentSound: ${filePath}`);
+    return true;
+  }
+
+  async resetMetronomeSounds(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.resetMetronomeSounds) {
+      return await window.__JUCE__.backend.resetMetronomeSounds();
+    }
+    console.log("[NativeBridge] Mock resetMetronomeSounds");
+    return true;
+  }
+
+  async measureLUFS(filePath: string, startTime?: number, endTime?: number): Promise<{
+    integrated: number;
+    shortTerm: number;
+    momentary: number;
+    truePeak: number;
+    range: number;
+  }> {
+    if (this.isNative && window.__JUCE__?.backend.measureLUFS) {
+      return await window.__JUCE__.backend.measureLUFS(filePath, startTime, endTime);
+    }
+    console.log(`[NativeBridge] Mock measureLUFS: ${filePath}`);
+    return { integrated: -14.0, shortTerm: -12.0, momentary: -10.0, truePeak: -0.3, range: 8.0 };
+  }
+
+  // Phase 11: Send/Bus Routing
+  async addTrackSend(sourceTrackId: string, destTrackId: string): Promise<number> {
+    if (this.isNative && window.__JUCE__?.backend.addTrackSend) {
+      return await window.__JUCE__.backend.addTrackSend(sourceTrackId, destTrackId);
+    }
+    console.log(`[NativeBridge] Mock addTrackSend: ${sourceTrackId} -> ${destTrackId}`);
+    return 0;
+  }
+
+  async removeTrackSend(sourceTrackId: string, sendIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.removeTrackSend) {
+      return await window.__JUCE__.backend.removeTrackSend(sourceTrackId, sendIndex);
+    }
+    console.log(`[NativeBridge] Mock removeTrackSend: ${sourceTrackId} [${sendIndex}]`);
+    return true;
+  }
+
+  async setTrackSendLevel(sourceTrackId: string, sendIndex: number, level: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackSendLevel) {
+      return await window.__JUCE__.backend.setTrackSendLevel(sourceTrackId, sendIndex, level);
+    }
+    return true;
+  }
+
+  async setTrackSendPan(sourceTrackId: string, sendIndex: number, pan: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackSendPan) {
+      return await window.__JUCE__.backend.setTrackSendPan(sourceTrackId, sendIndex, pan);
+    }
+    return true;
+  }
+
+  async setTrackSendEnabled(sourceTrackId: string, sendIndex: number, enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackSendEnabled) {
+      return await window.__JUCE__.backend.setTrackSendEnabled(sourceTrackId, sendIndex, enabled);
+    }
+    return true;
+  }
+
+  async setTrackSendPreFader(sourceTrackId: string, sendIndex: number, preFader: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackSendPreFader) {
+      return await window.__JUCE__.backend.setTrackSendPreFader(sourceTrackId, sendIndex, preFader);
+    }
+    return true;
+  }
+
+  async getTrackSends(trackId: string): Promise<Array<{ destTrackId: string; level: number; pan: number; enabled: boolean; preFader: boolean }>> {
+    if (this.isNative && window.__JUCE__?.backend.getTrackSends) {
+      return await window.__JUCE__.backend.getTrackSends(trackId);
+    }
+    return [];
+  }
+
+  // ===== Phase 12: Media & File Management =====
+
+  async browseDirectory(path: string): Promise<Array<{
+    name: string; path: string; size: number; isDirectory: boolean;
+    format: string; duration: number; sampleRate: number; numChannels: number;
+  }>> {
+    if (this.isNative && window.__JUCE__?.backend.browseDirectory) {
+      return await window.__JUCE__.backend.browseDirectory(path);
+    }
+    // Mock: return some fake directory entries
+    return [
+      { name: "Documents", path: path + "/Documents", size: 0, isDirectory: true, format: "", duration: 0, sampleRate: 0, numChannels: 0 },
+      { name: "demo_beat.wav", path: path + "/demo_beat.wav", size: 2456000, isDirectory: false, format: "wav", duration: 4.2, sampleRate: 44100, numChannels: 2 },
+      { name: "vocal_take.wav", path: path + "/vocal_take.wav", size: 8320000, isDirectory: false, format: "wav", duration: 12.5, sampleRate: 48000, numChannels: 1 },
+    ];
+  }
+
+  async previewAudioFile(path: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.previewAudioFile) {
+      return await window.__JUCE__.backend.previewAudioFile(path);
+    }
+    console.log("[NativeBridge] Mock previewAudioFile:", path);
+    return true;
+  }
+
+  async stopPreview(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.stopPreview) {
+      return await window.__JUCE__.backend.stopPreview();
+    }
+    return true;
+  }
+
+  async cleanProjectDirectory(projectDir: string, referencedFiles: string[]): Promise<{
+    orphanedFiles: Array<{ path: string; size: number }>;
+    totalSize: number;
+  }> {
+    if (this.isNative && window.__JUCE__?.backend.cleanProjectDirectory) {
+      return await window.__JUCE__.backend.cleanProjectDirectory(projectDir, referencedFiles);
+    }
+    return { orphanedFiles: [], totalSize: 0 };
+  }
+
+  async deleteFiles(filePaths: string[]): Promise<{ deleted: number; errors: string[] }> {
+    if (this.isNative && window.__JUCE__?.backend.deleteFiles) {
+      return await window.__JUCE__.backend.deleteFiles(filePaths);
+    }
+    console.log("[NativeBridge] Mock deleteFiles:", filePaths);
+    return { deleted: filePaths.length, errors: [] };
+  }
+
+  async exportProjectMIDI(filePath: string, midiTracks: any[]): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.exportProjectMIDI) {
+      return await window.__JUCE__.backend.exportProjectMIDI(filePath, midiTracks);
+    }
+    console.log("[NativeBridge] Mock exportProjectMIDI:", filePath);
+    return true;
+  }
+
+  async convertAudioFile(inputPath: string, outputPath: string, format: string, sampleRate: number, bitDepth: number, channels: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.convertAudioFile) {
+      return await window.__JUCE__.backend.convertAudioFile(inputPath, outputPath, format, sampleRate, bitDepth, channels);
+    }
+    console.log("[NativeBridge] Mock convertAudioFile:", inputPath, "->", outputPath);
+    return true;
+  }
+
+  async getHomeDirectory(): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getHomeDirectory) {
+      return await window.__JUCE__.backend.getHomeDirectory();
+    }
+    return "C:/Users";
+  }
+
+  // ===== Phase 13: Advanced Editing =====
+
+  async timeStretchClip(filePath: string, factor: number): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.timeStretchClip) {
+      return await window.__JUCE__.backend.timeStretchClip(filePath, factor);
+    }
+    console.log("[NativeBridge] Mock timeStretchClip:", filePath, factor);
+    return filePath; // Mock: return same file
+  }
+
+  async pitchShiftClip(filePath: string, semitones: number): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.pitchShiftClip) {
+      return await window.__JUCE__.backend.pitchShiftClip(filePath, semitones);
+    }
+    console.log("[NativeBridge] Mock pitchShiftClip:", filePath, semitones);
+    return filePath;
+  }
+
+  // Phase 15: Platform & Extensibility
+  async openVideoFile(filePath: string): Promise<{ width: number; height: number; duration: number; fps: number }> {
+    if (this.isNative && window.__JUCE__?.backend.openVideoFile) {
+      return await window.__JUCE__.backend.openVideoFile(filePath);
+    }
+    console.log("[NativeBridge] Mock openVideoFile:", filePath);
+    return { width: 1920, height: 1080, duration: 120, fps: 30 };
+  }
+
+  async getVideoFrame(time: number): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getVideoFrame) {
+      return await window.__JUCE__.backend.getVideoFrame(time);
+    }
+    // Mock: return empty 1x1 transparent pixel
+    return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  }
+
+  closeVideoFile(): void {
+    if (this.isNative && window.__JUCE__?.backend.closeVideoFile) {
+      window.__JUCE__.backend.closeVideoFile();
+    }
+    console.log("[NativeBridge] Mock closeVideoFile");
+  }
+
+  async executeScript(code: string): Promise<{ result: string; error: string }> {
+    if (this.isNative && window.__JUCE__?.backend.executeScript) {
+      return await window.__JUCE__.backend.executeScript(code);
+    }
+    console.log("[NativeBridge] Mock executeScript:", code.substring(0, 100));
+    return { result: "Script executed (mock)", error: "" };
+  }
+
+  async loadScriptFile(filePath: string): Promise<{ result: string; error: string }> {
+    if (this.isNative && window.__JUCE__?.backend.loadScriptFile) {
+      return await window.__JUCE__.backend.loadScriptFile(filePath);
+    }
+    console.log("[NativeBridge] Mock loadScriptFile:", filePath);
+    return { result: "Script loaded (mock)", error: "" };
+  }
+
+  async setLTCOutput(enabled: boolean, channel: number, frameRate: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setLTCOutput) {
+      return await window.__JUCE__.backend.setLTCOutput(enabled, channel, frameRate);
+    }
+    console.log("[NativeBridge] Mock setLTCOutput:", enabled, channel, frameRate);
+    return true;
+  }
+
+  // Phase 16: Pro Audio & Compatibility
+  async startLiveCapture(format: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.startLiveCapture) {
+      return await window.__JUCE__.backend.startLiveCapture(format);
+    }
+    console.log("[NativeBridge] Mock startLiveCapture:", format);
+    return "mock_capture.wav";
+  }
+
+  async stopLiveCapture(): Promise<{ filePath: string; duration: number }> {
+    if (this.isNative && window.__JUCE__?.backend.stopLiveCapture) {
+      return await window.__JUCE__.backend.stopLiveCapture();
+    }
+    console.log("[NativeBridge] Mock stopLiveCapture");
+    return { filePath: "mock_capture.wav", duration: 0 };
+  }
+
+  async exportDDP(outputDir: string, regions: any[]): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.exportDDP) {
+      return await window.__JUCE__.backend.exportDDP(outputDir, regions);
+    }
+    console.log("[NativeBridge] Mock exportDDP:", outputDir, regions.length, "regions");
+    return true;
+  }
+
+  // ==================== Window Management ====================
+  async minimizeWindow(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.minimizeWindow) {
+      await window.__JUCE__.backend.minimizeWindow();
+    }
+  }
+
+  async maximizeWindow(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.maximizeWindow) {
+      return await window.__JUCE__.backend.maximizeWindow();
+    }
+    return false;
+  }
+
+  async closeWindow(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.closeWindow) {
+      await window.__JUCE__.backend.closeWindow();
+    }
+  }
+
+  async isWindowMaximized(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.isWindowMaximized) {
+      return await window.__JUCE__.backend.isWindowMaximized();
+    }
+    return false;
+  }
+
+  async startWindowDrag(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.startWindowDrag) {
+      await window.__JUCE__.backend.startWindowDrag();
+    }
   }
 
   // Event subscription

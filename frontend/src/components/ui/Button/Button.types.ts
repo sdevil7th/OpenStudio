@@ -134,34 +134,32 @@ export const buttonSizeStyles: Record<ButtonSize, string> = {
  * Variant base styles (inactive state)
  */
 export const buttonVariantStyles: Record<ButtonVariant, string> = {
-  'default': 'bg-neutral-800 text-neutral-400 border border-neutral-700 hover:text-white hover:border-neutral-500',
-  'primary': 'bg-blue-600 text-white hover:bg-blue-700 font-medium',
+  'default': 'bg-neutral-800 text-neutral-400 border border-neutral-700 hover:bg-neutral-700/50 hover:text-neutral-200 hover:border-neutral-600',
+  'primary': 'bg-blue-600 text-white hover:bg-blue-500 font-medium',
   'secondary': 'bg-daw-darker border border-daw-border text-daw-text hover:bg-daw-lighter',
-  'success': 'bg-neutral-800 text-green-500 border border-neutral-700 hover:bg-green-700 hover:text-white hover:border-green-600',
-  'warning': 'bg-neutral-800 text-yellow-500 border border-neutral-700 hover:bg-yellow-500 hover:text-black hover:border-yellow-600',
-  // Danger inactive: dark bg, red icon - hover shows semi-transparent red (distinct from armed state)
-  'danger': 'bg-neutral-800 text-red-500 border border-neutral-700 hover:bg-red-900 hover:text-red-300 hover:border-red-700',
-  'purple': 'bg-neutral-800 text-purple-500 border border-neutral-700 hover:bg-purple-700 hover:text-white hover:border-purple-600',
-  'orange': 'bg-neutral-800 text-orange-400 border border-neutral-600 hover:bg-orange-500 hover:text-black',
+  'success': 'bg-neutral-800 text-green-500 border border-neutral-700 hover:bg-green-900/40 hover:text-green-400 hover:border-green-700',
+  'warning': 'bg-neutral-800 text-yellow-500 border border-neutral-700 hover:bg-yellow-900/40 hover:text-yellow-400 hover:border-yellow-700',
+  'danger': 'bg-neutral-800 text-red-500 border border-neutral-700 hover:bg-red-900/40 hover:text-red-400 hover:border-red-700',
+  'purple': 'bg-neutral-800 text-purple-500 border border-neutral-700 hover:bg-purple-900/40 hover:text-purple-400 hover:border-purple-700',
+  'orange': 'bg-neutral-800 text-orange-400 border border-neutral-600 hover:bg-orange-900/40 hover:text-orange-300 hover:border-orange-700',
   'emerald': 'bg-emerald-700 border border-emerald-600 text-white hover:bg-emerald-600',
-  'ghost': 'text-neutral-400 hover:text-white hover:bg-neutral-700',
+  'ghost': 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700/40',
 };
 
 /**
  * Variant active styles (when active prop is true)
  */
 export const buttonActiveStyles: Record<ButtonVariant, string> = {
-  'default': 'bg-neutral-700 text-white border-neutral-500',
-  'primary': 'bg-blue-700',
-  'secondary': 'bg-daw-lighter',
-  'success': 'bg-green-700 text-white border-green-600',
-  'warning': 'bg-yellow-500 text-black border-yellow-600',
-  // Danger active (armed): bright red, white icon - hover goes even brighter
-  'danger': 'bg-red-600 text-white border-red-500 hover:bg-red-500 hover:border-red-400',
-  'purple': 'bg-purple-700 text-white border-purple-600',
-  'orange': 'bg-orange-500 text-black',
-  'emerald': 'bg-emerald-600',
-  'ghost': 'bg-neutral-600 text-white',
+  'default': 'bg-neutral-600 text-white border border-neutral-400 hover:bg-neutral-500',
+  'primary': 'bg-blue-700 text-white hover:bg-blue-600',
+  'secondary': 'bg-daw-lighter text-white',
+  'success': 'bg-green-700 text-white border border-green-600 hover:bg-green-600',
+  'warning': 'bg-yellow-500 text-black border border-yellow-600 hover:bg-yellow-400',
+  'danger': 'bg-red-600 text-white border border-red-500 hover:bg-red-500 hover:border-red-400',
+  'purple': 'bg-purple-700 text-white border border-purple-600 hover:bg-purple-600',
+  'orange': 'bg-orange-500 text-black border border-orange-400 hover:bg-orange-400',
+  'emerald': 'bg-emerald-600 text-white hover:bg-emerald-500',
+  'ghost': 'bg-neutral-600 text-white hover:bg-neutral-500',
 };
 
 /**

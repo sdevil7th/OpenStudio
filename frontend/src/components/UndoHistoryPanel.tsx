@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Undo2, Redo2, Play } from "lucide-react";
 import { commandManager, Command } from "../store/commands";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
@@ -49,7 +50,7 @@ export function UndoHistoryPanel() {
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
           >
-            ↩
+            <Undo2 size={12} />
           </Button>
           <Button
             variant="default"
@@ -58,7 +59,7 @@ export function UndoHistoryPanel() {
             disabled={!canRedo}
             title="Redo (Ctrl+Shift+Z)"
           >
-            ↪
+            <Redo2 size={12} />
           </Button>
         </div>
       </div>
@@ -66,7 +67,7 @@ export function UndoHistoryPanel() {
       {/* Current State Marker */}
       <div className="border-l-2 border-daw-accent pl-2 mb-1">
         <div className="text-xs text-daw-accent font-medium">
-          ▶ Current State
+          <Play size={10} fill="currentColor" className="inline mr-1" /> Current State
         </div>
       </div>
 

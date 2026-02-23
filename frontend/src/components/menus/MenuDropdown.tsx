@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { Check, ChevronRight } from "lucide-react";
 import { Button } from "../ui";
 
 interface MenuItemProps {
@@ -92,7 +93,7 @@ export function MenuDropdown({
       >
         <div className="flex items-center gap-2">
           {item.checked !== undefined && (
-            <span className="w-4 text-center">{item.checked ? "✓" : ""}</span>
+            <span className="w-4 text-center">{item.checked ? <Check size={14} /> : ""}</span>
           )}
           <span>{item.label}</span>
         </div>
@@ -102,7 +103,7 @@ export function MenuDropdown({
               {item.shortcut}
             </span>
           )}
-          {item.submenu && <span className="text-xs">▶</span>}
+          {item.submenu && <ChevronRight size={14} />}
         </div>
       </div>
 
@@ -128,7 +129,12 @@ export function MenuDropdown({
                 }
               }}
             >
-              <span>{subItem.label}</span>
+              <div className="flex items-center gap-2">
+                {subItem.checked !== undefined && (
+                  <span className="w-4 text-center">{subItem.checked ? <Check size={14} /> : ""}</span>
+                )}
+                <span>{subItem.label}</span>
+              </div>
               {subItem.shortcut && (
                 <span className="text-xs text-daw-text-muted ml-4">
                   {subItem.shortcut}
@@ -156,7 +162,7 @@ export function MenuDropdown({
       </Button>
 
       {isOpen && (
-        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-50">
+        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-9999">
           {items.map((item, index) => (
             <div key={index} className="relative">
               {renderMenuItem(item, index)}

@@ -15,6 +15,13 @@ python build.py dev --run
 
 **No more juggling terminals!**
 
+
+**Run this to rebuild the backend:**
+
+```bash
+cmake --build build --config Debug
+```
+
 ---
 
 ## Alternative: Manual Development
