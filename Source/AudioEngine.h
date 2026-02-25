@@ -209,6 +209,8 @@ private:
     double currentSamplePosition = 0.0;
     double currentSampleRate = 44100.0;
     int currentBlockSize = 512;  // Device buffer size for re-preparing plugins after render
+    int inputLatencySamples = 0;  // Device input latency for recording compensation
+    std::atomic<bool> pendingRecordStartCapture { false };  // Audio thread captures start time
     double tempo = 120.0;  // BPM
     int timeSigNumerator = 4;
     int timeSigDenominator = 4;

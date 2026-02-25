@@ -181,6 +181,28 @@ function App() {
     return () => cancelAnimationFrame(frameId);
   }, [isPlaying, setCurrentTime]);
 
+  // Sync frontend playhead from backend transport position (10Hz).
+  // The RAF loop above provides smooth 60fps interpolation, but drifts over time.
+  // The backend's 10Hz transportUpdate corrects that drift, keeping the visual
+  // playhead within ~100ms of the true audio position at all times.
+  useEffect(() => {
+    const unsub = nativeBridge.onTransportUpdate((data) => {
+      const state = useDAWStore.getState();
+      if (!state.transport.isPlaying) return;
+
+      const backendPos = data.position;
+      const frontendPos = state.transport.currentTime;
+      const drift = Math.abs(backendPos - frontendPos);
+
+      // Only correct if drift exceeds 30ms — avoids jitter from minor timing differences
+      if (drift > 0.03) {
+        state.setCurrentTime(backendPos);
+      }
+    });
+
+    return unsub;
+  }, []);
+
   // Auto-backup timer
   useEffect(() => {
     const state = useDAWStore.getState();

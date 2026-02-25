@@ -1844,11 +1844,12 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       // Store the start position for stop behavior
       set({ playStartPosition: transport.currentTime });
 
-      // Sync transport position with backend before starting
-      await nativeBridge.setTransportPosition(transport.currentTime);
-
-      // Sync all clips with backend for playback
+      // Sync clips FIRST (slow, many bridge calls) so the position set and
+      // play start happen back-to-back with minimal delay between them.
       await syncClipsWithBackend();
+
+      // Position + play as close together as possible to minimize drift
+      await nativeBridge.setTransportPosition(transport.currentTime);
 
       set((state) => ({
         transport: {
@@ -1885,11 +1886,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
       // Only sync clips with backend if we're starting fresh (not already playing)
       if (!wasAlreadyPlaying) {
-        // Sync transport position with backend before starting
-        await nativeBridge.setTransportPosition(transport.currentTime);
-
-        // Sync all clips with backend for playback
+        // Sync clips FIRST (slow), then position + play back-to-back
         await get().syncClipsWithBackend();
+        await nativeBridge.setTransportPosition(transport.currentTime);
       } else {
         console.log(
           "[DAW] Punch-in recording: already playing, preserving playback state",

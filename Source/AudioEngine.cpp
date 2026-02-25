@@ -90,6 +90,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     }
     currentSampleRate = device->getCurrentSampleRate();
     currentBlockSize = device->getCurrentBufferSizeSamples();
+    inputLatencySamples = device->getInputLatencyInSamples();
+    logToDisk("Input latency: " + juce::String(inputLatencySamples) + " samples ("
+              + juce::String(inputLatencySamples / currentSampleRate * 1000.0, 1) + " ms)");
     if (mainProcessorGraph)
     {
         // ... (keep existing config logic)
@@ -180,11 +183,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     if (!sl.isLocked())
         return;  // Graph is being modified, output silence for this block
 
-    // Update transport position if playing
-    if (isPlaying)
-    {
-        currentSamplePosition += numSamples;
-    }
+    // NOTE: currentSamplePosition is advanced AFTER all processing (metronome,
+    // playback, recording) so that everything in this callback uses the correct
+    // position for the samples being output right now.  The increment is at the
+    // very end of the callback (search "Advance transport position").
 
     // Mix Metronome (if enabled and transport is running)
     if (isPlaying || isRecordMode)
@@ -313,9 +315,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // This captures the raw input BEFORE any FX processing
         if (isPlaying && isRecordMode && audioRecorder.isRecording(trackId))
         {
-            audioRecorder.writeBlock(trackId, trackBuffer, numSamples);
-            
+            // Capture recording start time on the audio thread (race-free).
+            // The message thread sets pendingRecordStartCapture; we read it once
+            // here and stamp every active recording with the current position
+            // minus input latency.
+            if (pendingRecordStartCapture.exchange(false, std::memory_order_acq_rel))
+            {
+                double latencyComp = inputLatencySamples / currentSampleRate;
+                double startPos = (currentSamplePosition / currentSampleRate) - latencyComp;
+                if (startPos < 0.0) startPos = 0.0;
+                // Set for all active recordings (they all started at the same point)
+                for (auto const& [recId, recTrack] : trackMap)
+                {
+                    juce::ignoreUnused(recTrack);
+                    if (audioRecorder.isRecording(recId))
+                        audioRecorder.setRecordingStartTime(recId, startPos);
+                }
+            }
 
+            audioRecorder.writeBlock(trackId, trackBuffer, numSamples);
         }
         
         // Process through track (applies volume, pan, FX)
@@ -409,6 +427,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             masterVolume,
             numSamples
         );
+    }
+
+    // ========== Advance transport position ==========
+    // IMPORTANT: This is intentionally AFTER all processing (metronome, playback,
+    // recording) so they use the position corresponding to the samples being
+    // output in this callback.  Previously this was at the top of the callback,
+    // causing a systematic one-buffer-length delay.
+    if (isPlaying)
+    {
+        currentSamplePosition += numSamples;
     }
 }
 
@@ -1097,10 +1125,14 @@ void AudioEngine::setTransportRecording(bool recording)
                 
                 int numChannels = track->getInputChannelCount();
                 bool started = audioRecorder.startRecording(trackId, outputFile, currentSampleRate, numChannels);
-                
+
                 if (started) {
-                    // Set the recording start time to current transport position
-                    audioRecorder.setRecordingStartTime(trackId, getTransportPosition());
+                    // Defer start-time capture to the audio thread to avoid race
+                    // conditions — the message thread's view of currentSamplePosition
+                    // may be stale by the time the audio callback processes the first
+                    // buffer.  The audio thread sets the correct start time (with
+                    // input latency compensation) on the first write.
+                    pendingRecordStartCapture.store(true, std::memory_order_release);
                 }
                 
                 logToDisk("Start Recording Track " + trackId + " -> " + (started ? "SUCCESS" : "FAIL to " + outputFile.getFullPathName()));

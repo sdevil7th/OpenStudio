@@ -162,7 +162,8 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
               value={track.name}
               onChange={handleNameChange}
               placeholder="Track Name"
-              className="flex-1 min-w-0 truncate"
+              className="flex-1 min-w-0"
+              inputClassName="w-full min-w-0"
             />
 
             {/* M S FX Buttons */}

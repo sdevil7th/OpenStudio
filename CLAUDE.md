@@ -180,89 +180,44 @@ python build.py prod
 
 ## Known Pitfalls & Past Issues
 
+### useShallow Is Required for ALL useDAWStore Consumers
+
+**Every** component that calls `useDAWStore()` must use a `useShallow` selector. The RAF-based `setCurrentTime` loop fires at 60fps during playback, so any bare `useDAWStore()` (no selector) causes 60fps re-renders. With N tracks this multiplies. Always use `useShallow((s) => ({ ... }))` and only pick the fields you need.
+
+### Meter State Must Be Isolated from Tracks Array
+
+`meterLevels` and `peakLevels` are separate top-level maps in the store, NOT inside `tracks[]`. Never return a new `tracks` reference when only meters changed — otherwise every track-dependent component re-renders at 60fps.
+
+### syncBackend Must Pass Explicit Track IDs
+
+`App.tsx`'s `syncBackend` must call `nativeBridge.addTrack(track.id)` with the Zustand track ID. Without the ID, C++ creates tracks with auto-generated UUIDs that don't match Zustand's — causing `setTrackRecordArm` etc. to silently fail.
+
 ### Dual Clamping on Zoom
 
-Zoom level (`pixelsPerSecond`) is clamped in **two places**: the constants in `Timeline.tsx` (MIN/MAX_PIXELS_PER_SECOND) AND inside `setZoom` in `useDAWStore.ts`. If zoom limits seem to not work, check both. They must agree.
+Zoom (`pixelsPerSecond`) is clamped in **two places**: `Timeline.tsx` constants AND `setZoom` in `useDAWStore.ts`. They must agree.
 
 ### Konva Event Bubbling & Click Handlers
 
-In Konva (react-konva), `onMouseDown` fires before `onClick`. If you handle selection in both (e.g., clip selection), the mouseDown resets state before the click handler can apply modifiers like Ctrl. **Solution**: handle all selection logic in `onMouseDown` with modifier keys, not in `onClick`.
-
-### Stage onClick Deselects Clips
-
-The Konva Stage's onClick fires for ANY click including on clips (if they don't have named shapes). To detect "background click" for deselection, name background rects `"timeline-bg"` and check `e.target.name() === "timeline-bg"` — do NOT use `!targetName` as unnamed clip shapes also match.
+In Konva, `onMouseDown` fires before `onClick`. Handle all selection logic in `onMouseDown` with modifier keys, not in `onClick`. To detect "background click" for deselection, check `e.target.name() === "timeline-bg"` — don't use `!targetName` as unnamed clip shapes also match.
 
 ### Waveform samplesPerPixel Must Use File's Sample Rate
 
-The `samplesPerPixel` sent to `getWaveformPeaks()` must be calculated from the **file's** sample rate (stored in `clip.sampleRate`), not a hardcoded 44100. A 48kHz file with 44100-based SPP produces a waveform that's visually shorter than the clip rect. The clip's `sampleRate` field was added for this — old clips without it fall back to 44100.
+`samplesPerPixel` must use the **file's** sample rate (`clip.sampleRate`), not a hardcoded 44100. For trimmed clips (`clip.offset > 0`), `numPeaks` must cover `(clip.offset + clip.duration) * sampleRate / samplesPerPixel`, not just `clip.duration` — peak data always starts from sample 0.
 
 ### PlaybackEngine Sample Rate Mismatch
 
-`PlaybackEngine::fillTrackBuffer()` uses the file's own `reader->sampleRate` for sample positions, not the device rate. It reads at the file's native rate and linearly interpolates to the device rate. Without this, files recorded at different rates play with wrong pitch/speed.
+`fillTrackBuffer()` uses the file's own `reader->sampleRate` for sample positions and linearly interpolates to the device rate. Without this, files at different rates play at wrong pitch/speed.
 
-### Plugin Crash on Track Arm (Amplitube etc.)
+### Plugin Channel Safety & Render State
 
-Some VST3 plugins (e.g., Amplitube) expect specific channel counts. The `TrackProcessor` and render path use a channel-safe wrapper: if a plugin needs more channels than the track buffer provides, it expands the buffer before `processBlock()` and copies back the stereo channels after. Check `safeRenderFX` lambda in AudioEngine's render loop.
-
-### Render Noise / Plugin State
-
-The render path must re-prepare all FX plugins with the render block size (512) and `reset()` them. After render, it restores the original device block size and plugin state. Without this, plugins like Amplitube overflow internal buffers and produce noise. See the `prepareProcessorForRender` lambda in `AudioEngine::renderProject()`.
-
-### Native `<select>` Option Styling on WebView2/Windows
-
-Native HTML `<option>` elements don't respect most CSS in WebView2. To get dark backgrounds on dropdown options, you must explicitly set `className="bg-neutral-900 text-white"` on each `<option>`. Both `Select` and `NativeSelect` components do this.
-
-### Z-Index Stacking with Menu Dropdowns
-
-The MenuBar dropdowns need `z-9999` and the MenuBar container itself needs `relative z-9999` to paint above the workspace. The track control panel (TCP) has elements at `z-100` which otherwise overlap the menus.
-
-### Button Variant for Toggle Buttons
-
-`variant="primary"` always looks active (blue bg). For toggle buttons (snap, mixer, etc.) use `variant="default"` which shows neutral gray when inactive and highlighted when active. `variant="primary"` is for modal action buttons only.
-
-### Ctrl+Scroll Zoom Performance
-
-The infinity wheel on mice like Logitech MX Master 3 fires many wheel events. The zoom system accumulates raw `deltaY` between frames via `accZoomDeltaRef` and applies once per `requestAnimationFrame`. During active zoom, waveform fetches are suppressed (`isZoomingRef`) with a 200ms debounce — waveforms re-render from cache at nearest power-of-2 resolution instead.
-
-### Multi-Clip Clipboard Structure
-
-The clipboard has both `clip: AudioClip | null` (legacy single-clip) and `clips: Array<{ clip: AudioClip; trackId: string }>` (multi-clip with track info). The `pasteClips()` action handles both — single clip pastes on selected track at playhead; multi-clip preserves relative track positions and time offsets. Access the clip properties via `entry.clip.startTime`, not `entry.startTime`.
-
-### C++ Naming Conflicts with C Standard Library Macros
-
-Never use `stderr`, `stdout`, `stdin`, or `errno` as C++ variable names — they are C macros that expand to `FILE*` etc. Using them causes cryptic compile errors (C2248 private member access, C2664 type mismatch). Use names like `errOutput` instead.
-
-### JUCE `withNativeFunction` Unused `args` Parameter
-
-All `withNativeFunction` callbacks must accept `(const juce::Array<juce::var>& args, NativeFunctionCompletion completion)` even when `args` isn't used. Add `juce::ignoreUnused(args);` as the first line to suppress C4100 warnings.
-
-### `flags` Shadows `juce::Component::flags`
-
-Local variables named `flags` inside MainComponent methods/lambdas shadow the inherited `juce::Component::flags` member (C4458). Use `chooserFlags` for `FileBrowserComponent` flag variables.
-
-### `MemoryOutputStream::getMemoryBlock()` Returns Rvalue
-
-`decoded.getMemoryBlock()` returns a temporary. Use `const auto& data = decoded.getMemoryBlock()` not `auto& data` (C4239 nonstandard extension).
+Some VST3 plugins (e.g., Amplitube) expect specific channel counts — `TrackProcessor` and render path expand buffers before `processBlock()` if needed (`safeRenderFX` lambda). The render path must also re-prepare all FX plugins with render block size (512) and `reset()` them, then restore original state after. Without this, plugins overflow internal buffers and produce noise.
 
 ### Render Modal — What Actually Works in Backend
 
-- **Working**: format (wav/aiff/flac), bit depth (16/24/32), channels (stereo/mono with downmix), normalize (2-pass), add tail with tail length
-- **Ignored by backend**: sample rate (always renders at device rate — sample rate conversion not implemented)
-- **Not implemented**: source "selected_tracks" and "stems" (always renders master mix), dither
-- The render calls `syncClipsWithBackend()` first, then `PlaybackEngine::fillTrackBuffer()` — same code path as real-time playback
+- **Working**: format (wav/aiff/flac), bit depth (16/24/32), channels (stereo/mono), normalize, tail
+- **Ignored**: sample rate (always renders at device rate)
+- **Not implemented**: "selected_tracks"/"stems" source (always master mix), dither
 
-### Waveform Peak numPeaks Must Account for Clip Offset
+### C++ Naming Conflicts with C Standard Library Macros
 
-When fetching waveform peaks for a trimmed clip (one with `clip.offset > 0`), the `numPeaks` request must cover `(clip.offset + clip.duration) * sampleRate / samplesPerPixel`, NOT just `clip.duration`. The peak data always starts from sample 0 of the file, and the frontend indexes into it at `clipStartPeak = floor(clip.offset * sampleRate / cacheSpp)`. If too few peaks are fetched, the waveform is truncated for trimmed clips.
-
-### batchUpdateMeterLevels Must Not Create Unnecessary State References
-
-In `useDAWStore.ts`, `batchUpdateMeterLevels` updates track meter levels and `masterLevel`. When only `masterLevel` changed (no track levels changed), it must return `{ masterLevel }` only — NOT `{ tracks, masterLevel }`. Returning a new `tracks` array reference causes every component that selects `tracks` to re-render on every meter update (60fps), even though no track data actually changed.
-
-### useShallow Is Required for MixerPanel and ChannelStrip
-
-`MixerPanel.tsx` and `ChannelStrip.tsx` must use `useShallow` selectors when consuming from `useDAWStore`. Without `useShallow`, these components re-render on **every** store change (including 60fps meter updates), causing severe CPU load. Since there are N ChannelStrips (one per track), the re-render cost multiplies.
-
-### Recording Waveform Effect Dependency Loop
-
-In `Timeline.tsx`, the recording waveform subscription effect must NOT include `recordingWaveformCache` (the state variable) in its dependency array. Doing so causes the effect to re-subscribe on every recording bar update (creating/destroying subscriptions at ~2Hz). Instead, use a ref (`recordingWaveformCacheRef.current`) inside the callback and only include stable references in deps.
+Never use `stderr`, `stdout`, `stdin`, or `errno` as C++ variable names — they are macros. Use names like `errOutput` instead.

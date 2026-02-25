@@ -391,6 +391,19 @@ class NativeBridge {
     return () => {};
   }
 
+  // Subscribe to transport position updates from C++ (emitted at 10Hz).
+  // Returns an unsubscribe function (or no-op in dev mode).
+  onTransportUpdate(callback: (data: { position: number; isPlaying: boolean }) => void): () => void {
+    const backend = window.__JUCE__?.backend;
+    if (this.isNative && backend?.addEventListener) {
+      const listener = backend.addEventListener("transportUpdate", (data: any) => {
+        callback(data);
+      });
+      return () => backend.removeEventListener(listener);
+    }
+    return () => {};
+  }
+
   // Set callback for meter update events from C++
   onMeterUpdate(
     callback: (data: {

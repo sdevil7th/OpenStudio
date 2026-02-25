@@ -68,10 +68,10 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     if (!enabled) return;
 
     int numSamples = buffer.getNumSamples();
-    int samplesPerBeat = static_cast<int>((60.0 / bpm) * sampleRate);
-    
+    double samplesPerBeat = (60.0 / bpm) * sampleRate;
+
     // Safety check
-    if (samplesPerBeat <= 0) return;
+    if (samplesPerBeat <= 0.0) return;
 
     auto* leftConfig = buffer.getWritePointer(0);
     auto* rightConfig = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
@@ -79,7 +79,7 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     // Detect playback restart: if position jumped backwards (e.g., from >0 back to 0)
     // or if this is the very first call (lastSamplePosition is -1)
     bool playbackRestarted = (lastSamplePosition < 0) || (currentSamplePosition < lastSamplePosition);
-    
+
     // If playback restarted at or near position 0, immediately trigger the first click
     if (playbackRestarted && currentSamplePosition < samplesPerBeat && !isClicking)
     {
@@ -97,17 +97,21 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     for (int i = 0; i < numSamples; ++i)
     {
         double currentPos = currentSamplePosition + i;
-        
-        long posInt = static_cast<long>(currentPos);
-        
-        // Determine if this sample is a beat start
-        bool isBeatStart = (posInt % samplesPerBeat == 0) && (posInt > 0 || !playbackRestarted);
-        
+
+        // Use floating-point beat detection to avoid cumulative drift from
+        // integer truncation.  A beat boundary occurs when the beat number
+        // (currentPos / samplesPerBeat) crosses an integer.  We detect this by
+        // comparing the beat index of the current sample with the previous one.
+        double beatPos = currentPos / samplesPerBeat;
+        double prevBeatPos = (currentPos - 1.0) / samplesPerBeat;
+        int currentBeatIdx = static_cast<int>(std::floor(beatPos));
+        int prevBeatIdx    = static_cast<int>(std::floor(prevBeatPos));
+        bool isBeatStart   = (currentBeatIdx > prevBeatIdx) && (currentPos > 0 || !playbackRestarted);
+
         if (isBeatStart && !isClicking)
         {
             // Beat detected
-            int totalBeats = static_cast<int>(posInt / samplesPerBeat);
-            int beatInBar = totalBeats % numerator; // 0-indexed: 0 is the first beat
+            int beatInBar = currentBeatIdx % numerator; // 0-indexed: 0 is the first beat
             
             isClicking = true;
             clickSampleCounter = 0;

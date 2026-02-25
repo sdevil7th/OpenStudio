@@ -749,30 +749,36 @@ export function Timeline({ tracks }: TimelineProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Auto-Scroll during playback - uses Zustand subscribe to avoid re-renders
+  // Auto-Scroll during playback - uses Zustand subscribe to avoid re-renders.
+  // IMPORTANT: scrollX is read from scrollXRef (not the dep array) to prevent a
+  // re-render → effect re-run → setScroll → re-render loop that caused the
+  // "white border flicker" during playback auto-scroll.
   useEffect(() => {
     if (!isPlaying) return;
 
-    // Track last scroll position to avoid scrolling backwards
-    let lastAutoScrollX = scrollX;
+    // Initialise from the ref so the effect doesn't depend on scrollX state.
+    let lastAutoScrollX = scrollXRef.current;
 
     const unsubscribe = useDAWStore.subscribe((state) => {
       if (!state.transport.isPlaying) return;
 
       const currentTime = state.transport.currentTime;
-      const playheadX = currentTime * pixelsPerSecond;
-      const triggerPoint = lastAutoScrollX + dimensions.width * 0.75;
+      const pps = pixelsPerSecondRef.current;
+      const playheadX = currentTime * pps;
+      const viewWidth = dimensions.width;
+      const triggerPoint = lastAutoScrollX + viewWidth * 0.75;
 
       // If playhead goes past 75% of viewport, scroll to keep it there
       if (playheadX > triggerPoint) {
-        const targetScrollX = playheadX - dimensions.width * 0.75;
+        const targetScrollX = playheadX - viewWidth * 0.75;
         lastAutoScrollX = targetScrollX;
-        setScroll(targetScrollX, 0);
+        // Use scheduleScroll to batch via RAF and suppress waveform refetches
+        scheduleScroll(targetScrollX, scrollYRef.current);
       }
     });
 
     return () => unsubscribe();
-  }, [isPlaying, scrollX, pixelsPerSecond, dimensions.width, setScroll]);
+  }, [isPlaying, dimensions.width, scheduleScroll]);
 
   // Note: Removed auto-scroll when stopped - users should be able to freely scroll
   // the timeline when not playing. Auto-scroll only happens during playback.
