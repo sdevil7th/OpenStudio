@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { X } from "lucide-react";
 import { nativeBridge } from "./services/NativeBridge";
@@ -36,9 +36,11 @@ import { ScriptEditor } from "./components/ScriptEditor";
 import { ProjectTabBar } from "./components/ProjectTabBar";
 import { ToolbarEditor, CustomToolbarStrip } from "./components/ToolbarEditor";
 import { DDPExportModal } from "./components/DDPExportModal";
+import { PluginBrowser } from "./components/PluginBrowser";
 import { SortableTrackHeader } from "./components/SortableTrackHeader";
 import {
   DndContext,
+  DragOverlay,
   closestCenter,
   PointerSensor,
   useSensor,
@@ -91,6 +93,10 @@ function App() {
     showScriptEditor,
     showToolbarEditor,
     showDDPExport,
+    showPluginBrowser,
+    pluginBrowserTrackId,
+    tcpWidth,
+    setTcpWidth,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
@@ -132,6 +138,10 @@ function App() {
       showScriptEditor: state.showScriptEditor,
       showToolbarEditor: state.showToolbarEditor,
       showDDPExport: state.showDDPExport,
+      showPluginBrowser: state.showPluginBrowser,
+      pluginBrowserTrackId: state.pluginBrowserTrackId,
+      tcpWidth: state.tcpWidth,
+      setTcpWidth: state.setTcpWidth,
     }))
   );
 
@@ -141,6 +151,11 @@ function App() {
   // Project loading state (separate selector to avoid unnecessary re-renders)
   const isProjectLoading = useDAWStore((state) => state.isProjectLoading);
   const projectLoadingMessage = useDAWStore((state) => state.projectLoadingMessage);
+
+  // Toast notification state
+  const toastVisible = useDAWStore((state) => state.toastVisible);
+  const toastMessage = useDAWStore((state) => state.toastMessage);
+  const toastType = useDAWStore((state) => state.toastType);
 
   // Subscribe only to isPlaying to avoid re-rendering App on every time update
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
@@ -264,29 +279,8 @@ function App() {
 
   // Global keyboard shortcuts
   useEffect(() => {
-    const handleKeyUp = (e: KeyboardEvent) => {
-      // Ignore if focused on input, textarea, or contenteditable
-      const target = e.target as HTMLElement;
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target.isContentEditable
-      ) {
-        return;
-      }
-
-      // Spacebar: Toggle play/stop
-      if (e.key === " " || e.code === "Space") {
-        e.preventDefault();
-        const state = useDAWStore.getState();
-        if (state.transport.isRecording) {
-          state.stop();
-        } else if (state.transport.isPlaying) {
-          state.stop();
-        } else {
-          state.play();
-        }
-      }
+    const handleKeyUp = (_e: KeyboardEvent) => {
+      // Spacebar moved to handleKeyDown to prevent native scroll-down
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -299,13 +293,27 @@ function App() {
         return;
       }
 
+      // Spacebar: Toggle play/stop (must be in keydown to prevent native page scroll)
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        const state = useDAWStore.getState();
+        if (state.transport.isRecording) {
+          state.stop();
+        } else if (state.transport.isPlaying) {
+          state.stop();
+        } else {
+          state.play();
+        }
+        return;
+      }
+
       // Ctrl+R: Record toggle
       if (e.key === "r" && e.ctrlKey) {
         e.preventDefault();
         const state = useDAWStore.getState();
         if (state.transport.isRecording) {
           state.stop();
-        } else {
+        } else if (state.tracks.some(t => t.armed)) {
           state.record();
         }
       }
@@ -390,6 +398,20 @@ function App() {
         if (state.selectedClipIds.length > 0) {
           state.selectedClipIds.forEach((id) => state.toggleClipMute(id));
         }
+      }
+
+      // Ctrl+Shift+S: Save As
+      if (e.key === "S" && e.ctrlKey && e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().saveProject(true);
+        return;
+      }
+
+      // Ctrl+S: Save Project
+      if (e.key === "s" && e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useDAWStore.getState().saveProject();
+        return;
       }
 
       // S: Split clips at cursor
@@ -487,10 +509,24 @@ function App() {
         useDAWStore.getState().toggleClipProperties();
       }
 
+      // Ctrl+O: Open Project
+      if (e.key === "o" && e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        void useDAWStore.getState().loadProject();
+        return;
+      }
+
       // Ctrl+Shift+O: Open Project (Safe Mode)
       if (e.key === "O" && e.ctrlKey && e.shiftKey && !e.altKey) {
         e.preventDefault();
         void useDAWStore.getState().loadProject(undefined, { bypassFX: true });
+      }
+
+      // Ctrl+N: New Project
+      if (e.key === "n" && e.ctrlKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        void useDAWStore.getState().newProject();
+        return;
       }
 
       // Ctrl+Shift+1-3: Save Screensets
@@ -692,11 +728,24 @@ function App() {
     }),
   );
 
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+
+  const handleDragStart = (event: any) => {
+    setActiveDragId(event.active.id.toString());
+  };
+
   const handleDragEnd = (event: any) => {
+    setActiveDragId(null);
     const { active, over } = event;
 
     if (active && over && active.id !== over.id) {
-      reorderTrack(active.id, over.id);
+      const { selectedTrackIds, reorderMultipleTracks } = useDAWStore.getState();
+      // If multiple tracks are selected and the dragged one is among them, move all together
+      if (selectedTrackIds.length > 1 && selectedTrackIds.includes(active.id.toString())) {
+        reorderMultipleTracks(selectedTrackIds, over.id.toString());
+      } else {
+        reorderTrack(active.id, over.id);
+      }
     }
   };
 
@@ -726,10 +775,20 @@ function App() {
       )}
       <div ref={workspaceRef} className="workspace flex-1">
         {/* Track Control Panel (Left Sidebar) */}
-        <div className="track-control-panel" onClick={(e) => {
+        <div className="track-control-panel" style={{ width: tcpWidth }} onClick={(e) => {
           // Click on empty space (not a track header) → deselect all
           if (e.target === e.currentTarget) {
             useDAWStore.getState().deselectAllTracks();
+          }
+        }} onWheel={(e) => {
+          // Alt+scroll to resize track height (mirrors Timeline behavior)
+          if (e.altKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            const store = useDAWStore.getState();
+            const curHeight = store.trackHeight;
+            const delta = e.deltaY > 0 ? 0.9 : 1.1;
+            store.setTrackHeight(curHeight * delta);
           }
         }}>
           <div className="tcp-header sticky top-0 z-100">
@@ -751,6 +810,7 @@ function App() {
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
             >
               <SortableContext
@@ -796,11 +856,64 @@ function App() {
                   );
                 })}
               </SortableContext>
+              <DragOverlay dropAnimation={null}>
+                {activeDragId && (() => {
+                  const { selectedTrackIds } = useDAWStore.getState();
+                  const isMulti = selectedTrackIds.length > 1 && selectedTrackIds.includes(activeDragId);
+                  const dragTracks = isMulti
+                    ? tracks.filter((t) => selectedTrackIds.includes(t.id))
+                    : tracks.filter((t) => t.id === activeDragId);
+                  const trackHeight = useDAWStore.getState().trackHeight;
+                  return (
+                    <div className="opacity-80 shadow-xl rounded overflow-hidden" style={{ width: '100%' }}>
+                      {dragTracks.map((t) => (
+                        <div
+                          key={t.id}
+                          className="border-b border-neutral-900 bg-neutral-800 flex items-center px-2"
+                          style={{ height: trackHeight }}
+                        >
+                          <div className="w-2 h-full shrink-0" style={{ background: t.color || '#666' }} />
+                          <span className="ml-2 text-xs text-neutral-200 truncate">{t.name}</span>
+                        </div>
+                      ))}
+                      {isMulti && (
+                        <div className="bg-blue-600/80 text-white text-[10px] text-center py-0.5">
+                          {dragTracks.length} tracks
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </DragOverlay>
             </DndContext>
           </div>
 
           {/* Master Track in TCP */}
           {showMasterTrackInTCP && <MasterTrackHeader />}
+        </div>
+
+        {/* Draggable resize handle between TCP and Timeline */}
+        <div
+          className="w-1.5 shrink-0 self-stretch sticky top-0 cursor-col-resize group/resize z-50"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startWidth = tcpWidth;
+            document.body.style.cursor = "col-resize";
+            const onMove = (me: MouseEvent) => {
+              setTcpWidth(startWidth + (me.clientX - startX));
+            };
+            const onUp = () => {
+              document.body.style.cursor = "";
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+            };
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+          }}
+          title="Drag to resize track panel"
+        >
+          <div className="w-full h-full bg-neutral-900 group-hover/resize:bg-daw-accent/50 group-active/resize:bg-daw-accent transition-colors" />
         </div>
 
         {/* Timeline (Canvas-based) */}
@@ -967,6 +1080,19 @@ function App() {
         onClose={() => useDAWStore.getState().toggleDDPExport()}
       />
 
+      {/* Plugin Browser (from action registry — instrument track creation) */}
+      {showPluginBrowser && pluginBrowserTrackId && (
+        <PluginBrowser
+          trackId={pluginBrowserTrackId}
+          targetChain={
+            tracks.find((t) => t.id === pluginBrowserTrackId)?.type === "instrument"
+              ? "instrument"
+              : "track"
+          }
+          onClose={() => useDAWStore.getState().closePluginBrowser()}
+        />
+      )}
+
       {/* Project Loading Overlay */}
       {isProjectLoading && (
         <div className="fixed inset-0 z-10000 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
@@ -976,6 +1102,17 @@ function App() {
               {projectLoadingMessage || "Loading project..."}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toastVisible && (
+        <div className={`fixed bottom-20 left-1/2 -translate-x-1/2 z-10000 px-4 py-2 rounded-lg shadow-lg text-sm font-medium transition-all animate-in fade-in slide-in-from-bottom-2 duration-200 ${
+          toastType === "success" ? "bg-green-600 text-white" :
+          toastType === "error" ? "bg-red-600 text-white" :
+          "bg-neutral-700 text-white"
+        }`}>
+          {toastMessage}
         </div>
       )}
     </div>

@@ -171,16 +171,57 @@ std::unique_ptr<juce::AudioProcessor> PluginManager::loadPluginFromFile(const ju
 {
     juce::Logger::writeToLog("PluginManager: Loading plugin from: " + filePath);
 
-    // Find the plugin description
+    // 1. Exact match in known list
     for (const auto& desc : knownPluginList.getTypes())
     {
         if (desc.fileOrIdentifier == filePath)
         {
+            juce::Logger::writeToLog("PluginManager: Exact match found in known list");
             return loadPlugin(desc, sampleRate, blockSize);
         }
     }
-    
-    juce::Logger::writeToLog("PluginManager: Plugin not found in known list");
+
+    // 2. Partial match — the saved fileOrIdentifier from a loaded plugin instance
+    //    may be the inner module path (e.g. .../Contents/x86_64-win/Plugin.vst3)
+    //    while the known list stores the bundle path (e.g. .../Plugin.vst3).
+    //    Try matching if one path contains the other.
+    for (const auto& desc : knownPluginList.getTypes())
+    {
+        if (filePath.contains(desc.fileOrIdentifier) || desc.fileOrIdentifier.contains(filePath))
+        {
+            juce::Logger::writeToLog("PluginManager: Partial match found: " + desc.fileOrIdentifier);
+            return loadPlugin(desc, sampleRate, blockSize);
+        }
+    }
+
+    // 3. Direct scan — try to load from the file path directly
+    juce::File pluginFile(filePath);
+    // Walk up to find the .vst3 bundle directory if we have an inner path
+    juce::File bundleFile = pluginFile;
+    while (bundleFile.getParentDirectory() != bundleFile &&
+           bundleFile.getFileExtension() != ".vst3")
+    {
+        bundleFile = bundleFile.getParentDirectory();
+    }
+
+    for (int i = 0; i < formatManager.getNumFormats(); ++i)
+    {
+        auto* format = formatManager.getFormat(i);
+        juce::String candidate = bundleFile.getFullPathName();
+        if (format->fileMightContainThisPluginType(candidate))
+        {
+            juce::OwnedArray<juce::PluginDescription> descriptions;
+            format->findAllTypesForFile(descriptions, candidate);
+            if (descriptions.size() > 0)
+            {
+                juce::Logger::writeToLog("PluginManager: Direct scan found: " + descriptions[0]->name);
+                knownPluginList.addType(*descriptions[0]);
+                return loadPlugin(*descriptions[0], sampleRate, blockSize);
+            }
+        }
+    }
+
+    juce::Logger::writeToLog("PluginManager: Plugin not found: " + filePath);
     return nullptr;
 }
 

@@ -67,6 +67,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
       error,
       className,
       placeholder,
+      title,
     },
     ref
   ) => {
@@ -104,6 +105,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           value={value !== undefined ? String(value) : ''}
           onChange={handleChange}
           disabled={disabled}
+          title={title}
           className={selectClasses}
         >
           {placeholder && (

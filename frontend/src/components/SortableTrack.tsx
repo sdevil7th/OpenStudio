@@ -6,9 +6,11 @@ import { Track } from "../store/useDAWStore";
 interface SortableTrackProps {
   track: Track;
   trackIndex: number;
+  isSelected?: boolean;
+  onSelect?: (e: React.MouseEvent) => void;
 }
 
-export function SortableTrack({ track, trackIndex }: SortableTrackProps) {
+export function SortableTrack({ track, trackIndex, isSelected, onSelect }: SortableTrackProps) {
   const {
     attributes,
     listeners,
@@ -75,7 +77,7 @@ export function SortableTrack({ track, trackIndex }: SortableTrackProps) {
         </div>
 
         <div className="flex-1 min-h-0">
-          <ChannelStrip track={track} trackIndex={trackIndex} />
+          <ChannelStrip track={track} trackIndex={trackIndex} isSelected={isSelected} onSelect={onSelect} />
         </div>
       </div>
     </div>

@@ -147,18 +147,15 @@ body {
 .workspace {
   flex: 1;
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   min-height: 0; /* Critical: allows flex item to shrink below content size */
   overflow-x: hidden;
   overflow-y: auto;
 }
 
 .track-control-panel {
-  width: 310px;
-  min-width: 310px;
   flex-shrink: 0;
   background: #1a1a1a;
-  border-right: 1px solid #0a0a0a;
   display: flex;
   flex-direction: column;
 }

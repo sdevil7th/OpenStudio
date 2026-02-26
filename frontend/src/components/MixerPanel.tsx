@@ -31,15 +31,23 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
     masterVolume,
     masterPan,
     masterLevel,
+    masterFxCount,
     toggleMixer,
     reorderTrack,
+    selectedTrackIds,
+    selectTrack,
+    deselectAllTracks,
   } = useDAWStore(useShallow((s) => ({
     tracks: s.tracks,
     masterVolume: s.masterVolume,
     masterPan: s.masterPan,
     masterLevel: s.masterLevel,
+    masterFxCount: s.masterFxCount,
     toggleMixer: s.toggleMixer,
     reorderTrack: s.reorderTrack,
+    selectedTrackIds: s.selectedTrackIds,
+    selectTrack: s.selectTrack,
+    deselectAllTracks: s.deselectAllTracks,
   })));
 
   const sensors = useSensors(
@@ -81,7 +89,8 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
     clips: [],
     midiClips: [],
     inputFxCount: 0,
-    trackFxCount: 0,
+    trackFxCount: masterFxCount,
+    fxBypassed: false,
     meterLevel: masterLevel,
     peakLevel: masterLevel,
     clipping: false,
@@ -110,8 +119,13 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
         </Button>
       </div>
 
-      {/* Channel Strips Container */}
-      <div className="relative flex-1 flex overflow-x-auto overflow-y-hidden bg-neutral-800 p-1 gap-1 pl-0">
+      {/* Channel Strips Container — click empty space to deselect */}
+      <div
+        className="relative flex-1 flex overflow-x-auto overflow-y-hidden bg-neutral-800 p-1 gap-1 pl-0"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) deselectAllTracks();
+        }}
+      >
         {/* Master Channel - Fixed position */}
         <ChannelStrip track={masterTrack} trackIndex={-1} isMaster={true} />
 
@@ -126,7 +140,13 @@ export function MixerPanel({ isVisible, onClose }: MixerPanelProps) {
             strategy={horizontalListSortingStrategy}
           >
             {tracks.map((track, index) => (
-              <SortableTrack key={track.id} track={track} trackIndex={index} />
+              <SortableTrack
+                key={track.id}
+                track={track}
+                trackIndex={index}
+                isSelected={selectedTrackIds.includes(track.id)}
+                onSelect={(e) => selectTrack(track.id, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey })}
+              />
             ))}
           </SortableContext>
         </DndContext>

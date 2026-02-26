@@ -231,7 +231,7 @@ export function TransportBar() {
             variant="danger"
             size="icon-lg"
             active={isRecording}
-            disabled={!hasArmedTracks && isPlaying}
+            disabled={!hasArmedTracks}
             onClick={handleRecord}
             title={hasArmedTracks ? "Play & Record" : "Arm a track to record"}
           >

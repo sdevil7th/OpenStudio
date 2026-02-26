@@ -113,8 +113,20 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         metronome.setBpm(tempo);
         metronome.setTimeSignature(timeSigNumerator, timeSigDenominator);
                                            
+        // Propagate this AudioEngine as the AudioPlayHead to all existing plugins
+        // so they receive tempo/position during processBlock.
+        for (const auto& id : trackOrder)
+        {
+            auto it = trackMap.find (id);
+            if (it != trackMap.end())
+                propagatePlayHead (it->second);
+        }
+        for (auto& node : masterFXNodes)
+            if (node && node->getProcessor())
+                node->getProcessor()->setPlayHead (this);
+
         // mainProcessorGraph->clear(); // COMMENTED OUT TO DEBUG - This wipes tracks!
-        
+
         // Add IO Nodes only if missing
         if (!audioInputNode) {
             logToDisk("Adding IO Nodes...");
@@ -693,8 +705,10 @@ bool AudioEngine::loadInstrument(const juce::String& trackId, const juce::String
     // Create a unique_ptr with the correct type
     std::unique_ptr<juce::AudioPluginInstance> instrumentPtr(pluginInstance);
     plugin.release(); // Release ownership from the AudioProcessor unique_ptr
-    
-    // Set the instrument on the track
+
+    // Provide tempo/position info to the instrument plugin
+    instrumentPtr->setPlayHead (this);
+
     // Set the instrument on the track
     trackMap[trackId]->setInstrument(std::move(instrumentPtr));
     trackMap[trackId]->setTrackType(TrackType::Instrument);
@@ -1174,7 +1188,7 @@ void AudioEngine::scanForPlugins()
 juce::var AudioEngine::getAvailablePlugins()
 {
     auto plugins = pluginManager.getAvailablePlugins();
-    
+
     juce::Array<juce::var> pluginList;
     for (const auto& plugin : plugins)
     {
@@ -1184,15 +1198,40 @@ juce::var AudioEngine::getAvailablePlugins()
         pluginObj->setProperty("category", plugin.category);
         pluginObj->setProperty("fileOrIdentifier", plugin.fileOrIdentifier);
         pluginObj->setProperty("isInstrument", plugin.isInstrument);
-        
+
+        // VST3 Snapshot lookup: check bundle for Contents/Resources/Snapshots/*.png
+        juce::File pluginPath(plugin.fileOrIdentifier);
+        if (pluginPath.isDirectory() && pluginPath.getFileExtension() == ".vst3")
+        {
+            juce::File snapshotsDir = pluginPath.getChildFile("Contents")
+                                                .getChildFile("Resources")
+                                                .getChildFile("Snapshots");
+            if (snapshotsDir.isDirectory())
+            {
+                juce::Array<juce::File> pngFiles;
+                snapshotsDir.findChildFiles(pngFiles, juce::File::findFiles, false, "*.png");
+                if (pngFiles.size() > 0)
+                {
+                    juce::MemoryBlock imageData;
+                    if (pngFiles[0].loadFileAsData(imageData))
+                    {
+                        juce::String base64 = juce::Base64::toBase64(imageData.getData(),
+                                                                      imageData.getSize());
+                        pluginObj->setProperty("snapshot",
+                            juce::String("data:image/png;base64,") + base64);
+                    }
+                }
+            }
+        }
+
         pluginList.add(juce::var(pluginObj));
     }
-    
+
     juce::Logger::writeToLog("AudioEngine: Returning " + juce::String(pluginList.size()) + " plugins");
     return pluginList;
 }
 
-bool AudioEngine::addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath)
+bool AudioEngine::addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath, bool openEditor)
 {
     // Load plugin BEFORE acquiring the lock (can take hundreds of ms).
     // Use actual device sample rate so the plugin initialises at the correct rate.
@@ -1206,6 +1245,9 @@ bool AudioEngine::addTrackInputFX(const juce::String& trackId, const juce::Strin
     auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
     if (!plugin)
         return false;
+
+    // Provide tempo/position info to the plugin
+    plugin->setPlayHead (this);
 
     bool success = false;
     int fxIndex = -1;
@@ -1224,13 +1266,14 @@ bool AudioEngine::addTrackInputFX(const juce::String& trackId, const juce::Strin
 
     if (success && fxIndex >= 0)
     {
-        openPluginEditor(trackId, fxIndex, true);
-        juce::Logger::writeToLog("AudioEngine: Added input FX and opened editor");
+        if (openEditor)
+            openPluginEditor(trackId, fxIndex, true);
+        juce::Logger::writeToLog("AudioEngine: Added input FX" + juce::String(openEditor ? " and opened editor" : ""));
     }
     return success;
 }
 
-bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pluginPath)
+bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pluginPath, bool openEditor)
 {
     // Load plugin BEFORE acquiring the lock (can take hundreds of ms).
     // Use actual device sample rate so the plugin initialises at the correct rate.
@@ -1253,6 +1296,9 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
               " pluginSr=" + juce::String(plugin->getSampleRate()) +
               " pluginBs=" + juce::String(plugin->getBlockSize()));
 
+    // Provide tempo/position info to the plugin
+    plugin->setPlayHead (this);
+
     bool success = false;
     int fxIndex = -1;
     {
@@ -1270,8 +1316,9 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
 
     if (success && fxIndex >= 0)
     {
-        openPluginEditor(trackId, fxIndex, false);
-        juce::Logger::writeToLog("AudioEngine: Added track FX and opened editor");
+        if (openEditor)
+            openPluginEditor(trackId, fxIndex, false);
+        juce::Logger::writeToLog("AudioEngine: Added track FX" + juce::String(openEditor ? " and opened editor" : ""));
     }
     return success;
 }
@@ -1314,6 +1361,24 @@ void AudioEngine::openPluginEditor(const juce::String& trackId, int fxIndex, boo
     if (processor)
     {
         pluginWindowManager.openEditor(processor, windowTitle);
+    }
+}
+
+void AudioEngine::openInstrumentEditor(const juce::String& trackId)
+{
+    if (trackMap.find(trackId) == trackMap.end())
+        return;
+
+    auto* track = trackMap[trackId];
+    if (!track)
+        return;
+
+    auto* instrument = track->getInstrument();
+    if (instrument)
+    {
+        int displayIndex = getTrackIndex(trackId) + 1;
+        juce::String windowTitle = "Track " + juce::String(displayIndex) + " - " + instrument->getName();
+        pluginWindowManager.openEditor(instrument, windowTitle);
     }
 }
 
@@ -1510,6 +1575,9 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
         return false;
     }
 
+    // Provide tempo/position info to the plugin
+    plugin->setPlayHead (this);
+
     // Plugin was already created at the correct rate by loadPluginFromFile,
     // but re-prepare in case the device has changed since then.
     // Clamp max-block-size to at least 512 (same rationale as track FX).
@@ -1519,7 +1587,7 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
         plugin->prepareToPlay(device->getCurrentSampleRate(),
                               juce::jmax(device->getCurrentBufferSizeSamples(), 512));
     }
-    
+
     // Add to master FX chain graph
     auto node = masterFXChain->addNode(std::move(plugin));
     if (node != nullptr)
@@ -1534,6 +1602,56 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
     
     juce::Logger::writeToLog("AudioEngine: Failed to add node to master FX chain");
     return false;
+}
+
+juce::var AudioEngine::getMasterFX()
+{
+    juce::Array<juce::var> fxList;
+    for (int i = 0; i < static_cast<int>(masterFXNodes.size()); ++i)
+    {
+        auto& node = masterFXNodes[i];
+        if (node && node->getProcessor())
+        {
+            juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
+            fxInfo->setProperty("index", i);
+            fxInfo->setProperty("name", node->getProcessor()->getName());
+            // Include plugin file path for save/restore
+            if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(node->getProcessor()))
+            {
+                auto desc = pluginInstance->getPluginDescription();
+                fxInfo->setProperty("pluginPath", desc.fileOrIdentifier);
+            }
+            fxList.add(juce::var(fxInfo.get()));
+        }
+    }
+    return fxList;
+}
+
+void AudioEngine::removeMasterFX(int fxIndex)
+{
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    if (fxIndex >= 0 && fxIndex < static_cast<int>(masterFXNodes.size()))
+    {
+        auto node = masterFXNodes[fxIndex];
+        masterFXNodes.erase(masterFXNodes.begin() + fxIndex);
+        if (node)
+            masterFXChain->removeNode(node.get());
+        juce::Logger::writeToLog("AudioEngine: Removed master FX " + juce::String(fxIndex));
+    }
+}
+
+void AudioEngine::openMasterFXEditor(int fxIndex)
+{
+    if (fxIndex >= 0 && fxIndex < static_cast<int>(masterFXNodes.size()))
+    {
+        auto& node = masterFXNodes[fxIndex];
+        if (node && node->getProcessor())
+        {
+            auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(node->getProcessor());
+            if (pluginInstance)
+                pluginWindowManager.openEditor(pluginInstance, pluginInstance->getName());
+        }
+    }
 }
 
 void AudioEngine::setMasterVolume(float volume)
@@ -1583,15 +1701,13 @@ std::vector<AudioRecorder::CompletedRecording> AudioEngine::getLastCompletedClip
 
 // Playback Clip Management
 
-void AudioEngine::addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration)
+void AudioEngine::addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration,
+                                   double offset, double volumeDB, double fadeIn, double fadeOut)
 {
     juce::File audioFile(filePath);
-    // Assuming PlaybackEngine updated to take String ID
-    // For now, if PlaybackEngine uses int, we might need a map or conversion.
-    // BUT we must adhere to interface. 
-    // Let's assume we will update PlaybackEngine too.
-    playbackEngine.addClip(audioFile, startTime, duration, trackId);
-    juce::Logger::writeToLog("AudioEngine: Added playback clip to track " + trackId);
+    playbackEngine.addClip(audioFile, startTime, duration, trackId, offset, volumeDB, fadeIn, fadeOut);
+    juce::Logger::writeToLog("AudioEngine: Added playback clip to track " + trackId +
+                           " (offset=" + juce::String(offset) + "s, vol=" + juce::String(volumeDB) + "dB)");
 }
 
 void AudioEngine::removePlaybackClip(const juce::String& trackId, const juce::String& filePath)
@@ -1681,6 +1797,57 @@ void AudioEngine::getTimeSignature(int& numerator, int& denominator) const
 {
     numerator = timeSigNumerator;
     denominator = timeSigDenominator;
+}
+
+//==============================================================================
+// AudioPlayHead — provides tempo/position info to hosted VST3 plugins
+
+juce::Optional<juce::AudioPlayHead::PositionInfo> AudioEngine::getPosition() const
+{
+    PositionInfo info;
+
+    info.setBpm (tempo);
+
+    juce::AudioPlayHead::TimeSignature timeSig;
+    timeSig.numerator   = timeSigNumerator;
+    timeSig.denominator = timeSigDenominator;
+    info.setTimeSignature (timeSig);
+    info.setIsPlaying (isPlaying.load());
+    info.setIsRecording (isRecordMode.load());
+    info.setIsLooping (isLooping);
+
+    double timeInSeconds = (currentSampleRate > 0)
+                           ? currentSamplePosition / currentSampleRate
+                           : 0.0;
+    info.setTimeInSamples (static_cast<juce::int64> (currentSamplePosition));
+    info.setTimeInSeconds (timeInSeconds);
+
+    // PPQ = position in quarter notes = seconds * (BPM / 60)
+    double ppqPosition = timeInSeconds * (tempo / 60.0);
+    info.setPpqPosition (ppqPosition);
+
+    // Bar start in PPQ: quarter notes per bar depends on time signature
+    double quarterNotesPerBar = timeSigNumerator * (4.0 / timeSigDenominator);
+    if (quarterNotesPerBar > 0.0)
+        info.setPpqPositionOfLastBarStart (std::floor (ppqPosition / quarterNotesPerBar) * quarterNotesPerBar);
+
+    return info;
+}
+
+void AudioEngine::propagatePlayHead (TrackProcessor* track)
+{
+    if (!track) return;
+
+    for (int i = 0; i < track->getNumInputFX(); ++i)
+        if (auto* proc = track->getInputFXProcessor (i))
+            proc->setPlayHead (this);
+
+    for (int i = 0; i < track->getNumTrackFX(); ++i)
+        if (auto* proc = track->getTrackFXProcessor (i))
+            proc->setPlayHead (this);
+
+    if (auto* inst = track->getInstrument())
+        inst->setPlayHead (this);
 }
 
 // Custom metronome sounds (Phase 9C)

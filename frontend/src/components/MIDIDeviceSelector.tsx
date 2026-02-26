@@ -23,8 +23,8 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
     try {
       const devices = await nativeBridge.getMIDIInputDevices();
       const open = await nativeBridge.getOpenMIDIDevices();
-      setAvailableDevices(devices);
-      setOpenDevices(open);
+      setAvailableDevices(Array.isArray(devices) ? devices : []);
+      setOpenDevices(Array.isArray(open) ? open : []);
     } catch (error) {
       console.error("Failed to load MIDI devices:", error);
     }

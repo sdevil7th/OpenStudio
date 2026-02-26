@@ -1,15 +1,28 @@
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { X, GripVertical } from "lucide-react";
+import {
+  X,
+  GripVertical,
+  Waves,
+  Timer,
+  SlidersHorizontal,
+  Gauge,
+  Zap,
+  Activity,
+  AudioWaveform,
+  Music,
+  Box,
+} from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 import { Button, Input, Select } from "./ui";
 import "./FXChainPanel.css";
 
 interface FXChainPanelProps {
   trackId: string;
   trackName: string;
-  chainType: "input" | "track";
+  chainType: "input" | "track" | "master";
   onClose: () => void;
 }
 
@@ -24,6 +37,38 @@ interface Plugin {
   category: string;
   fileOrIdentifier: string;
   isInstrument: boolean;
+  snapshot?: string;
+}
+
+// Map VST3 category substrings to Lucide icons and colors
+const CATEGORY_ICON_MAP: Array<{
+  match: string;
+  Icon: React.ComponentType<{ size?: number }>;
+  color: string;
+}> = [
+  { match: "Reverb", Icon: Waves, color: "#3b82f6" },
+  { match: "Delay", Icon: Timer, color: "#8b5cf6" },
+  { match: "EQ", Icon: SlidersHorizontal, color: "#22c55e" },
+  { match: "Dynamics", Icon: Gauge, color: "#f59e0b" },
+  { match: "Compressor", Icon: Gauge, color: "#f59e0b" },
+  { match: "Limiter", Icon: Gauge, color: "#f59e0b" },
+  { match: "Distortion", Icon: Zap, color: "#ef4444" },
+  { match: "Modulation", Icon: Activity, color: "#06b6d4" },
+  { match: "Chorus", Icon: Activity, color: "#06b6d4" },
+  { match: "Flanger", Icon: Activity, color: "#06b6d4" },
+  { match: "Phaser", Icon: Activity, color: "#06b6d4" },
+  { match: "Synth", Icon: AudioWaveform, color: "#a855f7" },
+  { match: "Instrument", Icon: Music, color: "#ec4899" },
+];
+
+function getCategoryIcon(category: string) {
+  const lowerCat = category.toLowerCase();
+  for (const entry of CATEGORY_ICON_MAP) {
+    if (lowerCat.includes(entry.match.toLowerCase())) {
+      return entry;
+    }
+  }
+  return { match: "Other", Icon: Box, color: "#6b7280" };
 }
 
 export function FXChainPanel({
@@ -32,7 +77,13 @@ export function FXChainPanel({
   chainType,
   onClose,
 }: FXChainPanelProps) {
-  const updateTrack = useDAWStore((s) => s.updateTrack);
+  const { updateTrack, addTrackFXWithUndo, removeTrackFXWithUndo } = useDAWStore(
+    useShallow((s) => ({
+      updateTrack: s.updateTrack,
+      addTrackFXWithUndo: s.addTrackFXWithUndo,
+      removeTrackFXWithUndo: s.removeTrackFXWithUndo,
+    }))
+  );
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
@@ -67,12 +118,18 @@ export function FXChainPanel({
     setLoading(true);
     try {
       const plugins =
-        chainType === "input"
-          ? await nativeBridge.getTrackInputFX(trackId)
-          : await nativeBridge.getTrackFX(trackId);
+        chainType === "master"
+          ? await nativeBridge.getMasterFX()
+          : chainType === "input"
+            ? await nativeBridge.getTrackInputFX(trackId)
+            : await nativeBridge.getTrackFX(trackId);
       setFxSlots(plugins);
       // Update store FX counts
-      updateFxCounts();
+      if (chainType === "master") {
+        useDAWStore.setState({ masterFxCount: plugins.length });
+      } else {
+        updateFxCounts();
+      }
     } catch (e) {
       console.error("[FXChain] Failed to load plugins:", e);
     } finally {
@@ -107,10 +164,12 @@ export function FXChainPanel({
   const handleAddPlugin = async (plugin: Plugin) => {
     setAddingPlugin(plugin.fileOrIdentifier);
     try {
-      const success =
-        chainType === "input"
-          ? await nativeBridge.addTrackInputFX(trackId, plugin.fileOrIdentifier)
-          : await nativeBridge.addTrackFX(trackId, plugin.fileOrIdentifier);
+      let success = false;
+      if (chainType === "master") {
+        success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
+      } else if (chainType === "input" || chainType === "track") {
+        success = await addTrackFXWithUndo(trackId, plugin.fileOrIdentifier, chainType);
+      }
 
       if (success) {
         console.log(`[FXChain] Added ${plugin.name} to ${chainType} chain`);
@@ -125,8 +184,11 @@ export function FXChainPanel({
 
   const handleOpenEditor = async (fxIndex: number) => {
     try {
-      const isInputFX = chainType === "input";
-      await nativeBridge.openPluginEditor(trackId, fxIndex, isInputFX);
+      if (chainType === "master") {
+        await nativeBridge.openMasterFXEditor(fxIndex);
+      } else {
+        await nativeBridge.openPluginEditor(trackId, fxIndex, chainType === "input");
+      }
       console.log(
         `[FXChain] Opened editor for ${chainType} FX ${fxIndex} on track ${trackId}`,
       );
@@ -137,10 +199,13 @@ export function FXChainPanel({
 
   const handleRemove = async (fxIndex: number) => {
     try {
-      const success =
-        chainType === "input"
-          ? await nativeBridge.removeTrackInputFX(trackId, fxIndex)
-          : await nativeBridge.removeTrackFX(trackId, fxIndex);
+      let success = false;
+      if (chainType === "master") {
+        await nativeBridge.removeMasterFX(fxIndex);
+        success = true;
+      } else if (chainType === "input" || chainType === "track") {
+        success = await removeTrackFXWithUndo(trackId, fxIndex, chainType);
+      }
 
       if (success) {
         console.log(`[FXChain] Removed ${chainType} FX ${fxIndex}`);
@@ -167,14 +232,15 @@ export function FXChainPanel({
     }
 
     try {
-      const success =
-        chainType === "input"
-          ? await nativeBridge.reorderTrackInputFX(
-              trackId,
-              draggedIndex,
-              dropIndex,
-            )
-          : await nativeBridge.reorderTrackFX(trackId, draggedIndex, dropIndex);
+      let success = false;
+      if (chainType === "master") {
+        // Master FX reorder not yet supported
+        success = false;
+      } else if (chainType === "input") {
+        success = await nativeBridge.reorderTrackInputFX(trackId, draggedIndex, dropIndex);
+      } else {
+        success = await nativeBridge.reorderTrackFX(trackId, draggedIndex, dropIndex);
+      }
 
       if (success) {
         console.log(
@@ -194,9 +260,11 @@ export function FXChainPanel({
     ...Array.from(new Set(plugins.map((p) => p.category))),
   ];
   const filteredPlugins = plugins.filter((p) => {
+    const term = searchTerm.toLowerCase();
     const matchesSearch =
-      p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.manufacturer.toLowerCase().includes(searchTerm.toLowerCase());
+      p.name.toLowerCase().includes(term) ||
+      p.manufacturer.toLowerCase().includes(term) ||
+      p.category.toLowerCase().includes(term);
     const matchesCategory =
       categoryFilter === "All" || p.category === categoryFilter;
     return matchesSearch && matchesCategory;
@@ -210,7 +278,7 @@ export function FXChainPanel({
       >
         <div className="fx-chain-header">
           <h3>
-            {chainType === "input" ? "Input FX Chain" : "Track FX Chain"} -{" "}
+            {chainType === "master" ? "Master FX Chain" : chainType === "input" ? "Input FX Chain" : "Track FX Chain"} -{" "}
             {trackName}
           </h3>
           <Button variant="ghost" size="icon-sm" onClick={onClose}>
@@ -289,7 +357,7 @@ export function FXChainPanel({
                 type="text"
                 variant="default"
                 size="md"
-                placeholder="Search plugins..."
+                placeholder="Search by name, manufacturer, or category..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="flex-1"
@@ -323,32 +391,50 @@ export function FXChainPanel({
                   No plugins found. Click "Scan" to search your system.
                 </div>
               ) : (
-                filteredPlugins.map((plugin, idx) => (
-                  <div
-                    key={idx}
-                    className="flex justify-between items-center p-3 bg-neutral-800 border border-neutral-700 rounded mb-2 hover:border-blue-500 transition-colors"
-                  >
-                    <div className="flex-1">
-                      <div className="font-semibold text-white mb-1">
-                        {plugin.name}
-                      </div>
-                      <div className="text-xs text-neutral-400">
-                        {plugin.manufacturer}
-                      </div>
-                      <div className="text-[11px] text-neutral-500 mt-0.5">
-                        {plugin.category}
-                      </div>
-                    </div>
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => handleAddPlugin(plugin)}
-                      disabled={addingPlugin !== null}
+                filteredPlugins.map((plugin, idx) => {
+                  const { Icon, color } = getCategoryIcon(plugin.category);
+                  return (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 p-2 bg-neutral-800 border border-neutral-700 rounded mb-2 hover:border-blue-500 transition-colors"
                     >
-                      {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
-                    </Button>
-                  </div>
-                ))
+                      {/* Snapshot or category icon */}
+                      {plugin.snapshot ? (
+                        <img
+                          src={plugin.snapshot}
+                          alt={plugin.name}
+                          className="w-8 h-8 rounded object-cover shrink-0"
+                        />
+                      ) : (
+                        <div
+                          className="w-8 h-8 rounded flex items-center justify-center shrink-0"
+                          style={{ backgroundColor: color + "20", border: `1px solid ${color}40` }}
+                        >
+                          <Icon size={16} />
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-white text-sm truncate">
+                          {plugin.name}
+                        </div>
+                        <div className="text-[10px] text-neutral-400">
+                          {plugin.manufacturer}
+                        </div>
+                        <div className="text-[9px] text-neutral-500">
+                          {plugin.category}
+                        </div>
+                      </div>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => handleAddPlugin(plugin)}
+                        disabled={addingPlugin !== null}
+                      >
+                        {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
+                      </Button>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>

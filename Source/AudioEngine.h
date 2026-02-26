@@ -14,7 +14,8 @@
 #include <memory>
 // ... (skip lines) ...
 
-class AudioEngine  : public juce::AudioIODeviceCallback
+class AudioEngine  : public juce::AudioIODeviceCallback,
+                     public juce::AudioPlayHead
 {
 public:
     AudioEngine();
@@ -92,7 +93,8 @@ public:
     std::function<void(const juce::String& filePath)> onPeaksReady;
     
     // Playback clip management - ID-based
-    void addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration);
+    void addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration,
+                         double offset = 0.0, double volumeDB = 0.0, double fadeIn = 0.0, double fadeOut = 0.0);
     void removePlaybackClip(const juce::String& trackId, const juce::String& filePath);
     void clearPlaybackClips();
     void clearTrackPlaybackClips(const juce::String& trackId);
@@ -100,11 +102,12 @@ public:
     // FX Management (Phase 3) - ID-based
     void scanForPlugins();
     juce::var getAvailablePlugins();
-    bool addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath);
-    bool addTrackFX(const juce::String& trackId, const juce::String& pluginPath);
+    bool addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath, bool openEditor = true);
+    bool addTrackFX(const juce::String& trackId, const juce::String& pluginPath, bool openEditor = true);
     
     // Plugin Editor Windows (Phase 3) - ID-based
     void openPluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
+    void openInstrumentEditor(const juce::String& trackId);
     void closePluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
     
     // MIDI Device Management (Phase 2)
@@ -130,6 +133,9 @@ public:
     
     // Master \u0026 Monitoring (Phase 4)
     bool addMasterFX(const juce::String& pluginPath);
+    juce::var getMasterFX();
+    void removeMasterFX(int fxIndex);
+    void openMasterFXEditor(int fxIndex);
     bool addMonitoringFX(const juce::String& pluginPath);
     void setMasterVolume(float volume);
     float getMasterVolume() const { return masterVolume; }
@@ -175,7 +181,12 @@ public:
     // Audio Analysis (Phase 9)
     AudioAnalyzer& getAudioAnalyzer() { return audioAnalyzer; }
 
+    // AudioPlayHead — provides tempo/position to hosted VST3 plugins
+    juce::Optional<juce::AudioPlayHead::PositionInfo> getPosition() const override;
+
 private:
+    // Set this AudioEngine as the AudioPlayHead on all plugins in a track
+    void propagatePlayHead(TrackProcessor* track);
     // FFmpeg helpers for lossy encoding and sample rate conversion
     juce::File findFFmpegExe() const;
     bool convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,

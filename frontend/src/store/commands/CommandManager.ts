@@ -40,6 +40,14 @@ export class CommandManager {
    */
   execute(command: Command): void {
     command.execute();
+    this.push(command);
+  }
+
+  /**
+   * Add a command to the undo stack without executing it.
+   * Use when the action has already been performed and you only need undo tracking.
+   */
+  push(command: Command): void {
     this.undoStack.push(command);
 
     // Clear redo stack when new command is executed

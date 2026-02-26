@@ -78,6 +78,7 @@ export function Timeline({ tracks }: TimelineProps) {
     type: "move" | "resize-left" | "resize-right" | null;
     clipId: string | null;
     trackIndex: number | null;
+    targetTrackIndex: number | null; // Visual target track during cross-track drag
     startX: number;
     startTime: number;
     originalStartTime: number;
@@ -89,6 +90,7 @@ export function Timeline({ tracks }: TimelineProps) {
     type: null,
     clipId: null,
     trackIndex: null,
+    targetTrackIndex: null,
     startX: 0,
     startTime: 0,
     originalStartTime: 0,
@@ -105,6 +107,7 @@ export function Timeline({ tracks }: TimelineProps) {
       type: null,
       clipId: null,
       trackIndex: null,
+      targetTrackIndex: null,
       startX: 0,
       startTime: 0,
       originalStartTime: 0,
@@ -184,6 +187,8 @@ export function Timeline({ tracks }: TimelineProps) {
     moveClipToTrack,
     resizeClip,
     setClipVolume,
+    beginClipVolumeEdit,
+    commitClipVolumeEdit,
     setClipFades,
     copyClip,
     cutClip,
@@ -226,6 +231,8 @@ export function Timeline({ tracks }: TimelineProps) {
       moveClipToTrack: state.moveClipToTrack,
       resizeClip: state.resizeClip,
       setClipVolume: state.setClipVolume,
+      beginClipVolumeEdit: state.beginClipVolumeEdit,
+      commitClipVolumeEdit: state.commitClipVolumeEdit,
       setClipFades: state.setClipFades,
       copyClip: state.copyClip,
       cutClip: state.cutClip,
@@ -300,7 +307,7 @@ export function Timeline({ tracks }: TimelineProps) {
       // Calculate directly from parent - don't rely on container.clientWidth
       // which may not have shrunk yet due to CSS layout timing
       const workspaceWidth = parent.clientWidth;
-      const tcpWidth = 310; // Track control panel fixed width from CSS
+      const tcpWidth = useDAWStore.getState().tcpWidth + 4; // +4 for resize handle
       return Math.max(100, workspaceWidth - tcpWidth);
     };
 
@@ -347,6 +354,27 @@ export function Timeline({ tracks }: TimelineProps) {
       window.removeEventListener("resize", handleResize);
       if (resizeTimeout) clearTimeout(resizeTimeout);
     };
+  }, []);
+
+  // Re-measure when TCP width changes (draggable divider)
+  useEffect(() => {
+    let prevTcpWidth = useDAWStore.getState().tcpWidth;
+    const unsub = useDAWStore.subscribe((state) => {
+      if (state.tcpWidth === prevTcpWidth) return;
+      prevTcpWidth = state.tcpWidth;
+      const container = containerRef.current;
+      if (!container) return;
+      const parent = container.parentElement;
+      if (!parent) return;
+      const workspaceWidth = parent.clientWidth;
+      const newWidth = Math.max(100, workspaceWidth - state.tcpWidth - 4);
+      const newHeight = parent.clientHeight;
+      setDimensions((prev) => {
+        if (prev.width === newWidth && prev.height === newHeight) return prev;
+        return { width: newWidth, height: newHeight };
+      });
+    });
+    return unsub;
   }, []);
 
   // Handle scroll wheel for zoom with native listener to prevent browser zoom
@@ -489,8 +517,7 @@ export function Timeline({ tracks }: TimelineProps) {
         e.stopPropagation();
         const curHeight = pendingTrackHeightRef.current ?? trackHeightRef.current;
         const delta = e.deltaY > 0 ? 0.9 : 1.1;
-        const newHeight = Math.max(80, Math.min(500, curHeight * delta));
-        scheduleTrackHeight(newHeight);
+        scheduleTrackHeight(curHeight * delta);
       } else if (e.shiftKey) {
         // Horizontal scroll with Shift + Mouse Wheel
         e.preventDefault();
@@ -766,6 +793,15 @@ export function Timeline({ tracks }: TimelineProps) {
       const pps = pixelsPerSecondRef.current;
       const playheadX = currentTime * pps;
       const viewWidth = dimensions.width;
+
+      // If playhead jumped behind viewport (e.g. loop wrap), scroll back to show it
+      if (playheadX < lastAutoScrollX) {
+        const targetScrollX = Math.max(0, playheadX - 100);
+        lastAutoScrollX = targetScrollX;
+        scheduleScroll(targetScrollX, scrollYRef.current);
+        return;
+      }
+
       const triggerPoint = lastAutoScrollX + viewWidth * 0.75;
 
       // If playhead goes past 75% of viewport, scroll to keep it there
@@ -1088,6 +1124,17 @@ export function Timeline({ tracks }: TimelineProps) {
     const isSelected = selectedClipIds.includes(clip.id);
     const isCut = clipboard.isCut && clipboard.clip?.id === clip.id; // Check if this clip is cut
 
+    // During cross-track drag, visually offset clip to target track position
+    // (actual move deferred to drag end to prevent Konva node unmount)
+    if (
+      dragState.type === "move" &&
+      dragState.clipId === clip.id &&
+      dragState.targetTrackIndex != null &&
+      dragState.targetTrackIndex !== trackIndex
+    ) {
+      trackY = dragState.targetTrackIndex * trackHeight;
+    }
+
     // Skip if clip is outside visible area
     if (x + width < 0 || x > dimensions.width) return null;
 
@@ -1150,8 +1197,19 @@ export function Timeline({ tracks }: TimelineProps) {
           const channelData = waveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
 
+          // Per-pixel fade attenuation
+          const timeInClip = i / pixelsPerSecond;
+          let fadeMult = 1;
+          if (clip.fadeIn > 0 && timeInClip < clip.fadeIn) {
+            fadeMult *= timeInClip / clip.fadeIn;
+          }
+          if (clip.fadeOut > 0 && timeInClip > clip.duration - clip.fadeOut) {
+            fadeMult *= (clip.duration - timeInClip) / clip.fadeOut;
+          }
+          const pixelGain = gainFactor * fadeMult;
+
           const px = x + i;
-          const scaledMax = Math.max(-1, Math.min(1, channelData.max * gainFactor));
+          const scaledMax = Math.max(-1, Math.min(1, channelData.max * pixelGain));
           const py = centerY - scaledMax * halfHeight;
           points.push(px, py);
         }
@@ -1162,8 +1220,19 @@ export function Timeline({ tracks }: TimelineProps) {
           const channelData = waveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
 
+          // Per-pixel fade attenuation
+          const timeInClip = i / pixelsPerSecond;
+          let fadeMult = 1;
+          if (clip.fadeIn > 0 && timeInClip < clip.fadeIn) {
+            fadeMult *= timeInClip / clip.fadeIn;
+          }
+          if (clip.fadeOut > 0 && timeInClip > clip.duration - clip.fadeOut) {
+            fadeMult *= (clip.duration - timeInClip) / clip.fadeOut;
+          }
+          const pixelGain = gainFactor * fadeMult;
+
           const px = x + i;
-          const scaledMin = Math.max(-1, Math.min(1, channelData.min * gainFactor));
+          const scaledMin = Math.max(-1, Math.min(1, channelData.min * pixelGain));
           const py = centerY - scaledMin * halfHeight;
           points.push(px, py);
         }
@@ -1212,6 +1281,7 @@ export function Timeline({ tracks }: TimelineProps) {
         type: "move",
         clipId: clip.id,
         trackIndex,
+        targetTrackIndex: trackIndex,
         startX: pointerPos.x,
         startTime: (pointerPos.x + scrollX) / pixelsPerSecond,
         originalStartTime: clip.startTime,
@@ -1238,31 +1308,32 @@ export function Timeline({ tracks }: TimelineProps) {
       }
 
       // Calculate target track based on Y position
-      const targetTrackIndex = Math.floor(pointerPos.y / trackHeight);
+      const targetTrackIdx = Math.floor(pointerPos.y / trackHeight);
 
       // Check if dragging below all existing tracks (to empty space)
-      if (targetTrackIndex >= tracks.length) {
+      if (targetTrackIdx >= tracks.length) {
         // Show ghost track at bottom
         setShowGhostTrack(true);
-        // Update time position only, keep on current track for now
+        // Update time position only on current track, store target visually
         if (newStartTime !== clip.startTime) {
           moveClipToTrack(clip.id, tracks[trackIndex].id, newStartTime);
         }
+        setDragState(prev => ({ ...prev, targetTrackIndex: targetTrackIdx }));
       } else {
         // Normal drag within existing tracks
         setShowGhostTrack(false);
         const clampedTrackIndex = Math.max(
           0,
-          Math.min(tracks.length - 1, targetTrackIndex),
+          Math.min(tracks.length - 1, targetTrackIdx),
         );
 
-        // Update clip position
-        if (
-          clampedTrackIndex !== trackIndex ||
-          newStartTime !== clip.startTime
-        ) {
-          const targetTrackId = tracks[clampedTrackIndex].id;
-          moveClipToTrack(clip.id, targetTrackId, newStartTime);
+        // Update time position on current track (don't move cross-track during drag)
+        if (newStartTime !== clip.startTime) {
+          moveClipToTrack(clip.id, tracks[trackIndex].id, newStartTime);
+        }
+        // Store visual target track — actual move happens on drag end
+        if (clampedTrackIndex !== dragState.targetTrackIndex) {
+          setDragState(prev => ({ ...prev, targetTrackIndex: clampedTrackIndex }));
         }
       }
     };
@@ -1293,6 +1364,14 @@ export function Timeline({ tracks }: TimelineProps) {
         } catch (error) {
           console.error("[Timeline] Failed to create track from drag:", error);
         }
+      } else if (
+        dragState.targetTrackIndex != null &&
+        dragState.targetTrackIndex !== trackIndex &&
+        dragState.targetTrackIndex < tracks.length
+      ) {
+        // Finalize cross-track move (deferred from drag to prevent unmount)
+        const targetTrackId = tracks[dragState.targetTrackIndex].id;
+        await moveClipToTrack(clip.id, targetTrackId, clip.startTime);
       }
 
       // Sync backend with current frontend clip state after drag completes.
@@ -1369,6 +1448,7 @@ export function Timeline({ tracks }: TimelineProps) {
         type: dragType,
         clipId: clip.id,
         trackIndex,
+        targetTrackIndex: trackIndex,
         startX: pointerPos.x,
         startTime: (pointerPos.x + scrollX) / pixelsPerSecond,
         originalStartTime: clip.startTime,
@@ -1466,12 +1546,39 @@ export function Timeline({ tracks }: TimelineProps) {
           width={width}
           height={trackHeight - 10}
           fill={clip.color || trackColor}
-          opacity={clip.muted ? 0.1 : isCut ? 0.15 : 0.3}
+          opacity={clip.muted ? 0.1 : isCut ? 0.1 : 0.15}
           cornerRadius={3}
           listening={false}
         />
         {/* Waveform visualization */}
         {!clip.muted && waveformShapes}
+        {/* Fade envelope overlays — always visible */}
+        {clip.fadeIn > 0 && (
+          <Line
+            points={[
+              x, trackY + 5,
+              x + clip.fadeIn * pixelsPerSecond, trackY + 5,
+              x, trackY + trackHeight - 5,
+            ]}
+            fill="#000000"
+            opacity={0.25}
+            closed
+            listening={false}
+          />
+        )}
+        {clip.fadeOut > 0 && (
+          <Line
+            points={[
+              x + width, trackY + 5,
+              x + width - clip.fadeOut * pixelsPerSecond, trackY + 5,
+              x + width, trackY + trackHeight - 5,
+            ]}
+            fill="#000000"
+            opacity={0.25}
+            closed
+            listening={false}
+          />
+        )}
         {/* Muted clip diagonal stripes overlay */}
         {clip.muted && (
           <Group listening={false} opacity={0.15}>
@@ -1531,6 +1638,7 @@ export function Timeline({ tracks }: TimelineProps) {
             const handleVolumeMouseDown = (e: any) => {
               e.cancelBubble = true; // Prevent clip drag
               e.evt?.stopPropagation?.(); // Also stop native event
+              beginClipVolumeEdit(clip.id); // Capture starting value for undo
             };
 
             const handleVolumeDrag = (e: any) => {
@@ -1546,10 +1654,12 @@ export function Timeline({ tracks }: TimelineProps) {
 
             const handleVolumeDragEnd = (e: any) => {
               e.cancelBubble = true; // Prevent bubbling
+              commitClipVolumeEdit(clip.id); // Create undo command for the full drag
             };
 
             return (
               <>
+                {/* Visible volume line */}
                 <Line
                   points={[x, volumeY, x + width, volumeY]}
                   stroke="#ffaa00"
@@ -1557,13 +1667,13 @@ export function Timeline({ tracks }: TimelineProps) {
                   opacity={0.8}
                   listening={false}
                 />
-                <Circle
-                  x={x + width / 2}
-                  y={volumeY}
-                  radius={4}
-                  fill="#ffaa00"
-                  stroke="#fff"
-                  strokeWidth={1}
+                {/* Invisible wider hit area for dragging the volume line */}
+                <Rect
+                  x={x}
+                  y={volumeY - 6}
+                  width={width}
+                  height={12}
+                  fill="transparent"
                   draggable
                   onMouseDown={handleVolumeMouseDown}
                   onDragStart={(e: any) => {
@@ -1572,16 +1682,17 @@ export function Timeline({ tracks }: TimelineProps) {
                   onDragMove={handleVolumeDrag}
                   onDragEnd={handleVolumeDragEnd}
                   dragBoundFunc={(pos: any) => ({
-                    x: pos.x,
+                    x: x, // Lock horizontal position
                     y: Math.max(
                       trackY + 5,
                       Math.min(trackY + trackHeight - 5, pos.y),
                     ),
                   })}
+                  style={{ cursor: "ns-resize" }}
                 />
                 <Text
-                  x={x + width / 2 + 8}
-                  y={volumeY - 6}
+                  x={x + 5}
+                  y={volumeY - 14}
                   text={`${clip.volumeDB.toFixed(1)} dB`}
                   fontSize={9}
                   fill="#ffaa00"
@@ -1628,40 +1739,6 @@ export function Timeline({ tracks }: TimelineProps) {
 
             return (
               <>
-                {/* Fade in triangle overlay */}
-                {clip.fadeIn > 0 && (
-                  <Line
-                    points={[
-                      x,
-                      trackY + 5,
-                      x + fadeInWidth,
-                      trackY + 5,
-                      x,
-                      trackY + trackHeight - 5,
-                    ]}
-                    fill="#ffffff"
-                    opacity={0.15}
-                    closed
-                    listening={false}
-                  />
-                )}
-                {/* Fade out triangle overlay */}
-                {clip.fadeOut > 0 && (
-                  <Line
-                    points={[
-                      x + width,
-                      trackY + 5,
-                      x + width - fadeOutWidth,
-                      trackY + 5,
-                      x + width,
-                      trackY + trackHeight - 5,
-                    ]}
-                    fill="#ffffff"
-                    opacity={0.15}
-                    closed
-                    listening={false}
-                  />
-                )}
                 {/* Fade in handle - circle at fade position */}
                 <Circle
                   x={x + fadeInWidth}
@@ -2370,22 +2447,7 @@ export function Timeline({ tracks }: TimelineProps) {
             fill="#121212"
           />
 
-          {/* Grid Lines */}
-          {gridLines}
-
-          {/* Snap Grid Lines */}
-          {renderSnapGridLines()}
-
-          {/* Loop Region */}
-          {renderLoopRegion()}
-
-          {/* Time Selection */}
-          {renderTimeSelection()}
-
-          {/* Razor Edit Highlights */}
-          {renderRazorEdits()}
-
-          {/* Tracks Background Alternating - with double-click for MIDI clip creation */}
+          {/* Tracks Background Alternating - rendered BEFORE grid lines so lines show on top */}
           {tracks.map((track, i) => (
             <Rect
               name="timeline-bg"
@@ -2430,6 +2492,21 @@ export function Timeline({ tracks }: TimelineProps) {
             />
           ))}
 
+          {/* Grid Lines - rendered after track backgrounds so they're visible on top */}
+          {gridLines}
+
+          {/* Snap Grid Lines */}
+          {renderSnapGridLines()}
+
+          {/* Loop Region */}
+          {renderLoopRegion()}
+
+          {/* Time Selection */}
+          {renderTimeSelection()}
+
+          {/* Razor Edit Highlights */}
+          {renderRazorEdits()}
+
           {/* Regions (behind markers) */}
           {renderRegions()}
 
@@ -2442,10 +2519,19 @@ export function Timeline({ tracks }: TimelineProps) {
 
             return (
               <Group key={track.id}>
-                {/* Existing Audio Clips */}
-                {track.clips.map((clip) =>
-                  renderClip(clip, i, trackY, track.color, track.id),
-                )}
+                {/* Existing Audio Clips — render non-selected first, selected on top
+                    so that fade handles / volume line of the selected clip are always
+                    clickable even when two clips overlap. */}
+                {track.clips
+                  .filter((clip) => !selectedClipIds.includes(clip.id))
+                  .map((clip) =>
+                    renderClip(clip, i, trackY, track.color, track.id),
+                  )}
+                {track.clips
+                  .filter((clip) => selectedClipIds.includes(clip.id))
+                  .map((clip) =>
+                    renderClip(clip, i, trackY, track.color, track.id),
+                  )}
 
                 {/* Existing MIDI Clips */}
                 {track.midiClips.map((clip) =>

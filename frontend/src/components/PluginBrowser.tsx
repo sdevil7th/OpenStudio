@@ -1,6 +1,17 @@
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import {
+  X,
+  Waves,
+  Timer,
+  SlidersHorizontal,
+  Gauge,
+  Zap,
+  Activity,
+  AudioWaveform,
+  Music,
+  Box,
+} from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input, Select } from "./ui";
@@ -11,13 +22,45 @@ interface Plugin {
   category: string;
   fileOrIdentifier: string;
   isInstrument: boolean;
+  snapshot?: string; // base64 data URL from C++ snapshot lookup
+}
+
+// Map VST3 category substrings to Lucide icons and colors
+const CATEGORY_ICON_MAP: Array<{
+  match: string;
+  Icon: React.ComponentType<{ size?: number }>;
+  color: string;
+}> = [
+  { match: "Reverb", Icon: Waves, color: "#3b82f6" },
+  { match: "Delay", Icon: Timer, color: "#8b5cf6" },
+  { match: "EQ", Icon: SlidersHorizontal, color: "#22c55e" },
+  { match: "Dynamics", Icon: Gauge, color: "#f59e0b" },
+  { match: "Compressor", Icon: Gauge, color: "#f59e0b" },
+  { match: "Limiter", Icon: Gauge, color: "#f59e0b" },
+  { match: "Distortion", Icon: Zap, color: "#ef4444" },
+  { match: "Modulation", Icon: Activity, color: "#06b6d4" },
+  { match: "Chorus", Icon: Activity, color: "#06b6d4" },
+  { match: "Flanger", Icon: Activity, color: "#06b6d4" },
+  { match: "Phaser", Icon: Activity, color: "#06b6d4" },
+  { match: "Synth", Icon: AudioWaveform, color: "#a855f7" },
+  { match: "Instrument", Icon: Music, color: "#ec4899" },
+];
+
+function getCategoryIcon(category: string) {
+  const lowerCat = category.toLowerCase();
+  for (const entry of CATEGORY_ICON_MAP) {
+    if (lowerCat.includes(entry.match.toLowerCase())) {
+      return entry;
+    }
+  }
+  return { match: "Other", Icon: Box, color: "#6b7280" };
 }
 
 interface PluginBrowserProps {
   trackId: string;
   targetChain: "input" | "track" | "master" | "instrument";
   onClose: () => void;
-  embedded?: boolean; // If true, renders without overlay/modal wrapper
+  embedded?: boolean;
 }
 
 export function PluginBrowser({
@@ -69,11 +112,12 @@ export function PluginBrowser({
           trackId,
           plugin.fileOrIdentifier,
         );
-        // Update the store with the loaded instrument
         if (success) {
           useDAWStore.getState().updateTrack(trackId, {
             instrumentPlugin: plugin.fileOrIdentifier,
           });
+          // Open the instrument plugin editor in a separate window
+          await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (targetChain === "input") {
         success = await nativeBridge.addTrackInputFX(
@@ -93,7 +137,7 @@ export function PluginBrowser({
         console.log(
           `[PluginBrowser] Added ${plugin.name} to ${targetChain}`,
         );
-        onClose(); // Notify parent that plugin was added
+        onClose();
       }
     } catch (e) {
       console.error("[PluginBrowser] Failed to add plugin:", e);
@@ -102,7 +146,7 @@ export function PluginBrowser({
     }
   };
 
-  // Filter plugins based on targetChain - show only instruments when loading an instrument
+  // Filter plugins based on targetChain
   const basePlugins = targetChain === "instrument"
     ? plugins.filter((p) => p.isInstrument)
     : plugins.filter((p) => !p.isInstrument);
@@ -111,10 +155,14 @@ export function PluginBrowser({
     "All",
     ...Array.from(new Set(basePlugins.map((p) => p.category))),
   ];
+
+  // Enhanced search: match against name, manufacturer, AND category
   const filteredPlugins = basePlugins.filter((p) => {
+    const term = searchTerm.toLowerCase();
     const matchesSearch =
-      p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.manufacturer.toLowerCase().includes(searchTerm.toLowerCase());
+      p.name.toLowerCase().includes(term) ||
+      p.manufacturer.toLowerCase().includes(term) ||
+      p.category.toLowerCase().includes(term);
     const matchesCategory =
       categoryFilter === "All" || p.category === categoryFilter;
     return matchesSearch && matchesCategory;
@@ -133,7 +181,7 @@ export function PluginBrowser({
           type="text"
           variant="default"
           size="md"
-          placeholder="Search plugins..."
+          placeholder="Search by name, manufacturer, or category..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="flex-1"
@@ -172,43 +220,60 @@ export function PluginBrowser({
             No plugins found. Click "Scan" to search your system.
           </div>
         ) : (
-          filteredPlugins.map((plugin, idx) => (
-            <div
-              key={idx}
-              className="flex justify-between items-center p-3 bg-neutral-800 border border-neutral-700 rounded mb-2 hover:border-blue-500 transition-colors"
-            >
-              <div className="flex-1">
-                <div className="font-semibold text-white mb-1">
-                  {plugin.name}
-                </div>
-                <div className="text-xs text-neutral-400">
-                  {plugin.manufacturer}
-                </div>
-                <div className="text-[11px] text-neutral-500 mt-0.5">
-                  {plugin.category}
-                </div>
-              </div>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => handleAddPlugin(plugin)}
-                disabled={addingPlugin !== null}
+          filteredPlugins.map((plugin, idx) => {
+            const { Icon, color } = getCategoryIcon(plugin.category);
+            return (
+              <div
+                key={idx}
+                className="flex items-center gap-3 p-3 bg-neutral-800 border border-neutral-700 rounded mb-2 hover:border-blue-500 transition-colors"
               >
-                {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
-              </Button>
-            </div>
-          ))
+                {/* Snapshot or category icon */}
+                {plugin.snapshot ? (
+                  <img
+                    src={plugin.snapshot}
+                    alt={plugin.name}
+                    className="w-10 h-10 rounded object-cover shrink-0"
+                  />
+                ) : (
+                  <div
+                    className="w-10 h-10 rounded flex items-center justify-center shrink-0"
+                    style={{ backgroundColor: color + "20", border: `1px solid ${color}40` }}
+                  >
+                    <Icon size={20} />
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-white mb-0.5 truncate">
+                    {plugin.name}
+                  </div>
+                  <div className="text-xs text-neutral-400">
+                    {plugin.manufacturer}
+                  </div>
+                  <div className="text-[11px] text-neutral-500 mt-0.5">
+                    {plugin.category}
+                  </div>
+                </div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => handleAddPlugin(plugin)}
+                  disabled={addingPlugin !== null}
+                  className="shrink-0"
+                >
+                  {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
+                </Button>
+              </div>
+            );
+          })
         )}
       </div>
     </>
   );
 
   if (embedded) {
-    // Embedded mode: render content directly without overlay
     return <div className="flex flex-col h-full">{content}</div>;
   }
 
-  // Modal mode: render with overlay via portal
   return createPortal(
     <div
       className="fixed inset-0 bg-black/80 flex items-center justify-center z-2000"

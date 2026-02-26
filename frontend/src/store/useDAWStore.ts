@@ -4,6 +4,10 @@ import { nativeBridge } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import { calculateGridInterval } from "../utils/snapToGrid";
 
+// Module-level snapshot map for continuous edit undo/redo (volume/pan fader drags).
+// Stores the value at edit start so we can create a single undo command on edit end.
+const _editSnapshots = new Map<string, number>();
+
 // ============================================
 // Type Definitions
 // ============================================
@@ -128,6 +132,7 @@ export interface Track {
   // FX counts (for visual indicators)
   inputFxCount: number;
   trackFxCount: number;
+  fxBypassed: boolean; // All FX bypassed (on/off toggle)
 
   // Automation
   automationLanes: AutomationLane[];
@@ -256,6 +261,7 @@ interface DAWState {
   masterVolume: number;
   masterPan: number;
   masterLevel: number;
+  masterFxCount: number;
   isMasterMuted: boolean;
 
   // Meter state — stored separately from `tracks` so that 10Hz meter updates
@@ -280,6 +286,7 @@ interface DAWState {
   scrollX: number;
   scrollY: number;
   trackHeight: number; // For Vertical Zoom
+  tcpWidth: number; // Track Control Panel width (draggable)
   snapEnabled: boolean;
   gridSize: "bar" | "beat" | "half_beat" | "quarter_beat";
   toolMode: "select" | "split";
@@ -338,6 +345,11 @@ interface DAWState {
   isProjectLoading: boolean;
   projectLoadingMessage: string;
 
+  // Toast notifications
+  toastMessage: string;
+  toastType: "success" | "error" | "info";
+  toastVisible: boolean;
+
   // Lock Settings (granular)
   lockSettings: {
     items: boolean;
@@ -366,6 +378,7 @@ interface DAWState {
       showRegionMarkerManager: boolean;
       pixelsPerSecond: number;
       trackHeight: number;
+      tcpWidth?: number;
     };
   }>;
 
@@ -461,6 +474,9 @@ interface DAWState {
 // ============================================
 
 interface DAWActions {
+  // Toast
+  showToast: (message: string, type?: "success" | "error" | "info") => void;
+
   // Project Management (F2)
   newProject: () => Promise<void>;
   saveProject: (saveAs?: boolean) => Promise<boolean>;
@@ -483,6 +499,7 @@ interface DAWActions {
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
   reorderTrack: (activeId: string, overId: string) => void;
+  reorderMultipleTracks: (trackIds: string[], overId: string) => void;
   selectTrack: (
     id: string | null,
     modifiers?: { shift?: boolean; ctrl?: boolean },
@@ -497,12 +514,25 @@ interface DAWActions {
   toggleTrackMute: (id: string) => Promise<void>;
   toggleTrackSolo: (id: string) => Promise<void>;
   toggleTrackArmed: (id: string) => Promise<void>;
+  toggleTrackFXBypass: (id: string) => Promise<void>;
   toggleTrackMonitor: (id: string) => Promise<void>;
   setTrackInput: (
     id: string,
     startChannel: number,
     channelCount: number,
   ) => Promise<void>;
+
+  // Continuous edit begin/commit (for undo/redo of fader drags)
+  beginTrackVolumeEdit: (id: string) => void;
+  commitTrackVolumeEdit: (id: string) => void;
+  beginTrackPanEdit: (id: string) => void;
+  commitTrackPanEdit: (id: string) => void;
+  beginClipVolumeEdit: (clipId: string) => void;
+  commitClipVolumeEdit: (clipId: string) => void;
+
+  // FX undo/redo actions
+  addTrackFXWithUndo: (trackId: string, pluginPath: string, chainType: "input" | "track") => Promise<boolean>;
+  removeTrackFXWithUndo: (trackId: string, fxIndex: number, chainType: "input" | "track") => Promise<boolean>;
 
   // Record & Edit Modes
   setRecordMode: (mode: "normal" | "overdub" | "replace") => void;
@@ -553,6 +583,7 @@ interface DAWActions {
   setZoom: (pixelsPerSecond: number) => void;
   setScroll: (x: number, y: number) => void;
   setTrackHeight: (height: number) => void;
+  setTcpWidth: (width: number) => void;
   toggleSnap: () => void;
   setGridSize: (size: "bar" | "beat" | "half_beat" | "quarter_beat") => void;
 
@@ -879,6 +910,7 @@ const createDefaultTrack = (
   midiClips: [],
   inputFxCount: 0,
   trackFxCount: 0,
+  fxBypassed: false,
   meterLevel: 0,
   peakLevel: 0,
   clipping: false,
@@ -905,6 +937,36 @@ const initialTransport: TransportState = {
 };
 
 // ============================================
+// ============================================
+// Helpers
+// ============================================
+
+/**
+ * Compute the minimum track header height based on TCP width.
+ *
+ * The track header uses a single flex-wrap row. Items wrap into more rows as
+ * the panel gets narrower. This estimates the number of rows and converts to
+ * a minimum pixel height so content is never clipped by the fixed trackHeight.
+ *
+ * Row item approximate widths (including gaps):
+ *   Record arm (30) + Name input (46+) + M/S/FX/bypass/A group (126) +
+ *   Track type select (50) + stereo/mono select (50) + input select (50) +
+ *   MIDI device selector (~140)
+ *
+ * Usable width ≈ tcpWidth - colorBar(8) - meter(24) - padding(12)
+ */
+function getMinTrackHeight(tcpWidth: number): number {
+  const usable = tcpWidth - 44; // color bar + meter + padding
+  const ROW_H = 24; // icon-sm button height
+  const GAP_Y = 2;  // gap-y-0.5
+  const PAD_Y = 8;  // py-1 top + bottom
+
+  // Approximate total item width for worst case (audio track with all selects)
+  const totalItemWidth = 30 + 46 + 126 + 50 + 50 + 50; // ~352px
+  const rows = Math.max(1, Math.ceil(totalItemWidth / Math.max(usable, 60)));
+  return rows * ROW_H + (rows - 1) * GAP_Y + PAD_Y;
+}
+
 // Store Creation
 // ============================================
 
@@ -939,6 +1001,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     masterVolume: 1.0,
     masterPan: 0.0,
     masterLevel: 0,
+    masterFxCount: 0,
     isMasterMuted: false,
     meterLevels: {},
     peakLevels: {},
@@ -946,6 +1009,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     scrollX: 0,
     scrollY: 0,
     trackHeight: 100,
+    tcpWidth: 310,
     recordMode: "normal",
     rippleMode: "off",
     autoCrossfade: true,
@@ -1004,6 +1068,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // Project Loading
     isProjectLoading: false,
     projectLoadingMessage: "",
+
+    // Toast notifications
+    toastMessage: "",
+    toastType: "info" as const,
+    toastVisible: false,
 
     // Lock Settings (granular)
     lockSettings: { items: false, envelopes: false, timeSelection: false, markers: false },
@@ -1108,6 +1177,12 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     liveCaptureDuration: 0,
     showDDPExport: false,
 
+    // ========== Toast ==========
+    showToast: (message, type = "info") => {
+      set({ toastMessage: message, toastType: type, toastVisible: true });
+      setTimeout(() => set({ toastVisible: false }), 3000);
+    },
+
     // ========== Project Management (F2) ==========
     newProject: async () => {
       // Stop playback
@@ -1148,43 +1223,41 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         if (!path) return false;
       }
 
+      try {
       const state = get();
+      console.log(`[DEBUG SAVE] Starting save. ${state.tracks.length} tracks.`);
 
       // 1. Serialize Tracks with Plugin States
       const serializedTracks = await Promise.all(
         state.tracks.map(async (track) => {
-          // Fetch input FX states
           const inputFXStates: string[] = [];
-          // We assume inputType tells us something but we mostly rely on what's loaded
-          // Since we don't track numInputFX in frontend strictly, we need to ask backend?
-          // Actually, we should probably add getTrackInputFX/getTrackFX to nativeBridge to get the list
-          // But for now, let's assume valid state is in store or we iterate a reasonable number?
-          // BETTER: Use nativeBridge.getTrackInputFX(track.id) to get count/list
 
           const inputFXList = await nativeBridge.getTrackInputFX(track.id);
+          console.log(`[DEBUG SAVE] Track "${track.name}" (${track.id}): getTrackInputFX returned`, JSON.stringify(inputFXList));
           const inputFXPaths: string[] = [];
           for (let i = 0; i < inputFXList.length; i++) {
-            if (inputFXList[i].pluginPath) inputFXPaths.push(inputFXList[i].pluginPath);
-            const fxState = await nativeBridge.getPluginState(
-              track.id,
-              i,
-              true,
-            );
+            const item = inputFXList[i];
+            console.log(`[DEBUG SAVE]   inputFX[${i}] raw object keys:`, Object.keys(item), `pluginPath="${item.pluginPath}"`);
+            if (item.pluginPath) inputFXPaths.push(item.pluginPath);
+            const fxState = await nativeBridge.getPluginState(track.id, i, true);
+            console.log(`[DEBUG SAVE]   inputFX[${i}] state length: ${fxState ? fxState.length : 0}`);
             if (fxState) inputFXStates.push(fxState);
           }
 
           const trackFXStates: string[] = [];
           const trackFXPaths: string[] = [];
           const trackFXList = await nativeBridge.getTrackFX(track.id);
+          console.log(`[DEBUG SAVE] Track "${track.name}" (${track.id}): getTrackFX returned`, JSON.stringify(trackFXList));
           for (let i = 0; i < trackFXList.length; i++) {
-            if (trackFXList[i].pluginPath) trackFXPaths.push(trackFXList[i].pluginPath);
-            const fxState = await nativeBridge.getPluginState(
-              track.id,
-              i,
-              false,
-            );
+            const item = trackFXList[i];
+            console.log(`[DEBUG SAVE]   trackFX[${i}] raw object keys:`, Object.keys(item), `pluginPath="${item.pluginPath}"`);
+            if (item.pluginPath) trackFXPaths.push(item.pluginPath);
+            const fxState = await nativeBridge.getPluginState(track.id, i, false);
+            console.log(`[DEBUG SAVE]   trackFX[${i}] state length: ${fxState ? fxState.length : 0}`);
             if (fxState) trackFXStates.push(fxState);
           }
+
+          console.log(`[DEBUG SAVE] Track "${track.name}" RESULT: ${inputFXPaths.length} input FX paths, ${trackFXPaths.length} track FX paths`);
 
           return {
             id: track.id,
@@ -1203,7 +1276,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             inputChannel: track.inputChannel,
             clips: track.clips,
             midiClips: track.midiClips,
-            // Serialized plugin paths and states
             inputFXPaths,
             inputFXStates,
             trackFXPaths,
@@ -1213,9 +1285,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }),
       );
 
-      // 2. Master Bus
-      // Serialize master FX here if we had them trackable in frontend
-      // For now just volume/pan
+      // 2. Master Bus FX serialization
+      const masterFXPaths: string[] = [];
+      const masterFXStates: string[] = [];
+      try {
+        const masterFXList = await nativeBridge.getMasterFX();
+        for (let i = 0; i < masterFXList.length; i++) {
+          const path = masterFXList[i].pluginPath;
+          if (path) masterFXPaths.push(path);
+          const fxState = await nativeBridge.getMasterPluginState(i);
+          if (fxState) masterFXStates.push(fxState);
+        }
+      } catch (e) {
+        console.warn("[saveProject] Failed to serialize master FX:", e);
+      }
 
       const projectData = {
         version: "1.0.0",
@@ -1229,6 +1312,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         masterVolume: state.masterVolume,
         masterPan: state.masterPan,
         tracks: serializedTracks,
+        masterFXPaths,
+        masterFXStates,
         metronomeVolume: state.metronomeVolume,
         metronomeTrackId: state.metronomeTrackId,
         projectRange: state.projectRange,
@@ -1240,6 +1325,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       );
 
       if (success) {
+        console.log(`[DEBUG SAVE] Saved successfully to: ${path}`);
+        get().showToast("Project saved", "success");
         set((ctx) => {
           const newRecent = [
             path!,
@@ -1251,14 +1338,21 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             recentProjects: newRecent,
           };
         });
-        // TODO: Persist recentProjects to localStorage
         localStorage.setItem(
           "recentProjects",
           JSON.stringify(get().recentProjects),
         );
+      } else {
+        console.error(`[DEBUG SAVE] Save FAILED for path: ${path}`);
+        get().showToast("Failed to save project", "error");
       }
 
       return success;
+      } catch (e) {
+        console.error("[DEBUG SAVE] Exception during save:", e);
+        get().showToast("Save failed: " + String(e), "error");
+        return false;
+      }
     },
 
     saveNewVersion: async () => {
@@ -1351,6 +1445,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
       try {
         const data = JSON.parse(json);
+        console.log(`[DEBUG LOAD] Parsed project. ${data.tracks?.length || 0} tracks.`);
+        // Log what FX data exists in the saved file for each track
+        for (const t of data.tracks || []) {
+          console.log(`[DEBUG LOAD] Saved track "${t.name}": inputFXPaths=${JSON.stringify(t.inputFXPaths || [])}, trackFXPaths=${JSON.stringify(t.trackFXPaths || [])}, inputFXStates=${(t.inputFXStates || []).length} states, trackFXStates=${(t.trackFXStates || []).length} states`);
+        }
+        if (data.masterFXPaths) {
+          console.log(`[DEBUG LOAD] Saved masterFXPaths=${JSON.stringify(data.masterFXPaths)}`);
+        }
 
         set({ projectLoadingMessage: "Resetting current project..." });
         await new Promise((r) => setTimeout(r, 0));
@@ -1432,22 +1534,29 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                     clip.filePath,
                     clip.startTime,
                     clip.duration,
+                    clip.offset || 0,
+                    clip.volumeDB || 0,
+                    clip.fadeIn || 0,
+                    clip.fadeOut || 0,
                   );
                 }
               }
             }
 
             // 4. Restore FX Plugins (skipped in Recovery Mode)
+            console.log(`[DEBUG LOAD] Track "${trackData.name}" FX data from file: bypassFX=${bypassFX}, inputFXPaths=${JSON.stringify(trackData.inputFXPaths || "MISSING")}, trackFXPaths=${JSON.stringify(trackData.trackFXPaths || "MISSING")}`);
             let inputFxRestored = 0;
             if (!bypassFX && trackData.inputFXPaths && trackData.inputFXPaths.length > 0) {
               set({ projectLoadingMessage: `Restoring input FX for ${trackData.name}...` });
               await new Promise((r) => setTimeout(r, 0));
               for (let i = 0; i < trackData.inputFXPaths.length; i++) {
-                const success = await nativeBridge.addTrackInputFX(trackData.id, trackData.inputFXPaths[i]);
+                console.log(`[DEBUG LOAD]   Restoring input FX[${i}]: "${trackData.inputFXPaths[i]}"`);
+                const success = await nativeBridge.addTrackInputFX(trackData.id, trackData.inputFXPaths[i], false);
+                console.log(`[DEBUG LOAD]   addTrackInputFX result: ${success}`);
                 if (success) {
-                  // Restore plugin state if available
                   if (trackData.inputFXStates && trackData.inputFXStates[i]) {
-                    await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
+                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
+                    console.log(`[DEBUG LOAD]   setPluginState(input) result: ${stateResult}`);
                   }
                   inputFxRestored++;
                 }
@@ -1459,16 +1568,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               set({ projectLoadingMessage: `Restoring track FX for ${trackData.name}...` });
               await new Promise((r) => setTimeout(r, 0));
               for (let i = 0; i < trackData.trackFXPaths.length; i++) {
-                const success = await nativeBridge.addTrackFX(trackData.id, trackData.trackFXPaths[i]);
+                console.log(`[DEBUG LOAD]   Restoring track FX[${i}]: "${trackData.trackFXPaths[i]}"`);
+                const success = await nativeBridge.addTrackFX(trackData.id, trackData.trackFXPaths[i], false);
+                console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
                 if (success) {
-                  // Restore plugin state if available
                   if (trackData.trackFXStates && trackData.trackFXStates[i]) {
-                    await nativeBridge.setPluginState(trackData.id, i, false, trackData.trackFXStates[i]);
+                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, false, trackData.trackFXStates[i]);
+                    console.log(`[DEBUG LOAD]   setPluginState(track) result: ${stateResult}`);
                   }
                   trackFxRestored++;
                 }
               }
             }
+
+            console.log(`[DEBUG LOAD] Track "${trackData.name}" RESULT: restored ${inputFxRestored} input FX, ${trackFxRestored} track FX`);
 
             // Ensure saved track data has correct defaults for store state
             trackData.inputType = trackData.inputType || (inputChCount === 1 ? "mono" : "stereo");
@@ -1486,12 +1599,45 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           }
         }
 
-        set({ projectLoadingMessage: "Finalizing..." });
+        // 5. Restore Master FX Plugins
+        let masterFxRestored = 0;
+        if (!bypassFX && data.masterFXPaths && data.masterFXPaths.length > 0) {
+          set({ projectLoadingMessage: "Restoring master FX..." });
+          await new Promise((r) => setTimeout(r, 0));
+          for (let i = 0; i < data.masterFXPaths.length; i++) {
+            const success = await nativeBridge.addMasterFX(data.masterFXPaths[i]);
+            if (success) {
+              if (data.masterFXStates && data.masterFXStates[i]) {
+                await nativeBridge.setMasterPluginState(i, data.masterFXStates[i]);
+              }
+              masterFxRestored++;
+            }
+          }
+        }
+
+        set({ projectLoadingMessage: "Finalizing...", masterFxCount: masterFxRestored });
         await new Promise((r) => setTimeout(r, 0));
+
+        // Normalize tracks — fill missing fields from defaults for old project files
+        const normalizedTracks = (data.tracks || []).map((t: any) => {
+          const defaults = createDefaultTrack(t.id, t.name, t.color);
+          return {
+            ...defaults,
+            ...t,
+            clips: (t.clips || []).map((c: any) => ({ ...c, offset: c.offset ?? 0 })),
+            midiClips: t.midiClips ?? [],
+            sends: t.sends ?? [],
+            automationLanes: t.automationLanes ?? defaults.automationLanes,
+            takes: t.takes ?? [],
+            meterLevel: 0,
+            peakLevel: 0,
+            clipping: false,
+          };
+        });
 
         // Update Store State
         set((state) => ({
-          tracks: data.tracks,
+          tracks: normalizedTracks,
           projectPath: path,
           isModified: false,
           transport: { ...state.transport, tempo: data.tempo || 120 },
@@ -1557,40 +1703,88 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         trackData.name,
         trackData.color,
       );
-      set((state) => ({
-        tracks: [...state.tracks, { ...newTrack, ...trackData }],
-      }));
-      // Sync with C++ backend so the track exists in AudioEngine::trackMap
-      nativeBridge.addTrack(trackData.id).catch((e) =>
-        console.error("[DAW] Failed to sync addTrack with backend:", e),
-      );
+      const fullTrack = { ...newTrack, ...trackData };
+
+      const command: Command = {
+        type: "ADD_TRACK",
+        description: `Add track "${trackData.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((state) => ({
+            tracks: [...state.tracks, fullTrack],
+          }));
+          nativeBridge.addTrack(trackData.id).catch((e) =>
+            console.error("[DAW] Failed to sync addTrack with backend:", e),
+          );
+        },
+        undo: () => {
+          nativeBridge.removeTrack(trackData.id).catch((e) =>
+            console.error("[DAW] Failed to sync removeTrack with backend:", e),
+          );
+          set((state) => ({
+            tracks: state.tracks.filter((t) => t.id !== trackData.id),
+            selectedTrackId:
+              state.selectedTrackId === trackData.id ? null : state.selectedTrackId,
+          }));
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     removeTrack: async (id) => {
       const state = get();
       const track = state.tracks.find((t) => t.id === id);
+      if (!track) return;
 
-      // Clear clips from backend playback engine first
-      if (track) {
-        for (const clip of track.clips) {
-          if (clip.filePath) {
-            await nativeBridge.removePlaybackClip(id, clip.filePath);
+      // Capture full track data and its index for undo
+      const trackSnapshot = JSON.parse(JSON.stringify(track)) as Track;
+      const trackIndex = state.tracks.findIndex((t) => t.id === id);
+
+      const command: Command = {
+        type: "REMOVE_TRACK",
+        description: `Remove track "${track.name}"`,
+        timestamp: Date.now(),
+        execute: async () => {
+          // Clear clips from backend playback engine
+          for (const clip of trackSnapshot.clips) {
+            if (clip.filePath) {
+              await nativeBridge.removePlaybackClip(id, clip.filePath).catch(() => {});
+            }
           }
-        }
-      }
+          await nativeBridge.removeTrack(id).catch(() => {});
+          set((s) => ({
+            tracks: s.tracks.filter((t) => t.id !== id),
+            selectedTrackId: s.selectedTrackId === id ? null : s.selectedTrackId,
+            metronomeTrackId: s.metronomeTrackId === id ? null : s.metronomeTrackId,
+          }));
+        },
+        undo: async () => {
+          // Re-add track to backend
+          await nativeBridge.addTrack(id).catch(() => {});
+          // Restore track at original position
+          set((s) => {
+            const newTracks = [...s.tracks];
+            newTracks.splice(Math.min(trackIndex, newTracks.length), 0, trackSnapshot);
+            return { tracks: newTracks };
+          });
+          // Re-add clips to backend
+          for (const clip of trackSnapshot.clips) {
+            if (clip.filePath) {
+              await nativeBridge.addPlaybackClip(
+                id, clip.filePath, clip.startTime, clip.duration,
+                clip.offset || 0, clip.volumeDB || 0, clip.fadeIn || 0, clip.fadeOut || 0,
+              ).catch(() => {});
+            }
+          }
+          // Restore backend track order
+          nativeBridge.reorderTrack(id, trackIndex).catch(() => {});
+        },
+      };
 
-      // Remove track from backend
-      await nativeBridge.removeTrack(id);
-
-      // Remove from frontend state
-      set((state) => ({
-        tracks: state.tracks.filter((t) => t.id !== id),
-        selectedTrackId:
-          state.selectedTrackId === id ? null : state.selectedTrackId,
-        // Clear metronome track reference if this is the metronome track
-        metronomeTrackId:
-          state.metronomeTrackId === id ? null : state.metronomeTrackId,
-      }));
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     updateTrack: (id, updates) => {
@@ -1613,19 +1807,75 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     reorderTrack: (activeId, overId) => {
+      const state = get();
+      const oldIndex = state.tracks.findIndex((t) => t.id === activeId);
+      const newIndex = state.tracks.findIndex((t) => t.id === overId);
+      if (oldIndex === -1 || newIndex === -1) return;
+
+      const command: Command = {
+        type: "REORDER_TRACK",
+        description: "Reorder track",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => {
+            const oi = s.tracks.findIndex((t) => t.id === activeId);
+            const ni = s.tracks.findIndex((t) => t.id === overId);
+            if (oi === -1 || ni === -1) return s;
+            const newTracks = [...s.tracks];
+            const [moved] = newTracks.splice(oi, 1);
+            newTracks.splice(ni, 0, moved);
+            nativeBridge.reorderTrack(activeId, ni);
+            return { tracks: newTracks };
+          });
+        },
+        undo: () => {
+          set((s) => {
+            const ci = s.tracks.findIndex((t) => t.id === activeId);
+            if (ci === -1) return s;
+            const newTracks = [...s.tracks];
+            const [moved] = newTracks.splice(ci, 1);
+            newTracks.splice(Math.min(oldIndex, newTracks.length), 0, moved);
+            nativeBridge.reorderTrack(activeId, oldIndex);
+            return { tracks: newTracks };
+          });
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    reorderMultipleTracks: (trackIds, overId) => {
       set((state) => {
-        const oldIndex = state.tracks.findIndex((t) => t.id === activeId);
-        const newIndex = state.tracks.findIndex((t) => t.id === overId);
+        // Find the target position (where the drop target is)
+        const overIndex = state.tracks.findIndex((t) => t.id === overId);
+        if (overIndex === -1) return state;
 
-        if (oldIndex === -1 || newIndex === -1) return state;
+        // Extract selected tracks in their original relative order
+        const selectedTracks = state.tracks.filter((t) => trackIds.includes(t.id));
+        const remainingTracks = state.tracks.filter((t) => !trackIds.includes(t.id));
 
-        // Create new array with reordered tracks
-        const newTracks = [...state.tracks];
-        const [movedTrack] = newTracks.splice(oldIndex, 1);
-        newTracks.splice(newIndex, 0, movedTrack);
+        // Find where to insert in the remaining array
+        let insertIndex = remainingTracks.findIndex((t) => t.id === overId);
+        if (insertIndex === -1) {
+          // overId was a selected track — insert at the original position
+          insertIndex = Math.min(overIndex, remainingTracks.length);
+        } else {
+          // Determine drag direction: if first selected was above over target, we're moving down
+          const firstSelectedIndex = state.tracks.findIndex((t) => trackIds.includes(t.id));
+          if (firstSelectedIndex < overIndex) {
+            insertIndex++; // Insert AFTER the over item when moving down
+          }
+        }
 
-        // Call backend to update order
-        nativeBridge.reorderTrack(activeId, newIndex);
+        // Insert all selected tracks at the target position
+        const newTracks = [...remainingTracks];
+        newTracks.splice(insertIndex, 0, ...selectedTracks);
+
+        // Sync backend for each moved track
+        newTracks.forEach((track, i) => {
+          nativeBridge.reorderTrack(track.id, i);
+        });
 
         return { tracks: newTracks };
       });
@@ -1755,35 +2005,67 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     toggleTrackMute: async (id) => {
-      const state = get();
-      const track = state.tracks.find((t) => t.id === id);
+      const track = get().tracks.find((t) => t.id === id);
       if (!track) return;
 
-      const newMuted = !track.muted;
+      const oldMuted = track.muted;
 
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === id ? { ...t, muted: newMuted } : t,
-        ),
-      }));
+      const command: Command = {
+        type: "TOGGLE_TRACK_MUTE",
+        description: oldMuted ? "Unmute track" : "Mute track",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === id ? { ...t, muted: !oldMuted } : t,
+            ),
+          }));
+          nativeBridge.setTrackMute(id, !oldMuted);
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === id ? { ...t, muted: oldMuted } : t,
+            ),
+          }));
+          nativeBridge.setTrackMute(id, oldMuted);
+        },
+      };
 
-      await nativeBridge.setTrackMute(id, newMuted);
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     toggleTrackSolo: async (id) => {
-      const state = get();
-      const track = state.tracks.find((t) => t.id === id);
+      const track = get().tracks.find((t) => t.id === id);
       if (!track) return;
 
-      const newSoloed = !track.soloed;
+      const oldSoloed = track.soloed;
 
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === id ? { ...t, soloed: newSoloed } : t,
-        ),
-      }));
+      const command: Command = {
+        type: "TOGGLE_TRACK_SOLO",
+        description: oldSoloed ? "Unsolo track" : "Solo track",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === id ? { ...t, soloed: !oldSoloed } : t,
+            ),
+          }));
+          nativeBridge.setTrackSolo(id, !oldSoloed);
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === id ? { ...t, soloed: oldSoloed } : t,
+            ),
+          }));
+          nativeBridge.setTrackSolo(id, oldSoloed);
+        },
+      };
 
-      await nativeBridge.setTrackSolo(id, newSoloed);
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     toggleTrackArmed: async (id) => {
@@ -1800,6 +2082,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       }));
 
       await nativeBridge.setTrackRecordArm(id, newArmed);
+    },
+
+    toggleTrackFXBypass: async (id) => {
+      const track = get().tracks.find((t) => t.id === id);
+      if (!track) return;
+
+      const newBypassed = !track.fxBypassed;
+      set((s) => ({
+        tracks: s.tracks.map((t) =>
+          t.id === id ? { ...t, fxBypassed: newBypassed } : t,
+        ),
+      }));
+
+      // Bypass/unbypass all input FX and track FX on this track
+      for (let i = 0; i < track.inputFxCount; i++)
+        await nativeBridge.bypassTrackInputFX(id, i, newBypassed);
+      for (let i = 0; i < track.trackFxCount; i++)
+        await nativeBridge.bypassTrackFX(id, i, newBypassed);
     },
 
     toggleTrackMonitor: async (id) => {
@@ -1837,19 +2137,256 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       await nativeBridge.setTrackInputChannels(id, startChannel, channelCount);
     },
 
+    // ========== Continuous Edit Begin/Commit (for undo/redo of fader drags) ==========
+    beginTrackVolumeEdit: (id) => {
+      const track = get().tracks.find((t) => t.id === id);
+      if (track) _editSnapshots.set("vol_" + id, track.volumeDB);
+    },
+    commitTrackVolumeEdit: (id) => {
+      const key = "vol_" + id;
+      const oldValue = _editSnapshots.get(key);
+      _editSnapshots.delete(key);
+      if (oldValue === undefined) return;
+      const track = get().tracks.find((t) => t.id === id);
+      if (!track || track.volumeDB === oldValue) return;
+      const newValue = track.volumeDB;
+      const command: Command = {
+        type: "SET_TRACK_VOLUME",
+        description: "Adjust track volume",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === id ? { ...t, volumeDB: newValue, volume: Math.min(1, Math.pow(10, newValue / 20)) } : t,
+            ),
+          }));
+          nativeBridge.setTrackVolume(id, newValue);
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === id ? { ...t, volumeDB: oldValue, volume: Math.min(1, Math.pow(10, oldValue / 20)) } : t,
+            ),
+          }));
+          nativeBridge.setTrackVolume(id, oldValue);
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+    beginTrackPanEdit: (id) => {
+      const track = get().tracks.find((t) => t.id === id);
+      if (track) _editSnapshots.set("pan_" + id, track.pan);
+    },
+    commitTrackPanEdit: (id) => {
+      const key = "pan_" + id;
+      const oldValue = _editSnapshots.get(key);
+      _editSnapshots.delete(key);
+      if (oldValue === undefined) return;
+      const track = get().tracks.find((t) => t.id === id);
+      if (!track || track.pan === oldValue) return;
+      const newValue = track.pan;
+      const command: Command = {
+        type: "SET_TRACK_PAN",
+        description: "Adjust track pan",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => (t.id === id ? { ...t, pan: newValue } : t)),
+          }));
+          nativeBridge.setTrackPan(id, newValue);
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => (t.id === id ? { ...t, pan: oldValue } : t)),
+          }));
+          nativeBridge.setTrackPan(id, oldValue);
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+    beginClipVolumeEdit: (clipId) => {
+      for (const track of get().tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) { _editSnapshots.set("clipVol_" + clipId, clip.volumeDB); break; }
+      }
+    },
+    commitClipVolumeEdit: (clipId) => {
+      const key = "clipVol_" + clipId;
+      const oldValue = _editSnapshots.get(key);
+      _editSnapshots.delete(key);
+      if (oldValue === undefined) return;
+      let newValue = oldValue;
+      for (const track of get().tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) { newValue = clip.volumeDB; break; }
+      }
+      if (newValue === oldValue) return;
+      const command: Command = {
+        type: "SET_CLIP_VOLUME",
+        description: "Adjust clip volume",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, volumeDB: newValue } : clip,
+              ),
+            })),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, volumeDB: oldValue } : clip,
+              ),
+            })),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    // ========== FX Undo/Redo ==========
+    addTrackFXWithUndo: async (trackId, pluginPath, chainType) => {
+      const addFn = chainType === "input" ? nativeBridge.addTrackInputFX.bind(nativeBridge) : nativeBridge.addTrackFX.bind(nativeBridge);
+      const removeFn = chainType === "input" ? nativeBridge.removeTrackInputFX.bind(nativeBridge) : nativeBridge.removeTrackFX.bind(nativeBridge);
+
+      const success = await addFn(trackId, pluginPath);
+      if (!success) return false;
+
+      // Get the new FX count to know the index of the just-added plugin
+      const fxList = chainType === "input"
+        ? await nativeBridge.getTrackInputFX(trackId)
+        : await nativeBridge.getTrackFX(trackId);
+      const newIndex = fxList.length - 1;
+
+      // Update store FX counts
+      const countField = chainType === "input" ? "inputFxCount" : "trackFxCount";
+      get().updateTrack(trackId, { [countField]: fxList.length });
+
+      const command: Command = {
+        type: "ADD_TRACK_FX",
+        description: `Add ${chainType} FX`,
+        timestamp: Date.now(),
+        execute: async () => {
+          await addFn(trackId, pluginPath);
+          const list = chainType === "input"
+            ? await nativeBridge.getTrackInputFX(trackId)
+            : await nativeBridge.getTrackFX(trackId);
+          get().updateTrack(trackId, { [countField]: list.length });
+        },
+        undo: async () => {
+          await removeFn(trackId, newIndex);
+          const list = chainType === "input"
+            ? await nativeBridge.getTrackInputFX(trackId)
+            : await nativeBridge.getTrackFX(trackId);
+          get().updateTrack(trackId, { [countField]: list.length });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    removeTrackFXWithUndo: async (trackId, fxIndex, chainType) => {
+      const isInput = chainType === "input";
+
+      // Save plugin state and path before removing
+      const fxList = isInput
+        ? await nativeBridge.getTrackInputFX(trackId)
+        : await nativeBridge.getTrackFX(trackId);
+      const pluginInfo = fxList[fxIndex];
+      const pluginPath = pluginInfo?.pluginPath || "";
+      const savedState = await nativeBridge.getPluginState(trackId, fxIndex, isInput);
+
+      const removeFn = isInput ? nativeBridge.removeTrackInputFX.bind(nativeBridge) : nativeBridge.removeTrackFX.bind(nativeBridge);
+      const addFn = isInput ? nativeBridge.addTrackInputFX.bind(nativeBridge) : nativeBridge.addTrackFX.bind(nativeBridge);
+
+      await removeFn(trackId, fxIndex);
+
+      // Update store FX counts
+      const countField = isInput ? "inputFxCount" : "trackFxCount";
+      const newList = isInput
+        ? await nativeBridge.getTrackInputFX(trackId)
+        : await nativeBridge.getTrackFX(trackId);
+      get().updateTrack(trackId, { [countField]: newList.length });
+
+      const command: Command = {
+        type: "REMOVE_TRACK_FX",
+        description: `Remove ${chainType} FX`,
+        timestamp: Date.now(),
+        execute: async () => {
+          await removeFn(trackId, fxIndex);
+          const list = isInput
+            ? await nativeBridge.getTrackInputFX(trackId)
+            : await nativeBridge.getTrackFX(trackId);
+          get().updateTrack(trackId, { [countField]: list.length });
+        },
+        undo: async () => {
+          // Re-add the plugin and restore its state
+          const success = await addFn(trackId, pluginPath);
+          if (success && savedState) {
+            // The re-added plugin is at the end; move it to original position if needed
+            await nativeBridge.setPluginState(trackId, fxIndex, isInput, savedState);
+          }
+          const list = isInput
+            ? await nativeBridge.getTrackInputFX(trackId)
+            : await nativeBridge.getTrackFX(trackId);
+          get().updateTrack(trackId, { [countField]: list.length });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
     // ========== Transport Controls ==========
     play: async () => {
-      const { transport, syncClipsWithBackend } = get();
+      const { transport, syncClipsWithBackend, pixelsPerSecond, timeSelection } = get();
+
+      // If time selection exists and loop is enabled, start from selection and sync loop bounds
+      let startTime = transport.currentTime;
+      if (timeSelection && transport.loopEnabled) {
+        startTime = timeSelection.start;
+        set((state) => ({
+          transport: {
+            ...state.transport,
+            currentTime: timeSelection.start,
+            loopStart: timeSelection.start,
+            loopEnd: timeSelection.end,
+          },
+        }));
+      } else if (transport.loopEnabled && transport.loopEnd > transport.loopStart) {
+        // Loop enabled without time selection — if playhead is outside loop region, snap to loopStart
+        if (startTime < transport.loopStart || startTime >= transport.loopEnd) {
+          startTime = transport.loopStart;
+          set((state) => ({
+            transport: {
+              ...state.transport,
+              currentTime: transport.loopStart,
+            },
+          }));
+        }
+      }
 
       // Store the start position for stop behavior
-      set({ playStartPosition: transport.currentTime });
+      set({ playStartPosition: startTime });
+
+      // Scroll timeline so playhead is visible (position it ~100px from left edge)
+      set({ scrollX: Math.max(0, startTime * pixelsPerSecond - 100) });
 
       // Sync clips FIRST (slow, many bridge calls) so the position set and
       // play start happen back-to-back with minimal delay between them.
       await syncClipsWithBackend();
 
       // Position + play as close together as possible to minimize drift
-      await nativeBridge.setTransportPosition(transport.currentTime);
+      await nativeBridge.setTransportPosition(startTime);
 
       set((state) => ({
         transport: {
@@ -1864,23 +2401,49 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     record: async () => {
-      const { tracks, transport } = get();
+      const { tracks, transport, pixelsPerSecond, timeSelection } = get();
       const armedTracks = tracks
         .map((t) => ({ track: t }))
         .filter(({ track }) => track.armed);
 
       const wasAlreadyPlaying = transport.isPlaying;
 
+      // If time selection exists and loop is enabled, start from selection
+      if (!wasAlreadyPlaying && timeSelection && transport.loopEnabled) {
+        set((state) => ({
+          transport: {
+            ...state.transport,
+            currentTime: timeSelection.start,
+            loopStart: timeSelection.start,
+            loopEnd: timeSelection.end,
+          },
+        }));
+      } else if (!wasAlreadyPlaying && transport.loopEnabled && transport.loopEnd > transport.loopStart) {
+        // Loop enabled without time selection — if playhead is outside loop region, snap to loopStart
+        if (transport.currentTime < transport.loopStart || transport.currentTime >= transport.loopEnd) {
+          set((state) => ({
+            transport: {
+              ...state.transport,
+              currentTime: transport.loopStart,
+            },
+          }));
+        }
+      }
+
+      const currentTime = get().transport.currentTime;
+
       // Store the start position for stop behavior (only if not already playing)
       if (!wasAlreadyPlaying) {
-        set({ playStartPosition: transport.currentTime });
+        set({ playStartPosition: currentTime });
+        // Scroll timeline so playhead is visible
+        set({ scrollX: Math.max(0, currentTime * pixelsPerSecond - 100) });
       }
 
       // Create recording clips for armed tracks at current position
       const newRecordingClips: RecordingClip[] = armedTracks.map(
         ({ track }) => ({
           trackId: track.id,
-          startTime: transport.currentTime,
+          startTime: currentTime,
         }),
       );
 
@@ -2018,6 +2581,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             clipInfo.filePath,
             clipInfo.startTime,
             clipInfo.duration,
+            0, // offset — freshly recorded clips start at 0
+            newClip.volumeDB || 0,
+            newClip.fadeIn || 0,
+            newClip.fadeOut || 0,
           ).catch((e) => console.warn("[useDAWStore] addPlaybackClip after record failed:", e));
         }
       }
@@ -2072,14 +2639,27 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     setTempo: async (tempo) => {
-      set((state) => ({
-        transport: { ...state.transport, tempo },
-      }));
-      await nativeBridge.setTempo(tempo);
-      // Regenerate metronome track if it exists
-      if (get().metronomeTrackId) {
-        await get().generateMetronomeTrack();
-      }
+      const oldTempo = get().transport.tempo;
+      if (oldTempo === tempo) return;
+
+      const command: Command = {
+        type: "SET_TEMPO",
+        description: `Set tempo to ${tempo} BPM`,
+        timestamp: Date.now(),
+        execute: async () => {
+          set((s) => ({ transport: { ...s.transport, tempo } }));
+          await nativeBridge.setTempo(tempo);
+          if (get().metronomeTrackId) await get().generateMetronomeTrack();
+        },
+        undo: async () => {
+          set((s) => ({ transport: { ...s.transport, tempo: oldTempo } }));
+          await nativeBridge.setTempo(oldTempo);
+          if (get().metronomeTrackId) await get().generateMetronomeTrack();
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     toggleLoop: () => {
@@ -2150,25 +2730,36 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     setTimeSignature: async (numerator, denominator) => {
-      // Also update accent beats array to match new time signature
-      const currentAccents = get().metronomeAccentBeats;
+      const oldTimeSig = { ...get().timeSignature };
+      const oldAccents = [...get().metronomeAccentBeats];
+
+      // Compute new accents
       const newAccents = Array(numerator).fill(false);
-      // Preserve accents where possible, ensure beat 1 is always accented
       newAccents[0] = true;
-      for (let i = 1; i < Math.min(currentAccents.length, numerator); i++) {
-        newAccents[i] = currentAccents[i];
+      for (let i = 1; i < Math.min(oldAccents.length, numerator); i++) {
+        newAccents[i] = oldAccents[i];
       }
-      set({
-        timeSignature: { numerator, denominator },
-        metronomeAccentBeats: newAccents,
-      });
-      await nativeBridge.setTimeSignature(numerator, denominator);
-      // Sync the updated accent beats to the backend
-      await nativeBridge.setMetronomeAccentBeats(newAccents);
-      // Regenerate metronome track if it exists
-      if (get().metronomeTrackId) {
-        await get().generateMetronomeTrack();
-      }
+
+      const command: Command = {
+        type: "SET_TIME_SIGNATURE",
+        description: `Set time signature to ${numerator}/${denominator}`,
+        timestamp: Date.now(),
+        execute: async () => {
+          set({ timeSignature: { numerator, denominator }, metronomeAccentBeats: newAccents });
+          await nativeBridge.setTimeSignature(numerator, denominator);
+          await nativeBridge.setMetronomeAccentBeats(newAccents);
+          if (get().metronomeTrackId) await get().generateMetronomeTrack();
+        },
+        undo: async () => {
+          set({ timeSignature: oldTimeSig, metronomeAccentBeats: oldAccents });
+          await nativeBridge.setTimeSignature(oldTimeSig.numerator, oldTimeSig.denominator);
+          await nativeBridge.setMetronomeAccentBeats(oldAccents);
+          if (get().metronomeTrackId) await get().generateMetronomeTrack();
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     generateMetronomeTrack: async () => {
@@ -2230,6 +2821,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         filePath,
         projectRange.start,
         duration,
+        0, 0, 0, 0,
       );
 
       set({ metronomeTrackId: trackId, isModified: true });
@@ -2364,6 +2956,17 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           newPeak[track.id]  = Math.max(newPeak[track.id] ?? 0, level);
         }
 
+        // Also update master level in meterLevels map so ChannelStrip can read it
+        if (masterLevel !== state.meterLevels["master"]) {
+          if (!anyChanged) {
+            newMeter = { ...state.meterLevels };
+            newPeak  = { ...state.peakLevels };
+            anyChanged = true;
+          }
+          newMeter["master"] = masterLevel;
+          newPeak["master"]  = Math.max(newPeak["master"] ?? 0, masterLevel);
+        }
+
         if (!anyChanged && masterLevel === state.masterLevel) return state;
         if (!anyChanged) return { masterLevel };
         return { meterLevels: newMeter, peakLevels: newPeak, masterLevel };
@@ -2378,7 +2981,17 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     setScroll: (x, y) => set({ scrollX: x, scrollY: y }),
-    setTrackHeight: (height) => set({ trackHeight: height }),
+    setTrackHeight: (height) => {
+      const minH = getMinTrackHeight(get().tcpWidth);
+      set({ trackHeight: Math.max(minH, Math.min(500, height)) });
+    },
+    setTcpWidth: (width) => {
+      const clamped = Math.max(150, Math.min(600, width));
+      const minH = getMinTrackHeight(clamped);
+      const curHeight = get().trackHeight;
+      // Auto-raise track height if shrinking TCP would clip content
+      set({ tcpWidth: clamped, trackHeight: Math.max(minH, curHeight) });
+    },
 
     toggleSnap: () => set((state) => ({ snapEnabled: !state.snapEnabled })),
     setGridSize: (size) => set({ gridSize: size }),
@@ -2417,6 +3030,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               clip.filePath,
               clip.startTime,
               clip.duration,
+              clip.offset || 0,
+              clip.volumeDB || 0,
+              clip.fadeIn || 0,
+              clip.fadeOut || 0,
             );
           }
         }
@@ -2460,6 +3077,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           newClip.filePath,
           newClip.startTime,
           newClip.duration,
+          newClip.offset || 0,
+          newClip.volumeDB || 0,
+          newClip.fadeIn || 0,
+          newClip.fadeOut || 0,
         );
 
         console.log(
@@ -2866,15 +3487,42 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     toggleClipMute: (clipId) => {
-      set((state) => ({
-        tracks: state.tracks.map((track) => ({
-          ...track,
-          clips: track.clips.map((clip) =>
-            clip.id === clipId ? { ...clip, muted: !clip.muted } : clip,
-          ),
-        })),
-        isModified: true,
-      }));
+      let oldMuted = false;
+      for (const track of get().tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) { oldMuted = !!clip.muted; break; }
+      }
+
+      const command: Command = {
+        type: "TOGGLE_CLIP_MUTE",
+        description: oldMuted ? "Unmute clip" : "Mute clip",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, muted: !oldMuted } : clip,
+              ),
+            })),
+            isModified: true,
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, muted: oldMuted } : clip,
+              ),
+            })),
+            isModified: true,
+          }));
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     setClipVolume: (clipId, volumeDB) => {
@@ -3288,6 +3936,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 clipFilePath,
                 foundClip.startTime,
                 foundClip.duration,
+                foundClip.offset || 0,
+                foundClip.volumeDB || 0,
+                foundClip.fadeIn || 0,
+                foundClip.fadeOut || 0,
               );
               console.log(`[DAW] Clip restored to backend: ${clipFilePath}`);
             } catch (error) {
@@ -3970,7 +4622,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     applyAutoCrossfades: (trackId) => {
       const state = get();
       if (!state.autoCrossfade) return;
-      const fadeLen = state.defaultCrossfadeLength;
 
       set((s) => ({
         tracks: s.tracks.map((track) => {
@@ -3982,11 +4633,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             const prevEnd = prev.startTime + prev.duration;
             const overlap = prevEnd - clip.startTime;
             if (overlap > 0) {
-              // There's an overlap — apply crossfade
-              const crossfadeLen = Math.min(overlap, fadeLen);
-              return { ...clip, fadeIn: crossfadeLen };
+              // Crossfade length matches the actual overlap
+              return { ...clip, fadeIn: overlap };
             }
-            return clip;
+            return { ...clip, fadeIn: 0 };
           });
           // Also set fadeOut on clips that have a following overlap
           const final = updated.map((clip, i) => {
@@ -3995,10 +4645,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             const clipEnd = clip.startTime + clip.duration;
             const overlap = clipEnd - next.startTime;
             if (overlap > 0) {
-              const crossfadeLen = Math.min(overlap, fadeLen);
-              return { ...clip, fadeOut: crossfadeLen };
+              return { ...clip, fadeOut: overlap };
             }
-            return clip;
+            return { ...clip, fadeOut: 0 };
           });
           return { ...track, clips: final };
         }),
@@ -4200,6 +4849,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         showRegionMarkerManager: state.showRegionMarkerManager,
         pixelsPerSecond: state.pixelsPerSecond,
         trackHeight: state.trackHeight,
+        tcpWidth: state.tcpWidth,
       };
       set((s) => {
         const screensets = [...s.screensets];
@@ -4231,6 +4881,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         showRegionMarkerManager: screenset.layout.showRegionMarkerManager,
         pixelsPerSecond: screenset.layout.pixelsPerSecond,
         trackHeight: screenset.layout.trackHeight,
+        tcpWidth: screenset.layout.tcpWidth ?? 310,
       });
     },
     deleteScreenset: (slotIndex) => {

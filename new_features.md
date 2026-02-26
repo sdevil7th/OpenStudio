@@ -1,7 +1,7 @@
 1. Drag and select should multi-select clips  in the timeline
 2. After selecting multiple tracks, the selected state should also be shown in the channel strips, and when multiple are selected if one of the channel strip is right clicked, show option to link the tracks together, and once linked all the linked tracks should behave the same way, any action done on one track should be applied on the other one.
 3. track headers should be draggable by clicking on the empty space in its body, and if multiple are selected all should be dragged together
-4. 
+4. Need volume knobs on every track headers, right now volume can only be controlled from the channel strips through a slider, it should also be controllable from a small knob like rotating button (because that saves space) in the track header.
 
 
 1. The mixer should be dockable, can be moved to places and should stick there

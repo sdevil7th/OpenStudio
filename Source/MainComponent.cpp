@@ -254,6 +254,26 @@ MainComponent::MainComponent()
                            completion(false);
                        }
                    })
+                   .withNativeFunction ("getMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       juce::ignoreUnused(args);
+                       completion(audioEngine.getMasterFX());
+                   })
+                   .withNativeFunction ("removeMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() == 1 && (args[0].isInt() || args[0].isDouble())) {
+                           audioEngine.removeMasterFX((int)args[0]);
+                           completion(true);
+                       } else {
+                           completion(false);
+                       }
+                   })
+                   .withNativeFunction ("openMasterFXEditor", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() == 1 && (args[0].isInt() || args[0].isDouble())) {
+                           audioEngine.openMasterFXEditor((int)args[0]);
+                           completion(true);
+                       } else {
+                           completion(false);
+                       }
+                   })
                    // Plugin Management
                    .withNativeFunction ("scanForPlugins", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::ignoreUnused(args);
@@ -270,20 +290,22 @@ MainComponent::MainComponent()
                        completion(audioEngine.getAvailablePlugins());
                    })
                    .withNativeFunction ("addTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                       if (args.size() == 2) {
+                       if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
                            juce::String pluginPath = args[1].toString();
-                           bool success = audioEngine.addTrackInputFX(trackId, pluginPath);
+                           bool openEditor = args.size() >= 3 ? (bool)args[2] : true;
+                           bool success = audioEngine.addTrackInputFX(trackId, pluginPath, openEditor);
                            completion(success);
                        } else {
                            completion(false);
                        }
                    })
                    .withNativeFunction ("addTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                       if (args.size() == 2) {
+                       if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
                            juce::String pluginPath = args[1].toString();
-                           bool success = audioEngine.addTrackFX(trackId, pluginPath);
+                           bool openEditor = args.size() >= 3 ? (bool)args[2] : true;
+                           bool success = audioEngine.addTrackFX(trackId, pluginPath, openEditor);
                            completion(success);
                        } else {
                            completion(false);
@@ -516,14 +538,18 @@ MainComponent::MainComponent()
                    })
                    // Playback clip management
                    .withNativeFunction ("addPlaybackClip", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        // Note: args[2]/args[3] can be int or double depending on JS value serialization
-                        // (e.g. snap-to-grid produces round numbers like 2, 4 which arrive as int not double)
-                        if (args.size() == 4 && args[1].isString() && (args[2].isDouble() || args[2].isInt()) && (args[3].isDouble() || args[3].isInt())) {
+                        // Accepts 4-8 args: trackId, filePath, startTime, duration, [offset], [volumeDB], [fadeIn], [fadeOut]
+                        // Note: numeric args can be int or double depending on JS value serialization
+                        if (args.size() >= 4 && args[1].isString()) {
                             juce::String trackId = args[0].toString();
                             juce::String filePath = args[1].toString();
                             double startTime = (double)args[2];
                             double duration = (double)args[3];
-                            audioEngine.addPlaybackClip(trackId, filePath, startTime, duration);
+                            double offset = args.size() > 4 ? (double)args[4] : 0.0;
+                            double volumeDB = args.size() > 5 ? (double)args[5] : 0.0;
+                            double fadeIn = args.size() > 6 ? (double)args[6] : 0.0;
+                            double fadeOut = args.size() > 7 ? (double)args[7] : 0.0;
+                            audioEngine.addPlaybackClip(trackId, filePath, startTime, duration, offset, volumeDB, fadeIn, fadeOut);
                             completion(true);
                         } else {
                             completion(false);
@@ -597,6 +623,15 @@ MainComponent::MainComponent()
                             juce::String trackId = args[0].toString();
                             juce::String vstPath = args[1].toString();
                             completion(audioEngine.loadInstrument(trackId, vstPath));
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("openInstrumentEditor", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 1 && args[0].isString()) {
+                            juce::String trackId = args[0].toString();
+                            audioEngine.openInstrumentEditor(trackId);
+                            completion(true);
                         } else {
                             completion(false);
                         }

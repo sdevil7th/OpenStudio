@@ -5,7 +5,7 @@ import { ButtonHTMLAttributes, ReactNode } from 'react';
  * - xs, sm, md, lg: Text buttons with padding
  * - icon-sm, icon-md, icon-lg: Icon-only buttons (square)
  */
-export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon-sm' | 'icon-md' | 'icon-lg';
+export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon-xs' | 'icon-sm' | 'icon-md' | 'icon-lg';
 
 /**
  * Button visual variants
@@ -125,6 +125,7 @@ export const buttonSizeStyles: Record<ButtonSize, string> = {
   'sm': 'h-6 px-2 text-[11px]',
   'md': 'h-8 px-3 text-sm',
   'lg': 'h-10 px-4 text-base',
+  'icon-xs': 'w-4 h-6 text-[10px]',
   'icon-sm': 'w-6 h-6 text-[10px]',
   'icon-md': 'w-7 h-7 text-xs',
   'icon-lg': 'w-8 h-8 text-sm',

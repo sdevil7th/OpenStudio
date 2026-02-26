@@ -132,6 +132,9 @@ declare global {
 
         // Master (Phase 5)
         addMasterFX?: (pluginPath: string) => Promise<boolean>;
+        getMasterFX?: () => Promise<any[]>;
+        removeMasterFX?: (fxIndex: number) => Promise<boolean>;
+        openMasterFXEditor?: (fxIndex: number) => Promise<boolean>;
         setMasterVolume?: (volume: number) => Promise<boolean>;
         setMasterPan?: (pan: number) => Promise<boolean>;
         getMasterPan?: () => Promise<number>;
@@ -149,6 +152,10 @@ declare global {
           filePath: string,
           startTime: number,
           duration: number,
+          offset: number,
+          volumeDB: number,
+          fadeIn: number,
+          fadeOut: number,
         ) => Promise<boolean>;
         removePlaybackClip?: (
           trackId: string,
@@ -202,6 +209,7 @@ declare global {
           channel: number,
         ) => Promise<boolean>;
         loadInstrument?: (trackId: string, vstPath: string) => Promise<boolean>;
+        openInstrumentEditor?: (trackId: string) => Promise<boolean>;
 
         // Project Save/Load (F2)
         showSaveDialog?: (
@@ -797,9 +805,9 @@ class NativeBridge {
     }
   }
 
-  async addTrackInputFX(trackId: string, pluginPath: string): Promise<boolean> {
+  async addTrackInputFX(trackId: string, pluginPath: string, openEditor = true): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.addTrackInputFX) {
-      return await window.__JUCE__.backend.addTrackInputFX(trackId, pluginPath);
+      return await window.__JUCE__.backend.addTrackInputFX(trackId, pluginPath, openEditor);
     } else {
       console.log(
         `[NativeBridge] Mock addTrackInputFX: track ${trackId}, plugin ${pluginPath}`,
@@ -808,9 +816,9 @@ class NativeBridge {
     }
   }
 
-  async addTrackFX(trackId: string, pluginPath: string): Promise<boolean> {
+  async addTrackFX(trackId: string, pluginPath: string, openEditor = true): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.addTrackFX) {
-      return await window.__JUCE__.backend.addTrackFX(trackId, pluginPath);
+      return await window.__JUCE__.backend.addTrackFX(trackId, pluginPath, openEditor);
     } else {
       console.log(
         `[NativeBridge] Mock addTrackFX: track ${trackId}, plugin ${pluginPath}`,
@@ -886,6 +894,27 @@ class NativeBridge {
     }
   }
 
+  async getMasterFX(): Promise<{ index: number; name: string; pluginPath?: string }[]> {
+    if (this.isNative && window.__JUCE__?.backend.getMasterFX) {
+      return await window.__JUCE__.backend.getMasterFX();
+    }
+    return [];
+  }
+
+  async removeMasterFX(fxIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.removeMasterFX) {
+      return await window.__JUCE__.backend.removeMasterFX(fxIndex);
+    }
+    return false;
+  }
+
+  async openMasterFXEditor(fxIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openMasterFXEditor) {
+      return await window.__JUCE__.backend.openMasterFXEditor(fxIndex);
+    }
+    return false;
+  }
+
   async setMasterVolume(volume: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setMasterVolume) {
       return await window.__JUCE__.backend.setMasterVolume(volume);
@@ -942,12 +971,15 @@ class NativeBridge {
   }
 
   // Playback clip management
-  // Playback clip management
   async addPlaybackClip(
     trackId: string,
     filePath: string,
     startTime: number,
     duration: number,
+    offset: number = 0,
+    volumeDB: number = 0,
+    fadeIn: number = 0,
+    fadeOut: number = 0,
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.addPlaybackClip) {
       return await window.__JUCE__.backend.addPlaybackClip(
@@ -955,6 +987,10 @@ class NativeBridge {
         filePath,
         startTime,
         duration,
+        offset,
+        volumeDB,
+        fadeIn,
+        fadeOut,
       );
     }
     return false;
@@ -1039,6 +1075,13 @@ class NativeBridge {
   async loadInstrument(trackId: string, vstPath: string): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.loadInstrument) {
       return await window.__JUCE__.backend.loadInstrument(trackId, vstPath);
+    }
+    return false;
+  }
+
+  async openInstrumentEditor(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openInstrumentEditor) {
+      return await window.__JUCE__.backend.openInstrumentEditor(trackId);
     }
     return false;
   }

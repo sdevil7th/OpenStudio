@@ -4,26 +4,13 @@ import { CSS } from "@dnd-kit/utilities";
 import { Track, useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { TrackHeader } from "./TrackHeader";
+import { TRACK_COLORS } from "./ColorPicker";
 import { useContextMenu, MenuItem } from "./ContextMenu";
 
 interface SortableTrackHeaderProps {
   track: Track;
   children?: React.ReactNode;
 }
-
-// Preset colors for track color picker
-const TRACK_COLORS = [
-  "#ef4444",
-  "#f97316",
-  "#eab308",
-  "#22c55e",
-  "#14b8a6",
-  "#3b82f6",
-  "#8b5cf6",
-  "#ec4899",
-  "#6b7280",
-  "#ffffff",
-];
 
 export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
   const {
@@ -106,10 +93,10 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
           { divider: true, label: "" },
           {
             label: "Track Color",
-            submenu: TRACK_COLORS.map((color) => ({
-              label: color === track.color ? `● ${color}` : color,
+            submenu: TRACK_COLORS.map((c) => ({
+              label: c.value === track.color ? `● ${c.name}` : c.name,
               onClick: () =>
-                selectedTrackIds.forEach((id) => updateTrack(id, { color })),
+                selectedTrackIds.forEach((id) => updateTrack(id, { color: c.value })),
             })),
           },
         ]
@@ -149,9 +136,9 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
           { divider: true, label: "" },
           {
             label: "Track Color",
-            submenu: TRACK_COLORS.map((color) => ({
-              label: color === track.color ? `● ${color}` : color,
-              onClick: () => updateTrack(track.id, { color }),
+            submenu: TRACK_COLORS.map((c) => ({
+              label: c.value === track.color ? `● ${c.name}` : c.name,
+              onClick: () => updateTrack(track.id, { color: c.value }),
             })),
           },
           { divider: true, label: "" },
@@ -208,36 +195,35 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     zIndex: isDragging ? 999 : 1,
   };
 
+  // Filter drag listeners so interactive elements (buttons, inputs, selects, color bar)
+  // don't initiate drag — only empty space in the track header does.
+  const filteredListeners = listeners
+    ? Object.fromEntries(
+        Object.entries(listeners).map(([key, handler]) => [
+          key,
+          (e: any) => {
+            const target = e.target as HTMLElement;
+            if (target.closest("button, input, select, [data-no-drag], [data-color-bar]")) {
+              return;
+            }
+            (handler as any)?.(e);
+          },
+        ]),
+      )
+    : {};
+
   return (
     <>
       <div
         ref={setNodeRef}
         style={style}
         {...attributes}
+        {...filteredListeners}
         onClick={handleClick}
         onContextMenu={handleContextMenu}
-        className={isSelected ? "shadow-[inset_0_0_0_2px_#3b82f6]" : ""}
+        className={`cursor-grab active:cursor-grabbing ${isSelected ? "shadow-[inset_0_0_0_2px_#3b82f6]" : ""}`}
       >
-        <div className="relative group">
-          {/* Drag Handle - Absolutely positioned to the left or integrated */}
-          <div
-            {...listeners}
-            className="absolute left-0 top-0 bottom-0 w-3 cursor-move z-10 flex items-center justify-center
-                               opacity-0 group-hover:opacity-100 transition-opacity bg-neutral-800/50 hover:bg-neutral-700/80"
-            title="Drag to reorder"
-          >
-            <div className="flex flex-col gap-0.5">
-              <div className="w-0.5 h-0.5 bg-neutral-400 rounded-full"></div>
-              <div className="w-0.5 h-0.5 bg-neutral-400 rounded-full"></div>
-              <div className="w-0.5 h-0.5 bg-neutral-400 rounded-full"></div>
-            </div>
-          </div>
-
-          {/* Track Content */}
-          <div className="pl-1">
-            <TrackHeader track={track} isSelected={isSelected} />
-          </div>
-        </div>
+        <TrackHeader track={track} isSelected={isSelected} />
       </div>
       {ContextMenuComponent}
     </>

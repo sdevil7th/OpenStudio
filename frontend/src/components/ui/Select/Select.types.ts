@@ -90,6 +90,11 @@ export interface SelectProps {
    * Placeholder text when no value selected
    */
   placeholder?: string;
+
+  /**
+   * Tooltip text shown on hover
+   */
+  title?: string;
 }
 
 /**

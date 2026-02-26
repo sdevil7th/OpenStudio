@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import classNames from "classnames";
 import { useDAWStore, Track } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
@@ -7,7 +8,8 @@ import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
 import { ColorPicker } from "./ColorPicker";
 import { PluginBrowser } from "./PluginBrowser";
 import { PianoIcon } from "./icons";
-import { Button, Input, Select } from "./ui";
+import { Power } from "lucide-react";
+import { Button, Input, Select, Knob } from "./ui";
 
 interface TrackHeaderProps {
   track: Track;
@@ -23,22 +25,39 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
     toggleTrackMute,
     toggleTrackSolo,
     toggleTrackArmed,
+    toggleTrackFXBypass,
     setTrackInput,
     updateTrack,
+    setTrackVolume,
+    setTrackPan,
+    beginTrackVolumeEdit,
+    commitTrackVolumeEdit,
+    beginTrackPanEdit,
+    commitTrackPanEdit,
     audioDeviceSetup,
     refreshAudioDeviceSetup,
     trackHeight,
-  } = useDAWStore(useShallow((s) => ({
-    toggleTrackMute: s.toggleTrackMute,
-    toggleTrackSolo: s.toggleTrackSolo,
-    toggleTrackArmed: s.toggleTrackArmed,
-    setTrackInput: s.setTrackInput,
-    updateTrack: s.updateTrack,
-    audioDeviceSetup: s.audioDeviceSetup,
-    refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
-    trackHeight: s.trackHeight,
-  })));
+  } = useDAWStore(
+    useShallow((s) => ({
+      toggleTrackMute: s.toggleTrackMute,
+      toggleTrackSolo: s.toggleTrackSolo,
+      toggleTrackArmed: s.toggleTrackArmed,
+      toggleTrackFXBypass: s.toggleTrackFXBypass,
+      setTrackInput: s.setTrackInput,
+      updateTrack: s.updateTrack,
+      setTrackVolume: s.setTrackVolume,
+      setTrackPan: s.setTrackPan,
+      beginTrackVolumeEdit: s.beginTrackVolumeEdit,
+      commitTrackVolumeEdit: s.commitTrackVolumeEdit,
+      beginTrackPanEdit: s.beginTrackPanEdit,
+      commitTrackPanEdit: s.commitTrackPanEdit,
+      audioDeviceSetup: s.audioDeviceSetup,
+      refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
+      trackHeight: s.trackHeight,
+    })),
+  );
 
+  const colorBarRef = useRef<HTMLDivElement>(null);
   const [showFXChain, setShowFXChain] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showInstrumentBrowser, setShowInstrumentBrowser] = useState(false);
@@ -80,17 +99,45 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
     }
   }, [audioDeviceSetup, refreshAudioDeviceSetup]);
 
+  const hasFx = track.inputFxCount + track.trackFxCount > 0;
+  let fxButtonClass = "hover:text-green-500 hover:border-green-500";
+  if (hasFx && track.fxBypassed)
+    fxButtonClass =
+      "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]";
+  else if (hasFx)
+    fxButtonClass =
+      "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]";
+
+  let fxBypassClass = "hover:text-green-500 hover:border-green-500";
+  if (hasFx && track.fxBypassed)
+    fxBypassClass = "text-red-400! border-red-500!";
+  else if (hasFx) fxBypassClass = "text-green-400! border-green-500!";
+  const fxBypassTitle = hasFx
+    ? track.fxBypassed
+      ? "Enable FX"
+      : "Bypass FX"
+    : "No FX loaded";
+
   const handleRecordArm = () => toggleTrackArmed(track.id);
   const handleMute = () => toggleTrackMute(track.id);
   const handleSolo = () => toggleTrackSolo(track.id);
+
+  const handleVolumeChange = (volumeDB: number) => {
+    setTrackVolume(track.id, volumeDB);
+  };
+  const handlePanChange = (pan: number) => {
+    setTrackPan(track.id, pan);
+  };
+  const formatVolume = (db: number) =>
+    db <= -60 ? "-∞ dB" : `${db.toFixed(1)} dB`;
+  const formatPan = (pan: number) => {
+    if (Math.abs(pan) < 0.005) return "C";
+    return pan > 0
+      ? `R${Math.round(Math.abs(pan * 100))}`
+      : `L${Math.round(Math.abs(pan * 100))}`;
+  };
   const handleOpenFX = () => {
     setShowFXChain(true);
-  };
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const value = e.target.value;
-    const [startChannel, numChannels] = value.split("-").map(Number);
-    setTrackInput(track.id, startChannel, numChannels);
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -114,208 +161,260 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
       >
         {/* Track Color Bar - Clickable to change color */}
         <div
+          ref={colorBarRef}
           onClick={() => setShowColorPicker(true)}
-          className="w-2 shrink-0 cursor-pointer hover:w-3 transition-all relative group/color"
+          className="w-2 shrink-0 cursor-pointer hover:brightness-125 transition-all relative group/color"
           style={{ background: track.color || "#666" }}
           title="Click to change track color"
           data-color-bar
           data-no-select
+          data-no-drag
         >
           {/* Hover indicator */}
           <div className="absolute inset-0 bg-white/20 opacity-0 group-hover/color:opacity-100 transition-opacity" />
         </div>
-        {/* Color Picker Popup */}
-        {showColorPicker && (
-          <ColorPicker
-            currentColor={track.color}
-            onColorChange={(color) => {
-              updateTrack(track.id, { color });
-              setShowColorPicker(false);
-            }}
-            onClose={() => setShowColorPicker(false)}
-          />
-        )}
-
-        {/* Main Content */}
-        <div className="flex-1 flex flex-col py-1 px-2 gap-1">
-          {/* Row 1: Record Arm + Name + M/S/FX */}
-          <div className="flex items-center gap-2">
-            {/* Record Arm Button */}
-            <Button
-              variant="danger"
-              size="icon-md"
-              shape="circle"
-              active={track.armed}
-              activeStyle="glow"
-              onClick={handleRecordArm}
-              title="Record Arm"
-              className="shrink-0"
-            >
-              ●
-            </Button>
-
-            {/* Track Name */}
-            <Input
-              type="text"
-              variant="inline"
-              size="sm"
-              value={track.name}
-              onChange={handleNameChange}
-              placeholder="Track Name"
-              className="flex-1 min-w-0"
-              inputClassName="w-full min-w-0"
-            />
-
-            {/* M S FX Buttons */}
-            <div className="flex gap-0.5 shrink-0">
-              <Button
-                variant="success"
-                size="icon-sm"
-                active={track.muted}
-                onClick={handleMute}
-                title="Mute"
-              >
-                M
-              </Button>
-              <Button
-                variant="warning"
-                size="icon-sm"
-                active={track.soloed}
-                onClick={handleSolo}
-                title="Solo"
-              >
-                S
-              </Button>
-              <Button
-                variant="default"
-                size="icon-sm"
-                onClick={handleOpenFX}
-                title="FX Chain"
-                className={
-                  (track.inputFxCount + track.trackFxCount) > 0
-                    ? "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]"
-                    : "hover:text-green-500 hover:border-green-500"
-                }
-              >
-                FX
-              </Button>
-              <Button
-                variant="default"
-                size="icon-sm"
-                active={track.showAutomation}
-                onClick={() => useDAWStore.getState().toggleTrackAutomation(track.id)}
-                title="Toggle Automation"
-                className={track.showAutomation ? "text-green-400!" : ""}
-              >
-                A
-              </Button>
-              {track.frozen && (
-                <span className="text-xs text-blue-400 px-1" title="Track is frozen">
-                  ❄
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Row 2: Track Type + Input Selector */}
-          <div className="flex items-center gap-2">
-            {/* Track Type Selector */}
-            <Select
-              variant="compact"
-              size="xs"
-              value={track.type}
-              onChange={async (val) => {
-                const newType = val as "audio" | "midi" | "instrument";
-                updateTrack(track.id, { type: newType });
-                // Update backend
-                const { nativeBridge } =
-                  await import("../services/NativeBridge");
-                await nativeBridge.setTrackType(track.id, newType);
+        {/* Color Picker Popup - rendered via portal to avoid overflow clipping */}
+        {showColorPicker &&
+          createPortal(
+            <ColorPicker
+              currentColor={track.color}
+              anchorRef={colorBarRef}
+              onColorChange={(color) => {
+                updateTrack(track.id, { color });
+                setShowColorPicker(false);
               }}
-              options={[
-                { value: "audio", label: "Audio" },
-                { value: "midi", label: "MIDI" },
-                { value: "instrument", label: "Instrument" },
-              ]}
-              className="w-[70px] shrink-0"
+              onClose={() => setShowColorPicker(false)}
+            />,
+            document.body,
+          )}
+
+        {/* Main Content — single flex-wrap row, wraps when TCP is narrow */}
+        <div className="flex-1 flex flex-wrap items-center py-1 px-1.5 gap-x-1.5 gap-y-0.5 content-center">
+          {/* Record Arm Button */}
+          <Button
+            variant="danger"
+            size="icon-sm"
+            shape="circle"
+            active={track.armed}
+            activeStyle="glow"
+            onClick={handleRecordArm}
+            title="Record Arm"
+            className="shrink-0"
+          >
+            ●
+          </Button>
+
+          {/* Track Name */}
+          <Input
+            type="text"
+            variant="inline"
+            size="sm"
+            value={track.name}
+            onChange={handleNameChange}
+            placeholder="Track Name"
+            className="min-w-[40px] flex-1 basis-16"
+            inputClassName="w-full min-w-0"
+          />
+
+          {/* Volume & Pan Knobs */}
+          <span
+            className="flex items-center gap-1 shrink-0"
+            data-no-drag
+            data-no-select
+          >
+            <Knob
+              variant="volume"
+              size="sm"
+              min={-60}
+              max={12}
+              value={track.volumeDB}
+              defaultValue={0}
+              onChange={handleVolumeChange}
+              onBeginEdit={() => beginTrackVolumeEdit(track.id)}
+              onCommitEdit={() => commitTrackVolumeEdit(track.id)}
+              formatValue={formatVolume}
+              label="Volume"
             />
+            <Knob
+              variant="pan"
+              size="sm"
+              min={-1}
+              max={1}
+              value={track.pan}
+              defaultValue={0}
+              onChange={handlePanChange}
+              onBeginEdit={() => beginTrackPanEdit(track.id)}
+              onCommitEdit={() => commitTrackPanEdit(track.id)}
+              formatValue={formatPan}
+              label="Pan"
+              bipolarCenter={0}
+            />
+          </span>
 
-            {/* Audio Input Controls */}
-            {track.type === "audio" && (
-              <>
-                {/* Input Type Toggle */}
-                <Select
-                  variant="compact"
-                  size="xs"
-                  value={inputType}
-                  onChange={(val) => {
-                    const type = val as "stereo" | "mono";
-                    const channelCount = type === "stereo" ? 2 : 1;
-                    setInputType(type);
-                    updateTrack(track.id, {
-                      inputType: type,
-                      inputChannelCount: channelCount,
-                    });
-                    // Sync with C++ backend so recording uses correct channel count
-                    setTrackInput(track.id, track.inputStartChannel, channelCount);
-                  }}
-                  options={[
-                    { value: "stereo", label: "Stereo" },
-                    { value: "mono", label: "Mono" },
-                  ]}
-                  className="w-[54px] shrink-0"
-                />
+          {/* M S FX A Buttons */}
+          <span className="flex gap-px">
+            <Button
+              variant="success"
+              size="icon-sm"
+              shape="square"
+              active={track.muted}
+              onClick={handleMute}
+              title="Mute"
+              className="rounded-l"
+            >
+              M
+            </Button>
+            <Button
+              variant="warning"
+              size="icon-sm"
+              shape="square"
+              active={track.soloed}
+              onClick={handleSolo}
+              title="Solo"
+            >
+              S
+            </Button>
+          </span>
+          <span className="flex">
+            <Button
+              variant="default"
+              size="icon-sm"
+              shape="square"
+              onClick={handleOpenFX}
+              title="FX Chain"
+              className={fxButtonClass}
+            >
+              FX
+            </Button>
+            <Button
+              variant="default"
+              size="icon-xs"
+              shape="square"
+              onClick={() => {
+                if (!hasFx) {
+                  setShowFXChain(true);
+                } else {
+                  toggleTrackFXBypass(track.id);
+                }
+              }}
+              title={fxBypassTitle}
+              className={fxBypassClass}
+            >
+              <Power size={10} strokeWidth={2.5} />
+            </Button>
+          </span>
+          <Button
+            variant="default"
+            size="icon-sm"
+            shape="square"
+            active={track.showAutomation}
+            onClick={() =>
+              useDAWStore.getState().toggleTrackAutomation(track.id)
+            }
+            title="Toggle Automation"
+            className={`${track.showAutomation ? "text-green-400!" : ""} rounded-r`}
+          >
+            A
+          </Button>
+          {track.frozen && (
+            <span
+              className="text-[10px] text-blue-400 px-0.5"
+              title="Track is frozen"
+            >
+              ❄
+            </span>
+          )}
 
-                {/* Input Channel Selector */}
-                <div className="min-w-0 relative group">
-                  <Select
-                    variant="accent"
-                    size="xs"
-                    value={currentInputValue}
-                    onChange={(val) => {
-                      const value = val.toString();
-                      const [startChannel, numChannels] = value.split("-").map(Number);
-                      setTrackInput(track.id, startChannel, numChannels);
-                    }}
-                    options={availableInputs}
-                    className="w-24 truncate appearance-none"
-                  />
-                </div>
-              </>
-            )}
+          {/* Track Type Selector */}
+          <Select
+            variant="compact"
+            size="xs"
+            value={track.type}
+            onChange={async (val) => {
+              const newType = val as "audio" | "midi" | "instrument";
+              updateTrack(track.id, { type: newType });
+              const { nativeBridge } = await import("../services/NativeBridge");
+              await nativeBridge.setTrackType(track.id, newType);
+            }}
+            options={[
+              { value: "audio", label: "Audio" },
+              { value: "midi", label: "MIDI" },
+              { value: "instrument", label: "Instrument" },
+            ]}
+            title={
+              track.type === "audio"
+                ? "Audio"
+                : track.type === "midi"
+                  ? "MIDI"
+                  : "Instrument"
+            }
+            className="w-11 shrink-0"
+          />
 
-            {/* MIDI Input Controls */}
-            {track.type === "midi" && (
-              <div className="flex-1 text-[10px] text-neutral-400">
-                MIDI Track - Double-click timeline to create clip
-              </div>
-            )}
-            {/* Instrument Track Controls */}
-            {track.type === "instrument" && (
-              <div className="flex items-center gap-1 flex-1">
-                <Button
-                  variant="default"
-                  size="icon-sm"
-                  onClick={() => setShowInstrumentBrowser(true)}
-                  title="Load Instrument Plugin"
-                  className="hover:text-purple-400 hover:border-purple-400 text-[9px] px-1.5"
-                >
-                  <PianoIcon size={14} />
-                  {track.instrumentPlugin ? null : "+"}
-                </Button>
-                <span className="text-[10px] text-neutral-400 truncate max-w-[100px]" title={track.instrumentPlugin || "No instrument"}>
-                  {track.instrumentPlugin ? track.instrumentPlugin.split(/[/\\]/).pop() : "No instrument"}
-                </span>
-              </div>
-            )}
+          {/* Audio Input Controls */}
+          {track.type === "audio" && (
+            <>
+              <Select
+                variant="compact"
+                size="xs"
+                value={inputType}
+                onChange={(val) => {
+                  const type = val as "stereo" | "mono";
+                  const channelCount = type === "stereo" ? 2 : 1;
+                  setInputType(type);
+                  updateTrack(track.id, {
+                    inputType: type,
+                    inputChannelCount: channelCount,
+                  });
+                  setTrackInput(
+                    track.id,
+                    track.inputStartChannel,
+                    channelCount,
+                  );
+                }}
+                options={[
+                  { value: "stereo", label: "Stereo" },
+                  { value: "mono", label: "Mono" },
+                ]}
+                title={inputType === "stereo" ? "Stereo" : "Mono"}
+                className="w-11 shrink-0"
+              />
+              <Select
+                variant="accent"
+                size="xs"
+                value={currentInputValue}
+                onChange={(val) => {
+                  const value = val.toString();
+                  const [startChannel, numChannels] = value
+                    .split("-")
+                    .map(Number);
+                  setTrackInput(track.id, startChannel, numChannels);
+                }}
+                options={availableInputs}
+                title={
+                  availableInputs.find((i) => i.value === currentInputValue)
+                    ?.label ?? currentInputValue
+                }
+                className="w-11 shrink-0"
+              />
+            </>
+          )}
 
-            {/* TRIM indicator */}
-            <div className="text-[9px] text-neutral-400 bg-neutral-800 px-1.5 py-0.5 rounded border border-neutral-700 shrink-0">
-              ▲TRIM
-            </div>
-          </div>
+          {/* Instrument plugin button */}
+          {track.type === "instrument" && (
+            <Button
+              variant="default"
+              size="icon-sm"
+              onClick={() => setShowInstrumentBrowser(true)}
+              title={track.instrumentPlugin || "Load Instrument Plugin"}
+              className="hover:text-purple-400 hover:border-purple-400 text-[9px] px-1.5 shrink-0"
+            >
+              <PianoIcon size={12} />
+              {track.instrumentPlugin ? null : "+"}
+            </Button>
+          )}
 
-          {/* Row 3: MIDI Device Selector (conditional) - now compact inline */}
+          {/* MIDI Device Selector (conditional) */}
           {(track.type === "midi" || track.type === "instrument") && (
             <MIDIDeviceSelector trackId={track.id} />
           )}
@@ -325,8 +424,7 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
         {/* Ensure enough space for scrollbar explicitly */}
         <div
           className={classNames(
-            "bg-neutral-900 flex flex-col-reverse border-l border-neutral-800 shrink-0 mr-1 transition-all duration-300",
-            track.armed ? "w-8" : "w-4", // Wider when armed for better visibility
+            "w-2 pt-1 bg-neutral-900 flex flex-col-reverse border-l border-neutral-800 shrink-0 mr-1 transition-all duration-300",
           )}
         >
           <div

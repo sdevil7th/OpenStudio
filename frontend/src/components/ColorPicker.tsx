@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "./ui";
 
 interface ColorPickerProps {
   currentColor: string;
   onColorChange: (color: string) => void;
   onClose: () => void;
+  anchorRef?: React.RefObject<HTMLElement | null>;
 }
 
 // Predefined track colors - users can assign same color to multiple tracks for grouping
@@ -27,8 +28,28 @@ export function ColorPicker({
   currentColor,
   onColorChange,
   onClose,
+  anchorRef,
 }: ColorPickerProps) {
   const popupRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+
+  // Position relative to anchor element
+  useEffect(() => {
+    if (anchorRef?.current) {
+      const rect = anchorRef.current.getBoundingClientRect();
+      let top = rect.top;
+      let left = rect.right + 4;
+
+      // Ensure popup doesn't go below viewport
+      const popupHeight = 180; // approximate height
+      if (top + popupHeight > window.innerHeight) {
+        top = window.innerHeight - popupHeight - 8;
+      }
+      if (top < 8) top = 8;
+
+      setPosition({ top, left });
+    }
+  }, [anchorRef]);
 
   // Close on click outside
   useEffect(() => {
@@ -61,10 +82,15 @@ export function ColorPicker({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  const style: React.CSSProperties = position
+    ? { position: "fixed", top: position.top, left: position.left, zIndex: 9999 }
+    : { position: "absolute", left: 4, top: 0, zIndex: 50 };
+
   return (
     <div
       ref={popupRef}
-      className="absolute left-4 top-0 z-50 bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl p-2"
+      className="bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl p-2"
+      style={style}
       onClick={(e) => e.stopPropagation()}
     >
       <div className="text-xs text-neutral-400 mb-2 px-1">Track Color</div>

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Check, ChevronRight } from "lucide-react";
 import { Button } from "../ui";
 
@@ -30,6 +30,7 @@ export function MenuDropdown({
   const [isOpen, setIsOpen] = useState(false);
   const [activeSubmenu, setActiveSubmenu] = useState<number | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const submenuTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Close on outside click
   useEffect(() => {
@@ -64,6 +65,13 @@ export function MenuDropdown({
     return () => document.removeEventListener("keydown", handleEscape);
   }, [isOpen]);
 
+  const clearSubmenuTimeout = useCallback(() => {
+    if (submenuTimeoutRef.current) {
+      clearTimeout(submenuTimeoutRef.current);
+      submenuTimeoutRef.current = null;
+    }
+  }, []);
+
   const handleItemClick = (item: MenuItemProps, index: number) => {
     if (item.disabled) return;
 
@@ -89,7 +97,15 @@ export function MenuDropdown({
           ${activeSubmenu === index ? "bg-daw-selection" : ""}
         `}
         onClick={() => handleItemClick(item, index)}
-        onMouseEnter={() => item.submenu && setActiveSubmenu(index)}
+        onMouseEnter={() => {
+          clearSubmenuTimeout();
+          if (item.submenu) {
+            setActiveSubmenu(index);
+          } else {
+            // Hovering a non-submenu item closes any open submenu after a short delay
+            submenuTimeoutRef.current = setTimeout(() => setActiveSubmenu(null), 100);
+          }
+        }}
       >
         <div className="flex items-center gap-2">
           {item.checked !== undefined && (
@@ -109,7 +125,13 @@ export function MenuDropdown({
 
       {/* Submenu */}
       {item.submenu && activeSubmenu === index && (
-        <div className="absolute left-full top-0 ml-0 bg-daw-panel border border-daw-border rounded shadow-lg min-w-40 py-1">
+        <div
+          className="absolute left-full top-0 ml-0 bg-daw-panel border border-daw-border rounded shadow-lg min-w-40 py-1"
+          onMouseEnter={clearSubmenuTimeout}
+          onMouseLeave={() => {
+            submenuTimeoutRef.current = setTimeout(() => setActiveSubmenu(null), 100);
+          }}
+        >
           {item.submenu.map((subItem, subIndex) => (
             <div
               key={subIndex}
