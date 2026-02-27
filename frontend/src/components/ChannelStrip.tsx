@@ -2,10 +2,11 @@ import { useState, useCallback } from "react";
 import classNames from "classnames";
 import { Power } from "lucide-react";
 import { PeakMeter } from "./PeakMeter";
-import { useDAWStore, Track } from "../store/useDAWStore";
+import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { FXChainPanel } from "./FXChainPanel";
 import { Button, Slider } from "./ui";
+import { useContextMenu, MenuItem } from "./ContextMenu";
 
 interface ChannelStripProps {
   track: Track;
@@ -57,6 +58,11 @@ export function ChannelStrip({
     commitTrackVolumeEdit,
     beginTrackPanEdit,
     commitTrackPanEdit,
+    selectedTrackIds,
+    trackGroups,
+    addTrackGroup,
+    removeTrackGroup,
+    updateTrackGroup,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -71,12 +77,72 @@ export function ChannelStrip({
       commitTrackVolumeEdit: s.commitTrackVolumeEdit,
       beginTrackPanEdit: s.beginTrackPanEdit,
       commitTrackPanEdit: s.commitTrackPanEdit,
+      selectedTrackIds: s.selectedTrackIds,
+      trackGroups: s.trackGroups,
+      addTrackGroup: s.addTrackGroup,
+      removeTrackGroup: s.removeTrackGroup,
+      updateTrackGroup: s.updateTrackGroup,
     })),
   );
+
+  const { showContextMenu, ContextMenuComponent } = useContextMenu();
 
   const [phaseInverted, setPhaseInverted] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
   const hasFx = track.inputFxCount + track.trackFxCount > 0;
+
+  const ALL_LINKED_PARAMS = ["volume", "pan", "mute", "solo", "armed", "fxBypass"];
+  const trackGroup = trackGroups.find((g) => g.memberTrackIds.includes(track.id));
+  const groupInfo = getTrackGroupInfo(track.id, trackGroups);
+  const groupColor = groupInfo ? TRACK_GROUP_COLORS[groupInfo.colorIndex] : null;
+  const isMultiSelected = selectedTrackIds.includes(track.id) && selectedTrackIds.length > 1;
+  const allInSameGroup = isMultiSelected && trackGroups.find((g) =>
+    selectedTrackIds.every((id) => g.memberTrackIds.includes(id)),
+  );
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    if (isMaster) return;
+
+    const items: MenuItem[] = [];
+
+    if (isMultiSelected && !allInSameGroup) {
+      items.push({
+        label: `Link ${selectedTrackIds.length} Tracks`,
+        onClick: () => addTrackGroup("Group", selectedTrackIds[0], [...selectedTrackIds], ALL_LINKED_PARAMS),
+      });
+    }
+    if (isMultiSelected && allInSameGroup) {
+      items.push({
+        label: "Unlink Entire Group",
+        onClick: () => removeTrackGroup(allInSameGroup.id),
+      });
+    }
+    if (trackGroup) {
+      items.push({
+        label: "Unlink This Track",
+        onClick: () => {
+          const remaining = trackGroup.memberTrackIds.filter((id) => id !== track.id);
+          if (remaining.length <= 1) {
+            removeTrackGroup(trackGroup.id);
+          } else {
+            updateTrackGroup(trackGroup.id, { memberTrackIds: remaining });
+          }
+        },
+      });
+      if (!allInSameGroup) {
+        items.push({
+          label: "Unlink Entire Group",
+          onClick: () => removeTrackGroup(trackGroup.id),
+        });
+      }
+    }
+
+    if (items.length > 0) {
+      showContextMenu(e, items);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMaster, isMultiSelected, allInSameGroup, trackGroup, selectedTrackIds, addTrackGroup, removeTrackGroup, updateTrackGroup, showContextMenu, track.id]);
 
   const handleVolumeChange = (volumeDB: number) => {
     if (isMaster) {
@@ -135,6 +201,7 @@ export function ChannelStrip({
     : DB_MARKS.filter((m) => [12, 0, -12, -48, -60].includes(m.db));
 
   return (
+  <>
     <div
       className={classNames(
         "flex flex-col shrink-0 h-full border-r border-l border-neutral-800",
@@ -146,7 +213,13 @@ export function ChannelStrip({
         },
       )}
       onClick={onSelect}
+      onContextMenu={handleContextMenu}
     >
+      {/* Link group indicator bar */}
+      {groupColor && !isMaster && (
+        <div className="h-[3px] shrink-0" style={{ backgroundColor: groupColor }} />
+      )}
+
       {/* Track Name Header */}
       <div
         className={classNames(
@@ -458,5 +531,7 @@ export function ChannelStrip({
         ""
       )}
     </div>
+    {ContextMenuComponent}
+  </>
   );
 }

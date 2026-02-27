@@ -32,6 +32,10 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     toggleTrackSolo,
     toggleTrackArmed,
     addTrack,
+    trackGroups,
+    addTrackGroup,
+    removeTrackGroup,
+    updateTrackGroup,
   } = useDAWStore(useShallow((s) => ({
     selectedTrackIds: s.selectedTrackIds,
     selectTrack: s.selectTrack,
@@ -42,6 +46,10 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     toggleTrackSolo: s.toggleTrackSolo,
     toggleTrackArmed: s.toggleTrackArmed,
     addTrack: s.addTrack,
+    trackGroups: s.trackGroups,
+    addTrackGroup: s.addTrackGroup,
+    removeTrackGroup: s.removeTrackGroup,
+    updateTrackGroup: s.updateTrackGroup,
   })));
 
   const isSelected = selectedTrackIds.includes(track.id);
@@ -70,6 +78,15 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
       selectTrack(track.id);
     }
 
+    // Check if this track belongs to a group
+    const trackGroup = trackGroups.find((g) => g.memberTrackIds.includes(track.id));
+    // Check if ALL selected tracks are already in the same group
+    const allInSameGroup = isMulti && trackGroups.find((g) =>
+      selectedTrackIds.every((id) => g.memberTrackIds.includes(id)),
+    );
+
+    const ALL_LINKED_PARAMS = ["volume", "pan", "mute", "solo", "armed", "fxBypass"];
+
     const menuItems: MenuItem[] = isMulti
       ? [
           {
@@ -77,6 +94,29 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
             shortcut: "Del",
             onClick: () => deleteSelectedTracks(),
           },
+          { divider: true, label: "" },
+          ...(!allInSameGroup
+            ? [
+                {
+                  label: `Link ${count} Tracks`,
+                  onClick: () => {
+                    addTrackGroup(
+                      `Group`,
+                      selectedTrackIds[0],
+                      [...selectedTrackIds],
+                      ALL_LINKED_PARAMS,
+                    );
+                  },
+                },
+              ]
+            : [
+                {
+                  label: "Unlink Entire Group",
+                  onClick: () => {
+                    if (allInSameGroup) removeTrackGroup(allInSameGroup.id);
+                  },
+                },
+              ]),
           { divider: true, label: "" },
           {
             label: `Mute ${count} Tracks`,
@@ -141,6 +181,26 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
               onClick: () => updateTrack(track.id, { color: c.value }),
             })),
           },
+          ...(trackGroup
+            ? [
+                { divider: true, label: "" },
+                {
+                  label: "Unlink This Track",
+                  onClick: () => {
+                    const remaining = trackGroup.memberTrackIds.filter((id) => id !== track.id);
+                    if (remaining.length <= 1) {
+                      removeTrackGroup(trackGroup.id);
+                    } else {
+                      updateTrackGroup(trackGroup.id, { memberTrackIds: remaining });
+                    }
+                  },
+                },
+                {
+                  label: "Unlink Entire Group",
+                  onClick: () => removeTrackGroup(trackGroup.id),
+                },
+              ]
+            : []),
           { divider: true, label: "" },
           {
             label: track.showAutomation ? "Hide Automation" : "Show Automation",

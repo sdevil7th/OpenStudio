@@ -7,6 +7,8 @@ import {
   AudioClip,
   MIDIClip,
   RecordingClip,
+  getTrackGroupInfo,
+  TRACK_GROUP_COLORS,
 } from "../store/useDAWStore";
 import { nativeBridge, WaveformPeak } from "../services/NativeBridge";
 import { ContextMenu } from "./ContextMenu";
@@ -86,6 +88,13 @@ export function Timeline({ tracks }: TimelineProps) {
     originalOffset: number;
     ghostX?: number; // Ghost preview position
     ghostY?: number;
+    // Multi-clip drag info — populated when dragging a clip that's part of multi-selection
+    multiClipInfo?: Array<{
+      clipId: string;
+      trackIndex: number;
+      originalStartTime: number;
+      isMidi: boolean;
+    }>;
   }>({
     type: null,
     clipId: null,
@@ -117,12 +126,20 @@ export function Timeline({ tracks }: TimelineProps) {
     setShowGhostTrack(false);
   }, []);
 
-  // Global mouseup and blur handlers to prevent stuck drag state
+  // Global mouseup and blur handlers to prevent stuck drag/marquee state
   useEffect(() => {
+    const resetMarquee = () => {
+      marqueeRef.current = null;
+      setMarqueeRect(null);
+    };
+
     const handleGlobalMouseUp = () => {
       if (dragState.type !== null) {
         console.log("[Timeline] Global mouseup - resetting drag state");
         resetDragState();
+      }
+      if (marqueeRef.current) {
+        resetMarquee();
       }
     };
 
@@ -131,13 +148,14 @@ export function Timeline({ tracks }: TimelineProps) {
         console.log("[Timeline] Window blur - resetting drag state");
         resetDragState();
       }
+      if (marqueeRef.current) {
+        resetMarquee();
+      }
     };
 
-    // Add global listeners when drag is active
-    if (dragState.type !== null) {
-      window.addEventListener("mouseup", handleGlobalMouseUp);
-      window.addEventListener("blur", handleWindowBlur);
-    }
+    // Always listen — handlers are cheap no-ops when nothing is active
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+    window.addEventListener("blur", handleWindowBlur);
 
     return () => {
       window.removeEventListener("mouseup", handleGlobalMouseUp);
@@ -157,6 +175,19 @@ export function Timeline({ tracks }: TimelineProps) {
     trackId: string;
     startTime: number;
   } | null>(null);
+
+  // Marquee (rubber-band) selection state
+  const marqueeRef = useRef<{
+    startX: number; // timeline-space X (includes scrollX)
+    startY: number; // timeline-space Y
+    currentX: number;
+    currentY: number;
+    ctrlHeld: boolean;
+  } | null>(null);
+  const [marqueeRect, setMarqueeRect] = useState<{
+    x: number; y: number; width: number; height: number;
+  } | null>(null);
+  const marqueeJustCompletedRef = useRef(false);
 
   // Split tool preview line
   const [splitPreviewX, setSplitPreviewX] = useState<number | null>(null);
@@ -215,6 +246,7 @@ export function Timeline({ tracks }: TimelineProps) {
     clearRazorEdits,
     toolMode,
     splitClipAtPosition,
+    trackGroups,
   } = useDAWStore(
     useShallow((state) => ({
       recordingClips: state.recordingClips,
@@ -259,6 +291,7 @@ export function Timeline({ tracks }: TimelineProps) {
       clearRazorEdits: state.clearRazorEdits,
       toolMode: state.toolMode,
       splitClipAtPosition: state.splitClipAtPosition,
+      trackGroups: state.trackGroups,
     }))
   );
 
@@ -689,15 +722,76 @@ export function Timeline({ tracks }: TimelineProps) {
         addRazorEdit(razorDrag.trackId, start, end);
       }
     }
+
+    // Marquee selection drag
+    if (marqueeRef.current) {
+      const stage = e.target.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      if (pointerPos) {
+        const tlX = pointerPos.x + scrollX;
+        const tlY = pointerPos.y + scrollY;
+        marqueeRef.current.currentX = tlX;
+        marqueeRef.current.currentY = tlY;
+        const dx = tlX - marqueeRef.current.startX;
+        const dy = tlY - marqueeRef.current.startY;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+          const left = Math.min(marqueeRef.current.startX, tlX) - scrollX;
+          const top = Math.min(marqueeRef.current.startY, tlY) - scrollY;
+          const w = Math.abs(dx);
+          const h = Math.abs(dy);
+          setMarqueeRect({ x: left, y: top, width: w, height: h });
+        }
+      }
+    }
   };
 
-  // Handle mouse up to finalize time selection / razor edit (on main stage)
+  // Handle mouse up to finalize time selection / razor edit / marquee (on main stage)
   const handleStageMouseUp = () => {
     if (timeSelectionDrag && timeSelectionDrag.active) {
       setTimeSelectionDrag(null);
     }
     if (razorDrag && razorDrag.active) {
       setRazorDrag(null);
+    }
+    // Finalize marquee selection
+    if (marqueeRef.current && marqueeRect) {
+      const m = marqueeRef.current;
+      const left = Math.min(m.startX, m.currentX);
+      const top = Math.min(m.startY, m.currentY);
+      const right = Math.max(m.startX, m.currentX);
+      const bottom = Math.max(m.startY, m.currentY);
+
+      const intersectingIds: string[] = [];
+      const store = useDAWStore.getState();
+      store.tracks.forEach((track, trackIndex) => {
+        const clipTop = trackIndex * trackHeight + 5;
+        const clipBottom = clipTop + trackHeight - 10;
+        if (clipBottom < top || clipTop > bottom) return; // skip entire track
+        const checkClip = (clip: { id: string; startTime: number; duration: number }) => {
+          const clipLeft = clip.startTime * pixelsPerSecond;
+          const clipRight = clipLeft + clip.duration * pixelsPerSecond;
+          if (clipLeft < right && clipRight > left) {
+            intersectingIds.push(clip.id);
+          }
+        };
+        track.clips.forEach(checkClip);
+        track.midiClips.forEach(checkClip);
+      });
+
+      if (m.ctrlHeld) {
+        const merged = [...new Set([...store.selectedClipIds, ...intersectingIds])];
+        store.setSelectedClipIds(merged);
+      } else {
+        store.setSelectedClipIds(intersectingIds);
+      }
+
+      marqueeRef.current = null;
+      setMarqueeRect(null);
+      marqueeJustCompletedRef.current = true;
+    } else if (marqueeRef.current) {
+      // Was a click, not a drag — let onClick handle deselection
+      marqueeRef.current = null;
+      setMarqueeRect(null);
     }
   };
 
@@ -1126,13 +1220,23 @@ export function Timeline({ tracks }: TimelineProps) {
 
     // During cross-track drag, visually offset clip to target track position
     // (actual move deferred to drag end to prevent Konva node unmount)
-    if (
-      dragState.type === "move" &&
-      dragState.clipId === clip.id &&
-      dragState.targetTrackIndex != null &&
-      dragState.targetTrackIndex !== trackIndex
-    ) {
-      trackY = dragState.targetTrackIndex * trackHeight;
+    if (dragState.type === "move" && dragState.targetTrackIndex != null) {
+      if (dragState.clipId === clip.id) {
+        // Anchor clip — offset to pointer's target track
+        if (dragState.targetTrackIndex !== trackIndex) {
+          trackY = dragState.targetTrackIndex * trackHeight;
+        }
+      } else if (dragState.multiClipInfo && dragState.multiClipInfo.length > 1) {
+        // Other clips in multi-selection — offset by same track delta
+        const info = dragState.multiClipInfo.find(m => m.clipId === clip.id);
+        if (info) {
+          const trackDelta = dragState.targetTrackIndex - (dragState.trackIndex ?? 0);
+          const visualTrackIdx = info.trackIndex + trackDelta;
+          if (visualTrackIdx !== trackIndex) {
+            trackY = visualTrackIdx * trackHeight;
+          }
+        }
+      }
     }
 
     // Skip if clip is outside visible area
@@ -1263,31 +1367,14 @@ export function Timeline({ tracks }: TimelineProps) {
     const handleClipClick = () => {};
 
     // Handle drag start - only set up if not already set by handleMouseDown (for resize)
-    const handleDragStart = (e: any) => {
+    const handleDragStart = (_e: any) => {
       // Don't re-select if already selected (preserves multi-selection during drag)
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
       }
 
-      // If dragState is already set up by handleMouseDown for resize, don't overwrite it
-      if (dragState.clipId === clip.id && (dragState.type === "resize-left" || dragState.type === "resize-right")) {
-        return; // Keep the resize state that handleMouseDown set
-      }
-
-      const stage = e.target.getStage();
-      const pointerPos = stage.getPointerPosition();
-
-      setDragState({
-        type: "move",
-        clipId: clip.id,
-        trackIndex,
-        targetTrackIndex: trackIndex,
-        startX: pointerPos.x,
-        startTime: (pointerPos.x + scrollX) / pixelsPerSecond,
-        originalStartTime: clip.startTime,
-        originalDuration: clip.duration,
-        originalOffset: clip.offset,
-      });
+      // handleMouseDown already sets dragState (including multiClipInfo).
+      // If it was set up for resize, keep that. Otherwise, nothing more to do here.
     };
 
     // Handle drag move
@@ -1297,7 +1384,7 @@ export function Timeline({ tracks }: TimelineProps) {
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
 
-      // Calculate new time position
+      // Calculate new time position for anchor clip
       const deltaX = pointerPos.x - dragState.startX;
       const deltaTime = deltaX / pixelsPerSecond;
       let newStartTime = Math.max(0, dragState.originalStartTime + deltaTime);
@@ -1307,34 +1394,60 @@ export function Timeline({ tracks }: TimelineProps) {
         newStartTime = snapToGrid(newStartTime, tempo, timeSignature, gridSize);
       }
 
+      // Compute actual timeDelta after snap (for multi-clip)
+      const timeDelta = newStartTime - dragState.originalStartTime;
+
       // Calculate target track based on Y position
       const targetTrackIdx = Math.floor(pointerPos.y / trackHeight);
 
-      // Check if dragging below all existing tracks (to empty space)
-      if (targetTrackIdx >= tracks.length) {
-        // Show ghost track at bottom
-        setShowGhostTrack(true);
-        // Update time position only on current track, store target visually
-        if (newStartTime !== clip.startTime) {
-          moveClipToTrack(clip.id, tracks[trackIndex].id, newStartTime);
-        }
-        setDragState(prev => ({ ...prev, targetTrackIndex: targetTrackIdx }));
-      } else {
-        // Normal drag within existing tracks
-        setShowGhostTrack(false);
-        const clampedTrackIndex = Math.max(
-          0,
-          Math.min(tracks.length - 1, targetTrackIdx),
-        );
+      // Determine if multi-clip drag
+      const multi = dragState.multiClipInfo && dragState.multiClipInfo.length > 1;
 
-        // Update time position on current track (don't move cross-track during drag)
+      // Check if any clip in selection would go past last track (ghost track needed)
+      const trackDelta = targetTrackIdx - (dragState.trackIndex ?? 0);
+      let needsGhost = false;
+      if (multi) {
+        const maxTrackIdx = Math.max(...dragState.multiClipInfo!.map(m => m.trackIndex));
+        needsGhost = maxTrackIdx + trackDelta >= tracks.length;
+      } else {
+        needsGhost = targetTrackIdx >= tracks.length;
+      }
+
+      if (needsGhost) {
+        setShowGhostTrack(true);
+      } else {
+        setShowGhostTrack(false);
+      }
+
+      // Update time positions for all clips in the selection
+      if (multi) {
+        // Batch update all selected clips in one set() call
+        useDAWStore.setState((state) => ({
+          tracks: state.tracks.map(track => ({
+            ...track,
+            clips: track.clips.map(c => {
+              const info = dragState.multiClipInfo!.find(m => m.clipId === c.id && !m.isMidi);
+              if (info) return { ...c, startTime: Math.max(0, info.originalStartTime + timeDelta) };
+              return c;
+            }),
+            midiClips: track.midiClips.map(mc => {
+              const info = dragState.multiClipInfo!.find(m => m.clipId === mc.id && m.isMidi);
+              if (info) return { ...mc, startTime: Math.max(0, info.originalStartTime + timeDelta) };
+              return mc;
+            }),
+          })),
+        }));
+      } else {
+        // Single clip — use existing moveClipToTrack
         if (newStartTime !== clip.startTime) {
           moveClipToTrack(clip.id, tracks[trackIndex].id, newStartTime);
         }
-        // Store visual target track — actual move happens on drag end
-        if (clampedTrackIndex !== dragState.targetTrackIndex) {
-          setDragState(prev => ({ ...prev, targetTrackIndex: clampedTrackIndex }));
-        }
+      }
+
+      // Store visual target track — actual cross-track move happens on drag end
+      const clampedTarget = Math.max(0, targetTrackIdx);
+      if (clampedTarget !== dragState.targetTrackIndex) {
+        setDragState(prev => ({ ...prev, targetTrackIndex: clampedTarget }));
       }
     };
 
@@ -1343,40 +1456,93 @@ export function Timeline({ tracks }: TimelineProps) {
       // Only handle if this clip was actually being dragged
       if (dragState.clipId !== clip.id) return;
 
-      // If ghost track was shown, create a new track and move clip to it
-      if (showGhostTrack) {
-        try {
-          // Call backend to create track first - this returns the real track ID
-          const backendTrackId = await nativeBridge.addTrack();
+      const multi = dragState.multiClipInfo && dragState.multiClipInfo.length > 1;
+      const anchorTrackIdx = dragState.trackIndex ?? 0;
+      const targetIdx = dragState.targetTrackIndex ?? anchorTrackIdx;
+      const trackDelta = targetIdx - anchorTrackIdx;
 
-          // Add to frontend with the backend's ID
-          addTrack({
-            id: backendTrackId,
-            name: `Track ${tracks.length + 1}`,
-          });
+      if (multi) {
+        // --- Multi-clip cross-track move ---
+        // Sort clips by original track index (top-to-bottom) for ordered processing
+        const sorted = [...dragState.multiClipInfo!].sort((a, b) => a.trackIndex - b.trackIndex);
 
-          // Move clip to the new track
-          await moveClipToTrack(clip.id, backendTrackId, clip.startTime);
+        // Track creation cache: maps desired track index -> actual track ID
+        const createdTracks = new Map<number, string>();
+        const currentTracks = useDAWStore.getState().tracks;
 
-          console.log(
-            `[Timeline] Created new track ${backendTrackId} from drag`,
-          );
-        } catch (error) {
-          console.error("[Timeline] Failed to create track from drag:", error);
+        for (const info of sorted) {
+          const desiredTrackIdx = info.trackIndex + trackDelta;
+
+          // Same track — no cross-track move needed (time already updated during drag)
+          if (desiredTrackIdx === info.trackIndex) continue;
+
+          let targetTrackId: string | undefined;
+
+          if (desiredTrackIdx >= 0 && desiredTrackIdx < currentTracks.length) {
+            // Target track exists — check type compatibility
+            const srcTrack = currentTracks[info.trackIndex];
+            const dstTrack = currentTracks[desiredTrackIdx];
+            if (dstTrack.type === srcTrack.type) {
+              targetTrackId = dstTrack.id;
+            }
+          }
+
+          // Need a new track — either beyond bounds or incompatible type
+          if (!targetTrackId) {
+            // Check if we already created a track for this index in this batch
+            if (createdTracks.has(desiredTrackIdx)) {
+              targetTrackId = createdTracks.get(desiredTrackIdx)!;
+            } else {
+              try {
+                const backendTrackId = await nativeBridge.addTrack();
+                const srcTrack = currentTracks[info.trackIndex];
+                addTrack({
+                  id: backendTrackId,
+                  name: `Track ${useDAWStore.getState().tracks.length + 1}`,
+                  type: srcTrack.type,
+                });
+                createdTracks.set(desiredTrackIdx, backendTrackId);
+                targetTrackId = backendTrackId;
+              } catch (error) {
+                console.error("[Timeline] Failed to create track for multi-clip drag:", error);
+                continue;
+              }
+            }
+          }
+
+          // Move the clip to the target track (keeps current startTime from drag)
+          const currentClipState = useDAWStore.getState().tracks
+            .flatMap(t => [...t.clips, ...t.midiClips])
+            .find(c => c.id === info.clipId);
+          if (currentClipState && targetTrackId) {
+            await moveClipToTrack(info.clipId, targetTrackId, currentClipState.startTime);
+          }
         }
-      } else if (
-        dragState.targetTrackIndex != null &&
-        dragState.targetTrackIndex !== trackIndex &&
-        dragState.targetTrackIndex < tracks.length
-      ) {
-        // Finalize cross-track move (deferred from drag to prevent unmount)
-        const targetTrackId = tracks[dragState.targetTrackIndex].id;
-        await moveClipToTrack(clip.id, targetTrackId, clip.startTime);
+      } else {
+        // --- Single clip drag end (existing behavior) ---
+        if (showGhostTrack) {
+          try {
+            const backendTrackId = await nativeBridge.addTrack();
+            addTrack({
+              id: backendTrackId,
+              name: `Track ${tracks.length + 1}`,
+            });
+            await moveClipToTrack(clip.id, backendTrackId, clip.startTime);
+            console.log(`[Timeline] Created new track ${backendTrackId} from drag`);
+          } catch (error) {
+            console.error("[Timeline] Failed to create track from drag:", error);
+          }
+        } else if (
+          dragState.targetTrackIndex != null &&
+          dragState.targetTrackIndex !== trackIndex &&
+          dragState.targetTrackIndex < tracks.length
+        ) {
+          const targetTrackId = tracks[dragState.targetTrackIndex].id;
+          await moveClipToTrack(clip.id, targetTrackId, clip.startTime);
+        }
       }
 
       // Sync backend with current frontend clip state after drag completes.
-      // This is the single definitive sync point - moveClipToTrack only updates
-      // frontend state during drag to avoid race conditions from rapid async calls.
       await syncClipsWithBackend();
 
       // Always reset drag state (also hides ghost track)
@@ -1424,7 +1590,13 @@ export function Timeline({ tracks }: TimelineProps) {
       }
 
       const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
-      selectClip(clip.id, { ctrl });
+      // Preserve multi-selection: if the clip is already selected in a multi-selection
+      // and no Ctrl modifier, don't call selectClip (which would clear the selection).
+      const currentSelectedIds = useDAWStore.getState().selectedClipIds;
+      const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
+      if (!isAlreadyInMultiSelection || ctrl) {
+        selectClip(clip.id, { ctrl });
+      }
 
       // Locked clips cannot be moved or resized
       if (clip.locked) return;
@@ -1443,6 +1615,27 @@ export function Timeline({ tracks }: TimelineProps) {
         stage.container().style.cursor = "ew-resize";
       }
 
+      // Build multi-clip info when starting a drag on a multi-selected clip
+      let multiClipInfo: typeof dragState.multiClipInfo;
+      const latestSelectedIds = useDAWStore.getState().selectedClipIds;
+      if (dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
+        multiClipInfo = [];
+        const currentTracks = useDAWStore.getState().tracks;
+        for (let ti = 0; ti < currentTracks.length; ti++) {
+          const t = currentTracks[ti];
+          for (const c of t.clips) {
+            if (latestSelectedIds.includes(c.id) && !c.locked) {
+              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, isMidi: false });
+            }
+          }
+          for (const mc of t.midiClips) {
+            if (latestSelectedIds.includes(mc.id)) {
+              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, isMidi: true });
+            }
+          }
+        }
+      }
+
       // Set drag state immediately - handleDragStart will preserve resize types
       setDragState({
         type: dragType,
@@ -1454,6 +1647,7 @@ export function Timeline({ tracks }: TimelineProps) {
         originalStartTime: clip.startTime,
         originalDuration: clip.duration,
         originalOffset: clip.offset,
+        multiClipInfo,
       });
     };
 
@@ -1919,6 +2113,18 @@ export function Timeline({ tracks }: TimelineProps) {
     const x = clip.startTime * pixelsPerSecond - scrollX;
     const width = clip.duration * pixelsPerSecond;
     const isSelected = selectedClipIds.includes(clip.id);
+
+    // Visual offset for multi-clip drag
+    if (dragState.type === "move" && dragState.multiClipInfo && dragState.multiClipInfo.length > 1 && dragState.targetTrackIndex != null) {
+      const info = dragState.multiClipInfo.find(m => m.clipId === clip.id);
+      if (info) {
+        const trackDelta = dragState.targetTrackIndex - (dragState.trackIndex ?? 0);
+        const visualTrackIdx = info.trackIndex + trackDelta;
+        if (visualTrackIdx !== _trackIndex) {
+          trackY = visualTrackIdx * trackHeight;
+        }
+      }
+    }
 
     // Skip if clip is outside visible area
     if (x + width < 0 || x > dimensions.width) return null;
@@ -2411,9 +2617,9 @@ export function Timeline({ tracks }: TimelineProps) {
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
         onMouseDown={(e: any) => {
+          const targetName = e.target.name?.() || e.target.attrs?.name || "";
           // Alt+drag on background starts razor edit
           if (e.evt?.altKey) {
-            const targetName = e.target.name?.() || e.target.attrs?.name || "";
             if (targetName === "timeline-bg") {
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
@@ -2427,8 +2633,27 @@ export function Timeline({ tracks }: TimelineProps) {
               }
             }
           }
+          // Marquee selection: plain click+drag on background (no Alt, select tool)
+          else if (targetName === "timeline-bg" && toolModeRef.current !== "split") {
+            const stage = e.target.getStage();
+            const pointerPos = stage.getPointerPosition();
+            if (pointerPos) {
+              marqueeRef.current = {
+                startX: pointerPos.x + scrollX,
+                startY: pointerPos.y + scrollY,
+                currentX: pointerPos.x + scrollX,
+                currentY: pointerPos.y + scrollY,
+                ctrlHeld: e.evt?.ctrlKey || e.evt?.metaKey || false,
+              };
+            }
+          }
         }}
         onClick={(e: any) => {
+          // Skip deselection if marquee just finished
+          if (marqueeJustCompletedRef.current) {
+            marqueeJustCompletedRef.current = false;
+            return;
+          }
           // Click on background only → deselect all and clear razor edits
           const targetName = e.target.name?.() || e.target.attrs?.name || "";
           if (targetName === "timeline-bg" && !e.evt?.altKey) {
@@ -2492,6 +2717,24 @@ export function Timeline({ tracks }: TimelineProps) {
             />
           ))}
 
+          {/* Track group tint overlays */}
+          {tracks.map((track, i) => {
+            const gInfo = getTrackGroupInfo(track.id, trackGroups);
+            if (!gInfo) return null;
+            return (
+              <Rect
+                key={`group-tint-${i}`}
+                x={0}
+                y={i * trackHeight}
+                width={dimensions.width}
+                height={trackHeight}
+                fill={TRACK_GROUP_COLORS[gInfo.colorIndex]}
+                opacity={0.06}
+                listening={false}
+              />
+            );
+          })}
+
           {/* Grid Lines - rendered after track backgrounds so they're visible on top */}
           {gridLines}
 
@@ -2554,6 +2797,21 @@ export function Timeline({ tracks }: TimelineProps) {
 
           {/* Ghost Track */}
           {renderGhostTrack()}
+
+          {/* Marquee selection rectangle */}
+          {marqueeRect && (
+            <Rect
+              x={marqueeRect.x - scrollX}
+              y={marqueeRect.y - scrollY + RULER_HEIGHT}
+              width={marqueeRect.width}
+              height={marqueeRect.height}
+              fill="rgba(0, 120, 212, 0.15)"
+              stroke="#0078d4"
+              strokeWidth={1}
+              dash={[4, 2]}
+              listening={false}
+            />
+          )}
 
           {/* Playhead - separate component to avoid Timeline re-renders */}
           {/* Split tool preview line */}

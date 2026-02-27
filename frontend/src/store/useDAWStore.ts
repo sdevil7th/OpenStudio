@@ -8,6 +8,45 @@ import { calculateGridInterval } from "../utils/snapToGrid";
 // Stores the value at edit start so we can create a single undo command on edit end.
 const _editSnapshots = new Map<string, number>();
 
+// Group colors for visual linking brackets/tints
+export const TRACK_GROUP_COLORS = [
+  "#3b82f6", "#ef4444", "#22c55e", "#eab308",
+  "#8b5cf6", "#ec4899", "#f97316", "#14b8a6",
+];
+
+// Helper: find the group a track belongs to and return its color index
+export function getTrackGroupInfo(
+  trackId: string,
+  trackGroups: Array<{ id: string; memberTrackIds: string[] }>,
+): { groupId: string; colorIndex: number } | null {
+  for (let i = 0; i < trackGroups.length; i++) {
+    if (trackGroups[i].memberTrackIds.includes(trackId)) {
+      return { groupId: trackGroups[i].id, colorIndex: i % TRACK_GROUP_COLORS.length };
+    }
+  }
+  return null;
+}
+
+// Re-entrance guard for linked track parameter syncing.
+// Prevents infinite loops when changing a linked track triggers the same action
+// on other linked tracks.
+const _linkingInProgress = new Set<string>();
+
+// Returns all member IDs in the same track group as `trackId`, or just `[trackId]`.
+function getLinkedTrackIds(
+  trackId: string,
+  trackGroups: Array<{ id: string; memberTrackIds: string[]; linkedParams: string[] }>,
+  param?: string,
+): string[] {
+  for (const g of trackGroups) {
+    if (g.memberTrackIds.includes(trackId)) {
+      if (param && !g.linkedParams.includes(param)) return [trackId];
+      return g.memberTrackIds;
+    }
+  }
+  return [trackId];
+}
+
 // ============================================
 // Type Definitions
 // ============================================
@@ -620,6 +659,7 @@ interface DAWActions {
   setClipVolume: (clipId: string, volumeDB: number) => void;
   setClipFades: (clipId: string, fadeIn: number, fadeOut: number) => void;
   selectAllClips: () => void;
+  setSelectedClipIds: (clipIds: string[]) => void;
   copyClip: (clipId: string) => void;
   cutClip: (clipId: string) => void;
   copySelectedClips: () => void;
@@ -1933,10 +1973,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           });
         }
       } else {
-        // Single selection: replace selection with just this track
+        // Single selection: replace selection with this track + all linked group members
+        const linkedIds = getLinkedTrackIds(id, state.trackGroups);
         set({
           selectedTrackId: id,
-          selectedTrackIds: [id],
+          selectedTrackIds: linkedIds,
           lastSelectedTrackId: id,
         });
       }
@@ -1978,57 +2019,80 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Track Audio Controls ==========
     setTrackVolume: async (id, volumeDB) => {
+      if (_linkingInProgress.has("vol_" + id)) return;
       const track = get().tracks.find((t) => t.id === id);
       if (!track) return;
 
-      // Convert dB to linear for display
+      const linkedIds = getLinkedTrackIds(id, get().trackGroups, "volume");
       const linear = Math.pow(10, volumeDB / 20);
 
+      // Batch update all linked tracks in a single set()
       set((state) => ({
         tracks: state.tracks.map((t) =>
-          t.id === id ? { ...t, volumeDB, volume: Math.min(1, linear) } : t,
+          linkedIds.includes(t.id) ? { ...t, volumeDB, volume: Math.min(1, linear) } : t,
         ),
       }));
 
-      await nativeBridge.setTrackVolume(id, volumeDB);
+      // Bridge calls for each linked track
+      for (const tid of linkedIds) {
+        _linkingInProgress.add("vol_" + tid);
+        nativeBridge.setTrackVolume(tid, volumeDB);
+      }
+      for (const tid of linkedIds) _linkingInProgress.delete("vol_" + tid);
     },
 
     setTrackPan: async (id, pan) => {
+      if (_linkingInProgress.has("pan_" + id)) return;
       const track = get().tracks.find((t) => t.id === id);
       if (!track) return;
 
+      const linkedIds = getLinkedTrackIds(id, get().trackGroups, "pan");
+
       set((state) => ({
-        tracks: state.tracks.map((t) => (t.id === id ? { ...t, pan } : t)),
+        tracks: state.tracks.map((t) => (linkedIds.includes(t.id) ? { ...t, pan } : t)),
       }));
 
-      await nativeBridge.setTrackPan(id, pan);
+      for (const tid of linkedIds) {
+        _linkingInProgress.add("pan_" + tid);
+        nativeBridge.setTrackPan(tid, pan);
+      }
+      for (const tid of linkedIds) _linkingInProgress.delete("pan_" + tid);
     },
 
     toggleTrackMute: async (id) => {
-      const track = get().tracks.find((t) => t.id === id);
+      const state = get();
+      const track = state.tracks.find((t) => t.id === id);
       if (!track) return;
 
-      const oldMuted = track.muted;
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "mute");
+      const newMuted = !track.muted;
+      // Capture old states for undo
+      const oldStates = new Map<string, boolean>();
+      for (const tid of linkedIds) {
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (t) oldStates.set(tid, t.muted);
+      }
 
       const command: Command = {
         type: "TOGGLE_TRACK_MUTE",
-        description: oldMuted ? "Unmute track" : "Mute track",
+        description: newMuted ? "Mute track(s)" : "Unmute track(s)",
         timestamp: Date.now(),
         execute: () => {
           set((s) => ({
             tracks: s.tracks.map((t) =>
-              t.id === id ? { ...t, muted: !oldMuted } : t,
+              linkedIds.includes(t.id) ? { ...t, muted: newMuted } : t,
             ),
           }));
-          nativeBridge.setTrackMute(id, !oldMuted);
+          for (const tid of linkedIds) nativeBridge.setTrackMute(tid, newMuted);
         },
         undo: () => {
           set((s) => ({
-            tracks: s.tracks.map((t) =>
-              t.id === id ? { ...t, muted: oldMuted } : t,
-            ),
+            tracks: s.tracks.map((t) => {
+              const old = oldStates.get(t.id);
+              return old !== undefined ? { ...t, muted: old } : t;
+            }),
           }));
-          nativeBridge.setTrackMute(id, oldMuted);
+          for (const [tid, val] of oldStates) nativeBridge.setTrackMute(tid, val);
         },
       };
 
@@ -2037,30 +2101,38 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     toggleTrackSolo: async (id) => {
-      const track = get().tracks.find((t) => t.id === id);
+      const state = get();
+      const track = state.tracks.find((t) => t.id === id);
       if (!track) return;
 
-      const oldSoloed = track.soloed;
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "solo");
+      const newSoloed = !track.soloed;
+      const oldStates = new Map<string, boolean>();
+      for (const tid of linkedIds) {
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (t) oldStates.set(tid, t.soloed);
+      }
 
       const command: Command = {
         type: "TOGGLE_TRACK_SOLO",
-        description: oldSoloed ? "Unsolo track" : "Solo track",
+        description: newSoloed ? "Solo track(s)" : "Unsolo track(s)",
         timestamp: Date.now(),
         execute: () => {
           set((s) => ({
             tracks: s.tracks.map((t) =>
-              t.id === id ? { ...t, soloed: !oldSoloed } : t,
+              linkedIds.includes(t.id) ? { ...t, soloed: newSoloed } : t,
             ),
           }));
-          nativeBridge.setTrackSolo(id, !oldSoloed);
+          for (const tid of linkedIds) nativeBridge.setTrackSolo(tid, newSoloed);
         },
         undo: () => {
           set((s) => ({
-            tracks: s.tracks.map((t) =>
-              t.id === id ? { ...t, soloed: oldSoloed } : t,
-            ),
+            tracks: s.tracks.map((t) => {
+              const old = oldStates.get(t.id);
+              return old !== undefined ? { ...t, soloed: old } : t;
+            }),
           }));
-          nativeBridge.setTrackSolo(id, oldSoloed);
+          for (const [tid, val] of oldStates) nativeBridge.setTrackSolo(tid, val);
         },
       };
 
@@ -2073,33 +2145,41 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const track = state.tracks.find((t) => t.id === id);
       if (!track) return;
 
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "armed");
       const newArmed = !track.armed;
 
       set((s) => ({
         tracks: s.tracks.map((t) =>
-          t.id === id ? { ...t, armed: newArmed } : t,
+          linkedIds.includes(t.id) ? { ...t, armed: newArmed } : t,
         ),
       }));
 
-      await nativeBridge.setTrackRecordArm(id, newArmed);
+      for (const tid of linkedIds) await nativeBridge.setTrackRecordArm(tid, newArmed);
     },
 
     toggleTrackFXBypass: async (id) => {
-      const track = get().tracks.find((t) => t.id === id);
+      const state = get();
+      const track = state.tracks.find((t) => t.id === id);
       if (!track) return;
 
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "fxBypass");
       const newBypassed = !track.fxBypassed;
+
       set((s) => ({
         tracks: s.tracks.map((t) =>
-          t.id === id ? { ...t, fxBypassed: newBypassed } : t,
+          linkedIds.includes(t.id) ? { ...t, fxBypassed: newBypassed } : t,
         ),
       }));
 
-      // Bypass/unbypass all input FX and track FX on this track
-      for (let i = 0; i < track.inputFxCount; i++)
-        await nativeBridge.bypassTrackInputFX(id, i, newBypassed);
-      for (let i = 0; i < track.trackFxCount; i++)
-        await nativeBridge.bypassTrackFX(id, i, newBypassed);
+      // Bypass/unbypass all FX on all linked tracks
+      for (const tid of linkedIds) {
+        const linkedTrack = state.tracks.find((t) => t.id === tid);
+        if (!linkedTrack) continue;
+        for (let i = 0; i < linkedTrack.inputFxCount; i++)
+          await nativeBridge.bypassTrackInputFX(tid, i, newBypassed);
+        for (let i = 0; i < linkedTrack.trackFxCount; i++)
+          await nativeBridge.bypassTrackFX(tid, i, newBypassed);
+      }
     },
 
     toggleTrackMonitor: async (id) => {
@@ -2139,68 +2219,101 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Continuous Edit Begin/Commit (for undo/redo of fader drags) ==========
     beginTrackVolumeEdit: (id) => {
-      const track = get().tracks.find((t) => t.id === id);
-      if (track) _editSnapshots.set("vol_" + id, track.volumeDB);
+      const state = get();
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "volume");
+      for (const tid of linkedIds) {
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (t) _editSnapshots.set("vol_" + tid, t.volumeDB);
+      }
     },
     commitTrackVolumeEdit: (id) => {
-      const key = "vol_" + id;
-      const oldValue = _editSnapshots.get(key);
-      _editSnapshots.delete(key);
-      if (oldValue === undefined) return;
-      const track = get().tracks.find((t) => t.id === id);
-      if (!track || track.volumeDB === oldValue) return;
-      const newValue = track.volumeDB;
+      const state = get();
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "volume");
+
+      // Collect old/new values for all linked tracks
+      const changes: Array<{ tid: string; oldVal: number; newVal: number }> = [];
+      for (const tid of linkedIds) {
+        const key = "vol_" + tid;
+        const oldVal = _editSnapshots.get(key);
+        _editSnapshots.delete(key);
+        if (oldVal === undefined) continue;
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (!t || t.volumeDB === oldVal) continue;
+        changes.push({ tid, oldVal, newVal: t.volumeDB });
+      }
+      if (changes.length === 0) return;
+
       const command: Command = {
         type: "SET_TRACK_VOLUME",
         description: "Adjust track volume",
         timestamp: Date.now(),
         execute: () => {
           set((s) => ({
-            tracks: s.tracks.map((t) =>
-              t.id === id ? { ...t, volumeDB: newValue, volume: Math.min(1, Math.pow(10, newValue / 20)) } : t,
-            ),
+            tracks: s.tracks.map((t) => {
+              const c = changes.find((ch) => ch.tid === t.id);
+              return c ? { ...t, volumeDB: c.newVal, volume: Math.min(1, Math.pow(10, c.newVal / 20)) } : t;
+            }),
           }));
-          nativeBridge.setTrackVolume(id, newValue);
+          for (const c of changes) nativeBridge.setTrackVolume(c.tid, c.newVal);
         },
         undo: () => {
           set((s) => ({
-            tracks: s.tracks.map((t) =>
-              t.id === id ? { ...t, volumeDB: oldValue, volume: Math.min(1, Math.pow(10, oldValue / 20)) } : t,
-            ),
+            tracks: s.tracks.map((t) => {
+              const c = changes.find((ch) => ch.tid === t.id);
+              return c ? { ...t, volumeDB: c.oldVal, volume: Math.min(1, Math.pow(10, c.oldVal / 20)) } : t;
+            }),
           }));
-          nativeBridge.setTrackVolume(id, oldValue);
+          for (const c of changes) nativeBridge.setTrackVolume(c.tid, c.oldVal);
         },
       };
       commandManager.execute(command);
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
     beginTrackPanEdit: (id) => {
-      const track = get().tracks.find((t) => t.id === id);
-      if (track) _editSnapshots.set("pan_" + id, track.pan);
+      const state = get();
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "pan");
+      for (const tid of linkedIds) {
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (t) _editSnapshots.set("pan_" + tid, t.pan);
+      }
     },
     commitTrackPanEdit: (id) => {
-      const key = "pan_" + id;
-      const oldValue = _editSnapshots.get(key);
-      _editSnapshots.delete(key);
-      if (oldValue === undefined) return;
-      const track = get().tracks.find((t) => t.id === id);
-      if (!track || track.pan === oldValue) return;
-      const newValue = track.pan;
+      const state = get();
+      const linkedIds = getLinkedTrackIds(id, state.trackGroups, "pan");
+
+      const changes: Array<{ tid: string; oldVal: number; newVal: number }> = [];
+      for (const tid of linkedIds) {
+        const key = "pan_" + tid;
+        const oldVal = _editSnapshots.get(key);
+        _editSnapshots.delete(key);
+        if (oldVal === undefined) continue;
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (!t || t.pan === oldVal) continue;
+        changes.push({ tid, oldVal, newVal: t.pan });
+      }
+      if (changes.length === 0) return;
+
       const command: Command = {
         type: "SET_TRACK_PAN",
         description: "Adjust track pan",
         timestamp: Date.now(),
         execute: () => {
           set((s) => ({
-            tracks: s.tracks.map((t) => (t.id === id ? { ...t, pan: newValue } : t)),
+            tracks: s.tracks.map((t) => {
+              const c = changes.find((ch) => ch.tid === t.id);
+              return c ? { ...t, pan: c.newVal } : t;
+            }),
           }));
-          nativeBridge.setTrackPan(id, newValue);
+          for (const c of changes) nativeBridge.setTrackPan(c.tid, c.newVal);
         },
         undo: () => {
           set((s) => ({
-            tracks: s.tracks.map((t) => (t.id === id ? { ...t, pan: oldValue } : t)),
+            tracks: s.tracks.map((t) => {
+              const c = changes.find((ch) => ch.tid === t.id);
+              return c ? { ...t, pan: c.oldVal } : t;
+            }),
           }));
-          nativeBridge.setTrackPan(id, oldValue);
+          for (const c of changes) nativeBridge.setTrackPan(c.tid, c.oldVal);
         },
       };
       commandManager.execute(command);
@@ -3349,6 +3462,13 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         selectedClipId: allClipIds.length > 0 ? allClipIds[0] : null,
         selectedTrackIds: [],
         lastSelectedTrackId: null,
+      });
+    },
+
+    setSelectedClipIds: (clipIds: string[]) => {
+      set({
+        selectedClipIds: clipIds,
+        selectedClipId: clipIds.length > 0 ? clipIds[clipIds.length - 1] : null,
       });
     },
 

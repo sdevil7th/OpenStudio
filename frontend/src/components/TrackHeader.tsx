@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import classNames from "classnames";
-import { useDAWStore, Track } from "../store/useDAWStore";
+import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { FXChainPanel } from "./FXChainPanel";
 import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
@@ -37,6 +37,7 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
     audioDeviceSetup,
     refreshAudioDeviceSetup,
     trackHeight,
+    trackGroups,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -54,8 +55,12 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
       audioDeviceSetup: s.audioDeviceSetup,
       refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
       trackHeight: s.trackHeight,
+      trackGroups: s.trackGroups,
     })),
   );
+
+  const groupInfo = getTrackGroupInfo(track.id, trackGroups);
+  const groupColor = groupInfo ? TRACK_GROUP_COLORS[groupInfo.colorIndex] : null;
 
   const colorBarRef = useRef<HTMLDivElement>(null);
   const [showFXChain, setShowFXChain] = useState(false);
@@ -146,19 +151,31 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
 
   const currentInputValue = `${track.inputStartChannel}-${track.inputChannelCount}`;
 
-  // Meter gradient based on level
+  // Meter gradient based on dB-normalized level (matches PeakMeter breakpoints)
   const getMeterColor = () => {
-    if (meterLevel > 0.9) return "#f44336"; // Keeping hex for dynamic gradient or could allow standard colors if possible
-    if (meterLevel > 0.7) return "#ffc107";
-    return "#4caf50";
+    const dbNorm = meterLevel > 0.001 ? Math.max(0, (20 * Math.log10(meterLevel) + 60) / 72) : 0;
+    if (dbNorm > 0.92) return "#ef4444"; // Red — clipping
+    if (dbNorm > 0.85) return "#facc15"; // Yellow — hot
+    return "#16a34a"; // Green — normal
   };
 
   return (
     <>
       <div
         className={`flex border-b border-neutral-900 relative overflow-hidden box-border ${isSelected ? "bg-neutral-700" : "bg-neutral-800"}`}
-        style={{ height: trackHeight }}
+        style={{
+          height: trackHeight,
+          ...(groupColor ? { backgroundColor: isSelected ? undefined : `${groupColor}10` } : {}),
+        }}
       >
+        {/* Link group bracket */}
+        {groupColor && (
+          <div
+            className="w-1 shrink-0"
+            style={{ backgroundColor: groupColor }}
+            title="Linked group"
+          />
+        )}
         {/* Track Color Bar - Clickable to change color */}
         <div
           ref={colorBarRef}
@@ -433,7 +450,7 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
               track.armed && meterLevel > 0.01 && "animate-pulse", // Pulse when recording with signal
             )}
             style={{
-              height: `${Math.min(100, meterLevel * 100)}%`,
+              height: `${Math.min(100, meterLevel > 0.001 ? Math.max(0, (20 * Math.log10(meterLevel) + 60) / 72) * 100 : 0)}%`,
               background: `linear-gradient(to top, ${getMeterColor()}, ${getMeterColor()})`,
             }}
           />
