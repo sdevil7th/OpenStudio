@@ -218,6 +218,11 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
             onClick: () => { useDAWStore.getState().consolidateTrack(track.id); },
             disabled: track.clips.length === 0,
           },
+          {
+            label: "Render Track in Place",
+            onClick: () => { void useDAWStore.getState().renderTrackInPlace(track.id); },
+            disabled: track.clips.length === 0,
+          },
           { divider: true, label: "" },
           {
             label: "Save as Track Template...",
@@ -281,6 +286,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
         {...filteredListeners}
         onClick={handleClick}
         onContextMenu={handleContextMenu}
+        data-track-id={track.id}
         className={`cursor-grab active:cursor-grabbing ${isSelected ? "shadow-[inset_0_0_0_2px_#3b82f6]" : ""}`}
       >
         <TrackHeader track={track} isSelected={isSelected} />

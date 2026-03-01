@@ -122,6 +122,28 @@ python build.py prod
 - **Action Registry** (`actionRegistry.ts`): centralized list of all actions with id, name, category, shortcut, execute. Used by CommandPalette, KeyboardShortcutsModal, and menus
 - **Modal state pattern**: each modal follows `showX: boolean` + `toggleX()` in store + useShallow selector in App.tsx + keyboard shortcut + menu item + action registry entry
 
+### Undo/Redo Requirement (IMPORTANT)
+
+**Every new action/function that modifies clip or track data MUST be tracked via `commandManager.push()` or `commandManager.execute()`.** This includes but is not limited to:
+
+- Adding, removing, moving, splitting, resizing clips
+- Changing clip properties: volume, pan, fades, color, mute, lock, groupId, reverse
+- Paste, nudge, quantize, normalize operations
+- Time selection operations (cut, delete, insert silence)
+- Razor edit content deletion
+- Track property changes (name, color, volume, pan, mute, solo, armed)
+
+**Pattern for adding undo support:**
+
+1. **Before** the `set()` call, capture old state (snapshot or specific values)
+2. **After** the `set()` call, capture new state
+3. Call `commandManager.push({ type, description, timestamp, execute: () => set(newState), undo: () => set(oldState) })`
+4. Call `set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() })`
+
+For **continuous edits** (faders, knobs), use the begin/commit pattern: `beginXEdit()` captures initial state, intermediate `setX()` calls update live without undo, `commitXEdit()` pushes a single undo command covering the full range.
+
+**Do not skip undo tracking** — users expect Ctrl+Z to undo any data-modifying action.
+
 ### Timeline Rendering
 - **Konva** (react-konva) for canvas-based rendering
 - Waveform peaks fetched from C++ via `getWaveformPeaks(filePath, samplesPerPixel, numPixels)` — backed by PeakCache (`.s13peaks` files), never reads audio files directly

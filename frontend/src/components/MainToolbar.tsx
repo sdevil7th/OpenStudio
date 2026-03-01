@@ -1,4 +1,4 @@
-import { Mic, Repeat, Circle, Play, Square, Undo2, Redo2, Grid3x3, SlidersHorizontal, SlidersVertical, Settings, Blend, MousePointer, Scissors } from "lucide-react";
+import { Repeat, Circle, Play, Square, Undo2, Redo2, Grid3x3, SlidersHorizontal, SlidersVertical, Settings, Blend, MousePointer, Scissors, VolumeX } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
 
@@ -13,25 +13,15 @@ export function MainToolbar({
   onToggleMixer,
   showMixer,
 }: MainToolbarProps) {
-  const { transport, play, stop, toggleLoop, tracks, snapEnabled, toggleSnap, undo, redo, canUndo, canRedo, autoCrossfade, toggleAutoCrossfade, toolMode, setToolMode, toggleSplitTool } =
+  const { transport, play, record, stop, toggleLoop, tracks, snapEnabled, toggleSnap, undo, redo, canUndo, canRedo, autoCrossfade, toggleAutoCrossfade, toolMode, setToolMode, toggleSplitTool, toggleMuteTool } =
     useDAWStore();
-  const { isPlaying, loopEnabled } = transport;
+  const { isPlaying, isPaused, loopEnabled } = transport;
   const hasArmedTracks = tracks.some((t) => t.armed);
 
   return (
     <div className="h-12 bg-neutral-900 border-b border-b-neutral-950 flex items-center px-4 gap-4 shrink-0">
-      {/* Transport Section - Now Connected! */}
+      {/* Transport Section */}
       <div className="flex items-center gap-1">
-        <Button
-          variant="default"
-          size="icon-lg"
-          active={hasArmedTracks}
-          title={
-            hasArmedTracks ? "Tracks armed for recording" : "No tracks armed"
-          }
-        >
-          <Mic size={16} />
-        </Button>
         <Button
           variant="purple"
           size="icon-lg"
@@ -45,8 +35,9 @@ export function MainToolbar({
           variant="danger"
           size="icon-lg"
           active={hasArmedTracks && isPlaying}
-          onClick={play}
-          title={hasArmedTracks ? "Record" : "Arm tracks to record"}
+          disabled={!hasArmedTracks}
+          onClick={() => record()}
+          title={hasArmedTracks ? "Record" : "Arm a track to record"}
         >
           <Circle size={16} fill="currentColor" />
         </Button>
@@ -54,7 +45,7 @@ export function MainToolbar({
           variant="success"
           size="icon-lg"
           active={isPlaying}
-          onClick={play}
+          onClick={() => play()}
           title="Play"
         >
           <Play size={16} fill="currentColor" />
@@ -62,7 +53,8 @@ export function MainToolbar({
         <Button
           variant="default"
           size="icon-lg"
-          onClick={stop}
+          disabled={!isPlaying && !isPaused}
+          onClick={() => stop()}
           title="Stop"
         >
           <Square size={14} fill="currentColor" />
@@ -140,6 +132,15 @@ export function MainToolbar({
           title="Split Tool (B)"
         >
           <Scissors size={16} />
+        </Button>
+        <Button
+          variant="default"
+          size="icon-lg"
+          active={toolMode === "mute"}
+          onClick={toggleMuteTool}
+          title="Mute Tool (X)"
+        >
+          <VolumeX size={16} />
         </Button>
       </div>
 

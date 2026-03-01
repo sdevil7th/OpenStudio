@@ -3,7 +3,7 @@
  * Snaps time values to musical grid based on tempo and time signature
  */
 
-export type GridSize = "bar" | "beat" | "half_beat" | "quarter_beat";
+export type GridSize = "bar" | "half_bar" | "quarter_bar" | "eighth_bar" | "beat" | "half_beat" | "quarter_beat" | "second" | "minute";
 
 interface TimeSignature {
   numerator: number;
@@ -28,12 +28,22 @@ export function calculateGridInterval(
   switch (gridSize) {
     case "bar":
       return secondsPerBar;
+    case "half_bar":
+      return secondsPerBar / 2;
+    case "quarter_bar":
+      return secondsPerBar / 4;
+    case "eighth_bar":
+      return secondsPerBar / 8;
     case "beat":
       return secondsPerBeat;
     case "half_beat":
       return secondsPerBeat / 2;
     case "quarter_beat":
       return secondsPerBeat / 4;
+    case "second":
+      return 1;
+    case "minute":
+      return 60;
     default:
       return secondsPerBeat;
   }

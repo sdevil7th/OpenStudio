@@ -1,5 +1,5 @@
 import classNames from 'classnames';
-import { forwardRef } from 'react';
+import React, { forwardRef } from 'react';
 import {
   ButtonProps,
   buttonSizeStyles,
@@ -97,9 +97,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       className
     );
 
-    const handleClick = () => {
+    const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
       if (!disabled && !loading && onClick) {
-        onClick();
+        onClick(e);
       }
     };
 

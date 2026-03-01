@@ -1,4 +1,4 @@
-import { ButtonHTMLAttributes, ReactNode } from 'react';
+import React, { ButtonHTMLAttributes, ReactNode } from 'react';
 
 /**
  * Button size variants
@@ -107,9 +107,9 @@ export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement
   className?: string;
 
   /**
-   * Click handler
+   * Click handler (event is passed through for stopPropagation etc.)
    */
-  onClick?: () => void;
+  onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void;
 
   /**
    * Accessible title/tooltip

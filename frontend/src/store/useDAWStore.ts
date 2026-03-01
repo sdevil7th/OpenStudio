@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { nativeBridge } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
-import { calculateGridInterval } from "../utils/snapToGrid";
+import { calculateGridInterval, type GridSize } from "../utils/snapToGrid";
 
 // Module-level snapshot map for continuous edit undo/redo (volume/pan fader drags).
 // Stores the value at edit start so we can create a single undo command on edit end.
@@ -327,8 +327,8 @@ interface DAWState {
   trackHeight: number; // For Vertical Zoom
   tcpWidth: number; // Track Control Panel width (draggable)
   snapEnabled: boolean;
-  gridSize: "bar" | "beat" | "half_beat" | "quarter_beat";
-  toolMode: "select" | "split";
+  gridSize: GridSize;
+  toolMode: "select" | "split" | "mute";
 
   // UI State
   showMixer: boolean;
@@ -624,7 +624,7 @@ interface DAWActions {
   setTrackHeight: (height: number) => void;
   setTcpWidth: (width: number) => void;
   toggleSnap: () => void;
-  setGridSize: (size: "bar" | "beat" | "half_beat" | "quarter_beat") => void;
+  setGridSize: (size: GridSize) => void;
 
   // Clips
   addClip: (trackId: string, clip: AudioClip) => void;
@@ -637,8 +637,9 @@ interface DAWActions {
   ) => Promise<void>;
 
   // Tool Mode
-  setToolMode: (mode: "select" | "split") => void;
+  setToolMode: (mode: "select" | "split" | "mute") => void;
   toggleSplitTool: () => void;
+  toggleMuteTool: () => void;
 
   // Clip Editing
   splitClipAtPlayhead: () => void;
@@ -735,9 +736,11 @@ interface DAWActions {
   setTimecodeMode: (mode: "time" | "beats" | "smpte") => void;
   setSmpteFrameRate: (rate: 24 | 25 | 29.97 | 30) => void;
 
-  // Cut/Copy within Time Selection
+  // Cut/Copy/Delete within Time Selection
   cutWithinTimeSelection: () => void;
   copyWithinTimeSelection: () => void;
+  deleteWithinTimeSelection: () => void;
+  insertSilenceAtTimeSelection: () => void;
 
   // Piano Roll
   openPianoRoll: (trackId: string, clipId: string) => void;
@@ -844,6 +847,8 @@ interface DAWActions {
   toggleBatchConverter: () => void;
   exportProjectMIDI: () => Promise<boolean>;
   consolidateTrack: (trackId: string) => Promise<string | null>;
+  renderClipInPlace: (clipId: string) => Promise<void>;
+  renderTrackInPlace: (trackId: string) => Promise<void>;
 
   // Phase 13: Advanced Editing
   setClipFadeInShape: (clipId: string, shape: number) => void;
@@ -3112,6 +3117,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // ========== Tool Mode ==========
     setToolMode: (mode) => set({ toolMode: mode }),
     toggleSplitTool: () => set((state) => ({ toolMode: state.toolMode === "split" ? "select" : "split" })),
+    toggleMuteTool: () => set((state) => ({ toolMode: state.toolMode === "mute" ? "select" : "mute" })),
 
     // ========== Clips ==========
     addClip: (trackId, clip) => {
@@ -3763,21 +3769,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     pasteClip: (targetTrackId, targetTime) => {
-      const { clipboard } = get();
+      const state = get();
+      const { clipboard } = state;
       if (!clipboard.clip) return;
 
-      // Generate new ID for pasted clip
+      // Snapshot for undo
+      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldClipboard = clipboard;
+
       const newClip: AudioClip = {
         ...clipboard.clip,
         id: crypto.randomUUID(),
         startTime: targetTime,
       };
 
-      set((state) => {
-        // If it was a cut operation, remove original clip
-        let newTracks = state.tracks;
+      set((s) => {
+        let newTracks = s.tracks;
         if (clipboard.isCut) {
-          newTracks = state.tracks.map((t) => ({
+          newTracks = s.tracks.map((t) => ({
             ...t,
             clips: t.clips.filter((c) => c.id !== clipboard.clip!.id),
           }));
@@ -3787,12 +3796,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           tracks: newTracks.map((t) =>
             t.id === targetTrackId ? { ...t, clips: [...t.clips, newClip] } : t,
           ),
-          // Clear clipboard if cut
           clipboard: clipboard.isCut
             ? { clip: null, clips: [], isCut: false }
-            : state.clipboard,
+            : s.clipboard,
+          isModified: true,
         };
       });
+
+      const newTracks = get().tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newClipboardState = get().clipboard;
+
+      commandManager.push({
+        type: "PASTE_CLIP",
+        description: "Paste clip",
+        timestamp: Date.now(),
+        execute: () => set({ tracks: newTracks, clipboard: newClipboardState, isModified: true }),
+        undo: () => set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     pasteClips: () => {
@@ -3800,13 +3821,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const { clipboard } = state;
       if (clipboard.clips.length === 0) return;
 
-      const currentTime = state.transport.currentTime;
+      // Snapshot for undo
+      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldClipboard = clipboard;
 
-      // Find the earliest clip time to compute relative offsets
+      const currentTime = state.transport.currentTime;
       const earliestTime = Math.min(...clipboard.clips.map((c) => c.clip.startTime));
 
       if (clipboard.clips.length === 1) {
-        // Single clip: paste on selected track (or first track), at playhead
         const targetTrackId =
           state.selectedTrackIds.length > 0
             ? state.selectedTrackIds[0]
@@ -3835,26 +3857,22 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               t.id === targetTrackId ? { ...t, clips: [...t.clips, newClip] } : t,
             ),
             clipboard: clipboard.isCut ? { clip: null, clips: [], isCut: false } : s.clipboard,
+            isModified: true,
           };
         });
       } else {
-        // Multi clip: preserve relative track positions and time offsets
-        // Group clips by their source track
         const trackOrder = state.tracks.map((t) => t.id);
         const sourceTrackIndices = [...new Set(clipboard.clips.map((c) => c.trackId))];
         sourceTrackIndices.sort((a, b) => trackOrder.indexOf(a) - trackOrder.indexOf(b));
 
-        // Map source tracks to target tracks (selected tracks, or create new ones)
         const targetTrackIds: string[] = [];
         const newTracks: Array<{ id: string; name: string; color: string }> = [];
 
         if (state.selectedTrackIds.length >= sourceTrackIndices.length) {
-          // Enough selected tracks — use them in order
           for (let i = 0; i < sourceTrackIndices.length; i++) {
             targetTrackIds.push(state.selectedTrackIds[i]);
           }
         } else {
-          // Not enough tracks selected — use existing track positions or create new
           for (const srcTrackId of sourceTrackIndices) {
             const existingTrack = state.tracks.find((t) => t.id === srcTrackId);
             if (existingTrack) {
@@ -3867,13 +3885,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           }
         }
 
-        // Build the source→target track mapping
         const trackMap = new Map<string, string>();
         sourceTrackIndices.forEach((srcId, i) => {
           trackMap.set(srcId, targetTrackIds[i]);
         });
 
-        // Create new clips with time offsets relative to playhead
         const newClips = clipboard.clips.map((entry) => ({
           clip: {
             ...entry.clip,
@@ -3886,7 +3902,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         set((s) => {
           let tracks = s.tracks;
 
-          // If cut, remove originals
           if (clipboard.isCut) {
             const origIds = new Set(clipboard.clips.map((c) => c.clip.id));
             tracks = tracks.map((t) => ({
@@ -3895,7 +3910,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             }));
           }
 
-          // Add new clips to target tracks
           const clipsByTrack = new Map<string, AudioClip[]>();
           for (const { clip, targetTrackId } of newClips) {
             if (!clipsByTrack.has(targetTrackId)) clipsByTrack.set(targetTrackId, []);
@@ -3910,14 +3924,28 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           return {
             tracks,
             clipboard: clipboard.isCut ? { clip: null, clips: [], isCut: false } : s.clipboard,
+            isModified: true,
           };
         });
 
-        // Add new tracks if needed (addTrack is async, do it after state update)
         for (const newTrack of newTracks) {
           get().addTrack(newTrack);
         }
       }
+
+      // Undo tracking (captures full state after paste)
+      const afterState = get();
+      const newTracksSnapshot = afterState.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newClipboardSnapshot = afterState.clipboard;
+
+      commandManager.push({
+        type: "PASTE_CLIPS",
+        description: "Paste clips",
+        timestamp: Date.now(),
+        execute: () => set({ tracks: newTracksSnapshot, clipboard: newClipboardSnapshot, isModified: true }),
+        undo: () => set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     nudgeClips: (direction, fine) => {
@@ -3928,6 +3956,16 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         ? 0.01 // 10ms fine nudge
         : calculateGridInterval(state.transport.tempo, state.timeSignature, state.gridSize);
       const delta = direction === "right" ? amount : -amount;
+
+      // Capture old positions for undo
+      const clipPositions = new Map<string, number>();
+      for (const track of state.tracks) {
+        for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            clipPositions.set(clip.id, clip.startTime);
+          }
+        }
+      }
 
       set((s) => ({
         tracks: s.tracks.map((track) => ({
@@ -3940,6 +3978,40 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         })),
         isModified: true,
       }));
+
+      const command: Command = {
+        type: "NUDGE_CLIPS",
+        description: `Nudge clips ${direction}`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clipPositions.has(clip.id)
+                  ? { ...clip, startTime: Math.max(0, clipPositions.get(clip.id)! + delta) }
+                  : clip,
+              ),
+            })),
+            isModified: true,
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clipPositions.has(clip.id)
+                  ? { ...clip, startTime: clipPositions.get(clip.id)! }
+                  : clip,
+              ),
+            })),
+            isModified: true,
+          }));
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     deleteClip: (clipId) => {
@@ -4214,6 +4286,16 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const state = get();
       if (state.selectedClipIds.length < 2) return;
 
+      // Capture old groupIds for undo
+      const oldGroupIds = new Map<string, string | undefined>();
+      for (const track of state.tracks) {
+        for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            oldGroupIds.set(clip.id, clip.groupId);
+          }
+        }
+      }
+
       const groupId = crypto.randomUUID();
       set((s) => ({
         tracks: s.tracks.map((track) => ({
@@ -4226,11 +4308,45 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         })),
         isModified: true,
       }));
+
+      commandManager.push({
+        type: "GROUP_CLIPS",
+        description: "Group selected clips",
+        timestamp: Date.now(),
+        execute: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({
+            ...t,
+            clips: t.clips.map((c) => oldGroupIds.has(c.id) ? { ...c, groupId } : c),
+          })),
+          isModified: true,
+        })),
+        undo: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({
+            ...t,
+            clips: t.clips.map((c) => {
+              const old = oldGroupIds.get(c.id);
+              return old !== undefined || oldGroupIds.has(c.id) ? { ...c, groupId: old } : c;
+            }),
+          })),
+          isModified: true,
+        })),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     ungroupSelectedClips: () => {
       const state = get();
       if (state.selectedClipIds.length === 0) return;
+
+      // Capture old groupIds for undo
+      const oldGroupIds = new Map<string, string | undefined>();
+      for (const track of state.tracks) {
+        for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            oldGroupIds.set(clip.id, clip.groupId);
+          }
+        }
+      }
 
       set((s) => ({
         tracks: s.tracks.map((track) => ({
@@ -4243,15 +4359,46 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         })),
         isModified: true,
       }));
+
+      commandManager.push({
+        type: "UNGROUP_CLIPS",
+        description: "Ungroup selected clips",
+        timestamp: Date.now(),
+        execute: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({
+            ...t,
+            clips: t.clips.map((c) => oldGroupIds.has(c.id) ? { ...c, groupId: undefined } : c),
+          })),
+          isModified: true,
+        })),
+        undo: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({
+            ...t,
+            clips: t.clips.map((c) => {
+              const old = oldGroupIds.get(c.id);
+              return old !== undefined || oldGroupIds.has(c.id) ? { ...c, groupId: old } : c;
+            }),
+          })),
+          isModified: true,
+        })),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     normalizeSelectedClips: () => {
       const state = get();
       if (state.selectedClipIds.length === 0) return;
 
-      // Normalize sets clip volume to 0 dB (reset any manual volume adjustment)
-      // True peak normalization would require backend waveform analysis;
-      // for now we reset volumeDB to 0 which is "unity gain"
+      // Capture old volumes for undo
+      const oldVolumes = new Map<string, number>();
+      for (const track of state.tracks) {
+        for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            oldVolumes.set(clip.id, clip.volumeDB ?? 0);
+          }
+        }
+      }
+
       set((s) => ({
         tracks: s.tracks.map((track) => ({
           ...track,
@@ -4263,6 +4410,30 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         })),
         isModified: true,
       }));
+
+      commandManager.push({
+        type: "NORMALIZE_CLIPS",
+        description: "Normalize selected clips",
+        timestamp: Date.now(),
+        execute: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({
+            ...t,
+            clips: t.clips.map((c) => oldVolumes.has(c.id) ? { ...c, volumeDB: 0 } : c),
+          })),
+          isModified: true,
+        })),
+        undo: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({
+            ...t,
+            clips: t.clips.map((c) => {
+              const old = oldVolumes.get(c.id);
+              return old !== undefined ? { ...c, volumeDB: old } : c;
+            }),
+          })),
+          isModified: true,
+        })),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Razor Edits ==========
@@ -4280,6 +4451,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const state = get();
       if (state.razorEdits.length === 0) return;
 
+      // Snapshot for undo
+      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldRazorEdits = [...state.razorEdits];
+
       set((s) => ({
         tracks: s.tracks.map((track) => {
           const editsForTrack = s.razorEdits.filter((r) => r.trackId === track.id);
@@ -4291,13 +4466,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             for (const clip of clips) {
               const clipEnd = clip.startTime + clip.duration;
 
-              // No overlap — keep as is
               if (clipEnd <= razor.start || clip.startTime >= razor.end) {
                 newClips.push(clip);
                 continue;
               }
 
-              // Left portion (before razor)
               if (clip.startTime < razor.start) {
                 newClips.push({
                   ...clip,
@@ -4307,7 +4480,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 });
               }
 
-              // Right portion (after razor)
               if (clipEnd > razor.end) {
                 const trimmedOffset = razor.end - clip.startTime;
                 newClips.push({
@@ -4319,7 +4491,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                   fadeIn: 0,
                 });
               }
-              // Middle portion is deleted (not added to newClips)
             }
             clips = newClips;
           }
@@ -4329,6 +4500,17 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         razorEdits: [],
         isModified: true,
       }));
+
+      const newTracks = get().tracks.map(t => ({ ...t, clips: [...t.clips] }));
+
+      commandManager.push({
+        type: "DELETE_RAZOR_EDIT",
+        description: "Delete razor edit content",
+        timestamp: Date.now(),
+        execute: () => set({ tracks: newTracks, razorEdits: [], isModified: true }),
+        undo: () => set({ tracks: oldTracks, razorEdits: oldRazorEdits, isModified: true }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Track Automation (Phase 5) ==========
@@ -4641,15 +4823,13 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       for (const track of state.tracks) {
         for (const clip of track.clips) {
           const clipEnd = clip.startTime + clip.duration;
-          // Clip overlaps the selection
           if (clip.startTime < end && clipEnd > start) {
-            // Create a trimmed copy representing only the overlapping portion
             const trimStart = Math.max(clip.startTime, start);
             const trimEnd = Math.min(clipEnd, end);
             const trimmedClip: AudioClip = {
               ...clip,
               id: crypto.randomUUID(),
-              startTime: 0, // Relative to paste position
+              startTime: 0,
               offset: clip.offset + (trimStart - clip.startTime),
               duration: trimEnd - trimStart,
               fadeIn: 0,
@@ -4662,27 +4842,28 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
       if (clipsInRange.length === 0) return;
 
+      // Snapshot for undo
+      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldClipboard = state.clipboard;
+
       // Store in clipboard
       set({
         clipboard: { clip: clipsInRange[0]?.clip || null, clips: clipsInRange, isCut: true },
       });
 
-      // Remove content within the selection (like razor edit)
+      // Remove content within the selection
       set((s) => ({
         tracks: s.tracks.map((track) => {
-          let clips = [...track.clips];
           const newClips: AudioClip[] = [];
-          for (const clip of clips) {
+          for (const clip of track.clips) {
             const clipEnd = clip.startTime + clip.duration;
             if (clipEnd <= start || clip.startTime >= end) {
               newClips.push(clip);
               continue;
             }
-            // Left portion
             if (clip.startTime < start) {
               newClips.push({ ...clip, id: crypto.randomUUID(), duration: start - clip.startTime, fadeOut: 0 });
             }
-            // Right portion
             if (clipEnd > end) {
               newClips.push({
                 ...clip,
@@ -4698,6 +4879,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }),
         isModified: true,
       }));
+
+      const newTracks = get().tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newClipboard = get().clipboard;
+
+      commandManager.push({
+        type: "CUT_WITHIN_TIME_SELECTION",
+        description: "Cut within time selection",
+        timestamp: Date.now(),
+        execute: () => set({ tracks: newTracks, clipboard: newClipboard, isModified: true }),
+        undo: () => set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     copyWithinTimeSelection: () => {
@@ -4730,6 +4923,145 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set({
         clipboard: { clip: clipsInRange[0]?.clip || null, clips: clipsInRange, isCut: false },
       });
+    },
+
+    deleteWithinTimeSelection: () => {
+      const state = get();
+      if (!state.timeSelection) return;
+      const { start, end } = state.timeSelection;
+      const selectionDuration = end - start;
+
+      // Snapshot for undo
+      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldMarkers = [...state.markers];
+      const oldRegions = [...state.regions];
+      const oldTimeSelection = state.timeSelection;
+
+      set((s) => ({
+        tracks: s.tracks.map((track) => {
+          const newClips: AudioClip[] = [];
+          for (const clip of track.clips) {
+            const clipEnd = clip.startTime + clip.duration;
+            if (clipEnd <= start) {
+              newClips.push(clip);
+              continue;
+            }
+            if (clip.startTime >= end) {
+              newClips.push({ ...clip, startTime: clip.startTime - selectionDuration });
+              continue;
+            }
+            if (clip.startTime < start) {
+              newClips.push({ ...clip, id: crypto.randomUUID(), duration: start - clip.startTime, fadeOut: 0 });
+            }
+            if (clipEnd > end) {
+              newClips.push({
+                ...clip,
+                id: crypto.randomUUID(),
+                startTime: start,
+                duration: clipEnd - end,
+                offset: clip.offset + (end - clip.startTime),
+                fadeIn: 0,
+              });
+            }
+          }
+          return { ...track, clips: newClips };
+        }),
+        markers: s.markers.map((m) => {
+          if (m.time >= end) return { ...m, time: m.time - selectionDuration };
+          if (m.time > start) return { ...m, time: start };
+          return m;
+        }),
+        regions: s.regions.map((r) => {
+          if (r.startTime >= end) return { ...r, startTime: r.startTime - selectionDuration, endTime: r.endTime - selectionDuration };
+          if (r.endTime <= start) return r;
+          return { ...r, endTime: Math.min(r.endTime - selectionDuration, r.startTime < start ? start : r.startTime) };
+        }).filter((r) => r.endTime > r.startTime),
+        timeSelection: null,
+        isModified: true,
+      }));
+
+      const newState = get();
+      const newTracks = newState.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newMarkers = [...newState.markers];
+      const newRegions = [...newState.regions];
+
+      commandManager.push({
+        type: "DELETE_WITHIN_TIME_SELECTION",
+        description: "Delete within time selection (ripple)",
+        timestamp: Date.now(),
+        execute: () => set({ tracks: newTracks, markers: newMarkers, regions: newRegions, timeSelection: null, isModified: true }),
+        undo: () => set({ tracks: oldTracks, markers: oldMarkers, regions: oldRegions, timeSelection: oldTimeSelection, isModified: true }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    insertSilenceAtTimeSelection: () => {
+      const state = get();
+      if (!state.timeSelection) return;
+      const { start: insertTime, end: selEnd } = state.timeSelection;
+      const insertDuration = selEnd - insertTime;
+      if (insertDuration <= 0) return;
+
+      // Snapshot for undo
+      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldMarkers = [...state.markers];
+      const oldRegions = [...state.regions];
+      const oldTimeSelection = state.timeSelection;
+
+      set((s) => ({
+        tracks: s.tracks.map((track) => {
+          const newClips: AudioClip[] = [];
+          for (const clip of track.clips) {
+            const clipEnd = clip.startTime + clip.duration;
+            if (clipEnd <= insertTime) {
+              newClips.push(clip);
+            } else if (clip.startTime >= insertTime) {
+              newClips.push({ ...clip, startTime: clip.startTime + insertDuration });
+            } else {
+              newClips.push({
+                ...clip,
+                id: crypto.randomUUID(),
+                duration: insertTime - clip.startTime,
+                fadeOut: 0,
+              });
+              newClips.push({
+                ...clip,
+                id: crypto.randomUUID(),
+                startTime: insertTime + insertDuration,
+                duration: clipEnd - insertTime,
+                offset: clip.offset + (insertTime - clip.startTime),
+                fadeIn: 0,
+              });
+            }
+          }
+          return { ...track, clips: newClips };
+        }),
+        markers: s.markers.map((m) =>
+          m.time >= insertTime ? { ...m, time: m.time + insertDuration } : m
+        ),
+        regions: s.regions.map((r) => {
+          if (r.startTime >= insertTime) return { ...r, startTime: r.startTime + insertDuration, endTime: r.endTime + insertDuration };
+          if (r.endTime <= insertTime) return r;
+          return { ...r, endTime: r.endTime + insertDuration };
+        }),
+        timeSelection: null,
+        isModified: true,
+      }));
+
+      // Capture new state for redo
+      const newState = get();
+      const newTracks = newState.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newMarkers = [...newState.markers];
+      const newRegions = [...newState.regions];
+
+      commandManager.push({
+        type: "INSERT_SILENCE",
+        description: "Insert silence",
+        timestamp: Date.now(),
+        execute: () => set({ tracks: newTracks, markers: newMarkers, regions: newRegions, timeSelection: null, isModified: true }),
+        undo: () => set({ tracks: oldTracks, markers: oldMarkers, regions: oldRegions, timeSelection: oldTimeSelection, isModified: true }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Record & Edit Modes ==========
@@ -4776,27 +5108,65 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Clip Lock & Color ==========
     toggleClipLock: (clipId) => {
+      const clip = get().tracks.flatMap(t => t.clips).find(c => c.id === clipId);
+      if (!clip) return;
+      const wasLocked = !!clip.locked;
+
       set((s) => ({
         tracks: s.tracks.map((track) => ({
           ...track,
-          clips: track.clips.map((clip) =>
-            clip.id === clipId ? { ...clip, locked: !clip.locked } : clip,
+          clips: track.clips.map((c) =>
+            c.id === clipId ? { ...c, locked: !c.locked } : c,
           ),
         })),
         isModified: true,
       }));
+
+      commandManager.push({
+        type: "TOGGLE_CLIP_LOCK",
+        description: wasLocked ? "Unlock clip" : "Lock clip",
+        timestamp: Date.now(),
+        execute: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, locked: !wasLocked } : c) })),
+          isModified: true,
+        })),
+        undo: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, locked: wasLocked } : c) })),
+          isModified: true,
+        })),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     setClipColor: (clipId, color) => {
+      const clip = get().tracks.flatMap(t => t.clips).find(c => c.id === clipId);
+      if (!clip) return;
+      const oldColor = clip.color;
+
       set((s) => ({
         tracks: s.tracks.map((track) => ({
           ...track,
-          clips: track.clips.map((clip) =>
-            clip.id === clipId ? { ...clip, color } : clip,
+          clips: track.clips.map((c) =>
+            c.id === clipId ? { ...c, color } : c,
           ),
         })),
         isModified: true,
       }));
+
+      commandManager.push({
+        type: "SET_CLIP_COLOR",
+        description: "Change clip color",
+        timestamp: Date.now(),
+        execute: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color } : c) })),
+          isModified: true,
+        })),
+        undo: () => set((s) => ({
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color: oldColor } : c) })),
+          isModified: true,
+        })),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Piano Roll ==========
@@ -4940,17 +5310,64 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         state.timeSignature,
         state.gridSize,
       );
+
+      // Capture old positions for undo
+      const clipPositions = new Map<string, number>();
+      for (const track of state.tracks) {
+        for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            clipPositions.set(clip.id, clip.startTime);
+          }
+        }
+      }
+
+      // Compute new snapped positions
+      const snappedPositions = new Map<string, number>();
+      for (const [id, time] of clipPositions) {
+        snappedPositions.set(id, Math.round(time / gridInterval) * gridInterval);
+      }
+
       set((s) => ({
         tracks: s.tracks.map((t) => ({
           ...t,
           clips: t.clips.map((c) => {
-            if (!s.selectedClipIds.includes(c.id)) return c;
-            const snappedStart = Math.round(c.startTime / gridInterval) * gridInterval;
-            return { ...c, startTime: snappedStart };
+            const snapped = snappedPositions.get(c.id);
+            return snapped !== undefined ? { ...c, startTime: snapped } : c;
           }),
         })),
         isModified: true,
       }));
+
+      commandManager.push({
+        type: "QUANTIZE_CLIPS",
+        description: "Quantize clips to grid",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) => {
+                const snapped = snappedPositions.get(c.id);
+                return snapped !== undefined ? { ...c, startTime: snapped } : c;
+              }),
+            })),
+            isModified: true,
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) => {
+                const oldTime = clipPositions.get(c.id);
+                return oldTime !== undefined ? { ...c, startTime: oldTime } : c;
+              }),
+            })),
+            isModified: true,
+          }));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Move Envelope Points with Items ==========
@@ -5122,7 +5539,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
       if (!targetClip || !targetTrackId || !targetClip.filePath) return;
 
-      // If already reversed, reverse again (which gives back original-like file)
+      const oldFilePath = targetClip.filePath;
+      const wasReversed = !!targetClip.reversed;
+
       const reversedPath = await nativeBridge.reverseAudioFile(targetClip.filePath);
       if (!reversedPath) return;
 
@@ -5133,17 +5552,34 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 ...t,
                 clips: t.clips.map((c) =>
                   c.id === clipId
-                    ? {
-                        ...c,
-                        filePath: reversedPath,
-                        reversed: !c.reversed,
-                      }
+                    ? { ...c, filePath: reversedPath, reversed: !c.reversed }
                     : c
                 ),
               }
             : t
         ),
+        isModified: true,
       }));
+
+      const capturedTrackId = targetTrackId;
+      commandManager.push({
+        type: "REVERSE_CLIP",
+        description: "Reverse clip",
+        timestamp: Date.now(),
+        execute: () => set((s) => ({
+          tracks: s.tracks.map((t) => t.id === capturedTrackId
+            ? { ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, filePath: reversedPath, reversed: !wasReversed } : c) }
+            : t),
+          isModified: true,
+        })),
+        undo: () => set((s) => ({
+          tracks: s.tracks.map((t) => t.id === capturedTrackId
+            ? { ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, filePath: oldFilePath, reversed: wasReversed } : c) }
+            : t),
+          isModified: true,
+        })),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // 9B: Dynamic Split
@@ -5438,6 +5874,150 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         return filePath;
       }
       return null;
+    },
+
+    renderClipInPlace: async (clipId) => {
+      const state = get();
+      // Find the clip and its track
+      let sourceClip: AudioClip | null = null;
+      let sourceTrack: Track | null = null;
+      let sourceTrackIndex = -1;
+      for (let i = 0; i < state.tracks.length; i++) {
+        const clip = state.tracks[i].clips.find((c) => c.id === clipId);
+        if (clip) {
+          sourceClip = clip;
+          sourceTrack = state.tracks[i];
+          sourceTrackIndex = i;
+          break;
+        }
+      }
+      if (!sourceClip || !sourceTrack) return;
+
+      const startTime = sourceClip.startTime;
+      const endTime = sourceClip.startTime + sourceClip.duration;
+      const safeName = sourceClip.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const filePath = await nativeBridge.showRenderSaveDialog(`${safeName}_rendered.wav`, "wav");
+      if (!filePath) return;
+
+      const success = await nativeBridge.renderProject({
+        source: `stem:${sourceTrack.id}`,
+        startTime,
+        endTime,
+        filePath,
+        format: "wav",
+        sampleRate: state.projectSampleRate || 44100,
+        bitDepth: state.projectBitDepth || 24,
+        channels: 2,
+        normalize: false,
+        addTail: true,
+        tailLength: 1000,
+      });
+      if (!success) return;
+
+      // Import rendered file for accurate duration
+      const mediaInfo = await nativeBridge.importMediaFile(filePath);
+      const renderedDuration = mediaInfo?.duration || (endTime - startTime);
+
+      // Create new track below source
+      const newTrackId = crypto.randomUUID();
+      get().addTrack({ id: newTrackId, name: `${sourceTrack.name} (Rendered)`, type: "audio", color: sourceTrack.color });
+
+      // Move new track to right below source track
+      set((s) => {
+        const tracks = [...s.tracks];
+        const newIdx = tracks.findIndex((t) => t.id === newTrackId);
+        if (newIdx !== -1) {
+          const [moved] = tracks.splice(newIdx, 1);
+          tracks.splice(sourceTrackIndex + 1, 0, moved);
+        }
+        return { tracks };
+      });
+      nativeBridge.reorderTrack(newTrackId, sourceTrackIndex + 1).catch(() => {});
+
+      // Add rendered clip to new track
+      get().addClip(newTrackId, {
+        id: crypto.randomUUID(),
+        filePath,
+        name: `${sourceClip.name} (Rendered)`,
+        startTime,
+        duration: renderedDuration,
+        offset: 0,
+        color: sourceTrack.color,
+        volumeDB: 0,
+        fadeIn: 0,
+        fadeOut: 0,
+        sampleRate: mediaInfo?.sampleRate,
+        sourceLength: renderedDuration,
+      });
+
+      // Mute the original clip
+      get().toggleClipMute(clipId);
+    },
+
+    renderTrackInPlace: async (trackId) => {
+      const state = get();
+      const track = state.tracks.find((t) => t.id === trackId);
+      if (!track || track.clips.length === 0) return;
+
+      const sourceTrackIndex = state.tracks.findIndex((t) => t.id === trackId);
+      const earliest = Math.min(...track.clips.map((c) => c.startTime));
+      const latest = Math.max(...track.clips.map((c) => c.startTime + c.duration));
+      const safeName = track.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const filePath = await nativeBridge.showRenderSaveDialog(`${safeName}_rendered.wav`, "wav");
+      if (!filePath) return;
+
+      const success = await nativeBridge.renderProject({
+        source: `stem:${trackId}`,
+        startTime: earliest,
+        endTime: latest,
+        filePath,
+        format: "wav",
+        sampleRate: state.projectSampleRate || 44100,
+        bitDepth: state.projectBitDepth || 24,
+        channels: 2,
+        normalize: false,
+        addTail: true,
+        tailLength: 1000,
+      });
+      if (!success) return;
+
+      const mediaInfo = await nativeBridge.importMediaFile(filePath);
+      const renderedDuration = mediaInfo?.duration || (latest - earliest);
+
+      // Create new track below source
+      const newTrackId = crypto.randomUUID();
+      get().addTrack({ id: newTrackId, name: `${track.name} (Rendered)`, type: "audio", color: track.color });
+
+      set((s) => {
+        const tracks = [...s.tracks];
+        const newIdx = tracks.findIndex((t) => t.id === newTrackId);
+        if (newIdx !== -1) {
+          const [moved] = tracks.splice(newIdx, 1);
+          tracks.splice(sourceTrackIndex + 1, 0, moved);
+        }
+        return { tracks };
+      });
+      nativeBridge.reorderTrack(newTrackId, sourceTrackIndex + 1).catch(() => {});
+
+      get().addClip(newTrackId, {
+        id: crypto.randomUUID(),
+        filePath,
+        name: `${track.name} (Rendered)`,
+        startTime: earliest,
+        duration: renderedDuration,
+        offset: 0,
+        color: track.color,
+        volumeDB: 0,
+        fadeIn: 0,
+        fadeOut: 0,
+        sampleRate: mediaInfo?.sampleRate,
+        sourceLength: renderedDuration,
+      });
+
+      // Mute the original track
+      if (!track.muted) {
+        get().toggleTrackMute(trackId);
+      }
     },
 
     // ===== Phase 13: Advanced Editing =====

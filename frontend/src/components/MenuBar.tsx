@@ -415,6 +415,21 @@ export function MenuBar() {
           checked: gridSize === "bar",
         },
         {
+          label: "1/2 Bar",
+          onClick: () => setGridSize("half_bar"),
+          checked: gridSize === "half_bar",
+        },
+        {
+          label: "1/4 Bar",
+          onClick: () => setGridSize("quarter_bar"),
+          checked: gridSize === "quarter_bar",
+        },
+        {
+          label: "1/8 Bar",
+          onClick: () => setGridSize("eighth_bar"),
+          checked: gridSize === "eighth_bar",
+        },
+        {
           label: "Beat",
           onClick: () => setGridSize("beat"),
           checked: gridSize === "beat",
@@ -428,6 +443,16 @@ export function MenuBar() {
           label: "Quarter Beat",
           onClick: () => setGridSize("quarter_beat"),
           checked: gridSize === "quarter_beat",
+        },
+        {
+          label: "Second",
+          onClick: () => setGridSize("second"),
+          checked: gridSize === "second",
+        },
+        {
+          label: "Minute",
+          onClick: () => setGridSize("minute"),
+          checked: gridSize === "minute",
         },
       ],
     },

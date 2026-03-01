@@ -31,6 +31,7 @@ export function getRegisteredActions(): ActionDef[] {
     // ===== Tools =====
     { id: "tools.selectTool", name: "Select Tool", category: "Tools", shortcut: "V", execute: () => s().setToolMode("select") },
     { id: "tools.splitTool", name: "Split Tool", category: "Tools", shortcut: "B", execute: () => s().toggleSplitTool() },
+    { id: "tools.muteTool", name: "Mute Tool", category: "Tools", shortcut: "X", execute: () => s().toggleMuteTool() },
 
     // ===== Edit =====
     { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", execute: () => s().undo() },
@@ -99,6 +100,8 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "edit.toggleClipLock", name: "Toggle Clip Lock", category: "Edit", execute: () => { const state = s(); state.selectedClipIds.forEach((id) => state.toggleClipLock(id)); } },
     { id: "edit.cutWithinSelection", name: "Cut within Time Selection", category: "Edit", execute: () => s().cutWithinTimeSelection() },
     { id: "edit.copyWithinSelection", name: "Copy within Time Selection", category: "Edit", execute: () => s().copyWithinTimeSelection() },
+    { id: "edit.deleteWithinSelection", name: "Delete within Time Selection (Ripple)", category: "Edit", execute: () => s().deleteWithinTimeSelection() },
+    { id: "edit.insertSilence", name: "Insert Silence", category: "Edit", execute: () => s().insertSilenceAtTimeSelection() },
     { id: "view.bigClock", name: "Toggle Big Clock", category: "View", execute: () => s().toggleBigClock() },
     { id: "view.keyboardShortcuts", name: "Keyboard Shortcuts", category: "View", shortcut: "F1", execute: () => s().toggleKeyboardShortcuts() },
     { id: "options.preferences", name: "Preferences", category: "Options", shortcut: "Ctrl+,", execute: () => s().togglePreferences() },

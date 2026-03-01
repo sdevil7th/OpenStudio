@@ -213,6 +213,11 @@ export function ChannelStrip({
         },
       )}
       onClick={onSelect}
+      onDoubleClick={() => {
+        if (isMaster) return;
+        const el = document.querySelector(`[data-track-id="${track.id}"]`);
+        el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }}
       onContextMenu={handleContextMenu}
     >
       {/* Link group indicator bar */}

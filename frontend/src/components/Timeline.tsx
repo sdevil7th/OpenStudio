@@ -814,6 +814,11 @@ export function Timeline({ tracks }: TimelineProps) {
           state.toggleSplitTool();
           return;
         }
+        if ((e.key === "x" || e.key === "X") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          state.toggleMuteTool();
+          return;
+        }
         if (e.key === "Escape") {
           state.setToolMode("select");
           // Don't return — let Escape also deselect via action registry
@@ -862,6 +867,9 @@ export function Timeline({ tracks }: TimelineProps) {
         } else if (hasClips) {
           e.preventDefault();
           state.selectedClipIds.forEach((id) => state.deleteClip(id));
+        } else if (state.timeSelection) {
+          e.preventDefault();
+          state.deleteWithinTimeSelection();
         }
       }
     };
@@ -1558,6 +1566,11 @@ export function Timeline({ tracks }: TimelineProps) {
         e.target.getStage().container().style.cursor = "crosshair";
         return;
       }
+      // In mute mode, show pointer cursor
+      if (toolModeRef.current === "mute") {
+        e.target.getStage().container().style.cursor = "pointer";
+        return;
+      }
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
@@ -1586,6 +1599,12 @@ export function Timeline({ tracks }: TimelineProps) {
           splitTime = snapToGrid(splitTime, tempo, timeSignature, gridSize);
         }
         splitClipAtPosition(clip.id, splitTime);
+        return;
+      }
+      // Mute tool mode: click toggles clip mute
+      if (toolModeRef.current === "mute") {
+        e.cancelBubble = true;
+        useDAWStore.getState().toggleClipMute(clip.id);
         return;
       }
 
@@ -1773,18 +1792,37 @@ export function Timeline({ tracks }: TimelineProps) {
             listening={false}
           />
         )}
-        {/* Muted clip diagonal stripes overlay */}
+        {/* Muted clip dark overlay + diagonal stripes */}
         {clip.muted && (
-          <Group listening={false} opacity={0.15}>
-            {Array.from({ length: Math.ceil(width / 12) + 1 }).map((_, i) => (
-              <Line
-                key={`mute-stripe-${i}`}
-                points={[x + i * 12, trackY + 5, x + i * 12 - (trackHeight - 10), trackY + trackHeight - 5]}
-                stroke={clip.color || trackColor}
-                strokeWidth={1}
-              />
-            ))}
-          </Group>
+          <>
+            <Rect
+              x={x}
+              y={trackY + 5}
+              width={width}
+              height={trackHeight - 10}
+              fill="#000000"
+              opacity={0.4}
+              cornerRadius={3}
+              listening={false}
+            />
+            <Group
+              listening={false}
+              opacity={0.2}
+              clipFunc={(ctx: any) => {
+                ctx.beginPath();
+                ctx.roundRect(x, trackY + 5, width, trackHeight - 10, 3);
+              }}
+            >
+              {Array.from({ length: Math.ceil(width / 12) + 1 }).map((_, i) => (
+                <Line
+                  key={`mute-stripe-${i}`}
+                  points={[x + i * 12, trackY + 5, x + i * 12 - (trackHeight - 10), trackY + trackHeight - 5]}
+                  stroke={clip.color || trackColor}
+                  strokeWidth={1}
+                />
+              ))}
+            </Group>
+          </>
         )}
         {/* Clip border + interaction surface (must be topmost Rect to receive events) */}
         <Rect
@@ -2921,6 +2959,11 @@ export function Timeline({ tracks }: TimelineProps) {
             {
               label: "Dynamic Split...",
               onClick: () => useDAWStore.getState().openDynamicSplit(clipContextMenu.clipId),
+            },
+            { divider: true, label: "" },
+            {
+              label: "Render in Place",
+              onClick: () => { void useDAWStore.getState().renderClipInPlace(clipContextMenu.clipId); },
             },
             { divider: true, label: "" },
             {

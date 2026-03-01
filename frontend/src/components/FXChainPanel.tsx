@@ -88,6 +88,7 @@ export function FXChainPanel({
   const [loading, setLoading] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
+  const [bypassedFx, setBypassedFx] = useState<Set<number>>(new Set());
 
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -124,6 +125,8 @@ export function FXChainPanel({
             ? await nativeBridge.getTrackInputFX(trackId)
             : await nativeBridge.getTrackFX(trackId);
       setFxSlots(plugins);
+      // Reset bypass tracking when FX list changes (indices may have shifted)
+      setBypassedFx(new Set());
       // Update store FX counts
       if (chainType === "master") {
         useDAWStore.setState({ masterFxCount: plugins.length });
@@ -213,6 +216,32 @@ export function FXChainPanel({
       }
     } catch (e) {
       console.error("[FXChain] Failed to remove plugin:", e);
+    }
+  };
+
+  const handleToggleBypass = async (fxIndex: number) => {
+    const isBypassed = bypassedFx.has(fxIndex);
+    const newBypassed = !isBypassed;
+    try {
+      let success = false;
+      if (chainType === "master") {
+        // Master FX bypass not supported in backend yet
+        success = false;
+      } else if (chainType === "input") {
+        success = await nativeBridge.bypassTrackInputFX(trackId, fxIndex, newBypassed);
+      } else {
+        success = await nativeBridge.bypassTrackFX(trackId, fxIndex, newBypassed);
+      }
+      if (success) {
+        setBypassedFx((prev) => {
+          const next = new Set(prev);
+          if (newBypassed) next.add(fxIndex);
+          else next.delete(fxIndex);
+          return next;
+        });
+      }
+    } catch (e) {
+      console.error("[FXChain] Failed to toggle bypass:", e);
     }
   };
 
@@ -320,7 +349,16 @@ export function FXChainPanel({
                     <div className="fx-drag-handle" title="Drag to reorder">
                       <GripVertical size={14} />
                     </div>
-                    <div className="fx-slot-info">
+                    <input
+                      type="checkbox"
+                      checked={!bypassedFx.has(fx.index)}
+                      onChange={(e) => { e.stopPropagation(); handleToggleBypass(fx.index); }}
+                      onClick={(e) => e.stopPropagation()}
+                      title={bypassedFx.has(fx.index) ? "Enable plugin" : "Bypass plugin"}
+                      className="fx-bypass-checkbox"
+                      style={{ accentColor: "#22c55e", width: 14, height: 14, cursor: "pointer", flexShrink: 0 }}
+                    />
+                    <div className="fx-slot-info" style={{ opacity: bypassedFx.has(fx.index) ? 0.4 : 1 }}>
                       <div className="fx-slot-number">{index + 1}</div>
                       <div
                         className="fx-slot-name"
@@ -333,7 +371,7 @@ export function FXChainPanel({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() => handleRemove(fx.index)}
+                      onClick={(e) => { e.stopPropagation(); handleRemove(fx.index); }}
                       title="Remove plugin"
                       className="fx-remove-btn"
                     >

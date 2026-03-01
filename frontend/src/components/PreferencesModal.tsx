@@ -101,11 +101,11 @@ function GeneralTab() {
       </Row>
       <Row label="Default Grid Size">
         <NativeSelect
-          options={["bar", "beat", "half_beat", "quarter_beat"]}
+          options={["bar", "half_bar", "quarter_bar", "eighth_bar", "beat", "half_beat", "quarter_beat", "second", "minute"]}
           value={gridSize}
           onChange={(val) => useDAWStore.getState().setGridSize(val as any)}
           formatLabel={(v) => {
-            const labels: Record<string, string> = { bar: "Bar", beat: "Beat", half_beat: "Half Beat", quarter_beat: "Quarter Beat" };
+            const labels: Record<string, string> = { bar: "Bar", half_bar: "1/2 Bar", quarter_bar: "1/4 Bar", eighth_bar: "1/8 Bar", beat: "Beat", half_beat: "Half Beat", quarter_beat: "Quarter Beat", second: "Second", minute: "Minute" };
             return labels[String(v)] || String(v);
           }}
         />

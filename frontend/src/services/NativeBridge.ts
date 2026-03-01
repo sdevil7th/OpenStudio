@@ -113,8 +113,9 @@ declare global {
         addTrackInputFX?: (
           trackId: string,
           pluginPath: string,
+          openEditor?: boolean,
         ) => Promise<boolean>;
-        addTrackFX?: (trackId: string, pluginPath: string) => Promise<boolean>;
+        addTrackFX?: (trackId: string, pluginPath: string, openEditor?: boolean) => Promise<boolean>;
         openPluginEditor?: (
           trackId: string,
           fxIndex: number,
@@ -394,7 +395,7 @@ class NativeBridge {
         "peaksReady",
         (data: any) => callback(data?.filePath ?? ""),
       );
-      return () => backend.removeEventListener(listener);
+      return () => backend?.removeEventListener?.(listener);
     }
     return () => {};
   }
@@ -407,7 +408,7 @@ class NativeBridge {
       const listener = backend.addEventListener("transportUpdate", (data: any) => {
         callback(data);
       });
-      return () => backend.removeEventListener(listener);
+      return () => backend?.removeEventListener?.(listener);
     }
     return () => {};
   }

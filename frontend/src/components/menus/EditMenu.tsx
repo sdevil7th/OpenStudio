@@ -101,6 +101,15 @@ export function EditMenu() {
       disabled: !useDAWStore.getState().timeSelection,
     },
     {
+      label: "Delete within Time Selection (Ripple)",
+      onClick: () => useDAWStore.getState().deleteWithinTimeSelection(),
+      disabled: !useDAWStore.getState().timeSelection,
+    },
+    {
+      label: "Insert Silence",
+      onClick: () => useDAWStore.getState().insertSilenceAtTimeSelection(),
+    },
+    {
       label: "Delete Razor Edit Content",
       onClick: () => useDAWStore.getState().deleteRazorEditContent(),
       disabled: useDAWStore.getState().razorEdits.length === 0,
