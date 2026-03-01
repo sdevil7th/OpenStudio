@@ -10,6 +10,7 @@
 #include "Metronome.h"
 #include "PeakCache.h"
 #include "AudioAnalyzer.h"
+#include "ScriptEngine.h"
 #include <vector>
 #include <memory>
 // ... (skip lines) ...
@@ -104,6 +105,14 @@ public:
     juce::var getAvailablePlugins();
     bool addTrackInputFX(const juce::String& trackId, const juce::String& pluginPath, bool openEditor = true);
     bool addTrackFX(const juce::String& trackId, const juce::String& pluginPath, bool openEditor = true);
+
+    // S13FX (JSFX) Management
+    bool addTrackS13FX(const juce::String& trackId, const juce::String& scriptPath, bool isInputFX = false);
+    bool addMasterS13FX(const juce::String& scriptPath);
+    juce::var getS13FXSliders(const juce::String& trackId, int fxIndex, bool isInputFX);
+    bool setS13FXSlider(const juce::String& trackId, int fxIndex, bool isInputFX, int sliderIndex, double value);
+    bool reloadS13FX(const juce::String& trackId, int fxIndex, bool isInputFX);
+    juce::var getAvailableS13FX();
     
     // Plugin Editor Windows (Phase 3) - ID-based
     void openPluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
@@ -177,6 +186,12 @@ public:
     void setTrackSendEnabled(const juce::String& sourceTrackId, int sendIndex, bool enabled);
     void setTrackSendPreFader(const juce::String& sourceTrackId, int sendIndex, bool preFader);
     juce::var getTrackSends(const juce::String& trackId);
+
+    // Lua Scripting (S13Script)
+    juce::var runScript(const juce::String& scriptPath);
+    juce::var runScriptCode(const juce::String& luaCode);
+    juce::String getScriptDirectory();
+    juce::var listScripts();
 
     // Audio Analysis (Phase 9)
     AudioAnalyzer& getAudioAnalyzer() { return audioAnalyzer; }
@@ -257,6 +272,9 @@ private:
     // cos/sin every audio callback, ~94 trig calls/sec at 48kHz/512)
     std::atomic<float> cachedMasterPanL { 0.707107f };  // cos(pi/4)
     std::atomic<float> cachedMasterPanR { 0.707107f };  // sin(pi/4)
+
+    // Lua Scripting
+    ScriptEngine scriptEngine;
 
     // Audio Analysis (Phase 9)
     AudioAnalyzer audioAnalyzer;

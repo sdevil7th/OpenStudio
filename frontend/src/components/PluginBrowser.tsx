@@ -11,6 +11,7 @@ import {
   AudioWaveform,
   Music,
   Box,
+  Code,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
@@ -23,6 +24,7 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string; // base64 data URL from C++ snapshot lookup
+  pluginType?: "vst3" | "s13fx"; // Distinguishes VST3 from S13FX scripts
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -83,7 +85,30 @@ export function PluginBrowser({
     setLoading(true);
     try {
       const pluginList = await nativeBridge.getAvailablePlugins();
-      setPlugins(pluginList);
+      const vst3Plugins: Plugin[] = pluginList.map((p: any) => ({
+        ...p,
+        pluginType: "vst3" as const,
+      }));
+
+      // Also load S13FX scripts (not for instrument target)
+      let s13fxPlugins: Plugin[] = [];
+      if (targetChain !== "instrument") {
+        try {
+          const scripts = await nativeBridge.getAvailableS13FX();
+          s13fxPlugins = scripts.map((s: any) => ({
+            name: s.name,
+            manufacturer: s.author || "S13FX",
+            category: s.tags?.[0] || "Script",
+            fileOrIdentifier: s.filePath,
+            isInstrument: false,
+            pluginType: "s13fx" as const,
+          }));
+        } catch {
+          // S13FX not available, that's OK
+        }
+      }
+
+      setPlugins([...vst3Plugins, ...s13fxPlugins]);
     } catch (e) {
       console.error("[PluginBrowser] Failed to load plugins:", e);
     } finally {
@@ -107,7 +132,20 @@ export function PluginBrowser({
     setAddingPlugin(plugin.fileOrIdentifier);
     try {
       let success = false;
-      if (targetChain === "instrument") {
+
+      if (plugin.pluginType === "s13fx") {
+        // S13FX script — use dedicated bridge
+        if (targetChain === "master") {
+          success = await nativeBridge.addMasterS13FX(plugin.fileOrIdentifier);
+        } else {
+          const isInputFX = targetChain === "input";
+          success = await nativeBridge.addTrackS13FX(
+            trackId,
+            plugin.fileOrIdentifier,
+            isInputFX,
+          );
+        }
+      } else if (targetChain === "instrument") {
         success = await nativeBridge.loadInstrument(
           trackId,
           plugin.fileOrIdentifier,
@@ -116,7 +154,6 @@ export function PluginBrowser({
           useDAWStore.getState().updateTrack(trackId, {
             instrumentPlugin: plugin.fileOrIdentifier,
           });
-          // Open the instrument plugin editor in a separate window
           await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (targetChain === "input") {
@@ -221,11 +258,16 @@ export function PluginBrowser({
           </div>
         ) : (
           filteredPlugins.map((plugin, idx) => {
-            const { Icon, color } = getCategoryIcon(plugin.category);
+            const isScript = plugin.pluginType === "s13fx";
+            const { Icon, color } = isScript
+              ? { match: "Script", Icon: Code, color: "#84cc16" }
+              : getCategoryIcon(plugin.category);
             return (
               <div
                 key={idx}
-                className="flex items-center gap-3 p-3 bg-neutral-800 border border-neutral-700 rounded mb-2 hover:border-blue-500 transition-colors"
+                className={`flex items-center gap-3 p-3 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
+                  isScript ? "border-lime-700/40" : "border-neutral-700"
+                }`}
               >
                 {/* Snapshot or category icon */}
                 {plugin.snapshot ? (
@@ -245,12 +287,17 @@ export function PluginBrowser({
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-white mb-0.5 truncate">
                     {plugin.name}
+                    {isScript && (
+                      <span className="ml-2 text-[10px] font-normal text-lime-400 bg-lime-900/30 px-1.5 py-0.5 rounded">
+                        S13FX
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-neutral-400">
                     {plugin.manufacturer}
                   </div>
                   <div className="text-[11px] text-neutral-500 mt-0.5">
-                    {plugin.category}
+                    {isScript ? "JSFX Script" : plugin.category}
                   </div>
                 </div>
                 <Button

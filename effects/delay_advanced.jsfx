@@ -1,0 +1,156 @@
+desc:S13 Delay (8-Tap)
+author:Studio13
+tags:delay multitap advanced
+
+// Tap 1
+slider1:1<0,1,1{Off,On}>Tap 1 Enabled
+slider2:250<1,2000,1>Tap 1 Time (ms)
+slider3:100<0,100,1>Tap 1 Level (%)
+slider4:0<-100,100,1>Tap 1 Pan (%)
+slider5:0<0,95,1>Tap 1 Feedback (%)
+
+// Tap 2
+slider6:0<0,1,1{Off,On}>Tap 2 Enabled
+slider7:500<1,2000,1>Tap 2 Time (ms)
+slider8:70<0,100,1>Tap 2 Level (%)
+slider9:0<-100,100,1>Tap 2 Pan (%)
+slider10:0<0,95,1>Tap 2 Feedback (%)
+
+// Tap 3
+slider11:0<0,1,1{Off,On}>Tap 3 Enabled
+slider12:750<1,2000,1>Tap 3 Time (ms)
+slider13:50<0,100,1>Tap 3 Level (%)
+slider14:0<-100,100,1>Tap 3 Pan (%)
+slider15:0<0,95,1>Tap 3 Feedback (%)
+
+// Tap 4
+slider16:0<0,1,1{Off,On}>Tap 4 Enabled
+slider17:1000<1,2000,1>Tap 4 Time (ms)
+slider18:35<0,100,1>Tap 4 Level (%)
+slider19:0<-100,100,1>Tap 4 Pan (%)
+slider20:0<0,95,1>Tap 4 Feedback (%)
+
+// Tap 5
+slider21:0<0,1,1{Off,On}>Tap 5 Enabled
+slider22:375<1,2000,1>Tap 5 Time (ms)
+slider23:60<0,100,1>Tap 5 Level (%)
+slider24:0<-100,100,1>Tap 5 Pan (%)
+slider25:0<0,95,1>Tap 5 Feedback (%)
+
+// Tap 6
+slider26:0<0,1,1{Off,On}>Tap 6 Enabled
+slider27:625<1,2000,1>Tap 6 Time (ms)
+slider28:40<0,100,1>Tap 6 Level (%)
+slider29:0<-100,100,1>Tap 6 Pan (%)
+slider30:0<0,95,1>Tap 6 Feedback (%)
+
+// Tap 7
+slider31:0<0,1,1{Off,On}>Tap 7 Enabled
+slider32:875<1,2000,1>Tap 7 Time (ms)
+slider33:30<0,100,1>Tap 7 Level (%)
+slider34:0<-100,100,1>Tap 7 Pan (%)
+slider35:0<0,95,1>Tap 7 Feedback (%)
+
+// Tap 8
+slider36:0<0,1,1{Off,On}>Tap 8 Enabled
+slider37:1250<1,2000,1>Tap 8 Time (ms)
+slider38:20<0,100,1>Tap 8 Level (%)
+slider39:0<-100,100,1>Tap 8 Pan (%)
+slider40:0<0,95,1>Tap 8 Feedback (%)
+
+// Global
+slider41:0<0,1,1{Off,On}>Tempo Sync
+slider42:50<0,100,1>Mix (%)
+
+@init
+
+// 4-second circular buffer per channel
+buf_size = ceil(srate * 4);
+buf_l = 0;
+buf_r = buf_size;
+buf_pos = 0;
+memset(buf_l, 0, buf_size);
+memset(buf_r, 0, buf_size);
+
+// Per-tap feedback accumulators
+fb0 = fb1 = fb2 = fb3 = fb4 = fb5 = fb6 = fb7 = 0;
+
+@slider
+
+// Read tap parameters into arrays using memory
+// tap_en: offset 200000, tap_delay: 200008, tap_level: 200016
+// tap_pan_l: 200024, tap_pan_r: 200032, tap_fb: 200040
+i = 0;
+loop(8,
+  base = i * 5;
+  en = slider(base + 1);
+  200000[i] = en; // enabled
+  time_ms = slider(base + 2);
+  200008[i] = floor(time_ms * srate / 1000); // delay in samples
+  200016[i] = slider(base + 3) / 100; // level
+  pan = slider(base + 4) / 100; // -1 to 1
+  200024[i] = cos((pan + 1) * $pi / 4); // pan L
+  200032[i] = sin((pan + 1) * $pi / 4); // pan R
+  200040[i] = slider(base + 5) / 100; // feedback
+  i += 1;
+);
+
+mix_wet = slider42 / 100;
+mix_dry = 1 - mix_wet;
+
+@sample
+
+// Write input + feedback to buffer
+fb_sum_l = 0;
+fb_sum_r = 0;
+
+// Sum per-tap feedback
+i = 0;
+loop(8,
+  200000[i] ? (
+    delay_samps = 200008[i];
+    fb_amt = 200040[i];
+    fb_amt > 0 ? (
+      read_pos = buf_pos - delay_samps;
+      read_pos < 0 ? read_pos += buf_size;
+      fb_sum_l += buf_l[read_pos] * fb_amt * 200016[i];
+      fb_sum_r += buf_r[read_pos] * fb_amt * 200016[i];
+    );
+  );
+  i += 1;
+);
+
+buf_l[buf_pos] = spl0 + fb_sum_l;
+buf_r[buf_pos] = spl1 + fb_sum_r;
+
+// Sum all enabled taps
+wet_l = 0;
+wet_r = 0;
+
+i = 0;
+loop(8,
+  200000[i] ? (
+    delay_samps = 200008[i];
+    level = 200016[i];
+    pan_l = 200024[i];
+    pan_r = 200032[i];
+
+    read_pos = buf_pos - delay_samps;
+    read_pos < 0 ? read_pos += buf_size;
+
+    tap_l = buf_l[read_pos] * level;
+    tap_r = buf_r[read_pos] * level;
+
+    wet_l += tap_l * pan_l;
+    wet_r += tap_r * pan_r;
+  );
+  i += 1;
+);
+
+// Advance buffer position
+buf_pos += 1;
+buf_pos >= buf_size ? buf_pos = 0;
+
+// Output mix
+spl0 = spl0 * mix_dry + wet_l * mix_wet;
+spl1 = spl1 * mix_dry + wet_r * mix_wet;

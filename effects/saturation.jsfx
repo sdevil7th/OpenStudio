@@ -1,0 +1,46 @@
+desc:S13 Saturation
+author:Studio13
+tags:distortion saturation
+
+slider1:0<0,100,1>Drive (%)
+slider2:0<0,3,1{Soft Clip,Hard Clip,Tape,Tube}>Type
+slider3:50<0,100,1>Mix (%)
+slider4:0<-12,12,0.1>Output (dB)
+
+@init
+
+@slider
+drive = 1 + slider1 / 100 * 9; // 1x to 10x
+type = slider2;
+mix = slider3 / 100;
+output = 10^(slider4/20);
+
+@sample
+dry_l = spl0;
+dry_r = spl1;
+
+// Apply drive
+spl0 *= drive;
+spl1 *= drive;
+
+type == 0 ? (
+  // Soft clip (tanh approximation)
+  spl0 = spl0 / (1 + abs(spl0));
+  spl1 = spl1 / (1 + abs(spl1));
+) : type == 1 ? (
+  // Hard clip
+  spl0 = max(-1, min(1, spl0));
+  spl1 = max(-1, min(1, spl1));
+) : type == 2 ? (
+  // Tape-style (asymmetric soft clip)
+  spl0 > 0 ? spl0 = 1 - exp(-spl0) : spl0 = -1 + exp(spl0);
+  spl1 > 0 ? spl1 = 1 - exp(-spl1) : spl1 = -1 + exp(spl1);
+) : (
+  // Tube-style (even harmonics via asymmetric waveshaping)
+  spl0 = (3*spl0/2) / (1 + spl0*spl0*0.5) * 0.7;
+  spl1 = (3*spl1/2) / (1 + spl1*spl1*0.5) * 0.7;
+);
+
+// Mix and output
+spl0 = (dry_l * (1-mix) + spl0 * mix) * output;
+spl1 = (dry_r * (1-mix) + spl1 * mix) * output;

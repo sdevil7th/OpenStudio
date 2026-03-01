@@ -193,6 +193,38 @@ declare global {
           toIndex: number,
         ) => Promise<boolean>;
 
+        // S13FX (JSFX) Management
+        addTrackS13FX?: (
+          trackId: string,
+          scriptPath: string,
+          isInputFX?: boolean,
+        ) => Promise<boolean>;
+        addMasterS13FX?: (scriptPath: string) => Promise<boolean>;
+        getS13FXSliders?: (
+          trackId: string,
+          fxIndex: number,
+          isInputFX: boolean,
+        ) => Promise<any[]>;
+        setS13FXSlider?: (
+          trackId: string,
+          fxIndex: number,
+          isInputFX: boolean,
+          sliderIndex: number,
+          value: number,
+        ) => Promise<boolean>;
+        reloadS13FX?: (
+          trackId: string,
+          fxIndex: number,
+          isInputFX: boolean,
+        ) => Promise<boolean>;
+        getAvailableS13FX?: () => Promise<any[]>;
+
+        // Lua Scripting (S13Script)
+        runScript?: (scriptPath: string) => Promise<{ success: boolean; output: string; error?: string }>;
+        runScriptCode?: (code: string) => Promise<{ success: boolean; output: string; error?: string }>;
+        getScriptDirectory?: () => Promise<string>;
+        listScripts?: () => Promise<Array<{ name: string; filePath: string; description: string; isStock: boolean }>>;
+
         // MIDI Device Management (Phase 2)
         getMIDIInputDevices?: () => Promise<string[]>;
         openMIDIDevice?: (deviceName: string) => Promise<boolean>;
@@ -863,6 +895,176 @@ class NativeBridge {
         `[NativeBridge] Mock closePluginEditor: track ${trackId}, fx ${fxIndex}`,
       );
       return true;
+    }
+  }
+
+  // S13FX (JSFX) Management
+  async addTrackS13FX(
+    trackId: string,
+    scriptPath: string,
+    isInputFX = false,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addTrackS13FX) {
+      return await window.__JUCE__.backend.addTrackS13FX(
+        trackId,
+        scriptPath,
+        isInputFX,
+      );
+    } else {
+      console.log(
+        `[NativeBridge] Mock addTrackS13FX: track ${trackId}, script ${scriptPath}`,
+      );
+      return true;
+    }
+  }
+
+  async addMasterS13FX(scriptPath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addMasterS13FX) {
+      return await window.__JUCE__.backend.addMasterS13FX(scriptPath);
+    } else {
+      console.log(`[NativeBridge] Mock addMasterS13FX: ${scriptPath}`);
+      return true;
+    }
+  }
+
+  async getS13FXSliders(
+    trackId: string,
+    fxIndex: number,
+    isInputFX: boolean,
+  ): Promise<
+    {
+      index: number;
+      name: string;
+      min: number;
+      max: number;
+      def: number;
+      inc: number;
+      value: number;
+      isEnum: boolean;
+      enumNames?: string[];
+    }[]
+  > {
+    if (this.isNative && window.__JUCE__?.backend.getS13FXSliders) {
+      return await window.__JUCE__.backend.getS13FXSliders(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
+    } else {
+      return [];
+    }
+  }
+
+  async setS13FXSlider(
+    trackId: string,
+    fxIndex: number,
+    isInputFX: boolean,
+    sliderIndex: number,
+    value: number,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setS13FXSlider) {
+      return await window.__JUCE__.backend.setS13FXSlider(
+        trackId,
+        fxIndex,
+        isInputFX,
+        sliderIndex,
+        value,
+      );
+    } else {
+      return true;
+    }
+  }
+
+  async reloadS13FX(
+    trackId: string,
+    fxIndex: number,
+    isInputFX: boolean,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.reloadS13FX) {
+      return await window.__JUCE__.backend.reloadS13FX(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
+    } else {
+      return true;
+    }
+  }
+
+  async getAvailableS13FX(): Promise<
+    {
+      name: string;
+      filePath: string;
+      author: string;
+      isStock: boolean;
+      type: string;
+      tags: string[];
+    }[]
+  > {
+    if (this.isNative && window.__JUCE__?.backend.getAvailableS13FX) {
+      return await window.__JUCE__.backend.getAvailableS13FX();
+    } else {
+      return [
+        {
+          name: "Mock Gain",
+          filePath: "/mock/gain.jsfx",
+          author: "Studio13",
+          isStock: true,
+          type: "s13fx",
+          tags: ["utility"],
+        },
+      ];
+    }
+  }
+
+  // Lua Scripting (S13Script)
+  async runScript(
+    scriptPath: string,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    if (this.isNative && window.__JUCE__?.backend.runScript) {
+      return await window.__JUCE__.backend.runScript(scriptPath);
+    } else {
+      return { success: true, output: "Mock: script executed" };
+    }
+  }
+
+  async runScriptCode(
+    code: string,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    if (this.isNative && window.__JUCE__?.backend.runScriptCode) {
+      return await window.__JUCE__.backend.runScriptCode(code);
+    } else {
+      return { success: true, output: "Mock: code executed" };
+    }
+  }
+
+  async getScriptDirectory(): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getScriptDirectory) {
+      return await window.__JUCE__.backend.getScriptDirectory();
+    } else {
+      return String.raw`C:\Users\Mock\Documents\Studio13\Scripts`;
+    }
+  }
+
+  async listScripts(): Promise<
+    Array<{
+      name: string;
+      filePath: string;
+      description: string;
+      isStock: boolean;
+    }>
+  > {
+    if (this.isNative && window.__JUCE__?.backend.listScripts) {
+      return await window.__JUCE__.backend.listScripts();
+    } else {
+      return [
+        {
+          name: "Hello World",
+          filePath: "/mock/hello.lua",
+          description: "Print a greeting",
+          isStock: true,
+        },
+      ];
     }
   }
 
@@ -1602,6 +1804,11 @@ class NativeBridge {
   }
 
   async executeScript(code: string): Promise<{ result: string; error: string }> {
+    // Prefer the new Lua backend (runScriptCode) over the legacy stub
+    if (this.isNative && window.__JUCE__?.backend.runScriptCode) {
+      const res = await window.__JUCE__.backend.runScriptCode(code);
+      return { result: res.output || (res.success ? "OK" : ""), error: res.error || "" };
+    }
     if (this.isNative && window.__JUCE__?.backend.executeScript) {
       return await window.__JUCE__.backend.executeScript(code);
     }
@@ -1610,6 +1817,11 @@ class NativeBridge {
   }
 
   async loadScriptFile(filePath: string): Promise<{ result: string; error: string }> {
+    // Prefer the new Lua backend (runScript) over the legacy stub
+    if (this.isNative && window.__JUCE__?.backend.runScript) {
+      const res = await window.__JUCE__.backend.runScript(filePath);
+      return { result: res.output || (res.success ? "OK" : ""), error: res.error || "" };
+    }
     if (this.isNative && window.__JUCE__?.backend.loadScriptFile) {
       return await window.__JUCE__.backend.loadScriptFile(filePath);
     }

@@ -349,6 +349,9 @@ interface DAWState {
   timecodeMode: "time" | "beats" | "smpte";
   smpteFrameRate: 24 | 25 | 29.97 | 30;
 
+  // Script Console
+  showScriptConsole: boolean;
+
   // Piano Roll
   showPianoRoll: boolean;
   pianoRollTrackId: string | null;
@@ -733,6 +736,7 @@ interface DAWActions {
   toggleBigClockFormat: () => void;
   toggleKeyboardShortcuts: () => void;
   togglePreferences: () => void;
+  toggleScriptConsole: () => void;
   setTimecodeMode: (mode: "time" | "beats" | "smpte") => void;
   setSmpteFrameRate: (rate: 24 | 25 | 29.97 | 30) => void;
 
@@ -1080,6 +1084,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     smpteFrameRate: 24,
     showCommandPalette: false,
     showRegionMarkerManager: false,
+    showScriptConsole: false,
     showPianoRoll: false,
     pianoRollTrackId: null,
     pianoRollClipId: null,
@@ -4809,6 +4814,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set((state) => ({ showKeyboardShortcuts: !state.showKeyboardShortcuts })),
     togglePreferences: () =>
       set((state) => ({ showPreferences: !state.showPreferences })),
+    toggleScriptConsole: () =>
+      set((state) => ({ showScriptConsole: !state.showScriptConsole })),
     setTimecodeMode: (mode) => set({ timecodeMode: mode }),
     setSmpteFrameRate: (rate) => set({ smpteFrameRate: rate }),
 
@@ -5384,6 +5391,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         showClipProperties: state.showClipProperties,
         showUndoHistory: state.showUndoHistory,
         showRegionMarkerManager: state.showRegionMarkerManager,
+        showScriptConsole: state.showScriptConsole,
         pixelsPerSecond: state.pixelsPerSecond,
         trackHeight: state.trackHeight,
         tcpWidth: state.tcpWidth,
@@ -5416,6 +5424,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         showClipProperties: screenset.layout.showClipProperties,
         showUndoHistory: screenset.layout.showUndoHistory,
         showRegionMarkerManager: screenset.layout.showRegionMarkerManager,
+        showScriptConsole: screenset.layout.showScriptConsole ?? false,
         pixelsPerSecond: screenset.layout.pixelsPerSecond,
         trackHeight: screenset.layout.trackHeight,
         tcpWidth: screenset.layout.tcpWidth ?? 310,

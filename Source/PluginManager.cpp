@@ -1,26 +1,30 @@
 #include "PluginManager.h"
+#include "S13FXProcessor.h"
 
 PluginManager::PluginManager()
 {
     // Add default formats (VST3, AU, etc.)
     formatManager.addDefaultFormats();
-    
+
     // Debug: Log how many formats were added
-    juce::Logger::writeToLog("PluginManager: Constructor - formatManager has " + 
+    juce::Logger::writeToLog("PluginManager: Constructor - formatManager has " +
                            juce::String(formatManager.getNumFormats()) + " formats");
-    
+
     for (int i = 0; i < formatManager.getNumFormats(); ++i)
     {
         auto* format = formatManager.getFormat(i);
         juce::Logger::writeToLog("PluginManager: Format " + juce::String(i) + ": " + format->getName());
     }
-    
+
     // Get plugin list file location (Documents/Studio13/PluginList.xml)
     pluginListFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
         .getChildFile("Studio13").getChildFile("PluginList.xml");
-    
+
     // Load existing plugin list if available
     loadPluginList();
+
+    // Ensure user effects directory exists
+    getUserEffectsDirectory().createDirectory();
 }
 
 PluginManager::~PluginManager()
@@ -120,11 +124,14 @@ void PluginManager::scanForPlugins()
     }
     
     writeLog("PluginManager: ========================================");
-    writeLog("PluginManager: SCAN COMPLETE. Total plugins found: " + 
+    writeLog("PluginManager: SCAN COMPLETE. Total plugins found: " +
                            juce::String(knownPluginList.getNumTypes()));
     writeLog("PluginManager: ========================================");
     writeLog("PluginManager: Debug log saved to: " + debugLog.getFullPathName());
     savePluginList();
+
+    // Also scan for S13FX/JSFX scripts
+    scanForS13FX();
 }
 
 juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
@@ -246,12 +253,81 @@ void PluginManager::loadPluginList()
         if (auto xml = juce::parseXML(pluginListFile))
         {
             knownPluginList.recreateFromXml(*xml);
-            juce::Logger::writeToLog("PluginManager: Loaded " + juce::String(knownPluginList.getNumTypes()) + 
+            juce::Logger::writeToLog("PluginManager: Loaded " + juce::String(knownPluginList.getNumTypes()) +
                                    " plugins from " + pluginListFile.getFullPathName());
         }
     }
     else
     {
         juce::Logger::writeToLog("PluginManager: No existing plugin list found");
+    }
+}
+
+// ---- S13FX / JSFX scanning ----
+
+juce::File PluginManager::getUserEffectsDirectory()
+{
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+        .getChildFile("Studio13").getChildFile("Effects");
+}
+
+juce::File PluginManager::getStockEffectsDirectory()
+{
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+        .getParentDirectory().getChildFile("effects");
+}
+
+void PluginManager::scanForS13FX()
+{
+    s13fxList.clear();
+
+    // Scan stock effects (bundled with app)
+    auto stockDir = getStockEffectsDirectory();
+    if (stockDir.isDirectory())
+        scanDirectory(stockDir, true);
+
+    // Scan user effects
+    auto userDir = getUserEffectsDirectory();
+    if (userDir.isDirectory())
+        scanDirectory(userDir, false);
+
+    juce::Logger::writeToLog("PluginManager: Found " + juce::String(s13fxList.size()) + " S13FX/JSFX scripts");
+}
+
+void PluginManager::scanDirectory(const juce::File& dir, bool isStock)
+{
+    juce::Array<juce::File> files;
+    dir.findChildFiles(files, juce::File::findFiles, true, "*.jsfx;*.s13fx");
+
+    for (const auto& file : files)
+    {
+        S13FXInfo info;
+        info.filePath = file.getFullPathName();
+        info.isStock = isStock;
+
+        // Try to extract metadata by loading the script header (first 50 lines)
+        juce::StringArray lines;
+        file.readLines(lines);
+
+        info.name = file.getFileNameWithoutExtension();
+
+        for (int i = 0; i < juce::jmin(lines.size(), 50); ++i)
+        {
+            auto line = lines[i].trim();
+
+            if (line.startsWith("desc:"))
+                info.name = line.fromFirstOccurrenceOf("desc:", false, false).trim();
+            else if (line.startsWith("author:"))
+                info.author = line.fromFirstOccurrenceOf("author:", false, false).trim();
+            else if (line.startsWith("tags:"))
+            {
+                auto tagStr = line.fromFirstOccurrenceOf("tags:", false, false).trim();
+                info.tags.addTokens(tagStr, " ", "");
+            }
+        }
+
+        s13fxList.push_back(std::move(info));
+        juce::Logger::writeToLog("PluginManager: Found S13FX: " + info.name +
+                                 (isStock ? " (stock)" : " (user)"));
     }
 }

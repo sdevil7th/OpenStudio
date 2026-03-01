@@ -18,6 +18,39 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(juce)
 
+# Fetch YSFX — open-source JSFX runtime (Apache 2.0)
+FetchContent_Declare(
+    ysfx
+    GIT_REPOSITORY https://github.com/jpcima/ysfx.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+set(YSFX_PLUGIN OFF CACHE BOOL "" FORCE)
+set(YSFX_TOOLS OFF CACHE BOOL "" FORCE)
+set(YSFX_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(ysfx)
+
+# Fetch Lua 5.4 — scripting engine (MIT license)
+FetchContent_Declare(
+    lua
+    URL "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+)
+FetchContent_MakeAvailable(lua)
+
+# Build Lua as a static library (it ships as raw C sources)
+file(GLOB LUA_CORE_SOURCES "${lua_SOURCE_DIR}/src/*.c")
+# Remove lua.c and luac.c (standalone interpreter/compiler, not needed)
+list(FILTER LUA_CORE_SOURCES EXCLUDE REGEX "lua\\.c$|luac\\.c$")
+add_library(lua_static STATIC ${LUA_CORE_SOURCES})
+target_include_directories(lua_static PUBLIC "${lua_SOURCE_DIR}/src")
+if(MSVC)
+    target_compile_definitions(lua_static PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # Suppress Lua C code warnings (third-party code)
+    target_compile_options(lua_static PRIVATE /W0)
+else()
+    target_compile_options(lua_static PRIVATE -w)
+endif()
+
 # Define the JUCE applicati# Add our executable
 juce_add_gui_app(Studio13_v2
     PRODUCT_NAME "Studio13"
@@ -42,15 +75,19 @@ target_sources(Studio13_v2 PRIVATE
     Source/TrackProcessor.cpp
     Source/Metronome.cpp
     Source/AudioAnalyzer.cpp
+    Source/S13FXProcessor.cpp
+    Source/ScriptEngine.cpp
 )
 
 # Include directories
-target_include_directories(Studio13_v2 PRIVATE 
+target_include_directories(Studio13_v2 PRIVATE
     Source
     # ASIO SDK include paths
     "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK/common"
     "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK/host"
     "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK/host/pc"
+    # YSFX include paths
+    "${ysfx_SOURCE_DIR}/include"
 )
 
 # Link against JUCE modules
@@ -67,6 +104,8 @@ target_link_libraries(Studio13_v2 PRIVATE
     juce::juce_audio_processors
     juce::juce_audio_utils
     juce::juce_dsp
+    ysfx
+    lua_static
 )
 
 # Enable WebView2 on Windows
@@ -126,6 +165,28 @@ if(EXISTS "${FFMPEG_EXE}")
     )
 else()
     message(WARNING "tools/ffmpeg.exe not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
+endif()
+
+# Copy bundled JSFX effects to build output
+set(EFFECTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/effects")
+if(EXISTS "${EFFECTS_DIR}")
+    add_custom_command(TARGET Studio13_v2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${EFFECTS_DIR}"
+            "$<TARGET_FILE_DIR:Studio13_v2>/effects"
+        COMMENT "Copying stock JSFX effects to output directory"
+    )
+endif()
+
+# Copy bundled Lua scripts to build output
+set(SCRIPTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
+if(EXISTS "${SCRIPTS_DIR}")
+    add_custom_command(TARGET Studio13_v2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${SCRIPTS_DIR}"
+            "$<TARGET_FILE_DIR:Studio13_v2>/scripts"
+        COMMENT "Copying stock Lua scripts to output directory"
+    )
 endif()
 
 # Prepare for BinaryData (Frontend assets)

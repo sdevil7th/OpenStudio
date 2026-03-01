@@ -1,0 +1,224 @@
+desc:S13 Parametric EQ (8-Band)
+author:Studio13
+tags:eq equalizer parametric advanced
+
+// Band 1
+slider1:0<0,1,1{Off,On}>Band 1 Enabled
+slider2:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 1 Type
+slider3:80<20,20000,1>Band 1 Freq (Hz)
+slider4:0<-24,24,0.1>Band 1 Gain (dB)
+slider5:1.0<0.1,10,0.01>Band 1 Q
+
+// Band 2
+slider6:0<0,1,1{Off,On}>Band 2 Enabled
+slider7:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 2 Type
+slider8:250<20,20000,1>Band 2 Freq (Hz)
+slider9:0<-24,24,0.1>Band 2 Gain (dB)
+slider10:1.0<0.1,10,0.01>Band 2 Q
+
+// Band 3
+slider11:0<0,1,1{Off,On}>Band 3 Enabled
+slider12:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 3 Type
+slider13:800<20,20000,1>Band 3 Freq (Hz)
+slider14:0<-24,24,0.1>Band 3 Gain (dB)
+slider15:1.0<0.1,10,0.01>Band 3 Q
+
+// Band 4
+slider16:0<0,1,1{Off,On}>Band 4 Enabled
+slider17:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 4 Type
+slider18:2000<20,20000,1>Band 4 Freq (Hz)
+slider19:0<-24,24,0.1>Band 4 Gain (dB)
+slider20:1.0<0.1,10,0.01>Band 4 Q
+
+// Band 5
+slider21:0<0,1,1{Off,On}>Band 5 Enabled
+slider22:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 5 Type
+slider23:4000<20,20000,1>Band 5 Freq (Hz)
+slider24:0<-24,24,0.1>Band 5 Gain (dB)
+slider25:1.0<0.1,10,0.01>Band 5 Q
+
+// Band 6
+slider26:0<0,1,1{Off,On}>Band 6 Enabled
+slider27:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 6 Type
+slider28:8000<20,20000,1>Band 6 Freq (Hz)
+slider29:0<-24,24,0.1>Band 6 Gain (dB)
+slider30:1.0<0.1,10,0.01>Band 6 Q
+
+// Band 7
+slider31:0<0,1,1{Off,On}>Band 7 Enabled
+slider32:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 7 Type
+slider33:12000<20,20000,1>Band 7 Freq (Hz)
+slider34:0<-24,24,0.1>Band 7 Gain (dB)
+slider35:1.0<0.1,10,0.01>Band 7 Q
+
+// Band 8
+slider36:0<0,1,1{Off,On}>Band 8 Enabled
+slider37:1<0,5,1{Low Shelf,Peak,High Shelf,Low Pass,High Pass,Notch}>Band 8 Type
+slider38:16000<20,20000,1>Band 8 Freq (Hz)
+slider39:0<-24,24,0.1>Band 8 Gain (dB)
+slider40:1.0<0.1,10,0.01>Band 8 Q
+
+// Output
+slider41:0<-12,12,0.1>Output Gain (dB)
+
+@init
+
+// Biquad coefficient calculation — supports 6 filter types
+// type: 0=Low Shelf, 1=Peak, 2=High Shelf, 3=Low Pass, 4=High Pass, 5=Notch
+function biquad_coeff(type, fc, gain_db, q)
+  local(w0, alpha, A, cosw, sinw, a0, a1, a2, b0, b1, b2, sqrtA2alpha)
+(
+  w0 = 2 * $pi * fc / srate;
+  cosw = cos(w0);
+  sinw = sin(w0);
+  A = 10^(gain_db / 40);
+
+  type == 0 ? ( // Low shelf
+    alpha = sinw / 2 * sqrt((A + 1/A) * (1/0.707 - 1) + 2);
+    sqrtA2alpha = 2 * sqrt(A) * alpha;
+    b0 = A * ((A+1) - (A-1)*cosw + sqrtA2alpha);
+    b1 = 2*A * ((A-1) - (A+1)*cosw);
+    b2 = A * ((A+1) - (A-1)*cosw - sqrtA2alpha);
+    a0 = (A+1) + (A-1)*cosw + sqrtA2alpha;
+    a1 = -2 * ((A-1) + (A+1)*cosw);
+    a2 = (A+1) + (A-1)*cosw - sqrtA2alpha;
+  ) : type == 1 ? ( // Peak / Bell
+    alpha = sinw / (2*q);
+    b0 = 1 + alpha*A;
+    b1 = -2*cosw;
+    b2 = 1 - alpha*A;
+    a0 = 1 + alpha/A;
+    a1 = -2*cosw;
+    a2 = 1 - alpha/A;
+  ) : type == 2 ? ( // High shelf
+    alpha = sinw / 2 * sqrt((A + 1/A) * (1/0.707 - 1) + 2);
+    sqrtA2alpha = 2 * sqrt(A) * alpha;
+    b0 = A * ((A+1) + (A-1)*cosw + sqrtA2alpha);
+    b1 = -2*A * ((A-1) + (A+1)*cosw);
+    b2 = A * ((A+1) + (A-1)*cosw - sqrtA2alpha);
+    a0 = (A+1) - (A-1)*cosw + sqrtA2alpha;
+    a1 = 2 * ((A-1) - (A+1)*cosw);
+    a2 = (A+1) - (A-1)*cosw - sqrtA2alpha;
+  ) : type == 3 ? ( // Low pass
+    alpha = sinw / (2*q);
+    b0 = (1 - cosw) / 2;
+    b1 = 1 - cosw;
+    b2 = (1 - cosw) / 2;
+    a0 = 1 + alpha;
+    a1 = -2*cosw;
+    a2 = 1 - alpha;
+  ) : type == 4 ? ( // High pass
+    alpha = sinw / (2*q);
+    b0 = (1 + cosw) / 2;
+    b1 = -(1 + cosw);
+    b2 = (1 + cosw) / 2;
+    a0 = 1 + alpha;
+    a1 = -2*cosw;
+    a2 = 1 - alpha;
+  ) : ( // Notch (type == 5)
+    alpha = sinw / (2*q);
+    b0 = 1;
+    b1 = -2*cosw;
+    b2 = 1;
+    a0 = 1 + alpha;
+    a1 = -2*cosw;
+    a2 = 1 - alpha;
+  );
+
+  // Normalize coefficients
+  this.b0 = b0/a0; this.b1 = b1/a0; this.b2 = b2/a0;
+  this.a1 = a1/a0; this.a2 = a2/a0;
+);
+
+function biquad_process(x)
+  local(y)
+(
+  y = this.b0*x + this.b1*this.x1 + this.b2*this.x2 - this.a1*this.y1 - this.a2*this.y2;
+  this.x2 = this.x1; this.x1 = x;
+  this.y2 = this.y1; this.y1 = y;
+  y;
+);
+
+// Initialize 8 bands x 2 channels = 16 biquad filter states
+// Memory layout: band_N_L at offset N*2, band_N_R at offset N*2+1 (using namespace trick)
+b1_l.x1 = b1_l.x2 = b1_l.y1 = b1_l.y2 = 0;
+b1_r.x1 = b1_r.x2 = b1_r.y1 = b1_r.y2 = 0;
+b2_l.x1 = b2_l.x2 = b2_l.y1 = b2_l.y2 = 0;
+b2_r.x1 = b2_r.x2 = b2_r.y1 = b2_r.y2 = 0;
+b3_l.x1 = b3_l.x2 = b3_l.y1 = b3_l.y2 = 0;
+b3_r.x1 = b3_r.x2 = b3_r.y1 = b3_r.y2 = 0;
+b4_l.x1 = b4_l.x2 = b4_l.y1 = b4_l.y2 = 0;
+b4_r.x1 = b4_r.x2 = b4_r.y1 = b4_r.y2 = 0;
+b5_l.x1 = b5_l.x2 = b5_l.y1 = b5_l.y2 = 0;
+b5_r.x1 = b5_r.x2 = b5_r.y1 = b5_r.y2 = 0;
+b6_l.x1 = b6_l.x2 = b6_l.y1 = b6_l.y2 = 0;
+b6_r.x1 = b6_r.x2 = b6_r.y1 = b6_r.y2 = 0;
+b7_l.x1 = b7_l.x2 = b7_l.y1 = b7_l.y2 = 0;
+b7_r.x1 = b7_r.x2 = b7_r.y1 = b7_r.y2 = 0;
+b8_l.x1 = b8_l.x2 = b8_l.y1 = b8_l.y2 = 0;
+b8_r.x1 = b8_r.x2 = b8_r.y1 = b8_r.y2 = 0;
+
+// Enabled flags (avoid per-sample branching on slider reads)
+en1 = en2 = en3 = en4 = en5 = en6 = en7 = en8 = 0;
+out_gain = 1;
+
+@slider
+// Recalculate coefficients for all enabled bands
+en1 = slider1;
+en1 ? b1_l.biquad_coeff(slider2, slider3, slider4, slider5);
+en1 ? b1_r.biquad_coeff(slider2, slider3, slider4, slider5);
+
+en2 = slider6;
+en2 ? b2_l.biquad_coeff(slider7, slider8, slider9, slider10);
+en2 ? b2_r.biquad_coeff(slider7, slider8, slider9, slider10);
+
+en3 = slider11;
+en3 ? b3_l.biquad_coeff(slider12, slider13, slider14, slider15);
+en3 ? b3_r.biquad_coeff(slider12, slider13, slider14, slider15);
+
+en4 = slider16;
+en4 ? b4_l.biquad_coeff(slider17, slider18, slider19, slider20);
+en4 ? b4_r.biquad_coeff(slider17, slider18, slider19, slider20);
+
+en5 = slider21;
+en5 ? b5_l.biquad_coeff(slider22, slider23, slider24, slider25);
+en5 ? b5_r.biquad_coeff(slider22, slider23, slider24, slider25);
+
+en6 = slider26;
+en6 ? b6_l.biquad_coeff(slider27, slider28, slider29, slider30);
+en6 ? b6_r.biquad_coeff(slider27, slider28, slider29, slider30);
+
+en7 = slider31;
+en7 ? b7_l.biquad_coeff(slider32, slider33, slider34, slider35);
+en7 ? b7_r.biquad_coeff(slider32, slider33, slider34, slider35);
+
+en8 = slider36;
+en8 ? b8_l.biquad_coeff(slider37, slider38, slider39, slider40);
+en8 ? b8_r.biquad_coeff(slider37, slider38, slider39, slider40);
+
+out_gain = 10^(slider41/20);
+
+@sample
+// Process left channel through all enabled bands
+en1 ? spl0 = b1_l.biquad_process(spl0);
+en2 ? spl0 = b2_l.biquad_process(spl0);
+en3 ? spl0 = b3_l.biquad_process(spl0);
+en4 ? spl0 = b4_l.biquad_process(spl0);
+en5 ? spl0 = b5_l.biquad_process(spl0);
+en6 ? spl0 = b6_l.biquad_process(spl0);
+en7 ? spl0 = b7_l.biquad_process(spl0);
+en8 ? spl0 = b8_l.biquad_process(spl0);
+
+// Process right channel through all enabled bands
+en1 ? spl1 = b1_r.biquad_process(spl1);
+en2 ? spl1 = b2_r.biquad_process(spl1);
+en3 ? spl1 = b3_r.biquad_process(spl1);
+en4 ? spl1 = b4_r.biquad_process(spl1);
+en5 ? spl1 = b5_r.biquad_process(spl1);
+en6 ? spl1 = b6_r.biquad_process(spl1);
+en7 ? spl1 = b7_r.biquad_process(spl1);
+en8 ? spl1 = b8_r.biquad_process(spl1);
+
+// Apply output gain
+spl0 *= out_gain;
+spl1 *= out_gain;

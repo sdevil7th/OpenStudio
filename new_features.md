@@ -13,3 +13,15 @@ like voume automation, pan automation, reverb automation
 1. The mixer should be dockable, can be moved to places and should stick there
 
 2. Inbuilt Plugins- priority based -> 1. EQ, 2. Delay
+
+---
+
+## In Progress:
+
+### 8. Built-in JSFX Plugin System (S13FX)
+Full REAPER .jsfx compatibility via YSFX runtime (Apache 2.0). Users can write custom audio effects as plain text files, drop in existing REAPER community effects, and share effects by sharing text files. EEL2 scripts are JIT-compiled to x64 SSE assembly for near-native performance. Features slider-based parameter UI, hot-reload, and MIDI effect support.
+
+**Stock effects included:** Gain/Utility, Simple EQ, Compressor, Delay, Reverb, Chorus, Saturation, Gate
+
+### 9. Lua Scripting for DAW Automation (S13Script)
+Full Lua 5.4 scripting API (MIT license) for automating any DAW action. Scripts run on the message thread and can manipulate tracks, clips, transport, FX, markers, regions, and time selections. Includes a Script Console UI panel, REPL support, and stock scripts (Normalize All Clips, Remove Empty Tracks, Split All at Playhead, etc.).

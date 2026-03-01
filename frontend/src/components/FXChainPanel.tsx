@@ -12,11 +12,24 @@ import {
   AudioWaveform,
   Music,
   Box,
+  Code,
+  RefreshCw,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { Button, Input, Select } from "./ui";
+import {
+  EQGraph,
+  CompressorGraph,
+  GateGraph,
+  DelayGraph,
+  ReverbGraph,
+  SaturationGraph,
+  ChorusGraph,
+} from "./ParametricGraph";
 import "./FXChainPanel.css";
 
 interface FXChainPanelProps {
@@ -29,6 +42,20 @@ interface FXChainPanelProps {
 interface FXSlot {
   index: number;
   name: string;
+  type?: "vst3" | "s13fx";
+  pluginPath?: string;
+}
+
+interface S13FXSlider {
+  index: number;
+  name: string;
+  min: number;
+  max: number;
+  def: number;
+  inc: number;
+  value: number;
+  isEnum: boolean;
+  enumNames?: string[];
 }
 
 interface Plugin {
@@ -38,6 +65,7 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string;
+  pluginType?: "vst3" | "s13fx";
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -89,6 +117,9 @@ export function FXChainPanel({
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
   const [bypassedFx, setBypassedFx] = useState<Set<number>>(new Set());
+  const [expandedS13FX, setExpandedS13FX] = useState<number | null>(null);
+  const [s13fxSliders, setS13fxSliders] = useState<S13FXSlider[]>([]);
+  const [showRawSliders, setShowRawSliders] = useState(false);
 
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -144,7 +175,27 @@ export function FXChainPanel({
     setPluginsLoading(true);
     try {
       const pluginList = await nativeBridge.getAvailablePlugins();
-      setPlugins(pluginList);
+      const vst3Plugins: Plugin[] = pluginList.map((p: any) => ({
+        ...p,
+        pluginType: "vst3" as const,
+      }));
+
+      let s13fxPlugins: Plugin[] = [];
+      try {
+        const scripts = await nativeBridge.getAvailableS13FX();
+        s13fxPlugins = scripts.map((s: any) => ({
+          name: s.name,
+          manufacturer: s.author || "S13FX",
+          category: s.tags?.[0] || "Script",
+          fileOrIdentifier: s.filePath,
+          isInstrument: false,
+          pluginType: "s13fx" as const,
+        }));
+      } catch {
+        // S13FX not available
+      }
+
+      setPlugins([...vst3Plugins, ...s13fxPlugins]);
     } catch (e) {
       console.error("[FXChain] Failed to load available plugins:", e);
     } finally {
@@ -168,7 +219,15 @@ export function FXChainPanel({
     setAddingPlugin(plugin.fileOrIdentifier);
     try {
       let success = false;
-      if (chainType === "master") {
+
+      if (plugin.pluginType === "s13fx") {
+        if (chainType === "master") {
+          success = await nativeBridge.addMasterS13FX(plugin.fileOrIdentifier);
+        } else {
+          const isInputFX = chainType === "input";
+          success = await nativeBridge.addTrackS13FX(trackId, plugin.fileOrIdentifier, isInputFX);
+        }
+      } else if (chainType === "master") {
         success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
       } else if (chainType === "input" || chainType === "track") {
         success = await addTrackFXWithUndo(trackId, plugin.fileOrIdentifier, chainType);
@@ -176,7 +235,7 @@ export function FXChainPanel({
 
       if (success) {
         console.log(`[FXChain] Added ${plugin.name} to ${chainType} chain`);
-        await loadPlugins(); // Reload FX list
+        await loadPlugins();
       }
     } catch (e) {
       console.error("[FXChain] Failed to add plugin:", e);
@@ -284,6 +343,48 @@ export function FXChainPanel({
     }
   };
 
+  const handleToggleS13FXSliders = async (fxIndex: number) => {
+    if (expandedS13FX === fxIndex) {
+      setExpandedS13FX(null);
+      setS13fxSliders([]);
+      return;
+    }
+    try {
+      const isInputFX = chainType === "input";
+      const sliders = await nativeBridge.getS13FXSliders(trackId, fxIndex, isInputFX);
+      setS13fxSliders(sliders);
+      setExpandedS13FX(fxIndex);
+    } catch (e) {
+      console.error("[FXChain] Failed to load S13FX sliders:", e);
+    }
+  };
+
+  const handleS13FXSliderChange = async (sliderIndex: number, value: number) => {
+    if (expandedS13FX === null) return;
+    const isInputFX = chainType === "input";
+    await nativeBridge.setS13FXSlider(trackId, expandedS13FX, isInputFX, sliderIndex, value);
+    setS13fxSliders((prev) =>
+      prev.map((s) => (s.index === sliderIndex ? { ...s, value } : s)),
+    );
+  };
+
+  const handleReloadS13FX = async (fxIndex: number) => {
+    try {
+      const isInputFX = chainType === "input";
+      const success = await nativeBridge.reloadS13FX(trackId, fxIndex, isInputFX);
+      if (success) {
+        console.log("[FXChain] Reloaded S13FX at index", fxIndex);
+        await loadPlugins();
+        if (expandedS13FX === fxIndex) {
+          const sliders = await nativeBridge.getS13FXSliders(trackId, fxIndex, isInputFX);
+          setS13fxSliders(sliders);
+        }
+      }
+    } catch (e) {
+      console.error("[FXChain] Failed to reload S13FX:", e);
+    }
+  };
+
   const categories = [
     "All",
     ...Array.from(new Set(plugins.map((p) => p.category))),
@@ -336,49 +437,128 @@ export function FXChainPanel({
                   <p className="hint">Add plugins from the browser →</p>
                 </div>
               ) : (
-                fxSlots.map((fx, index) => (
-                  <div
-                    key={fx.index}
-                    className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""}`}
-                    draggable
-                    onDragStart={() => handleDragStart(index)}
-                    onDragOver={handleDragOver}
-                    onDrop={(e) => handleDrop(e, index)}
-                    onClick={() => handleOpenEditor(fx.index)}
-                  >
-                    <div className="fx-drag-handle" title="Drag to reorder">
-                      <GripVertical size={14} />
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={!bypassedFx.has(fx.index)}
-                      onChange={(e) => { e.stopPropagation(); handleToggleBypass(fx.index); }}
-                      onClick={(e) => e.stopPropagation()}
-                      title={bypassedFx.has(fx.index) ? "Enable plugin" : "Bypass plugin"}
-                      className="fx-bypass-checkbox"
-                      style={{ accentColor: "#22c55e", width: 14, height: 14, cursor: "pointer", flexShrink: 0 }}
-                    />
-                    <div className="fx-slot-info" style={{ opacity: bypassedFx.has(fx.index) ? 0.4 : 1 }}>
-                      <div className="fx-slot-number">{index + 1}</div>
+                fxSlots.map((fx, index) => {
+                  const isS13FX = fx.type === "s13fx";
+                  return (
+                    <div key={fx.index}>
                       <div
-                        className="fx-slot-name"
-                        onClick={() => handleOpenEditor(fx.index)}
-                        title="Click to open editor"
+                        className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""}`}
+                        draggable
+                        onDragStart={() => handleDragStart(index)}
+                        onDragOver={handleDragOver}
+                        onDrop={(e) => handleDrop(e, index)}
+                        onClick={() => isS13FX ? handleToggleS13FXSliders(fx.index) : handleOpenEditor(fx.index)}
                       >
-                        {fx.name}
+                        <div className="fx-drag-handle" title="Drag to reorder">
+                          <GripVertical size={14} />
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={!bypassedFx.has(fx.index)}
+                          onChange={(e) => { e.stopPropagation(); handleToggleBypass(fx.index); }}
+                          onClick={(e) => e.stopPropagation()}
+                          title={bypassedFx.has(fx.index) ? "Enable plugin" : "Bypass plugin"}
+                          className="fx-bypass-checkbox"
+                          style={{ accentColor: "#22c55e", width: 14, height: 14, cursor: "pointer", flexShrink: 0 }}
+                        />
+                        <div className="fx-slot-info" style={{ opacity: bypassedFx.has(fx.index) ? 0.4 : 1 }}>
+                          <div className="fx-slot-number">
+                            {isS13FX ? <Code size={12} className="text-lime-400" /> : index + 1}
+                          </div>
+                          <div
+                            className="fx-slot-name"
+                            title={isS13FX ? "Click to show sliders" : "Click to open editor"}
+                          >
+                            {fx.name}
+                          </div>
+                        </div>
+                        {isS13FX && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={(e) => { e.stopPropagation(); handleReloadS13FX(fx.index); }}
+                            title="Reload script"
+                            className="fx-remove-btn"
+                          >
+                            <RefreshCw size={12} />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={(e) => { e.stopPropagation(); handleRemove(fx.index); }}
+                          title="Remove plugin"
+                          className="fx-remove-btn"
+                        >
+                          <X size={14} />
+                        </Button>
                       </div>
+
+                      {/* S13FX inline sliders + advanced graph */}
+                      {isS13FX && expandedS13FX === fx.index && s13fxSliders.length > 0 && (() => {
+                        const advancedType = fx.pluginPath?.match(/(\w+)_advanced\.jsfx/)?.[1];
+                        const hasGraph = !!advancedType && ["eq", "compressor", "gate", "delay", "reverb", "saturation", "chorus"].includes(advancedType);
+                        const graphProps = { sliders: s13fxSliders, onSliderChange: handleS13FXSliderChange, width: 340, height: 180 };
+                        return (
+                          <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2 space-y-1.5">
+                            {/* Advanced parametric graph */}
+                            {advancedType === "eq" && <EQGraph {...graphProps} />}
+                            {advancedType === "compressor" && <CompressorGraph {...graphProps} />}
+                            {advancedType === "gate" && <GateGraph {...graphProps} />}
+                            {advancedType === "delay" && <DelayGraph {...graphProps} />}
+                            {advancedType === "reverb" && <ReverbGraph {...graphProps} />}
+                            {advancedType === "saturation" && <SaturationGraph {...graphProps} />}
+                            {advancedType === "chorus" && <ChorusGraph {...graphProps} />}
+
+                            {/* Raw sliders toggle when graph is present */}
+                            {hasGraph && (
+                              <button
+                                onClick={() => setShowRawSliders((v) => !v)}
+                                className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors"
+                              >
+                                {showRawSliders ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                {showRawSliders ? "Hide" : "Show"} raw sliders
+                              </button>
+                            )}
+
+                            {/* Raw sliders (always shown if no graph, toggleable if graph present) */}
+                            {(!hasGraph || showRawSliders) && s13fxSliders.map((slider) => (
+                              <div key={slider.index} className="flex items-center gap-2 text-xs">
+                                <span className="text-neutral-400 w-24 truncate shrink-0" title={slider.name}>
+                                  {slider.name}
+                                </span>
+                                {slider.isEnum && slider.enumNames ? (
+                                  <select
+                                    value={slider.value}
+                                    onChange={(e) => handleS13FXSliderChange(slider.index, Number(e.target.value))}
+                                    className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-white text-xs"
+                                  >
+                                    {slider.enumNames.map((name, i) => (
+                                      <option key={i} value={i}>{name}</option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    type="range"
+                                    min={slider.min}
+                                    max={slider.max}
+                                    step={slider.inc || 0.001}
+                                    value={slider.value}
+                                    onChange={(e) => handleS13FXSliderChange(slider.index, Number(e.target.value))}
+                                    className="flex-1 accent-lime-500"
+                                  />
+                                )}
+                                <span className="text-neutral-500 w-12 text-right shrink-0">
+                                  {slider.value.toFixed(slider.inc >= 1 ? 0 : 2)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      onClick={(e) => { e.stopPropagation(); handleRemove(fx.index); }}
-                      title="Remove plugin"
-                      className="fx-remove-btn"
-                    >
-                      <X size={14} />
-                    </Button>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -430,13 +610,17 @@ export function FXChainPanel({
                 </div>
               ) : (
                 filteredPlugins.map((plugin, idx) => {
-                  const { Icon, color } = getCategoryIcon(plugin.category);
+                  const isScript = plugin.pluginType === "s13fx";
+                  const { Icon, color } = isScript
+                    ? { match: "Script", Icon: Code, color: "#84cc16" }
+                    : getCategoryIcon(plugin.category);
                   return (
                     <div
                       key={idx}
-                      className="flex items-center gap-2 p-2 bg-neutral-800 border border-neutral-700 rounded mb-2 hover:border-blue-500 transition-colors"
+                      className={`flex items-center gap-2 p-2 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
+                        isScript ? "border-lime-700/40" : "border-neutral-700"
+                      }`}
                     >
-                      {/* Snapshot or category icon */}
                       {plugin.snapshot ? (
                         <img
                           src={plugin.snapshot}
@@ -454,12 +638,17 @@ export function FXChainPanel({
                       <div className="flex-1 min-w-0">
                         <div className="font-semibold text-white text-sm truncate">
                           {plugin.name}
+                          {isScript && (
+                            <span className="ml-1.5 text-[9px] font-normal text-lime-400 bg-lime-900/30 px-1 py-0.5 rounded">
+                              S13FX
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] text-neutral-400">
                           {plugin.manufacturer}
                         </div>
                         <div className="text-[9px] text-neutral-500">
-                          {plugin.category}
+                          {isScript ? "JSFX Script" : plugin.category}
                         </div>
                       </div>
                       <Button

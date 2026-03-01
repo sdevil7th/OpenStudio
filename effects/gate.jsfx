@@ -1,0 +1,64 @@
+desc:S13 Gate
+author:Studio13
+tags:dynamics gate
+
+slider1:-40<-80,0,0.5>Threshold (dB)
+slider2:0.5<0.01,50,0.01>Attack (ms)
+slider3:50<1,500,1>Hold (ms)
+slider4:100<10,2000,1>Release (ms)
+slider5:-80<-80,0,1>Range (dB)
+
+@init
+env = 0;
+gate_state = 0; // 0=closed, 1=opening, 2=open, 3=holding, 4=closing
+hold_counter = 0;
+gain = 0;
+
+@slider
+threshold = 10^(slider1/20);
+attack_coeff = exp(-1 / (slider2 * 0.001 * srate));
+hold_samps = slider3 * 0.001 * srate;
+release_coeff = exp(-1 / (slider4 * 0.001 * srate));
+range_gain = 10^(slider5/20);
+
+@sample
+// Detect level
+level = max(abs(spl0), abs(spl1));
+
+// Gate state machine
+level > threshold ? (
+  // Signal above threshold
+  gate_state < 2 ? gate_state = 1; // Opening
+  gate_state == 3 ? gate_state = 2; // Was holding, now open
+  gate_state == 4 ? gate_state = 1; // Was closing, now opening
+  hold_counter = hold_samps;
+) : (
+  // Signal below threshold
+  gate_state == 2 ? (
+    gate_state = 3; // Start holding
+  );
+  gate_state == 3 ? (
+    hold_counter -= 1;
+    hold_counter <= 0 ? gate_state = 4; // Start closing
+  );
+);
+
+// Gain envelope
+gate_state == 1 ? (
+  // Attack (opening)
+  gain = 1 - attack_coeff * (1 - gain);
+  gain >= 0.999 ? (gain = 1; gate_state = 2);
+) : gate_state == 2 || gate_state == 3 ? (
+  // Open or holding
+  gain = 1;
+) : gate_state == 4 ? (
+  // Release (closing)
+  gain = release_coeff * gain;
+  gain <= range_gain + 0.001 ? (gain = range_gain; gate_state = 0);
+) : (
+  // Closed
+  gain = range_gain;
+);
+
+spl0 *= gain;
+spl1 *= gain;

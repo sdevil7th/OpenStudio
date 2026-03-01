@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "S13FXProcessor.h"
 
 // Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
@@ -31,7 +32,11 @@ AudioEngine::AudioEngine()
     loadDeviceSettings();
     deviceManager.addAudioCallback (this);
 
+    // Initialize Lua scripting engine (runs on message thread only)
+    scriptEngine.registerAPI(*this);
+
     juce::Logger::writeToLog("AudioEngine: MIDI Manager initialized");
+    juce::Logger::writeToLog("AudioEngine: Lua ScriptEngine initialized");
 }
 
 AudioEngine::~AudioEngine()
@@ -1324,6 +1329,237 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
 }
 
 //==============================================================================
+// S13FX (JSFX) Management
+
+bool AudioEngine::addTrackS13FX(const juce::String& trackId, const juce::String& scriptPath, bool isInputFX)
+{
+    // Create S13FXProcessor and load script BEFORE acquiring the lock
+    auto s13fx = std::make_unique<S13FXProcessor>();
+    if (!s13fx->loadScript(scriptPath))
+    {
+        juce::Logger::writeToLog("AudioEngine: Failed to load S13FX script: " + scriptPath);
+        return false;
+    }
+
+    // Provide tempo/position info
+    s13fx->setPlayHead(this);
+
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = juce::jmax(currentBlockSize > 0 ? currentBlockSize : 512, 512);
+
+    bool success = false;
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        if (it != trackMap.end() && it->second)
+        {
+            if (isInputFX)
+                success = it->second->addInputFX(std::move(s13fx), sr, bs);
+            else
+                success = it->second->addTrackFX(std::move(s13fx), sr, bs);
+        }
+    }
+
+    if (success)
+        juce::Logger::writeToLog("AudioEngine: Added S13FX to " + juce::String(isInputFX ? "input" : "track") + " chain: " + scriptPath);
+
+    return success;
+}
+
+bool AudioEngine::addMasterS13FX(const juce::String& scriptPath)
+{
+    auto s13fx = std::make_unique<S13FXProcessor>();
+    if (!s13fx->loadScript(scriptPath))
+    {
+        juce::Logger::writeToLog("AudioEngine: Failed to load S13FX for master: " + scriptPath);
+        return false;
+    }
+
+    s13fx->setPlayHead(this);
+
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = juce::jmax(currentBlockSize > 0 ? currentBlockSize : 512, 512);
+
+    s13fx->prepareToPlay(sr, bs);
+
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto node = masterFXChain->addNode(std::move(s13fx));
+        if (node)
+        {
+            masterFXNodes.push_back(node);
+            juce::Logger::writeToLog("AudioEngine: Added S13FX to master chain: " + scriptPath);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+juce::var AudioEngine::getS13FXSliders(const juce::String& trackId, int fxIndex, bool isInputFX)
+{
+    juce::Array<juce::var> sliderList;
+
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return sliderList;
+
+    auto* track = it->second;
+    juce::AudioProcessor* proc = isInputFX
+        ? track->getInputFXProcessor(fxIndex)
+        : track->getTrackFXProcessor(fxIndex);
+
+    if (!proc)
+        return sliderList;
+
+    auto* s13fx = dynamic_cast<S13FXProcessor*>(proc);
+    if (!s13fx)
+        return sliderList;
+
+    auto sliders = s13fx->getSliders();
+    for (const auto& s : sliders)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("index", static_cast<int>(s.index));
+        obj->setProperty("name", s.name);
+        obj->setProperty("min", s.min);
+        obj->setProperty("max", s.max);
+        obj->setProperty("def", s.def);
+        obj->setProperty("inc", s.inc);
+        obj->setProperty("value", s.value);
+        obj->setProperty("isEnum", s.isEnum);
+
+        if (s.isEnum)
+        {
+            juce::Array<juce::var> names;
+            for (const auto& n : s.enumNames)
+                names.add(n);
+            obj->setProperty("enumNames", names);
+        }
+
+        sliderList.add(juce::var(obj));
+    }
+
+    return sliderList;
+}
+
+bool AudioEngine::setS13FXSlider(const juce::String& trackId, int fxIndex, bool isInputFX, int sliderIndex, double value)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return false;
+
+    auto* track = it->second;
+    juce::AudioProcessor* proc = isInputFX
+        ? track->getInputFXProcessor(fxIndex)
+        : track->getTrackFXProcessor(fxIndex);
+
+    if (!proc)
+        return false;
+
+    auto* s13fx = dynamic_cast<S13FXProcessor*>(proc);
+    if (!s13fx)
+        return false;
+
+    return s13fx->setSliderValue(static_cast<uint32_t>(sliderIndex), value);
+}
+
+bool AudioEngine::reloadS13FX(const juce::String& trackId, int fxIndex, bool isInputFX)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return false;
+
+    auto* track = it->second;
+    juce::AudioProcessor* proc = isInputFX
+        ? track->getInputFXProcessor(fxIndex)
+        : track->getTrackFXProcessor(fxIndex);
+
+    if (!proc)
+        return false;
+
+    auto* s13fx = dynamic_cast<S13FXProcessor*>(proc);
+    if (!s13fx)
+        return false;
+
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    return s13fx->reloadScript();
+}
+
+juce::var AudioEngine::getAvailableS13FX()
+{
+    pluginManager.scanForS13FX();
+
+    juce::Array<juce::var> list;
+    for (const auto& info : pluginManager.getAvailableS13FX())
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("name", info.name);
+        obj->setProperty("filePath", info.filePath);
+        obj->setProperty("author", info.author);
+        obj->setProperty("isStock", info.isStock);
+        obj->setProperty("type", "s13fx");
+
+        juce::Array<juce::var> tags;
+        for (const auto& tag : info.tags)
+            tags.add(tag);
+        obj->setProperty("tags", tags);
+
+        list.add(juce::var(obj));
+    }
+
+    return list;
+}
+
+//==============================================================================
+// Lua Scripting (S13Script)
+
+juce::var AudioEngine::runScript(const juce::String& scriptPath)
+{
+    auto* result = new juce::DynamicObject();
+    bool success = scriptEngine.loadAndRun(scriptPath);
+    result->setProperty("success", success);
+    result->setProperty("output", scriptEngine.getLastOutput());
+    if (!success)
+        result->setProperty("error", scriptEngine.getLastError());
+    return juce::var(result);
+}
+
+juce::var AudioEngine::runScriptCode(const juce::String& luaCode)
+{
+    auto* result = new juce::DynamicObject();
+    bool success = scriptEngine.executeString(luaCode);
+    result->setProperty("success", success);
+    result->setProperty("output", scriptEngine.getLastOutput());
+    if (!success)
+        result->setProperty("error", scriptEngine.getLastError());
+    return juce::var(result);
+}
+
+juce::String AudioEngine::getScriptDirectory()
+{
+    return ScriptEngine::getUserScriptsDirectory().getFullPathName();
+}
+
+juce::var AudioEngine::listScripts()
+{
+    auto scripts = scriptEngine.listAvailableScripts();
+    juce::Array<juce::var> list;
+
+    for (const auto& info : scripts)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("name", info.name);
+        obj->setProperty("filePath", info.filePath);
+        obj->setProperty("description", info.description);
+        obj->setProperty("isStock", info.isStock);
+        list.add(juce::var(obj));
+    }
+
+    return list;
+}
+
+//==============================================================================
 // Plugin Editor Windows (Phase 3)
 
 void AudioEngine::openPluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX)
@@ -1434,9 +1670,16 @@ juce::var AudioEngine::getTrackInputFX(const juce::String& trackId)
             juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
             fxInfo->setProperty("index", i);
             fxInfo->setProperty("name", processor->getName());
-            // Include plugin file path for save/restore
-            if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processor))
+
+            // Check if it's an S13FX processor
+            if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processor))
             {
+                fxInfo->setProperty("type", "s13fx");
+                fxInfo->setProperty("pluginPath", s13fx->getScriptPath());
+            }
+            else if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processor))
+            {
+                fxInfo->setProperty("type", "vst3");
                 auto desc = pluginInstance->getPluginDescription();
                 fxInfo->setProperty("pluginPath", desc.fileOrIdentifier);
             }
@@ -1467,9 +1710,16 @@ juce::var AudioEngine::getTrackFX(const juce::String& trackId)
             juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
             fxInfo->setProperty("index", i);
             fxInfo->setProperty("name", processor->getName());
-            // Include plugin file path for save/restore
-            if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processor))
+
+            // Check if it's an S13FX processor
+            if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processor))
             {
+                fxInfo->setProperty("type", "s13fx");
+                fxInfo->setProperty("pluginPath", s13fx->getScriptPath());
+            }
+            else if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processor))
+            {
+                fxInfo->setProperty("type", "vst3");
                 auto desc = pluginInstance->getPluginDescription();
                 fxInfo->setProperty("pluginPath", desc.fileOrIdentifier);
             }

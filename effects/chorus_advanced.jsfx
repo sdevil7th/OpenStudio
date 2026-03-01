@@ -1,0 +1,206 @@
+desc:S13 Chorus (4-Voice)
+author:Studio13
+tags:modulation chorus advanced
+
+// Voice 1
+slider1:1<0,1,1{Off,On}>Voice 1 Enabled
+slider2:5<0.1,30,0.1>Voice 1 Delay (ms)
+slider3:2<0.1,10,0.1>Voice 1 Depth (ms)
+slider4:0.5<0.05,5,0.01>Voice 1 Rate (Hz)
+
+// Voice 2
+slider5:0<0,1,1{Off,On}>Voice 2 Enabled
+slider6:7<0.1,30,0.1>Voice 2 Delay (ms)
+slider7:3<0.1,10,0.1>Voice 2 Depth (ms)
+slider8:0.7<0.05,5,0.01>Voice 2 Rate (Hz)
+
+// Voice 3
+slider9:0<0,1,1{Off,On}>Voice 3 Enabled
+slider10:10<0.1,30,0.1>Voice 3 Delay (ms)
+slider11:1.5<0.1,10,0.1>Voice 3 Depth (ms)
+slider12:0.3<0.05,5,0.01>Voice 3 Rate (Hz)
+
+// Voice 4
+slider13:0<0,1,1{Off,On}>Voice 4 Enabled
+slider14:15<0.1,30,0.1>Voice 4 Delay (ms)
+slider15:4<0.1,10,0.1>Voice 4 Depth (ms)
+slider16:0.9<0.05,5,0.01>Voice 4 Rate (Hz)
+
+// Global
+slider17:50<0,100,1>Mix (%)
+slider18:0<0,2,1{Mono,Stereo,Wide}>Stereo Mode
+
+@init
+
+// 1 second circular buffer per channel
+buf_size = ceil(srate);
+buf_l = 0;
+buf_r = buf_size;
+buf_pos = 0;
+memset(buf_l, 0, buf_size * 2);
+
+// LFO phases for 4 voices
+lfo_phase0 = 0;
+lfo_phase1 = 0;
+lfo_phase2 = 0;
+lfo_phase3 = 0;
+
+@slider
+
+// Voice parameters: enabled, delay_samps, depth_samps, lfo_inc
+// Store at offset 100000
+i = 0;
+loop(4,
+  base = i * 4;
+  100000[i] = slider(base + 1); // enabled
+  100004[i] = slider(base + 2) * srate / 1000; // delay in samples
+  100008[i] = slider(base + 3) * srate / 1000; // depth in samples
+  100012[i] = slider(base + 4) * 2 * $pi / srate; // LFO increment
+  i += 1;
+);
+
+mix_wet = slider17 / 100;
+mix_dry = 1 - mix_wet;
+stereo_mode = slider18;
+// Phase offsets for stereo: 0=mono, 1=stereo(pi/2), 2=wide(pi)
+stereo_mode == 0 ? phase_offset = 0;
+stereo_mode == 1 ? phase_offset = $pi / 2;
+stereo_mode == 2 ? phase_offset = $pi;
+
+@sample
+
+// Write input to buffer
+buf_l[buf_pos] = spl0;
+buf_r[buf_pos] = spl1;
+
+wet_l = 0;
+wet_r = 0;
+voice_count = 0;
+
+// Process each voice
+// Voice 0
+100000[0] ? (
+  mod_l = sin(lfo_phase0) * 100008[0];
+  mod_r = sin(lfo_phase0 + phase_offset) * 100008[0];
+  delay_l = 100004[0] + mod_l;
+  delay_r = 100004[0] + mod_r;
+
+  // Read with linear interpolation
+  rd = buf_pos - delay_l;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_l += buf_l[idx] * (1 - frac) + buf_l[idx2] * frac;
+
+  rd = buf_pos - delay_r;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_r += buf_r[idx] * (1 - frac) + buf_r[idx2] * frac;
+
+  lfo_phase0 += 100012[0];
+  lfo_phase0 >= 2 * $pi ? lfo_phase0 -= 2 * $pi;
+  voice_count += 1;
+);
+
+// Voice 1
+100000[1] ? (
+  mod_l = sin(lfo_phase1) * 100008[1];
+  mod_r = sin(lfo_phase1 + phase_offset) * 100008[1];
+  delay_l = 100004[1] + mod_l;
+  delay_r = 100004[1] + mod_r;
+
+  rd = buf_pos - delay_l;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_l += buf_l[idx] * (1 - frac) + buf_l[idx2] * frac;
+
+  rd = buf_pos - delay_r;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_r += buf_r[idx] * (1 - frac) + buf_r[idx2] * frac;
+
+  lfo_phase1 += 100012[1];
+  lfo_phase1 >= 2 * $pi ? lfo_phase1 -= 2 * $pi;
+  voice_count += 1;
+);
+
+// Voice 2
+100000[2] ? (
+  mod_l = sin(lfo_phase2) * 100008[2];
+  mod_r = sin(lfo_phase2 + phase_offset) * 100008[2];
+  delay_l = 100004[2] + mod_l;
+  delay_r = 100004[2] + mod_r;
+
+  rd = buf_pos - delay_l;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_l += buf_l[idx] * (1 - frac) + buf_l[idx2] * frac;
+
+  rd = buf_pos - delay_r;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_r += buf_r[idx] * (1 - frac) + buf_r[idx2] * frac;
+
+  lfo_phase2 += 100012[2];
+  lfo_phase2 >= 2 * $pi ? lfo_phase2 -= 2 * $pi;
+  voice_count += 1;
+);
+
+// Voice 3
+100000[3] ? (
+  mod_l = sin(lfo_phase3) * 100008[3];
+  mod_r = sin(lfo_phase3 + phase_offset) * 100008[3];
+  delay_l = 100004[3] + mod_l;
+  delay_r = 100004[3] + mod_r;
+
+  rd = buf_pos - delay_l;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_l += buf_l[idx] * (1 - frac) + buf_l[idx2] * frac;
+
+  rd = buf_pos - delay_r;
+  rd < 0 ? rd += buf_size;
+  idx = floor(rd);
+  frac = rd - idx;
+  idx2 = idx + 1;
+  idx2 >= buf_size ? idx2 -= buf_size;
+  wet_r += buf_r[idx] * (1 - frac) + buf_r[idx2] * frac;
+
+  lfo_phase3 += 100012[3];
+  lfo_phase3 >= 2 * $pi ? lfo_phase3 -= 2 * $pi;
+  voice_count += 1;
+);
+
+// Average voices
+voice_count > 0 ? (
+  wet_l /= voice_count;
+  wet_r /= voice_count;
+);
+
+// Advance buffer
+buf_pos += 1;
+buf_pos >= buf_size ? buf_pos = 0;
+
+// Output mix
+spl0 = spl0 * mix_dry + wet_l * mix_wet;
+spl1 = spl1 * mix_dry + wet_r * mix_wet;

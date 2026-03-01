@@ -408,6 +408,98 @@ MainComponent::MainComponent()
                             completion(false);
                         }
                     })
+                   // S13FX (JSFX) Management
+                   .withNativeFunction ("addTrackS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 2) {
+                           juce::String trackId = args[0].toString();
+                           juce::String scriptPath = args[1].toString();
+                           bool isInputFX = args.size() >= 3 ? (bool)args[2] : false;
+                           bool success = audioEngine.addTrackS13FX(trackId, scriptPath, isInputFX);
+                           completion(success);
+                       } else {
+                           completion(false);
+                       }
+                   })
+                   .withNativeFunction ("addMasterS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 1) {
+                           juce::String scriptPath = args[0].toString();
+                           bool success = audioEngine.addMasterS13FX(scriptPath);
+                           completion(success);
+                       } else {
+                           completion(false);
+                       }
+                   })
+                   .withNativeFunction ("getS13FXSliders", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 3) {
+                           juce::String trackId = args[0].toString();
+                           int fxIndex = args[1];
+                           bool isInputFX = args[2];
+                           completion(audioEngine.getS13FXSliders(trackId, fxIndex, isInputFX));
+                       } else {
+                           completion(juce::Array<juce::var>());
+                       }
+                   })
+                   .withNativeFunction ("setS13FXSlider", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 5) {
+                           juce::String trackId = args[0].toString();
+                           int fxIndex = args[1];
+                           bool isInputFX = args[2];
+                           int sliderIndex = args[3];
+                           double value = args[4];
+                           bool success = audioEngine.setS13FXSlider(trackId, fxIndex, isInputFX, sliderIndex, value);
+                           completion(success);
+                       } else {
+                           completion(false);
+                       }
+                   })
+                   .withNativeFunction ("reloadS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 3) {
+                           juce::String trackId = args[0].toString();
+                           int fxIndex = args[1];
+                           bool isInputFX = args[2];
+                           bool success = audioEngine.reloadS13FX(trackId, fxIndex, isInputFX);
+                           completion(success);
+                       } else {
+                           completion(false);
+                       }
+                   })
+                   .withNativeFunction ("getAvailableS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       juce::ignoreUnused(args);
+                       completion(audioEngine.getAvailableS13FX());
+                   })
+                   // Lua Scripting (S13Script)
+                   .withNativeFunction ("runScript", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 1) {
+                           juce::String scriptPath = args[0].toString();
+                           completion(audioEngine.runScript(scriptPath));
+                       } else {
+                           auto* err = new juce::DynamicObject();
+                           err->setProperty("success", false);
+                           err->setProperty("error", "Missing scriptPath argument");
+                           err->setProperty("output", "");
+                           completion(juce::var(err));
+                       }
+                   })
+                   .withNativeFunction ("runScriptCode", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 1) {
+                           juce::String code = args[0].toString();
+                           completion(audioEngine.runScriptCode(code));
+                       } else {
+                           auto* err = new juce::DynamicObject();
+                           err->setProperty("success", false);
+                           err->setProperty("error", "Missing code argument");
+                           err->setProperty("output", "");
+                           completion(juce::var(err));
+                       }
+                   })
+                   .withNativeFunction ("getScriptDirectory", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       juce::ignoreUnused(args);
+                       completion(audioEngine.getScriptDirectory());
+                   })
+                   .withNativeFunction ("listScripts", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       juce::ignoreUnused(args);
+                       completion(audioEngine.listScripts());
+                   })
                    // Transport Position
                    .withNativeFunction ("getTransportPosition", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::ignoreUnused(args);

@@ -1,0 +1,39 @@
+desc:S13 Gain / Utility
+author:Studio13
+tags:utility gain pan
+
+slider1:0<-60,12,0.1>Volume (dB)
+slider2:0<-100,100,1>Pan (%)
+slider3:0<0,1,1{Normal,Invert}>Phase Invert
+slider4:0<0,2,1{Stereo,Mono,Swap}>Channel Mode
+
+@init
+last_gain = 0;
+
+@slider
+gain = 10^(slider1/20);
+pan = slider2 / 100;
+invert = slider3 > 0.5 ? -1 : 1;
+mode = slider4;
+
+// Equal-power panning
+pan_l = cos((pan + 1) * $pi / 4);
+pan_r = sin((pan + 1) * $pi / 4);
+
+@sample
+// Apply channel mode
+mode == 1 ? (
+  // Mono: average both channels
+  mono = (spl0 + spl1) * 0.5;
+  spl0 = mono;
+  spl1 = mono;
+) : mode == 2 ? (
+  // Swap channels
+  tmp = spl0;
+  spl0 = spl1;
+  spl1 = tmp;
+);
+
+// Apply gain, pan, and phase
+spl0 *= gain * pan_l * invert;
+spl1 *= gain * pan_r * invert;

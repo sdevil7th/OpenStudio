@@ -1,0 +1,48 @@
+desc:S13 Compressor
+author:Studio13
+tags:dynamics compressor
+
+slider1:-20<-60,0,0.5>Threshold (dB)
+slider2:4<1,20,0.1>Ratio
+slider3:5<0.1,100,0.1>Attack (ms)
+slider4:100<10,1000,1>Release (ms)
+slider5:0<0,24,0.1>Makeup Gain (dB)
+slider6:0<0,1,1{Peak,RMS}>Detection
+
+@init
+env = 0;
+gr = 1;
+
+@slider
+threshold = 10^(slider1/20);
+ratio = slider2;
+attack_coeff = exp(-1 / (slider3 * 0.001 * srate));
+release_coeff = exp(-1 / (slider4 * 0.001 * srate));
+makeup = 10^(slider5/20);
+use_rms = slider6 > 0.5;
+
+@sample
+// Detect input level
+use_rms ? (
+  level = sqrt((spl0*spl0 + spl1*spl1) * 0.5);
+) : (
+  level = max(abs(spl0), abs(spl1));
+);
+
+// Envelope follower
+level > env ? (
+  env = attack_coeff * env + (1 - attack_coeff) * level;
+) : (
+  env = release_coeff * env + (1 - release_coeff) * level;
+);
+
+// Gain reduction
+env > threshold ? (
+  gr = threshold * (env / threshold) ^ (1/ratio - 1);
+) : (
+  gr = 1;
+);
+
+// Apply gain reduction and makeup
+spl0 *= gr * makeup;
+spl1 *= gr * makeup;

@@ -1,0 +1,149 @@
+desc:S13 Gate (Advanced)
+author:Studio13
+tags:dynamics gate advanced
+
+slider1:-40<-80,0,0.1>Threshold (dB)
+slider2:-80<-80,0,0.1>Range (dB)
+slider3:6<0,12,0.1>Hysteresis (dB)
+slider4:0.5<0.01,50,0.01>Attack (ms)
+slider5:50<1,500,1>Hold (ms)
+slider6:100<10,2000,1>Release (ms)
+slider7:0<0,10,0.1>Lookahead (ms)
+slider8:0<0,1,1{Peak,RMS}>Detection
+slider9:20<20,2000,1>SC HPF (Hz)
+slider10:20000<200,20000,1>SC LPF (Hz)
+slider11:0<0,1,1{Gate,Duck}>Mode
+slider12:100<0,100,1>Mix (%)
+
+@init
+
+// Gate states: 0=closed, 1=opening, 2=open, 3=holding, 4=closing
+gate_state = 0;
+gate_gain = 0;
+hold_counter = 0;
+
+// Sidechain filter state
+sc_hp_l_z1 = 0;
+sc_hp_r_z1 = 0;
+sc_lp_l_z1 = 0;
+sc_lp_r_z1 = 0;
+
+// Lookahead buffer
+la_buf_size = ceil(srate * 0.01) + 1;
+la_buf_l = 0;
+la_buf_r = la_buf_size;
+la_pos = 0;
+memset(la_buf_l, 0, la_buf_size);
+memset(la_buf_r, 0, la_buf_size);
+
+@slider
+
+threshold = slider1;
+range_lin = 10^(slider2 / 20);
+hysteresis = slider3;
+close_threshold = threshold - hysteresis;
+att_coeff = 1 - exp(-1 / (slider4 * 0.001 * srate));
+hold_samples = floor(slider5 * 0.001 * srate);
+rel_coeff = 1 - exp(-1 / (slider6 * 0.001 * srate));
+la_delay = floor(slider7 * 0.001 * srate);
+detect_rms = slider8;
+duck_mode = slider11;
+mix = slider12 / 100;
+
+// Sidechain filters
+sc_hp_coeff = exp(-2 * $pi * slider9 / srate);
+sc_lp_coeff = 1 - exp(-2 * $pi * slider10 / srate);
+
+@sample
+
+// Read from lookahead buffer
+la_out_l = la_buf_l[la_pos];
+la_out_r = la_buf_r[la_pos];
+
+// Write current input
+la_buf_l[la_pos] = spl0;
+la_buf_r[la_pos] = spl1;
+la_pos += 1;
+la_pos >= la_buf_size ? la_pos = 0;
+
+// Detection signal
+det_l = spl0;
+det_r = spl1;
+
+// Sidechain HPF
+sc_hp_l_z1 = sc_hp_coeff * sc_hp_l_z1 + (1 - sc_hp_coeff) * det_l;
+det_l -= sc_hp_l_z1;
+sc_hp_r_z1 = sc_hp_coeff * sc_hp_r_z1 + (1 - sc_hp_coeff) * det_r;
+det_r -= sc_hp_r_z1;
+
+// Sidechain LPF
+sc_lp_l_z1 += sc_lp_coeff * (det_l - sc_lp_l_z1);
+det_l = sc_lp_l_z1;
+sc_lp_r_z1 += sc_lp_coeff * (det_r - sc_lp_r_z1);
+det_r = sc_lp_r_z1;
+
+// Level detection
+detect_rms ? (
+  level = sqrt((det_l * det_l + det_r * det_r) / 2);
+) : (
+  level = max(abs(det_l), abs(det_r));
+);
+
+level_db = level > 0.0000001 ? 20 * log10(level) : -140;
+
+// State machine
+gate_state == 0 ? ( // Closed
+  level_db >= threshold ? (
+    gate_state = 1; // Start opening
+  );
+) : gate_state == 1 ? ( // Opening
+  gate_gain += att_coeff * (1 - gate_gain);
+  gate_gain >= 0.999 ? (
+    gate_gain = 1;
+    gate_state = 2; // Fully open
+  );
+) : gate_state == 2 ? ( // Open
+  level_db < close_threshold ? (
+    hold_counter = hold_samples;
+    gate_state = 3; // Start holding
+  );
+) : gate_state == 3 ? ( // Holding
+  level_db >= threshold ? (
+    gate_state = 2; // Re-open
+  ) : (
+    hold_counter -= 1;
+    hold_counter <= 0 ? (
+      gate_state = 4; // Start closing
+    );
+  );
+) : gate_state == 4 ? ( // Closing
+  level_db >= threshold ? (
+    gate_state = 1; // Re-open
+  ) : (
+    gate_gain -= rel_coeff * gate_gain;
+    gate_gain <= range_lin + 0.001 ? (
+      gate_gain = range_lin;
+      gate_state = 0; // Fully closed
+    );
+  );
+);
+
+// Apply gate (or duck mode — inverted)
+duck_mode ? (
+  g = 1 - gate_gain + range_lin;
+) : (
+  g = gate_gain < range_lin ? range_lin : gate_gain;
+);
+
+// Apply to delayed or direct signal
+la_delay > 0 ? (
+  out_l = la_out_l * g;
+  out_r = la_out_r * g;
+) : (
+  out_l = spl0 * g;
+  out_r = spl1 * g;
+);
+
+// Mix
+spl0 = spl0 * (1 - mix) + out_l * mix;
+spl1 = spl1 * (1 - mix) + out_r * mix;

@@ -1,0 +1,158 @@
+desc:S13 Compressor (Advanced)
+author:Studio13
+tags:dynamics compressor advanced
+
+slider1:-20<-60,0,0.1>Threshold (dB)
+slider2:4<1,20,0.1>Ratio
+slider3:6<0,24,0.1>Knee (dB)
+slider4:5<0.01,200,0.01>Attack (ms)
+slider5:100<5,2000,1>Release (ms)
+slider6:0<0,500,1>Hold (ms)
+slider7:0<-12,36,0.1>Makeup Gain (dB)
+slider8:100<0,100,1>Mix (%)
+slider9:0<0,1,1{Peak,RMS}>Detection
+slider10:20<20,2000,1>SC HPF (Hz)
+slider11:20000<200,20000,1>SC LPF (Hz)
+slider12:0<0,1,1{Off,On}>Auto Gain
+slider13:100<0,100,1>Stereo Link (%)
+slider14:0<0,10,0.1>Lookahead (ms)
+
+@init
+
+// Envelope follower state
+env_l = 0;
+env_r = 0;
+hold_counter = 0;
+
+// Sidechain filter state
+sc_hp_l_z1 = 0;
+sc_hp_r_z1 = 0;
+sc_lp_l_z1 = 0;
+sc_lp_r_z1 = 0;
+
+// Lookahead buffer
+la_buf_size = ceil(srate * 0.01) + 1; // max 10ms
+la_buf_l = 0;
+la_buf_r = la_buf_size;
+la_pos = 0;
+memset(la_buf_l, 0, la_buf_size);
+memset(la_buf_r, 0, la_buf_size);
+
+// Current gain reduction for metering
+gr_current = 0;
+
+@slider
+
+threshold = slider1;
+ratio = slider2;
+knee = slider3;
+att_coeff = exp(-1 / (slider4 * 0.001 * srate));
+rel_coeff = exp(-1 / (slider5 * 0.001 * srate));
+hold_samples = floor(slider6 * 0.001 * srate);
+makeup = 10^(slider7 / 20);
+mix = slider8 / 100;
+detect_rms = slider9;
+stereo_link = slider13 / 100;
+
+// Sidechain filters — 1-pole coefficients
+sc_hp_coeff = exp(-2 * $pi * slider10 / srate);
+sc_lp_coeff = 1 - exp(-2 * $pi * slider11 / srate);
+
+// Auto-gain: compensate based on threshold and ratio
+auto_gain = slider12;
+auto_gain ? (
+  auto_comp = -threshold * (1 - 1/ratio);
+  makeup = 10^((slider7 + auto_comp) / 20);
+);
+
+// Lookahead delay in samples
+la_delay = floor(slider14 * 0.001 * srate);
+
+@sample
+
+// Read from lookahead buffer (delayed signal)
+la_out_l = la_buf_l[la_pos];
+la_out_r = la_buf_r[la_pos];
+
+// Write current input to lookahead buffer
+la_buf_l[la_pos] = spl0;
+la_buf_r[la_pos] = spl1;
+la_pos += 1;
+la_pos >= la_buf_size ? la_pos = 0;
+
+// Use current input for detection (not delayed)
+det_l = spl0;
+det_r = spl1;
+
+// Sidechain highpass filter (1-pole)
+sc_hp_l_z1 = sc_hp_coeff * sc_hp_l_z1 + (1 - sc_hp_coeff) * det_l;
+det_l -= sc_hp_l_z1;
+sc_hp_r_z1 = sc_hp_coeff * sc_hp_r_z1 + (1 - sc_hp_coeff) * det_r;
+det_r -= sc_hp_r_z1;
+
+// Sidechain lowpass filter (1-pole)
+sc_lp_l_z1 += sc_lp_coeff * (det_l - sc_lp_l_z1);
+det_l = sc_lp_l_z1;
+sc_lp_r_z1 += sc_lp_coeff * (det_r - sc_lp_r_z1);
+det_r = sc_lp_r_z1;
+
+// Level detection
+detect_rms ? (
+  level_l = sqrt(det_l * det_l);
+  level_r = sqrt(det_r * det_r);
+) : (
+  level_l = abs(det_l);
+  level_r = abs(det_r);
+);
+
+// Stereo linking
+level = level_l * stereo_link + level_l * (1 - stereo_link);
+level_r_linked = level_r * stereo_link + level_r * (1 - stereo_link);
+level = max(level, level_r_linked * stereo_link);
+
+// Convert to dB
+level_db = level > 0.0000001 ? 20 * log10(level) : -140;
+
+// Compute gain reduction (soft knee)
+knee_lo = threshold - knee / 2;
+knee_hi = threshold + knee / 2;
+
+level_db < knee_lo ? (
+  gr_db = 0;
+) : level_db > knee_hi ? (
+  gr_db = (level_db - threshold) * (1 - 1/ratio);
+) : (
+  // Soft knee: quadratic interpolation
+  x = level_db - knee_lo;
+  gr_db = (1 - 1/ratio) * x * x / (2 * knee);
+);
+
+gr_target = 10^(-gr_db / 20);
+
+// Envelope follower with attack/release/hold
+gr_target < env_l ? (
+  env_l = att_coeff * env_l + (1 - att_coeff) * gr_target;
+  hold_counter = hold_samples;
+) : (
+  hold_counter > 0 ? (
+    hold_counter -= 1;
+  ) : (
+    env_l = rel_coeff * env_l + (1 - rel_coeff) * gr_target;
+  );
+);
+
+// Store current GR for metering
+gr_current = env_l;
+
+// Apply gain to lookahead-delayed signal
+la_delay > 0 ? (
+  out_l = la_out_l * env_l * makeup;
+  out_r = la_out_r * env_l * makeup;
+) : (
+  out_l = spl0 * env_l * makeup;
+  out_r = spl1 * env_l * makeup;
+);
+
+// Wet/dry mix
+spl0 = spl0 * (1 - mix) + out_l * mix;
+spl1 = spl1 * (1 - mix) + out_r * mix;

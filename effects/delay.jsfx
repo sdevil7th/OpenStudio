@@ -1,0 +1,79 @@
+desc:S13 Delay
+author:Studio13
+tags:delay echo
+
+slider1:250<1,2000,1>Delay Time (ms)
+slider2:50<0,100,1>Feedback (%)
+slider3:50<0,100,1>Mix (%)
+slider4:0<0,1,1{Off,On}>Tempo Sync
+slider5:0<0,5,1{1/4,1/8,1/8 Dot,1/16,1/4 Trip,1/2}>Note Division
+slider6:50<0,100,1>Low Cut (%)
+slider7:80<0,100,1>High Cut (%)
+
+@init
+bufsize = srate * 4; // 4 seconds max delay
+buf_l = 0;
+buf_r = bufsize;
+write_pos = 0;
+memset(buf_l, 0, bufsize);
+memset(buf_r, 0, bufsize);
+
+// Simple 1-pole filters for feedback
+lp_l = 0; lp_r = 0;
+hp_l = 0; hp_r = 0;
+
+@slider
+// Calculate delay in samples
+slider4 > 0.5 && tempo > 0 ? (
+  // Tempo synced
+  beat_len = 60 / tempo * srate;
+  slider5 == 0 ? delay_samps = beat_len;     // 1/4
+  slider5 == 1 ? delay_samps = beat_len/2;   // 1/8
+  slider5 == 2 ? delay_samps = beat_len*3/4; // 1/8 dot
+  slider5 == 3 ? delay_samps = beat_len/4;   // 1/16
+  slider5 == 4 ? delay_samps = beat_len*2/3; // 1/4 triplet
+  slider5 == 5 ? delay_samps = beat_len*2;   // 1/2
+) : (
+  delay_samps = slider1 * 0.001 * srate;
+);
+
+delay_samps = min(delay_samps, bufsize - 1);
+feedback = slider2 / 100;
+mix = slider3 / 100;
+
+// Filter coefficients
+lp_coeff = 1 - slider7/100;
+hp_coeff = slider6/100 * 0.99;
+
+@sample
+// Read from delay buffer
+read_pos = write_pos - delay_samps;
+read_pos < 0 ? read_pos += bufsize;
+
+rd = floor(read_pos);
+frac = read_pos - rd;
+rd2 = rd + 1;
+rd2 >= bufsize ? rd2 -= bufsize;
+
+// Linear interpolation
+del_l = buf_l[rd] * (1-frac) + buf_l[rd2] * frac;
+del_r = buf_r[rd] * (1-frac) + buf_r[rd2] * frac;
+
+// Apply feedback filters
+lp_l += lp_coeff * (del_l - lp_l);
+lp_r += lp_coeff * (del_r - lp_r);
+hp_l += hp_coeff * (lp_l - hp_l);
+hp_r += hp_coeff * (lp_r - hp_r);
+del_l = lp_l - hp_l;
+del_r = lp_r - hp_r;
+
+// Write to delay buffer
+buf_l[write_pos] = spl0 + del_l * feedback;
+buf_r[write_pos] = spl1 + del_r * feedback;
+
+write_pos += 1;
+write_pos >= bufsize ? write_pos = 0;
+
+// Mix dry/wet
+spl0 = spl0 * (1 - mix) + del_l * mix;
+spl1 = spl1 * (1 - mix) + del_r * mix;
