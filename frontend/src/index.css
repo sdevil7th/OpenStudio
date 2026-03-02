@@ -61,23 +61,37 @@ body {
   flex-direction: column;
 }
 
-/* Scrollbar Styling */
+/* Scrollbar Styling — uses theme-aware CSS custom properties */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: var(--color-daw-dark);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #333;
+  background: var(--color-daw-border-light);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #444;
+  background: var(--color-daw-text-dim);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--color-daw-dark);
+}
+
+/* Recording indicator pulse animation */
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.recording-dot {
+  animation: recording-pulse 1s ease-in-out infinite;
 }
 
 /* Vertical Fader Styling */
@@ -189,4 +203,28 @@ body {
 
 .tcp-master {
   border-top: 1px solid #2a2a2a;
+}
+
+/* Accessibility: Visible focus indicators for keyboard navigation */
+*:focus-visible {
+  outline: 2px solid #0078d4;
+  outline-offset: 2px;
+}
+
+/* Suppress focus ring for mouse/touch interactions */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Panel transition utilities */
+.panel-transition {
+  transition: all 0.2s ease-in-out;
+}
+
+.panel-slide-down {
+  transition: max-height 0.2s ease-in-out, opacity 0.15s ease-in-out;
+}
+
+.panel-fade {
+  transition: opacity 0.15s ease-in-out;
 }

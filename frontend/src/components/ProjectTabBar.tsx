@@ -1,10 +1,13 @@
 import { X, Plus } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { useContextMenu } from "./ContextMenu";
 
 export function ProjectTabBar() {
-  const projectTabs = useDAWStore((s) => s.projectTabs);
-  const activeTabId = useDAWStore((s) => s.activeTabId);
+  const { projectTabs, activeTabId } = useDAWStore(useShallow((s) => ({
+    projectTabs: s.projectTabs,
+    activeTabId: s.activeTabId,
+  })));
   const { showContextMenu, ContextMenuComponent } = useContextMenu();
 
   if (projectTabs.length <= 1) return null; // Hide when single tab

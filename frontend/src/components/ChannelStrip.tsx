@@ -1,6 +1,6 @@
-import { useState, useCallback } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import classNames from "classnames";
-import { Power } from "lucide-react";
+import { Power, ChevronDown, ChevronRight } from "lucide-react";
 import { PeakMeter } from "./PeakMeter";
 import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
@@ -33,7 +33,20 @@ function getDbPosition(db: number): number {
   return ((12 - db) / 72) * 100;
 }
 
-export function ChannelStrip({
+/** Color-code a dB value: green (-18 to -6), yellow (-6 to 0), red (>0), dim otherwise */
+function gainDbColor(db: number): string {
+  if (db > 0) return "text-red-400";
+  if (db > -6) return "text-yellow-400";
+  if (db >= -18) return "text-green-400";
+  return "text-neutral-500";
+}
+
+function formatGainDb(db: number): string {
+  if (db <= -60) return "-inf";
+  return (db >= 0 ? "+" : "") + db.toFixed(1);
+}
+
+export const ChannelStrip = React.memo(function ChannelStrip({
   track,
   trackIndex,
   isMaster = false,
@@ -63,6 +76,14 @@ export function ChannelStrip({
     addTrackGroup,
     removeTrackGroup,
     updateTrackGroup,
+    tracks,
+    addTrackSend,
+    removeTrackSend,
+    setTrackSendLevel,
+    setTrackSendEnabled,
+    setTrackSendPreFader,
+    currentTime,
+    masterVolume,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -82,6 +103,14 @@ export function ChannelStrip({
       addTrackGroup: s.addTrackGroup,
       removeTrackGroup: s.removeTrackGroup,
       updateTrackGroup: s.updateTrackGroup,
+      tracks: s.tracks,
+      addTrackSend: s.addTrackSend,
+      removeTrackSend: s.removeTrackSend,
+      setTrackSendLevel: s.setTrackSendLevel,
+      setTrackSendEnabled: s.setTrackSendEnabled,
+      setTrackSendPreFader: s.setTrackSendPreFader,
+      currentTime: s.transport.currentTime,
+      masterVolume: s.masterVolume,
     })),
   );
 
@@ -89,7 +118,19 @@ export function ChannelStrip({
 
   const [phaseInverted, setPhaseInverted] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
+  const [showGainStaging, setShowGainStaging] = useState(false);
   const hasFx = track.inputFxCount + track.trackFxCount > 0;
+
+  // Find the clip under the playhead for gain staging display
+  const activeClipGainDB = useMemo(() => {
+    if (isMaster) return null;
+    const clip = track.clips.find(
+      (c) => currentTime >= c.startTime && currentTime < c.startTime + c.duration && !c.muted,
+    );
+    return clip ? (clip.volumeDB ?? 0) : null;
+  }, [isMaster, track.clips, currentTime]);
+
+  const masterVolumeDB = masterVolume > 0 ? 20 * Math.log10(masterVolume) : -60;
 
   const ALL_LINKED_PARAMS = ["volume", "pan", "mute", "solo", "armed", "fxBypass"];
   const trackGroup = trackGroups.find((g) => g.memberTrackIds.includes(track.id));
@@ -239,54 +280,88 @@ export function ChannelStrip({
         {isMaster ? "● MASTER ●" : track.name}
       </div>
 
-      {/* Send Slots (Phase 11) */}
-      {!isMaster && track.sends?.length > 0 && (
+      {/* Sends Section */}
+      {!isMaster && (
         <div className="px-1 pt-0.5 pb-0.5 shrink-0 space-y-0.5">
-          {track.sends.map((send, i) => {
-            const destTrack = useDAWStore
-              .getState()
-              .tracks.find((t) => t.id === send.destTrackId);
+          {track.sends?.length > 0 && track.sends.map((send, i) => {
+            const destTrack = tracks.find((t) => t.id === send.destTrackId);
             return (
               <div
                 key={i}
                 className={classNames(
-                  "h-3.5 rounded text-[7px] flex items-center justify-between px-1 cursor-pointer transition-colors",
+                  "rounded text-[7px] transition-colors",
                   send.enabled
-                    ? "bg-neutral-800 border border-cyan-500 text-cyan-400"
-                    : "bg-neutral-800 border border-neutral-600 text-neutral-500",
+                    ? "bg-neutral-900 border border-cyan-600/60"
+                    : "bg-neutral-900 border border-neutral-700 opacity-50",
                 )}
-                onClick={() =>
-                  useDAWStore
-                    .getState()
-                    .setTrackSendEnabled(track.id, i, !send.enabled)
-                }
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  useDAWStore.getState().removeTrackSend(track.id, i);
-                }}
-                title={`Send → ${destTrack?.name || "?"} (${Math.round(send.level * 100)}%) — Right-click to remove`}
               >
-                <span className="truncate max-w-[50px]">
-                  → {destTrack?.name || "?"}
-                </span>
-                <span>{Math.round(send.level * 100)}%</span>
+                {/* Send header: destination + pre/post + remove */}
+                <div className="flex items-center justify-between px-1 h-3.5">
+                  <span
+                    className={classNames(
+                      "truncate max-w-[32px] cursor-pointer",
+                      send.enabled ? "text-cyan-400" : "text-neutral-500",
+                    )}
+                    onClick={() => setTrackSendEnabled(track.id, i, !send.enabled)}
+                    title={`${send.enabled ? "Disable" : "Enable"} send to ${destTrack?.name || "?"}`}
+                  >
+                    {destTrack?.name || "?"}
+                  </span>
+                  <span className="flex items-center gap-0.5">
+                    <button
+                      className={classNames(
+                        "text-[6px] px-0.5 rounded cursor-pointer transition-colors",
+                        send.preFader
+                          ? "bg-cyan-700/50 text-cyan-300"
+                          : "bg-neutral-700/50 text-neutral-500 hover:text-neutral-300",
+                      )}
+                      onClick={() => setTrackSendPreFader(track.id, i, !send.preFader)}
+                      title={send.preFader ? "Pre-fader (click for post)" : "Post-fader (click for pre)"}
+                    >
+                      {send.preFader ? "PRE" : "PST"}
+                    </button>
+                    <button
+                      className="text-neutral-600 hover:text-red-400 cursor-pointer transition-colors leading-none"
+                      onClick={() => removeTrackSend(track.id, i)}
+                      title="Remove send"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                </div>
+                {/* Send level slider */}
+                <div className="flex items-center gap-0.5 px-1 pb-0.5">
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(send.level * 100)}
+                    onChange={(e) => setTrackSendLevel(track.id, i, Number(e.target.value) / 100)}
+                    className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
+                    style={{ minWidth: 0 }}
+                    title={`${Math.round(send.level * 100)}%`}
+                  />
+                  <span className={classNames(
+                    "text-[7px] font-mono w-[20px] text-right",
+                    send.enabled ? "text-cyan-400" : "text-neutral-500",
+                  )}>
+                    {Math.round(send.level * 100)}
+                  </span>
+                </div>
               </div>
             );
           })}
+          {/* Add send button */}
           <div
-            className="h-3.5 bg-neutral-800 border border-dashed border-neutral-600 rounded text-[7px] text-neutral-500
-                       flex items-center justify-center cursor-pointer hover:border-cyan-400 hover:text-cyan-400 transition-colors"
+            className="h-3.5 bg-neutral-900/60 border border-dashed border-neutral-700 rounded text-[7px] text-neutral-500
+                       flex items-center justify-center cursor-pointer hover:border-cyan-500 hover:text-cyan-400 transition-colors"
             onClick={() => {
-              const otherTracks = useDAWStore
-                .getState()
-                .tracks.filter((t) => t.id !== track.id);
+              const otherTracks = tracks.filter((t) => t.id !== track.id);
               if (otherTracks.length > 0) {
-                // Add send to first available track (user can change via routing matrix)
-                useDAWStore
-                  .getState()
-                  .addTrackSend(track.id, otherTracks[0].id);
+                addTrackSend(track.id, otherTracks[0].id);
               }
             }}
+            title="Add send to another track"
           >
             + Send
           </div>
@@ -481,6 +556,58 @@ export function ChannelStrip({
         {formatVolume(track.volumeDB)} dB
       </div>
 
+      {/* Gain Staging Display */}
+      {!isMaster && (
+        <div className="shrink-0">
+          <button
+            className="w-full text-[7px] text-neutral-500 hover:text-neutral-300 bg-neutral-900/50 border-t border-neutral-700/50 flex items-center justify-center gap-0.5 py-0.5 cursor-pointer transition-colors"
+            onClick={() => setShowGainStaging(!showGainStaging)}
+            title="Gain staging — signal levels at each stage"
+          >
+            {showGainStaging ? <ChevronDown size={8} /> : <ChevronRight size={8} />}
+            GAIN
+          </button>
+          {showGainStaging && (
+            <div className="bg-neutral-950/60 px-1 py-0.5 space-y-px border-t border-neutral-800">
+              {/* Clip Gain */}
+              <div className="flex justify-between text-[7px] font-mono">
+                <span className="text-neutral-500">Clip</span>
+                <span className={activeClipGainDB !== null ? gainDbColor(activeClipGainDB) : "text-neutral-600"}>
+                  {activeClipGainDB !== null ? formatGainDb(activeClipGainDB) : "--"}
+                </span>
+              </div>
+              {/* Track Fader */}
+              <div className="flex justify-between text-[7px] font-mono">
+                <span className="text-neutral-500">Fader</span>
+                <span className={gainDbColor(track.volumeDB)}>
+                  {formatGainDb(track.volumeDB)}
+                </span>
+              </div>
+              {/* Master */}
+              <div className="flex justify-between text-[7px] font-mono">
+                <span className="text-neutral-500">Master</span>
+                <span className={gainDbColor(masterVolumeDB)}>
+                  {formatGainDb(masterVolumeDB)}
+                </span>
+              </div>
+              {/* Sum indicator */}
+              <div className="flex justify-between text-[7px] font-mono border-t border-neutral-700/50 pt-px mt-px">
+                <span className="text-neutral-400">Sum</span>
+                {(() => {
+                  const clipDb = activeClipGainDB ?? 0;
+                  const sum = clipDb + track.volumeDB + masterVolumeDB;
+                  return (
+                    <span className={gainDbColor(sum)}>
+                      {formatGainDb(sum)}
+                    </span>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* M/S/R Buttons for tracks */}
       {!isMaster && (
         <div className="flex gap-0.5 p-1 shrink-0">
@@ -539,4 +666,4 @@ export function ChannelStrip({
     {ContextMenuComponent}
   </>
   );
-}
+});

@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { X, AlertTriangle } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 
 interface PianoKey {
@@ -17,7 +18,10 @@ interface PianoKey {
  * Supports mouse/touch interaction to play notes
  */
 export function VirtualPianoKeyboard() {
-  const { tracks, selectedTrackIds } = useDAWStore();
+  const { tracks, selectedTrackIds } = useDAWStore(useShallow((s) => ({
+    tracks: s.tracks,
+    selectedTrackIds: s.selectedTrackIds,
+  })));
   const [activeNotes, setActiveNotes] = useState<Set<number>>(new Set());
 
   // Generate piano keys (2 octaves: C3 to B4)

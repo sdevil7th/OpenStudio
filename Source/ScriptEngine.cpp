@@ -620,6 +620,190 @@ static int l_getAvailablePlugins(lua_State* L)
 }
 
 // ============================================================================
+// Phase 3.11: Extended Scripting API
+// ============================================================================
+
+// --- Automation ---
+static int l_setAutomationPoints(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) return 0;
+    const char* trackId = luaL_checkstring(L, 1);
+    const char* paramId = luaL_checkstring(L, 2);
+    const char* pointsJSON = luaL_checkstring(L, 3);
+    engine->setAutomationPoints(juce::String(trackId), juce::String(paramId), juce::String(pointsJSON));
+    return 0;
+}
+
+static int l_setAutomationMode(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) return 0;
+    const char* trackId = luaL_checkstring(L, 1);
+    const char* paramId = luaL_checkstring(L, 2);
+    const char* mode = luaL_checkstring(L, 3);
+    engine->setAutomationMode(juce::String(trackId), juce::String(paramId), juce::String(mode));
+    return 0;
+}
+
+static int l_getAutomationMode(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_pushstring(L, "off"); return 1; }
+    const char* trackId = luaL_checkstring(L, 1);
+    const char* paramId = luaL_checkstring(L, 2);
+    auto mode = engine->getAutomationMode(juce::String(trackId), juce::String(paramId));
+    lua_pushstring(L, mode.toRawUTF8());
+    return 1;
+}
+
+static int l_clearAutomation(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) return 0;
+    const char* trackId = luaL_checkstring(L, 1);
+    const char* paramId = luaL_checkstring(L, 2);
+    engine->clearAutomation(juce::String(trackId), juce::String(paramId));
+    return 0;
+}
+
+// --- Analysis ---
+static int l_measureLUFS(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_pushnil(L); return 1; }
+    const char* filePath = luaL_checkstring(L, 1);
+    double startTime = lua_isnumber(L, 2) ? lua_tonumber(L, 2) : 0.0;
+    double endTime = lua_isnumber(L, 3) ? lua_tonumber(L, 3) : 0.0;
+    auto result = engine->getAudioAnalyzer().measureLUFS(juce::String(filePath), startTime, endTime);
+    lua_newtable(L);
+    lua_pushnumber(L, result.integrated); lua_setfield(L, -2, "integrated");
+    lua_pushnumber(L, result.shortTerm);  lua_setfield(L, -2, "shortTerm");
+    lua_pushnumber(L, result.momentary);  lua_setfield(L, -2, "momentary");
+    lua_pushnumber(L, result.truePeak);   lua_setfield(L, -2, "truePeak");
+    lua_pushnumber(L, result.range);      lua_setfield(L, -2, "range");
+    return 1;
+}
+
+static int l_detectTransients(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_newtable(L); return 1; }
+    const char* filePath = luaL_checkstring(L, 1);
+    double sensitivity = luaL_optnumber(L, 2, 0.5);
+    double minGapMs = luaL_optnumber(L, 3, 50.0);
+    auto transients = engine->getAudioAnalyzer().detectTransients(juce::String(filePath), sensitivity, minGapMs);
+    lua_newtable(L);
+    for (size_t i = 0; i < transients.size(); ++i)
+    {
+        lua_pushnumber(L, transients[i]);
+        lua_rawseti(L, -2, (int)i + 1);
+    }
+    return 1;
+}
+
+static int l_reverseAudioFile(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_pushnil(L); return 1; }
+    const char* filePath = luaL_checkstring(L, 1);
+    auto result = engine->getAudioAnalyzer().reverseAudioFile(juce::String(filePath));
+    if (result.isEmpty())
+        lua_pushnil(L);
+    else
+        lua_pushstring(L, result.toRawUTF8());
+    return 1;
+}
+
+// --- Freeze ---
+static int l_freezeTrack(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_pushnil(L); return 1; }
+    const char* trackId = luaL_checkstring(L, 1);
+    auto result = engine->freezeTrack(juce::String(trackId));
+    pushVar(L, result);
+    return 1;
+}
+
+static int l_unfreezeTrack(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_pushboolean(L, false); return 1; }
+    const char* trackId = luaL_checkstring(L, 1);
+    bool ok = engine->unfreezeTrack(juce::String(trackId));
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+// --- Strip Silence ---
+static int l_detectSilentRegions(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_newtable(L); return 1; }
+    const char* filePath = luaL_checkstring(L, 1);
+    double thresholdDb = luaL_optnumber(L, 2, -48.0);
+    double minSilenceMs = luaL_optnumber(L, 3, 200.0);
+    double minSoundMs = luaL_optnumber(L, 4, 100.0);
+    double preAttackMs = luaL_optnumber(L, 5, 10.0);
+    double postReleaseMs = luaL_optnumber(L, 6, 50.0);
+    auto result = engine->detectSilentRegions(juce::String(filePath), thresholdDb,
+                                               minSilenceMs, minSoundMs,
+                                               preAttackMs, postReleaseMs);
+    pushVar(L, result);
+    return 1;
+}
+
+// --- Render ---
+static int l_renderProject(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    if (!engine) { lua_pushboolean(L, false); return 1; }
+    const char* source = luaL_checkstring(L, 1);
+    double startTime = luaL_checknumber(L, 2);
+    double endTime = luaL_checknumber(L, 3);
+    const char* filePath = luaL_checkstring(L, 4);
+    const char* format = luaL_optstring(L, 5, "wav");
+    double sampleRate = luaL_optnumber(L, 6, 44100.0);
+    int bitDepth = (int)luaL_optinteger(L, 7, 24);
+    int numChannels = (int)luaL_optinteger(L, 8, 2);
+    bool normalize = lua_toboolean(L, 9) != 0;
+    bool addTail = lua_toboolean(L, 10) != 0;
+    double tailMs = luaL_optnumber(L, 11, 0.0);
+    bool ok = engine->renderProject(juce::String(source), startTime, endTime,
+                                     juce::String(filePath), juce::String(format),
+                                     sampleRate, bitDepth, numChannels,
+                                     normalize, addTail, tailMs);
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+// --- File dialog (returns a temp file path for script I/O) ---
+// JUCE 8 removed synchronous file dialogs; Lua scripts run on message thread
+// so we can't use async+WaitableEvent without deadlocking. Scripts should use
+// explicit file paths passed as arguments instead.
+static int l_fileDialog(lua_State* L)
+{
+    auto* engine = getEngine(L);
+    juce::ignoreUnused(engine);
+    const char* title = luaL_optstring(L, 1, "Select File");
+    const char* defaultPath = luaL_optstring(L, 2, "");
+    juce::ignoreUnused(title);
+
+    // If a default path was given, return it directly
+    if (juce::String(defaultPath).isNotEmpty())
+    {
+        lua_pushstring(L, defaultPath);
+        return 1;
+    }
+
+    // Otherwise return the user's documents folder as a starting point
+    auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    lua_pushstring(L, docs.getFullPathName().toRawUTF8());
+    return 1;
+}
+
+// ============================================================================
 // ScriptEngine implementation
 // ============================================================================
 
@@ -738,6 +922,28 @@ void ScriptEngine::registerAPI(AudioEngine& engine)
     // ------ Plugins ------
     reg("scanForPlugins",      l_scanForPlugins);
     reg("getAvailablePlugins", l_getAvailablePlugins);
+
+    // ------ Automation (Phase 3.11) ------
+    reg("setAutomationPoints",  l_setAutomationPoints);
+    reg("setAutomationMode",    l_setAutomationMode);
+    reg("getAutomationMode",    l_getAutomationMode);
+    reg("clearAutomation",      l_clearAutomation);
+
+    // ------ Analysis (Phase 3.11) ------
+    reg("measureLUFS",          l_measureLUFS);
+    reg("detectTransients",     l_detectTransients);
+    reg("reverseAudioFile",     l_reverseAudioFile);
+    reg("detectSilentRegions",  l_detectSilentRegions);
+
+    // ------ Freeze (Phase 3.11) ------
+    reg("freezeTrack",          l_freezeTrack);
+    reg("unfreezeTrack",        l_unfreezeTrack);
+
+    // ------ Render (Phase 3.11) ------
+    reg("renderProject",        l_renderProject);
+
+    // ------ Dialogs (Phase 3.11) ------
+    reg("fileDialog",           l_fileDialog);
 
     // ------ Utility ------
     reg("print",           l_print);

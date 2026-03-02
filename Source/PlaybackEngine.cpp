@@ -31,12 +31,17 @@ void PlaybackEngine::preloadReader(const juce::File& file)
     juce::String filePath = file.getFullPathName();
     auto it = readers.find(filePath);
     if (it != readers.end() && it->second != nullptr)
+    {
+        readerAccessTimes[filePath] = juce::Time::currentTimeMillis();
         return;  // Already loaded
+    }
 
     std::unique_ptr<juce::AudioFormatReader> newReader(formatManager.createReaderFor(file));
     if (newReader)
     {
         readers[filePath] = std::move(newReader);
+        readerAccessTimes[filePath] = juce::Time::currentTimeMillis();
+        evictOldReaders();
         juce::Logger::writeToLog("PlaybackEngine: Pre-loaded reader for: " + filePath);
     }
 }
@@ -46,12 +51,78 @@ juce::AudioFormatReader* PlaybackEngine::getCachedReader(const juce::File& file)
     // Audio-thread safe: only looks up, never creates readers
     auto it = readers.find(file.getFullPathName());
     if (it != readers.end() && it->second != nullptr)
+    {
+        readerAccessTimes[file.getFullPathName()] = juce::Time::currentTimeMillis();
         return it->second.get();
+    }
     return nullptr;
 }
 
+void PlaybackEngine::evictOldReaders()
+{
+    if ((int)readers.size() <= MAX_CACHED_READERS)
+        return;
+
+    // Evict the oldest 25% by access time
+    int numToEvict = (int)readers.size() / 4;
+    if (numToEvict < 1) numToEvict = 1;
+
+    // Collect entries sorted by access time (oldest first)
+    std::vector<std::pair<juce::int64, juce::String>> entries;
+    for (const auto& [path, accessTime] : readerAccessTimes)
+        entries.push_back({ accessTime, path });
+
+    std::sort(entries.begin(), entries.end());
+
+    for (int i = 0; i < numToEvict && i < (int)entries.size(); ++i)
+    {
+        const auto& path = entries[i].second;
+        readers.erase(path);
+        readerAccessTimes.erase(path);
+    }
+
+    juce::Logger::writeToLog("PlaybackEngine: Evicted " + juce::String(numToEvict) + " old readers");
+}
+
+float PlaybackEngine::interpolateGainEnvelope(const std::vector<GainEnvelopePoint>& points, double time)
+{
+    if (points.empty())
+        return 1.0f;
+
+    // Before first point
+    if (time <= points.front().time)
+        return points.front().gain;
+
+    // After last point
+    if (time >= points.back().time)
+        return points.back().gain;
+
+    // Find surrounding points and interpolate linearly
+    for (size_t i = 0; i + 1 < points.size(); ++i)
+    {
+        if (time >= points[i].time && time < points[i + 1].time)
+        {
+            double t = (time - points[i].time) / (points[i + 1].time - points[i].time);
+            return points[i].gain + static_cast<float>(t) * (points[i + 1].gain - points[i].gain);
+        }
+    }
+
+    return 1.0f;
+}
+
+void PlaybackEngine::setClipGainEnvelope(const juce::String& trackId, const juce::String& clipId,
+                                          const std::vector<GainEnvelopePoint>& points)
+{
+    juce::ScopedLock sl(lock);
+    juce::String key = trackId + "::" + clipId;
+    if (points.empty())
+        gainEnvelopes.erase(key);
+    else
+        gainEnvelopes[key] = points;
+}
+
 void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, double duration, const juce::String& trackId,
-                              double offset, double volumeDB, double fadeIn, double fadeOut)
+                              double offset, double volumeDB, double fadeIn, double fadeOut, const juce::String& clipId)
 {
     juce::ScopedLock sl(lock);
 
@@ -65,6 +136,7 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
     preloadReader(audioFile);
 
     ClipInfo clip(audioFile, startTime, duration, trackId, offset, volumeDB, fadeIn, fadeOut);
+    clip.clipId = clipId;
     clips.push_back(clip);
 
     juce::Logger::writeToLog("PlaybackEngine: Added clip - Track " + trackId +
@@ -95,13 +167,16 @@ void PlaybackEngine::clearAllClips()
     juce::ScopedLock sl(lock);
     clips.clear();
     readers.clear();
+    readerAccessTimes.clear();
+    lagrangeInterpolatorL.reset();
+    lagrangeInterpolatorR.reset();
     juce::Logger::writeToLog("PlaybackEngine: Cleared all clips");
 }
 
 void PlaybackEngine::clearTrackClips(const juce::String& trackId)
 {
     juce::ScopedLock sl(lock);
-    
+
     clips.erase(
         std::remove_if(clips.begin(), clips.end(),
             [&trackId](const ClipInfo& clip) {
@@ -109,7 +184,10 @@ void PlaybackEngine::clearTrackClips(const juce::String& trackId)
             }),
         clips.end()
     );
-    
+
+    lagrangeInterpolatorL.reset();
+    lagrangeInterpolatorR.reset();
+
     juce::Logger::writeToLog("PlaybackEngine: Cleared clips for track " + trackId);
 }
 
@@ -243,7 +321,61 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         int fileChannels = readerChannels;
         int outChannels = buffer.getNumChannels();
 
-        // Resample (linear interpolation) + apply gain/fades in one pass
+        // Look up gain envelope for this clip
+        const std::vector<GainEnvelopePoint>* envPoints = nullptr;
+        if (clip.clipId.isNotEmpty())
+        {
+            juce::String envKey = clip.trackId + "::" + clip.clipId;
+            auto envIt = gainEnvelopes.find(envKey);
+            if (envIt != gainEnvelopes.end() && !envIt->second.empty())
+                envPoints = &envIt->second;
+        }
+
+        // Render mode with sample rate conversion: use Lagrange interpolation
+        if (renderMode && ratio != 1.0)
+        {
+            // Use a temporary buffer for Lagrange-resampled output per channel
+            // Process each channel independently
+            int channelsToProcess = std::min(outChannels, fileChannels);
+            for (int ch = 0; ch < channelsToProcess; ++ch)
+            {
+                auto& interpolator = (ch == 0) ? lagrangeInterpolatorL : lagrangeInterpolatorR;
+                const float* inputData = reusableFileBuffer.getReadPointer(ch);
+
+                // Create a temporary output buffer for this channel
+                // We write directly into the output by accumulating sample by sample
+                // Use a small stack buffer for the resampled data
+                std::vector<float> resampledData(static_cast<size_t>(outputSamples));
+                interpolator.process(ratio, inputData, resampledData.data(), outputSamples);
+
+                // Apply fades, gain envelope, and clip gain, then mix into output buffer
+                for (int i = 0; i < outputSamples; ++i)
+                {
+                    float fadeGain = 1.0f;
+                    double sampleTimeInClip = offsetInClip + (i / sampleRate);
+
+                    if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
+                    {
+                        float t = static_cast<float>(sampleTimeInClip / clip.fadeIn);
+                        fadeGain *= applyFadeCurve(t, clip.fadeInCurve);
+                    }
+
+                    double timeFromEnd = clip.duration - sampleTimeInClip;
+                    if (clip.fadeOut > 0.0 && timeFromEnd < clip.fadeOut)
+                    {
+                        float t = static_cast<float>(timeFromEnd / clip.fadeOut);
+                        fadeGain *= applyFadeCurve(t, clip.fadeOutCurve);
+                    }
+
+                    float envGain = envPoints ? interpolateGainEnvelope(*envPoints, sampleTimeInClip) : 1.0f;
+
+                    buffer.addSample(ch, i, resampledData[static_cast<size_t>(i)] * clipGain * fadeGain * envGain);
+                }
+            }
+        }
+        else
+        {
+        // Real-time path: Resample (linear interpolation) + apply gain/fades in one pass
         for (int i = 0; i < outputSamples; ++i)
         {
             // Fractional position in the file buffer for this output sample
@@ -268,7 +400,8 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 fadeGain *= applyFadeCurve(t, clip.fadeOutCurve);
             }
 
-            float totalGain = clipGain * fadeGain;
+            float envGain = envPoints ? interpolateGainEnvelope(*envPoints, sampleTimeInClip) : 1.0f;
+            float totalGain = clipGain * fadeGain * envGain;
 
             // Linear interpolation + gain for each channel
             for (int ch = 0; ch < std::min(outChannels, fileChannels); ++ch)
@@ -279,5 +412,6 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 buffer.addSample(ch, i, sample * totalGain);
             }
         }
+        } // end real-time path
     }
 }

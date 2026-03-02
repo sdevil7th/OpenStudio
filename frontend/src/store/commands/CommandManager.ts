@@ -23,6 +23,25 @@ export interface Command {
 }
 
 /**
+ * Serializable snapshot of a Command (metadata only, no callbacks).
+ * Used for persisting undo history display across project save/load.
+ */
+export interface SerializedCommand {
+  type: string;
+  description: string;
+  timestamp: number;
+}
+
+/**
+ * Serializable snapshot of the undo/redo history.
+ */
+export interface SerializedUndoHistory {
+  version: 1;
+  undoStack: SerializedCommand[];
+  redoStack: SerializedCommand[];
+}
+
+/**
  * CommandManager handles the undo/redo stacks and execution
  */
 export class CommandManager {
@@ -121,6 +140,59 @@ export class CommandManager {
   clear(): void {
     this.undoStack = [];
     this.redoStack = [];
+    this.notifyChange();
+  }
+
+  /**
+   * Serialize the undo/redo history for project persistence.
+   *
+   * Since Command.execute and Command.undo are closures over Zustand state,
+   * they cannot be serialized. We persist only the metadata (type, description,
+   * timestamp). After deserialization the entries are "display-only" — the user
+   * can see what happened but cannot actually undo/redo pre-save commands.
+   */
+  serialize(): SerializedUndoHistory {
+    const toMeta = (cmd: Command): SerializedCommand => ({
+      type: cmd.type,
+      description: cmd.description,
+      timestamp: cmd.timestamp,
+    });
+
+    return {
+      version: 1,
+      undoStack: this.undoStack.map(toMeta),
+      redoStack: this.redoStack.map(toMeta),
+    };
+  }
+
+  /**
+   * Restore undo/redo history from a previously serialized snapshot.
+   *
+   * Because execute/undo callbacks cannot be restored, the deserialized
+   * commands use no-op functions. `canUndo()` / `canRedo()` will return true
+   * so the UI reflects history, but calling `undo()` / `redo()` on these
+   * restored entries will be a no-op (safe, just does nothing).
+   *
+   * As soon as the user performs a new action, the redo stack is cleared and
+   * new fully-functional commands replace the stale ones over time.
+   */
+  deserialize(data: SerializedUndoHistory | undefined | null): void {
+    if (!data || data.version !== 1) {
+      return; // Unknown or missing format — keep current state
+    }
+
+    const noop = () => {};
+
+    const toCommand = (meta: SerializedCommand): Command => ({
+      type: meta.type,
+      description: meta.description,
+      timestamp: meta.timestamp,
+      execute: noop,
+      undo: noop,
+    });
+
+    this.undoStack = (data.undoStack || []).map(toCommand);
+    this.redoStack = (data.redoStack || []).map(toCommand);
     this.notifyChange();
   }
 

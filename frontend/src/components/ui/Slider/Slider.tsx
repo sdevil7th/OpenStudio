@@ -102,6 +102,12 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
             style={{ background: '#3a3a3a' }}
             onMouseDown={handlePanMouseDown}
             title={rest.title as string}
+            role="slider"
+            aria-valuemin={min}
+            aria-valuemax={max}
+            aria-valuenow={currentVal}
+            aria-label={rest['aria-label'] as string}
+            tabIndex={0}
           >
             {/* Center line */}
             <div
@@ -190,6 +196,9 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
           onClick={handleClick}
           className={sliderClasses}
           style={inputStyle}
+          aria-valuemin={min}
+          aria-valuemax={max}
+          aria-valuenow={value}
           {...rest}
         />
       </div>

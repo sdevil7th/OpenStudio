@@ -8,6 +8,40 @@ import { calculateGridInterval, type GridSize } from "../utils/snapToGrid";
 // Stores the value at edit start so we can create a single undo command on edit end.
 const _editSnapshots = new Map<string, number>();
 
+// Helper: sync an automation lane's points to the C++ backend.
+// Converts normalised 0–1 frontend values to backend-native values:
+//   volume: 0–1 → -60 to +6 dB
+//   pan:    0–1 → -1.0 to +1.0
+function syncAutomationLaneToBackend(
+  trackId: string,
+  lane: { param: string; points: { time: number; value: number }[] },
+) {
+  const parameterId = lane.param; // "volume" | "pan" | "mute"
+  const converted = lane.points.map((p) => {
+    let backendValue = p.value;
+    if (lane.param === "volume") {
+      // 0–1 normalised → -60 to +6 dB (linear mapping)
+      backendValue = p.value * 66 - 60; // 0→-60, 1→+6
+    } else if (lane.param === "pan") {
+      // 0–1 → -1 to +1
+      backendValue = p.value * 2 - 1;
+    }
+    return { time: p.time, value: backendValue };
+  });
+  nativeBridge.setAutomationPoints(trackId, parameterId, converted).catch(() => {});
+  // Also set mode to "read" if not already set (so automation plays back)
+  nativeBridge.setAutomationMode(trackId, parameterId, "read").catch(() => {});
+}
+
+// Sync all tempo markers to the C++ backend (Phase 1.2)
+function syncTempoMarkersToBackend(markers: { time: number; tempo: number }[]) {
+  if (markers.length === 0) {
+    nativeBridge.clearTempoMarkers().catch(() => {});
+  } else {
+    nativeBridge.setTempoMarkers(markers).catch(() => {});
+  }
+}
+
 // Group colors for visual linking brackets/tints
 export const TRACK_GROUP_COLORS = [
   "#3b82f6", "#ef4444", "#22c55e", "#eab308",
@@ -32,6 +66,29 @@ export function getTrackGroupInfo(
 // on other linked tracks.
 const _linkingInProgress = new Set<string>();
 
+// Diff-based sync cache: tracks which clips were last sent to the C++ backend.
+// Key format: "trackId|filePath|startTime|duration|offset|volumeDB|fadeIn|fadeOut"
+// On play, we diff against this to only add/remove changed clips (Sprint 16.3).
+let _lastSyncedClipKeys = new Set<string>();
+
+function makeClipKey(
+  trackId: string,
+  filePath: string,
+  startTime: number,
+  duration: number,
+  offset: number,
+  volumeDB: number,
+  fadeIn: number,
+  fadeOut: number,
+): string {
+  return `${trackId}|${filePath}|${startTime}|${duration}|${offset}|${volumeDB}|${fadeIn}|${fadeOut}`;
+}
+
+// Reset the sync cache (call on project load/new)
+export function resetSyncCache() {
+  _lastSyncedClipKeys = new Set<string>();
+}
+
 // Returns all member IDs in the same track group as `trackId`, or just `[trackId]`.
 function getLinkedTrackIds(
   trackId: string,
@@ -51,7 +108,7 @@ function getLinkedTrackIds(
 // Type Definitions
 // ============================================
 
-export type TrackType = "audio" | "midi" | "instrument";
+export type TrackType = "audio" | "midi" | "instrument" | "bus";
 export type InputType = "mono" | "stereo" | "midi";
 
 // MIDI Event structure
@@ -62,6 +119,16 @@ export interface MIDIEvent {
   velocity?: number; // 0-127 for note events
   controller?: number; // CC number
   value?: number; // CC value or pitch bend
+  pitchBend?: number; // Per-note pitch bend, -1.0 to +1.0
+  pressure?: number; // Per-note pressure/aftertouch, 0.0 to 1.0
+  slide?: number; // Per-note slide (CC74), 0.0 to 1.0
+}
+
+// CC Event for MIDI CC lane editing
+export interface MIDICCEvent {
+  cc: number;       // CC number (e.g. 1=Mod, 7=Vol, 10=Pan, 11=Expr, 64=Sustain)
+  time: number;     // Time in seconds from clip start
+  value: number;    // 0-127
 }
 
 // MIDI Clip structure
@@ -71,10 +138,12 @@ export interface MIDIClip {
   startTime: number; // Position on timeline in seconds
   duration: number; // Duration in seconds
   events: MIDIEvent[];
+  ccEvents?: MIDICCEvent[]; // CC lane events for piano roll editing
   color: string;
 }
 
-export type AutomationParam = "volume" | "pan" | "mute";
+// Supports built-in params plus plugin params like "plugin_0_3" (fxIndex_paramIndex)
+export type AutomationParam = "volume" | "pan" | "mute" | (string & {});
 
 export interface AutomationPoint {
   time: number; // Position in seconds
@@ -108,10 +177,12 @@ export interface AudioClip {
   fadeOutShape?: number;
   playbackRate?: number; // Time stretch factor (1.0 = normal)
   pitchSemitones?: number; // Pitch shift in semitones
+  originalFilePath?: string; // Original file before time stretch/pitch shift (for undo)
   freeY?: number; // Free positioning Y offset in pixels
   takes?: AudioClip[]; // Alternative takes for comping
   activeTakeIndex?: number; // Which take is active (undefined = main clip)
   sourceLength?: number; // Full duration of source audio file (for resize clamping after split)
+  gainEnvelope?: Array<{ time: number; gain: number }>; // Per-clip gain envelope (time relative to clip start, gain 0.0-2.0)
 }
 
 export interface TempoMarker {
@@ -152,6 +223,7 @@ export interface Track {
   soloed: boolean;
   armed: boolean;
   monitorEnabled: boolean;
+  recordSafe: boolean; // Phase 3.3 — prevents arming
 
   // Metering
   meterLevel: number;
@@ -180,6 +252,7 @@ export interface Track {
   // Freeze
   frozen: boolean;
   freezeFilePath?: string;
+  frozenOriginalClips?: AudioClip[]; // Saved clips before freeze (for unfreeze restore)
 
   // Comping / Takes
   takes: AudioClip[][]; // Array of take lanes (each lane is an array of clips)
@@ -193,6 +266,21 @@ export interface Track {
     enabled: boolean;
     preFader: boolean;
   }>;
+
+  // Visual
+  icon?: string; // Track icon ID (microphone, guitar, drums, keys, bus, master, midi, folder, piano)
+  notes?: string; // Free-form track notes/comments
+  waveformZoom?: number; // Waveform vertical zoom factor (0.1 to 5.0, default 1.0)
+  spectralView?: boolean; // Show spectrogram instead of waveform
+
+  // Folder tracks
+  isFolder?: boolean; // True if this track is a folder track
+  parentFolderId?: string; // ID of parent folder track (for nesting)
+  folderCollapsed?: boolean; // Whether folder children are hidden
+
+  // VCA fader
+  vcaGroupId?: string; // VCA group this track belongs to (leader track acts as VCA fader)
+  isVCALeader?: boolean; // True if this track is the VCA fader controlling the group
 
   // Clips
   clips: AudioClip[];
@@ -208,6 +296,9 @@ export interface TransportState {
   loopEnabled: boolean;
   loopStart: number; // seconds
   loopEnd: number; // seconds
+  punchEnabled: boolean; // Phase 3.1 — punch in/out
+  punchStart: number; // seconds
+  punchEnd: number; // seconds
 }
 
 // Recording clip info for live visualization
@@ -252,6 +343,29 @@ export interface RenderJob {
   };
   status: "pending" | "rendering" | "done" | "error";
   error?: string;
+}
+
+// ============================================
+// Mixer Snapshot
+// ============================================
+
+export interface MixerSnapshot {
+  name: string;
+  timestamp: number;
+  tracks: Array<{ id: string; volume: number; pan: number; mute: boolean; solo: boolean }>;
+}
+
+// ============================================
+// Project Template
+// ============================================
+
+export interface ProjectTemplate {
+  name: string;
+  tracks: Track[];
+  masterVolume: number;
+  masterPan: number;
+  tempo: number;
+  timeSignature: { numerator: number; denominator: number };
 }
 
 // ============================================
@@ -328,7 +442,7 @@ interface DAWState {
   tcpWidth: number; // Track Control Panel width (draggable)
   snapEnabled: boolean;
   gridSize: GridSize;
-  toolMode: "select" | "split" | "mute";
+  toolMode: "select" | "split" | "mute" | "smart";
 
   // UI State
   showMixer: boolean;
@@ -345,9 +459,13 @@ interface DAWState {
   showBigClock: boolean;
   bigClockFormat: "time" | "beats";
   showKeyboardShortcuts: boolean;
+  showContextualHelp: boolean;
   showPreferences: boolean;
   timecodeMode: "time" | "beats" | "smpte";
   smpteFrameRate: 24 | 25 | 29.97 | 30;
+
+  // Accessibility: UI font scaling (0.75 - 1.5, default 1.0)
+  uiFontScale: number;
 
   // Script Console
   showScriptConsole: boolean;
@@ -356,6 +474,14 @@ interface DAWState {
   showPianoRoll: boolean;
   pianoRollTrackId: string | null;
   pianoRollClipId: string | null;
+  selectedNoteIds: string[];
+  pianoRollScaleRoot: number; // 0=C, 1=C#, ..., 11=B
+  pianoRollScaleType: string; // 'chromatic', 'major', 'minor', 'dorian', 'mixolydian', 'pentatonic_major', 'pentatonic_minor', 'blues'
+
+  // Step Input Mode (Piano Roll)
+  stepInputEnabled: boolean;
+  stepInputSize: number;     // Duration in beats (0.125=1/32, 0.25=1/16, 0.5=1/8, 1=1/4)
+  stepInputPosition: number; // Current step cursor time in seconds (relative to clip start)
 
   // Audio Device
   audioDeviceSetup: AudioDeviceSetup | null;
@@ -376,9 +502,15 @@ interface DAWState {
   projectSampleRate: 44100 | 48000 | 88200 | 96000 | 192000;
   projectBitDepth: 16 | 24 | 32;
 
-  // Auto-Backup
+  // Auto-Backup / Auto-Save
   autoBackupEnabled: boolean;
   autoBackupInterval: number; // milliseconds
+  autoSaveEnabled: boolean;
+  autoSaveIntervalMinutes: number; // minutes (default 5)
+  autoSaveMaxVersions: number; // max rotating backup versions (default 3)
+
+  // Custom Keyboard Shortcuts (actionId -> shortcut string)
+  customShortcuts: Record<string, string>;
 
   // Track Templates
   trackTemplates: Array<{ id: string; name: string; trackConfig: Partial<Track> }>;
@@ -509,6 +641,80 @@ interface DAWState {
   liveCaptureFilePath: string;
   liveCaptureDuration: number;
   showDDPExport: boolean;
+
+  // Phase 4.2: Step Sequencer
+  stepSequencer: {
+    steps: boolean[][];       // [row/pitch][column/step]
+    velocities: number[][];   // velocity per step (0-127)
+    stepCount: number;
+    stepSize: string;         // '1/16', '1/8', '1/4'
+    selectedPitch: number;
+    pitchCount: number;
+  };
+  showStepSequencer: boolean;
+
+  // Phase 4.1: Clip Launcher
+  clipLauncher: {
+    slots: Array<Array<{
+      filePath?: string;
+      name?: string;
+      duration?: number;
+      isPlaying?: boolean;
+      isQueued?: boolean;
+      color?: string;
+    }>>;
+    numTracks: number;
+    numSlots: number;
+    quantize: string;         // 'none', '1/4', '1/2', '1bar', '2bar', '4bar'
+  };
+  showClipLauncher: boolean;
+
+  // Sprint 17: Visual Improvements
+  recentColors: string[];
+
+  // Sprint 18: Interaction/Workflow
+  autoScrollDuringPlayback: boolean;
+  showQuantizeDialog: boolean;
+  showDrumEditor: boolean;
+
+  // Sprint 19: Plugin + Mixing
+  showMediaPool: boolean;
+
+  // Plugin A/B Comparison — per-plugin state slots keyed by "trackId-fxIndex"
+  pluginABStates: Record<string, { a?: string; b?: string; active: "a" | "b" }>;
+
+  // FX Chain Presets — save/load entire FX chains
+  fxChainPresets: Array<{ name: string; plugins: Array<{ pluginId: string; state?: string }> }>;
+
+  // Sprint 20: Metering + Analysis
+  showLoudnessMeter: boolean;
+  showSpectrumAnalyzer: boolean;
+  showPhaseCorrelation: boolean;
+  showProjectTemplates: boolean;
+
+  // Sprint 21: Timeline Interaction
+  showCrosshair: boolean;
+
+  // Mixer Snapshots
+  mixerSnapshots: MixerSnapshot[];
+
+  // Project Templates
+  projectTemplates: ProjectTemplate[];
+
+  // Project Compare
+  showProjectCompare: boolean;
+  projectCompareData: {
+    tracksDiff: Array<{ type: "added" | "removed" | "modified"; id: string; name: string; details?: string }>;
+    clipsDiff: Array<{ type: "added" | "removed" | "modified"; id: string; name: string; trackName: string; details?: string }>;
+    settingsDiff: Array<{ field: string; oldValue: string; newValue: string }>;
+  } | null;
+
+  // Collaborative Metadata
+  projectAuthor: string;
+  projectRevisionNotes: Array<{ timestamp: number; author: string; note: string }>;
+
+  // Detachable Panels (multi-monitor support)
+  detachedPanels: string[];
 }
 
 // ============================================
@@ -531,10 +737,30 @@ interface DAWActions {
   setAutoBackupEnabled: (enabled: boolean) => void;
   setAutoBackupInterval: (ms: number) => void;
 
+  // Auto-Save
+  toggleAutoSave: () => void;
+  setAutoSaveInterval: (minutes: number) => void;
+  setAutoSaveMaxVersions: (max: number) => void;
+
+  // Custom Keyboard Shortcuts
+  setCustomShortcut: (actionId: string, shortcut: string) => void;
+  resetCustomShortcuts: () => void;
+
   // Track Templates
   saveTrackTemplate: (trackId: string, name: string) => void;
   loadTrackTemplate: (templateId: string) => void;
   deleteTrackTemplate: (templateId: string) => void;
+
+  // Track Folder Management
+  createFolderTrack: (name: string) => void;
+  moveTracksToFolder: (trackIds: string[], folderId: string) => void;
+  toggleFolderCollapsed: (folderId: string) => void;
+  removeTrackFromFolder: (trackId: string) => void;
+  getVisibleTracks: () => Track[];
+
+  // VCA Faders
+  createVCAFader: (name: string, memberTrackIds: string[]) => void;
+  removeVCAGroup: (vcaGroupId: string) => void;
 
   // Track Management
   addTrack: (track: Partial<Track> & { id: string; name: string }) => void;
@@ -549,6 +775,9 @@ interface DAWActions {
   selectAllTracks: () => void;
   deselectAllTracks: () => void;
   deleteSelectedTracks: () => Promise<void>;
+
+  // Track Notes
+  setTrackNotes: (trackId: string, notes: string) => void;
 
   // Track Audio Controls
   setTrackVolume: (id: string, volumeDB: number) => Promise<void>;
@@ -599,6 +828,9 @@ interface DAWActions {
   setTempo: (tempo: number) => Promise<void>;
   toggleLoop: () => void;
   setLoopRegion: (start: number, end: number) => void;
+  togglePunch: () => void;
+  setPunchRange: (start: number, end: number) => void;
+  setTrackRecordSafe: (trackId: string, safe: boolean) => void;
   setTimeSelection: (start: number, end: number) => void;
   clearTimeSelection: () => void;
   setLoopToSelection: () => void;
@@ -640,7 +872,7 @@ interface DAWActions {
   ) => Promise<void>;
 
   // Tool Mode
-  setToolMode: (mode: "select" | "split" | "mute") => void;
+  setToolMode: (mode: "select" | "split" | "mute" | "smart") => void;
   toggleSplitTool: () => void;
   toggleMuteTool: () => void;
 
@@ -674,6 +906,11 @@ interface DAWActions {
   deleteClip: (clipId: string) => void;
   duplicateClip: (clipId: string) => void;
 
+  // Clip Gain Envelope
+  addClipGainPoint: (clipId: string, time: number, gain: number) => void;
+  removeClipGainPoint: (clipId: string, pointIndex: number) => void;
+  moveClipGainPoint: (clipId: string, pointIndex: number, time: number, gain: number) => void;
+
   // Advanced Clip Editing (Phase 4)
   splitAtTimeSelection: () => void;
   groupSelectedClips: () => void;
@@ -687,13 +924,18 @@ interface DAWActions {
 
   // Track Automation (Phase 5)
   toggleTrackAutomation: (trackId: string) => void;
+  addAutomationLane: (trackId: string, param: AutomationParam, label?: string) => string | null;
   addAutomationPoint: (trackId: string, laneId: string, time: number, value: number) => void;
   removeAutomationPoint: (trackId: string, laneId: string, pointIndex: number) => void;
   moveAutomationPoint: (trackId: string, laneId: string, pointIndex: number, time: number, value: number) => void;
   toggleAutomationLaneVisibility: (trackId: string, laneId: string) => void;
   clearAutomationLane: (trackId: string, laneId: string) => void;
 
-  // Track Freeze (Phase 5)
+  // Strip Silence (Phase 3.12)
+  stripSilence: (clipId: string, thresholdDb: number, minSilenceMs: number,
+                 minSoundMs: number, preAttackMs: number, postReleaseMs: number) => void;
+
+  // Track Freeze (Phase 3.13)
   freezeTrack: (trackId: string) => void;
   unfreezeTrack: (trackId: string) => void;
 
@@ -735,10 +977,16 @@ interface DAWActions {
   toggleBigClock: () => void;
   toggleBigClockFormat: () => void;
   toggleKeyboardShortcuts: () => void;
+  toggleContextualHelp: () => void;
   togglePreferences: () => void;
   toggleScriptConsole: () => void;
   setTimecodeMode: (mode: "time" | "beats" | "smpte") => void;
   setSmpteFrameRate: (rate: 24 | 25 | 29.97 | 30) => void;
+  setUIFontScale: (scale: number) => void;
+
+  // Detachable Panels
+  detachPanel: (panelId: string) => void;
+  attachPanel: (panelId: string) => void;
 
   // Cut/Copy/Delete within Time Selection
   cutWithinTimeSelection: () => void;
@@ -908,7 +1156,106 @@ interface DAWActions {
   startLiveCapture: () => Promise<void>;
   stopLiveCapture: () => Promise<void>;
   toggleDDPExport: () => void;
-  exportDDP: (outputDir: string) => Promise<boolean>;
+  exportDDP: (sourceWavPath: string, outputDir: string, catalogNumber?: string) => Promise<boolean>;
+
+  // Phase 4.2: Step Sequencer
+  toggleStep: (pitch: number, step: number) => void;
+  setStepVelocity: (pitch: number, step: number, velocity: number) => void;
+  setStepCount: (count: number) => void;
+  setStepSize: (size: string) => void;
+  clearStepSequencer: () => void;
+  generateMIDIClipFromSteps: () => void;
+  toggleStepSequencer: () => void;
+
+  // Phase 4.1: Clip Launcher
+  triggerSlot: (trackIndex: number, slotIndex: number) => void;
+  stopSlot: (trackIndex: number, slotIndex: number) => void;
+  triggerScene: (slotIndex: number) => void;
+  stopAllSlots: () => void;
+  setSlotClip: (trackIndex: number, slotIndex: number, filePath: string, name: string, duration: number) => void;
+  clearSlot: (trackIndex: number, slotIndex: number) => void;
+  setClipLauncherQuantize: (quantize: string) => void;
+  toggleClipLauncher: () => void;
+
+  // Sprint 17: Visual Improvements
+  addRecentColor: (color: string) => void;
+
+  // Sprint 18: Interaction/Workflow
+  toggleAutoScroll: () => void;
+  zoomToSelection: () => void;
+  toggleQuantizeDialog: () => void;
+  toggleDrumEditor: () => void;
+  selectAllMIDINotes: () => void;
+  updateMIDINotes: (clipId: string, notes: any[]) => void;
+
+  // Piano Roll: Velocity & CC editing
+  updateMIDINoteVelocity: (trackId: string, clipId: string, noteTimestamp: number, noteNumber: number, velocity: number) => void;
+  updateMIDICCEvents: (trackId: string, clipId: string, ccEvents: MIDICCEvent[]) => void;
+  setPianoRollScaleRoot: (root: number) => void;
+  setPianoRollScaleType: (scaleType: string) => void;
+
+  // Step Input Mode (Piano Roll)
+  toggleStepInput: () => void;
+  setStepInputSize: (beats: number) => void;
+  setStepInputPosition: (time: number) => void;
+  advanceStepInput: () => void;
+
+  // MIDI Transform
+  transposeMIDINotes: (clipId: string, semitones: number) => void;
+  scaleMIDINoteVelocity: (clipId: string, factor: number) => void;
+  reverseMIDINotes: (clipId: string) => void;
+  invertMIDINotes: (clipId: string) => void;
+
+  // Note Expression / MPE
+  setNoteExpression: (clipId: string, noteId: string, expr: { pitchBend?: number; pressure?: number; slide?: number }) => void;
+
+  // Sprint 19: Plugin + Mixing
+  toggleMediaPool: () => void;
+
+  // Plugin A/B Comparison
+  storePluginState: (trackId: string, fxIndex: number, slot: "a" | "b", isInputFX: boolean) => Promise<void>;
+  recallPluginState: (trackId: string, fxIndex: number, slot: "a" | "b", isInputFX: boolean) => Promise<void>;
+  togglePluginAB: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<void>;
+
+  // FX Chain Presets
+  saveFXChainPreset: (trackId: string, name: string, chainType: "input" | "track" | "master") => Promise<void>;
+  loadFXChainPreset: (trackId: string, presetIndex: number, chainType: "input" | "track" | "master") => Promise<void>;
+  deleteFXChainPreset: (index: number) => void;
+
+  // Sprint 20: Metering + Analysis + Project
+  toggleLoudnessMeter: () => void;
+  toggleSpectrumAnalyzer: () => void;
+  togglePhaseCorrelation: () => void;
+  toggleProjectTemplates: () => void;
+  archiveSession: () => Promise<void>;
+
+  // Sprint 21: Timeline Interaction
+  setTrackWaveformZoom: (trackId: string, zoom: number) => void;
+  toggleSpectralView: (trackId: string) => void;
+  toggleCrosshair: () => void;
+  slipEditClip: (clipId: string, newOffset: number) => void;
+
+  // Mixer Snapshots
+  saveMixerSnapshot: (name: string) => void;
+  recallMixerSnapshot: (index: number) => void;
+  deleteMixerSnapshot: (index: number) => void;
+
+  // Bus/Group Creation
+  createBusFromSelectedTracks: () => void;
+
+  // Project Templates
+  saveAsTemplate: (name: string) => void;
+  loadTemplate: (index: number) => void;
+  deleteTemplate: (index: number) => void;
+
+  // Project Compare
+  toggleProjectCompare: () => void;
+  compareWithSavedProject: () => Promise<void>;
+
+  // Collaborative Metadata
+  setProjectAuthor: (author: string) => void;
+  addRevisionNote: (note: string) => void;
+  deleteRevisionNote: (index: number) => void;
 }
 
 // ============================================
@@ -948,6 +1295,7 @@ const createDefaultTrack = (
   muted: false,
   soloed: false,
   armed: false,
+  recordSafe: false,
   monitorEnabled: false,
   inputChannel: null,
   inputStartChannel: 0,
@@ -983,6 +1331,9 @@ const initialTransport: TransportState = {
   loopEnabled: false,
   loopStart: 0,
   loopEnd: 16,
+  punchEnabled: false,
+  punchStart: 0,
+  punchEnd: 0,
 };
 
 // ============================================
@@ -1014,6 +1365,145 @@ function getMinTrackHeight(tcpWidth: number): number {
   const totalItemWidth = 30 + 46 + 126 + 50 + 50 + 50; // ~352px
   const rows = Math.max(1, Math.ceil(totalItemWidth / Math.max(usable, 60)));
   return rows * ROW_H + (rows - 1) * GAP_Y + PAD_Y;
+}
+
+// ============================================
+// State Serialization Helper
+// ============================================
+
+/**
+ * Keys that represent transient/runtime state and should NOT be persisted
+ * when saving a project. These include metering data (updated at 10-60 Hz),
+ * UI interaction state, drag state, and ephemeral display flags.
+ */
+const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
+  // Metering — updated at high frequency, meaningless after reload
+  "meterLevels",
+  "peakLevels",
+  "masterLevel",
+
+  // Transport runtime (position is reset on load; tempo/loop are saved explicitly)
+  "recordingClips",
+  "playStartPosition",
+
+  // Selection state — ephemeral, not part of the "document"
+  "selectedTrackId",
+  "selectedTrackIds",
+  "lastSelectedTrackId",
+  "selectedClipId",
+  "selectedClipIds",
+  "clipboard",
+  "selectedNoteIds",
+  "selectedRegionIds",
+  "razorEdits",
+  "timeSelection",
+
+  // UI modal/panel visibility — restored from defaults or user preferences
+  "showMixer",
+  "showSettings",
+  "showRenderModal",
+  "showPluginBrowser",
+  "pluginBrowserTrackId",
+  "showVirtualKeyboard",
+  "showUndoHistory",
+  "showCommandPalette",
+  "showRegionMarkerManager",
+  "showClipProperties",
+  "showBigClock",
+  "showKeyboardShortcuts",
+  "showContextualHelp",
+  "showPreferences",
+  "showScriptConsole",
+  "showPianoRoll",
+  "showProjectSettings",
+  "showDynamicSplit",
+  "showRenderQueue",
+  "showRoutingMatrix",
+  "showMediaExplorer",
+  "showCleanProject",
+  "showBatchConverter",
+  "showCrossfadeEditor",
+  "showThemeEditor",
+  "showVideoWindow",
+  "showScriptEditor",
+  "showToolbarEditor",
+  "showDDPExport",
+  "showStepSequencer",
+  "showClipLauncher",
+  "showQuantizeDialog",
+  "showDrumEditor",
+  "showMediaPool",
+  "showLoudnessMeter",
+  "showSpectrumAnalyzer",
+  "showPhaseCorrelation",
+  "showProjectTemplates",
+  "showRegionRenderMatrix",
+  "showMasterTrackInTCP",
+  "showCrosshair",
+  "showProjectCompare",
+  "projectCompareData",
+
+  // Piano Roll editing context — ephemeral
+  "pianoRollTrackId",
+  "pianoRollClipId",
+  "dynamicSplitClipId",
+  "crossfadeEditorClipIds",
+
+  // Step Input state — runtime only
+  "stepInputEnabled",
+  "stepInputSize",
+  "stepInputPosition",
+
+  // Audio device setup — always re-read from backend on start
+  "audioDeviceSetup",
+
+  // Undo/redo flags — restored from deserialized CommandManager
+  "canUndo",
+  "canRedo",
+
+  // Project loading overlay
+  "isProjectLoading",
+  "projectLoadingMessage",
+
+  // Toast notifications — ephemeral
+  "toastMessage",
+  "toastType",
+  "toastVisible",
+
+  // Tap tempo timestamps — runtime only
+  "tapTimestamps",
+
+  // Recent actions for Command Palette — session-only
+  "recentActions",
+
+  // Script console output — session-only
+  "scriptConsoleOutput",
+
+  // Plugin A/B states — runtime comparison, not document state
+  "pluginABStates",
+]);
+
+/**
+ * JSON.stringify replacer that strips transient keys and large binary-like
+ * data from the serialized output. Used by saveProject to keep project files
+ * lean and avoid persisting runtime-only state.
+ *
+ * @param key - The current key being stringified
+ * @param value - The current value being stringified
+ * @returns The value to include, or undefined to skip
+ */
+function projectJsonReplacer(key: string, value: unknown): unknown {
+  // Top-level transient keys
+  if (key && TRANSIENT_STATE_KEYS.has(key)) {
+    return undefined;
+  }
+
+  // Strip per-track runtime fields that are not useful after reload
+  if (key === "meterLevel" || key === "peakLevel" || key === "clipping") {
+    return undefined;
+  }
+
+  return value;
 }
 
 // Store Creation
@@ -1079,15 +1569,23 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showBigClock: false,
     bigClockFormat: "time",
     showKeyboardShortcuts: false,
+    showContextualHelp: false,
     showPreferences: false,
     timecodeMode: "time",
     smpteFrameRate: 24,
+    uiFontScale: 1.0,
     showCommandPalette: false,
     showRegionMarkerManager: false,
     showScriptConsole: false,
     showPianoRoll: false,
     pianoRollTrackId: null,
     pianoRollClipId: null,
+    selectedNoteIds: [],
+    pianoRollScaleRoot: 0,
+    pianoRollScaleType: "chromatic",
+    stepInputEnabled: false,
+    stepInputSize: 0.25,     // 1/16 note by default
+    stepInputPosition: 0,
     audioDeviceSetup: null,
     canUndo: false,
     canRedo: false,
@@ -1113,6 +1611,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     autoBackupEnabled: false,
     autoBackupInterval: 300000, // 5 minutes
+    autoSaveEnabled: false,
+    autoSaveIntervalMinutes: 5,
+    autoSaveMaxVersions: 3,
+
+    // Custom Keyboard Shortcuts (persisted in localStorage)
+    customShortcuts: (() => {
+      try {
+        const stored = localStorage.getItem("s13_customShortcuts");
+        return stored ? JSON.parse(stored) : {};
+      } catch {
+        return {};
+      }
+    })(),
+
     trackTemplates: JSON.parse(localStorage.getItem("s13_trackTemplates") || "[]"),
 
     // Project Loading
@@ -1227,6 +1739,75 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     liveCaptureDuration: 0,
     showDDPExport: false,
 
+    // Phase 4.2: Step Sequencer
+    stepSequencer: {
+      steps: Array.from({ length: 16 }, () => Array(16).fill(false)),
+      velocities: Array.from({ length: 16 }, () => Array(16).fill(100)),
+      stepCount: 16,
+      stepSize: "1/16",
+      selectedPitch: 0,
+      pitchCount: 16,
+    },
+    showStepSequencer: false,
+
+    // Phase 4.1: Clip Launcher
+    clipLauncher: {
+      slots: [],
+      numTracks: 0,
+      numSlots: 8,
+      quantize: "1bar",
+    },
+    showClipLauncher: false,
+
+    // Sprint 17: Visual Improvements
+    recentColors: [],
+
+    // Sprint 18: Interaction/Workflow
+    autoScrollDuringPlayback: true,
+    showQuantizeDialog: false,
+    showDrumEditor: false,
+
+    // Sprint 19: Plugin + Mixing
+    showMediaPool: false,
+
+    // Plugin A/B Comparison
+    pluginABStates: {},
+
+    // FX Chain Presets
+    fxChainPresets: [],
+
+    // Sprint 20: Metering + Analysis
+    showLoudnessMeter: false,
+    showSpectrumAnalyzer: false,
+    showPhaseCorrelation: false,
+    showProjectTemplates: false,
+
+    // Sprint 21: Timeline Interaction
+    showCrosshair: false,
+
+    // Mixer Snapshots
+    mixerSnapshots: JSON.parse(localStorage.getItem("s13_mixerSnapshots") || "[]"),
+
+    // Project Templates
+    projectTemplates: JSON.parse(localStorage.getItem("s13_projectTemplates") || "[]"),
+
+    // Project Compare
+    showProjectCompare: false,
+    projectCompareData: null,
+
+    // Collaborative Metadata
+    projectAuthor: (() => {
+      try {
+        return localStorage.getItem("s13_projectAuthor") || "Unknown Author";
+      } catch {
+        return "Unknown Author";
+      }
+    })(),
+    projectRevisionNotes: [],
+
+    // Detachable Panels (multi-monitor support)
+    detachedPanels: [],
+
     // ========== Toast ==========
     showToast: (message, type = "info") => {
       set({ toastMessage: message, toastType: type, toastVisible: true });
@@ -1237,6 +1818,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     newProject: async () => {
       // Stop playback
       get().stop();
+
+      // Reset sync cache (Sprint 16.3)
+      resetSyncCache();
 
       // Remove all tracks (reverse order to be safe)
       const tracks = get().tracks;
@@ -1257,6 +1841,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         metronomeVolume: 0.5,
         metronomeTrackId: null,
         projectRange: { start: 0, end: 0 },
+        projectRevisionNotes: [],
       });
 
       // Reset Undo History
@@ -1367,11 +1952,19 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         metronomeVolume: state.metronomeVolume,
         metronomeTrackId: state.metronomeTrackId,
         projectRange: state.projectRange,
+        mixerSnapshots: state.mixerSnapshots,
+        customShortcuts: state.customShortcuts,
+        autoSaveEnabled: state.autoSaveEnabled,
+        autoSaveIntervalMinutes: state.autoSaveIntervalMinutes,
+        autoSaveMaxVersions: state.autoSaveMaxVersions,
+        projectAuthor: state.projectAuthor,
+        projectRevisionNotes: state.projectRevisionNotes,
+        undoHistory: commandManager.serialize(),
       };
 
       const success = await nativeBridge.saveProjectToFile(
         path,
-        JSON.stringify(projectData, null, 2),
+        JSON.stringify(projectData, projectJsonReplacer, 2),
       );
 
       if (success) {
@@ -1434,6 +2027,26 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     setAutoBackupEnabled: (enabled) => set({ autoBackupEnabled: enabled }),
     setAutoBackupInterval: (ms) => set({ autoBackupInterval: Math.max(30000, ms) }),
 
+    // ========== Auto-Save ==========
+    toggleAutoSave: () => set((s) => ({ autoSaveEnabled: !s.autoSaveEnabled })),
+    setAutoSaveInterval: (minutes) =>
+      set({ autoSaveIntervalMinutes: Math.max(1, Math.min(60, minutes)) }),
+    setAutoSaveMaxVersions: (max) =>
+      set({ autoSaveMaxVersions: Math.max(1, Math.min(20, max)) }),
+
+    // ========== Custom Keyboard Shortcuts ==========
+    setCustomShortcut: (actionId, shortcut) => {
+      set((s) => {
+        const updated = { ...s.customShortcuts, [actionId]: shortcut };
+        localStorage.setItem("s13_customShortcuts", JSON.stringify(updated));
+        return { customShortcuts: updated };
+      });
+    },
+    resetCustomShortcuts: () => {
+      localStorage.removeItem("s13_customShortcuts");
+      set({ customShortcuts: {} });
+    },
+
     // ========== Track Templates ==========
     saveTrackTemplate: (trackId, name) => {
       const track = get().tracks.find((t) => t.id === trackId);
@@ -1480,6 +2093,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     loadProject: async (path, options) => {
+      // Reset sync cache on project load (Sprint 16.3)
+      resetSyncCache();
+
       const bypassFX = options?.bypassFX ?? false;
       if (!path) {
         path = await nativeBridge.showOpenDialog();
@@ -1515,6 +2131,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         if (data.projectNotes) get().setProjectNotes(data.projectNotes);
         if (data.projectSampleRate) get().setProjectSampleRate(data.projectSampleRate);
         if (data.projectBitDepth) get().setProjectBitDepth(data.projectBitDepth);
+
+        // Restore Collaborative Metadata
+        if (data.projectAuthor) set({ projectAuthor: data.projectAuthor });
+        if (data.projectRevisionNotes) set({ projectRevisionNotes: data.projectRevisionNotes });
 
         // Restore Global Settings
         get().setTempo(data.tempo || 120);
@@ -1697,7 +2317,36 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           metronomeVolume: data.metronomeVolume ?? 0.5,
           metronomeTrackId: data.metronomeTrackId ?? null,
           projectRange: data.projectRange ?? { start: 0, end: 120 },
+          mixerSnapshots: data.mixerSnapshots ?? [],
         }));
+
+        // Persist loaded mixer snapshots to localStorage
+        if (data.mixerSnapshots && data.mixerSnapshots.length > 0) {
+          localStorage.setItem("s13_mixerSnapshots", JSON.stringify(data.mixerSnapshots));
+        }
+
+        // Restore custom shortcuts and auto-save settings from project
+        if (data.customShortcuts && typeof data.customShortcuts === "object") {
+          set({ customShortcuts: data.customShortcuts });
+          localStorage.setItem("s13_customShortcuts", JSON.stringify(data.customShortcuts));
+        }
+        if (data.autoSaveEnabled !== undefined) {
+          set({
+            autoSaveEnabled: data.autoSaveEnabled,
+            autoSaveIntervalMinutes: data.autoSaveIntervalMinutes ?? 5,
+            autoSaveMaxVersions: data.autoSaveMaxVersions ?? 3,
+          });
+        }
+
+        // Restore undo history metadata (display-only — pre-save commands
+        // cannot be re-executed, but the history panel will show them)
+        if (data.undoHistory) {
+          commandManager.deserialize(data.undoHistory);
+          set({
+            canUndo: commandManager.canUndo(),
+            canRedo: commandManager.canRedo(),
+          });
+        }
 
         set((ctx) => {
           const newRecent = [
@@ -1744,6 +2393,197 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     setProjectBitDepth: (bitDepth) => {
       set({ projectBitDepth: bitDepth, isModified: true });
+    },
+
+    // ========== Track Folder Management ==========
+    createFolderTrack: (name) => {
+      const id = crypto.randomUUID();
+      const newTrack = createDefaultTrack(id, name);
+      const folderTrack: Track = { ...newTrack, isFolder: true, folderCollapsed: false, icon: "folder" };
+
+      const command: Command = {
+        type: "ADD_FOLDER_TRACK",
+        description: `Add folder track "${name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((state) => ({ tracks: [...state.tracks, folderTrack] }));
+        },
+        undo: () => {
+          set((state) => ({
+            tracks: state.tracks
+              .filter((t) => t.id !== id)
+              .map((t) => (t.parentFolderId === id ? { ...t, parentFolderId: undefined } : t)),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    moveTracksToFolder: (trackIds, folderId) => {
+      const state = get();
+      const folder = state.tracks.find((t) => t.id === folderId && t.isFolder);
+      if (!folder) return;
+      // Capture old parentFolderIds for undo
+      const oldParents = new Map<string, string | undefined>();
+      for (const tid of trackIds) {
+        const t = state.tracks.find((tr) => tr.id === tid);
+        if (t) oldParents.set(tid, t.parentFolderId);
+      }
+
+      const command: Command = {
+        type: "MOVE_TRACKS_TO_FOLDER",
+        description: `Move ${trackIds.length} track(s) to folder "${folder.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              trackIds.includes(t.id) ? { ...t, parentFolderId: folderId } : t,
+            ),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => {
+              const old = oldParents.get(t.id);
+              return old !== undefined || oldParents.has(t.id)
+                ? { ...t, parentFolderId: old }
+                : t;
+            }),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    toggleFolderCollapsed: (folderId) => {
+      const state = get();
+      const folder = state.tracks.find((t) => t.id === folderId && t.isFolder);
+      if (!folder) return;
+      const newCollapsed = !folder.folderCollapsed;
+
+      set((s) => ({
+        tracks: s.tracks.map((t) =>
+          t.id === folderId ? { ...t, folderCollapsed: newCollapsed } : t,
+        ),
+      }));
+    },
+
+    removeTrackFromFolder: (trackId) => {
+      const state = get();
+      const track = state.tracks.find((t) => t.id === trackId);
+      if (!track || !track.parentFolderId) return;
+      const oldFolderId = track.parentFolderId;
+
+      const command: Command = {
+        type: "REMOVE_TRACK_FROM_FOLDER",
+        description: `Remove track "${track.name}" from folder`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === trackId ? { ...t, parentFolderId: undefined } : t,
+            ),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === trackId ? { ...t, parentFolderId: oldFolderId } : t,
+            ),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    getVisibleTracks: () => {
+      const { tracks } = get();
+      // Collect all collapsed folder IDs
+      const collapsedFolderIds = new Set<string>();
+      for (const t of tracks) {
+        if (t.isFolder && t.folderCollapsed) collapsedFolderIds.add(t.id);
+      }
+      if (collapsedFolderIds.size === 0) return tracks;
+
+      // Build set of all ancestor folder IDs for each track; if any ancestor is collapsed, hide
+      return tracks.filter((t) => {
+        let current = t;
+        while (current.parentFolderId) {
+          if (collapsedFolderIds.has(current.parentFolderId)) return false;
+          const parent = tracks.find((p) => p.id === current.parentFolderId);
+          if (!parent) break;
+          current = parent;
+        }
+        return true;
+      });
+    },
+
+    // ========== VCA Faders ==========
+    createVCAFader: (name, memberTrackIds) => {
+      const vcaGroupId = crypto.randomUUID();
+      const vcaTrackId = crypto.randomUUID();
+      const vcaTrack = createDefaultTrack(vcaTrackId, name);
+      const faderTrack: Track = { ...vcaTrack, isVCALeader: true, vcaGroupId, type: "bus" as TrackType, icon: "bus" };
+
+      const command: Command = {
+        type: "CREATE_VCA_FADER",
+        description: `Create VCA fader "${name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((state) => ({
+            tracks: [
+              ...state.tracks.map((t) =>
+                memberTrackIds.includes(t.id) ? { ...t, vcaGroupId } : t,
+              ),
+              faderTrack,
+            ],
+          }));
+        },
+        undo: () => {
+          set((state) => ({
+            tracks: state.tracks
+              .filter((t) => t.id !== vcaTrackId)
+              .map((t) => (t.vcaGroupId === vcaGroupId ? { ...t, vcaGroupId: undefined } : t)),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    removeVCAGroup: (vcaGroupId) => {
+      const state = get();
+      const vcaLeader = state.tracks.find((t) => t.isVCALeader && t.vcaGroupId === vcaGroupId);
+      const memberIds = state.tracks.filter((t) => t.vcaGroupId === vcaGroupId).map((t) => t.id);
+      if (!vcaLeader) return;
+
+      const command: Command = {
+        type: "REMOVE_VCA_GROUP",
+        description: `Remove VCA group "${vcaLeader.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks
+              .filter((t) => !(t.isVCALeader && t.vcaGroupId === vcaGroupId))
+              .map((t) => (t.vcaGroupId === vcaGroupId ? { ...t, vcaGroupId: undefined } : t)),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: [
+              ...s.tracks.map((t) =>
+                memberIds.includes(t.id) ? { ...t, vcaGroupId } : t,
+              ),
+              vcaLeader,
+            ],
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Track Management ==========
@@ -1854,6 +2694,39 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           return t;
         }),
       }));
+    },
+
+    setTrackNotes: (trackId, notes) => {
+      const state = get();
+      const track = state.tracks.find((t) => t.id === trackId);
+      if (!track) return;
+      const oldNotes = track.notes || "";
+      set((s) => ({
+        tracks: s.tracks.map((t) =>
+          t.id === trackId ? { ...t, notes } : t,
+        ),
+      }));
+      const command: Command = {
+        type: "UPDATE_TRACK",
+        description: `Set track notes on "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === trackId ? { ...t, notes } : t,
+            ),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === trackId ? { ...t, notes: oldNotes } : t,
+            ),
+          }));
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     reorderTrack: (activeId, overId) => {
@@ -2155,16 +3028,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const track = state.tracks.find((t) => t.id === id);
       if (!track) return;
 
+      // Record-safe: prevent arming
+      if (track.recordSafe && !track.armed) return;
+
       const linkedIds = getLinkedTrackIds(id, state.trackGroups, "armed");
       const newArmed = !track.armed;
 
+      // Filter out record-safe tracks from linked set when trying to arm
+      const effectiveIds = newArmed
+        ? linkedIds.filter((tid) => !state.tracks.find((t) => t.id === tid)?.recordSafe)
+        : linkedIds;
+
       set((s) => ({
         tracks: s.tracks.map((t) =>
-          linkedIds.includes(t.id) ? { ...t, armed: newArmed } : t,
+          effectiveIds.includes(t.id) ? { ...t, armed: newArmed } : t,
         ),
       }));
 
-      for (const tid of linkedIds) await nativeBridge.setTrackRecordArm(tid, newArmed);
+      for (const tid of effectiveIds) await nativeBridge.setTrackRecordArm(tid, newArmed);
     },
 
     toggleTrackFXBypass: async (id) => {
@@ -2591,6 +3472,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         recordingClips: newRecordingClips,
       }));
 
+      // Sync punch range with backend before recording starts
+      const punchState = get().transport;
+      await nativeBridge.setPunchRange(punchState.punchStart, punchState.punchEnd, punchState.punchEnabled);
+
       // Start both playback and recording
       if (!wasAlreadyPlaying) {
         await nativeBridge.setTransportPlaying(true);
@@ -2630,6 +3515,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         "[useDAWStore] STOP State updated. Transport stopped, recordingClips cleared.",
       );
 
+      // Clear sync cache so next play does a fresh diff
+      resetSyncCache();
+
       // Stop playback and recording
       await nativeBridge.setTransportPlaying(false);
       await nativeBridge.setTransportRecording(false);
@@ -2646,23 +3534,23 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           "mode:", currentRecordMode,
         );
 
+        // Group clips by trackId for loop recording take handling
+        const clipsByTrack = new Map<string, typeof newClips>();
         for (const clipInfo of newClips) {
-          console.log("[useDAWStore] Recording clip:", clipInfo.trackId,
-            "startTime:", clipInfo.startTime.toFixed(3),
-            "duration:", clipInfo.duration.toFixed(3),
-            "file:", clipInfo.filePath);
+          if (clipInfo.duration <= 0) continue;
+          const existing = clipsByTrack.get(clipInfo.trackId) || [];
+          existing.push(clipInfo);
+          clipsByTrack.set(clipInfo.trackId, existing);
+        }
 
-          if (clipInfo.duration <= 0) {
-            console.warn("[useDAWStore] Skipping 0-duration clip for track", clipInfo.trackId);
-            continue;
-          }
-
-          const track = currentTracks.find((t) => t.id === clipInfo.trackId);
+        for (const [trackId, trackClips] of clipsByTrack) {
+          const track = currentTracks.find((t) => t.id === trackId);
           const clipColor = track?.color || "#4361ee";
 
-          const newClip: AudioClip = {
+          // Create AudioClip objects for each recorded clip
+          const recordedClips: AudioClip[] = trackClips.map((clipInfo, idx) => ({
             id: crypto.randomUUID(),
-            name: "Recording",
+            name: trackClips.length > 1 ? `Take ${idx + 1}` : "Recording",
             filePath: clipInfo.filePath,
             startTime: clipInfo.startTime,
             duration: clipInfo.duration,
@@ -2672,21 +3560,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             fadeIn: 0,
             fadeOut: 0,
             sampleRate: get().audioDeviceSetup?.sampleRate || 44100,
-          };
+          }));
 
-          if (currentRecordMode === "replace") {
-            // Replace mode: remove any existing clips that overlap the recorded region
-            const recStart = clipInfo.startTime;
-            const recEnd = clipInfo.startTime + clipInfo.duration;
+          if (currentRecordMode === "replace" && recordedClips.length > 0) {
+            const recStart = recordedClips[0].startTime;
+            const recEnd = recStart + recordedClips[0].duration;
             set((s) => ({
               tracks: s.tracks.map((t) =>
-                t.id === clipInfo.trackId
+                t.id === trackId
                   ? {
                       ...t,
                       clips: t.clips.filter((c) => {
                         const clipEnd = c.startTime + c.duration;
-                        // Remove clips fully inside the recording range
-                        // Trim clips partially overlapping (simple: remove if any overlap)
                         return clipEnd <= recStart || c.startTime >= recEnd;
                       }),
                     }
@@ -2694,21 +3579,86 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               ),
             }));
           }
-          // Normal and overdub both layer on top (overdub is the default DAW behavior)
-          addClip(clipInfo.trackId, newClip);
 
-          // Register immediately with the playback backend so play() works right away
-          // without needing syncClipsWithBackend() to know about this clip.
-          nativeBridge.addPlaybackClip(
-            clipInfo.trackId,
-            clipInfo.filePath,
-            clipInfo.startTime,
-            clipInfo.duration,
-            0, // offset — freshly recorded clips start at 0
-            newClip.volumeDB || 0,
-            newClip.fadeIn || 0,
-            newClip.fadeOut || 0,
-          ).catch((e) => console.warn("[useDAWStore] addPlaybackClip after record failed:", e));
+          if (recordedClips.length > 1) {
+            // Loop recording: first clip is the main clip, rest are takes
+            const mainClip = recordedClips[0];
+            mainClip.takes = recordedClips.slice(1);
+            mainClip.activeTakeIndex = recordedClips.length - 1; // Last take is active
+            addClip(trackId, mainClip);
+          } else if (recordedClips.length === 1) {
+            addClip(trackId, recordedClips[0]);
+          }
+
+          // Register clips with backend
+          for (const newClip of recordedClips) {
+            console.log("[useDAWStore] Recording clip:", trackId,
+              "startTime:", newClip.startTime.toFixed(3),
+              "duration:", newClip.duration.toFixed(3),
+              "file:", newClip.filePath);
+          }
+
+          // Register the active clip with the playback backend
+          const activeClip = recordedClips.length > 1
+            ? recordedClips[recordedClips.length - 1]
+            : recordedClips[0];
+          if (activeClip) {
+            nativeBridge.addPlaybackClip(
+              trackId,
+              activeClip.filePath,
+              activeClip.startTime,
+              activeClip.duration,
+              0,
+              activeClip.volumeDB || 0,
+              activeClip.fadeIn || 0,
+              activeClip.fadeOut || 0,
+            ).catch((e) => console.warn("[useDAWStore] addPlaybackClip after record failed:", e));
+          }
+        }
+
+        // Also fetch completed MIDI clips
+        const newMIDIClips = await nativeBridge.getLastCompletedMIDIClips();
+        console.log("[useDAWStore] Received MIDI clips:", newMIDIClips.length);
+
+        for (const midiClipInfo of newMIDIClips) {
+          if (midiClipInfo.events.length === 0) {
+            console.warn("[useDAWStore] Skipping empty MIDI clip for track", midiClipInfo.trackId);
+            continue;
+          }
+
+          const track = get().tracks.find((t) => t.id === midiClipInfo.trackId);
+          const clipColor = track?.color || "#4361ee";
+
+          // Convert backend events to frontend MIDIEvent format
+          const events: MIDIEvent[] = midiClipInfo.events.map((e) => ({
+            timestamp: e.timestamp,
+            type: e.type as MIDIEvent["type"],
+            note: e.note,
+            velocity: e.velocity,
+            controller: e.controller,
+            value: e.value,
+          }));
+
+          const newMIDIClip: MIDIClip = {
+            id: crypto.randomUUID(),
+            name: "MIDI Recording",
+            startTime: midiClipInfo.startTime,
+            duration: midiClipInfo.duration,
+            events,
+            color: clipColor,
+          };
+
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === midiClipInfo.trackId
+                ? { ...t, midiClips: [...t.midiClips, newMIDIClip] }
+                : t,
+            ),
+            isModified: true,
+          }));
+
+          console.log("[useDAWStore] Added MIDI clip to track", midiClipInfo.trackId,
+            "with", events.length, "events, duration:", midiClipInfo.duration.toFixed(3));
         }
       }
 
@@ -2804,6 +3754,41 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set((state) => ({
         transport: { ...state.transport, loopStart: start, loopEnd: end },
       }));
+    },
+
+    togglePunch: () => {
+      const { transport, timeSelection } = get();
+      const enabling = !transport.punchEnabled;
+      set((state) => ({
+        transport: {
+          ...state.transport,
+          punchEnabled: enabling,
+          // When enabling punch, sync to time selection if it exists
+          ...(enabling && timeSelection
+            ? { punchStart: timeSelection.start, punchEnd: timeSelection.end }
+            : {}),
+        },
+      }));
+      // Sync with backend
+      const t = get().transport;
+      nativeBridge.setPunchRange(t.punchStart, t.punchEnd, t.punchEnabled).catch(() => {});
+    },
+
+    setPunchRange: (start, end) => {
+      set((state) => ({
+        transport: { ...state.transport, punchStart: start, punchEnd: end },
+      }));
+      const t = get().transport;
+      nativeBridge.setPunchRange(start, end, t.punchEnabled).catch(() => {});
+    },
+
+    setTrackRecordSafe: (trackId, safe) => {
+      set((state) => ({
+        tracks: state.tracks.map((t) =>
+          t.id === trackId ? { ...t, recordSafe: safe, armed: safe ? false : t.armed } : t,
+        ),
+      }));
+      nativeBridge.setTrackRecordSafe(trackId, safe).catch(() => {});
     },
 
     setTimeSelection: (start, end) => {
@@ -3145,24 +4130,75 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     syncClipsWithBackend: async () => {
       const { tracks } = get();
-      await nativeBridge.clearPlaybackClips();
+
+      // Build current clip set with keys
+      const currentClips = new Map<string, { trackId: string; filePath: string; startTime: number; duration: number; offset: number; volumeDB: number; fadeIn: number; fadeOut: number }>();
       for (const track of tracks) {
         for (const clip of track.clips) {
           if (clip.filePath && !clip.muted) {
-            await nativeBridge.addPlaybackClip(
-              track.id,
-              clip.filePath,
-              clip.startTime,
-              clip.duration,
-              clip.offset || 0,
-              clip.volumeDB || 0,
-              clip.fadeIn || 0,
-              clip.fadeOut || 0,
-            );
+            const offset = clip.offset || 0;
+            const volumeDB = clip.volumeDB || 0;
+            const fadeIn = clip.fadeIn || 0;
+            const fadeOut = clip.fadeOut || 0;
+            const key = makeClipKey(track.id, clip.filePath, clip.startTime, clip.duration, offset, volumeDB, fadeIn, fadeOut);
+            currentClips.set(key, { trackId: track.id, filePath: clip.filePath, startTime: clip.startTime, duration: clip.duration, offset, volumeDB, fadeIn, fadeOut });
           }
         }
       }
-      console.log("[DAW] Synced all clips with backend");
+
+      const currentKeys = new Set(currentClips.keys());
+
+      // Diff: find clips to remove (in old set but not in new)
+      const toRemove: string[] = [];
+      for (const key of _lastSyncedClipKeys) {
+        if (!currentKeys.has(key)) toRemove.push(key);
+      }
+
+      // Diff: find clips to add (in new set but not in old)
+      const toAdd: string[] = [];
+      for (const key of currentKeys) {
+        if (!_lastSyncedClipKeys.has(key)) toAdd.push(key);
+      }
+
+      // If more than 60% changed, just do a full clear+rebuild (cheaper than many removes)
+      const totalOld = _lastSyncedClipKeys.size;
+      if (totalOld === 0 || toRemove.length > totalOld * 0.6) {
+        // Full rebuild — clear first, then batch-add all clips in parallel
+        await nativeBridge.clearPlaybackClips();
+        const allClips = Array.from(currentClips.values());
+        if (allClips.length > 0) {
+          await nativeBridge.addPlaybackClipsBatch(allClips);
+        }
+      } else {
+        // Incremental: batch remove old in parallel, then batch add new in parallel
+        if (toRemove.length > 0) {
+          await Promise.all(
+            toRemove.map((key) => {
+              const parts = key.split("|");
+              return nativeBridge.removePlaybackClip(parts[0], parts[1]);
+            }),
+          );
+        }
+        if (toAdd.length > 0) {
+          const clipsToAdd = toAdd.map((key) => currentClips.get(key)!);
+          await nativeBridge.addPlaybackClipsBatch(clipsToAdd);
+        }
+      }
+
+      // Update cache
+      _lastSyncedClipKeys = currentKeys;
+
+      // Also sync automation lanes to backend
+      for (const track of tracks) {
+        for (const lane of track.automationLanes) {
+          if (lane.points.length > 0) {
+            syncAutomationLaneToBackend(track.id, lane);
+          }
+        }
+      }
+      // Also sync tempo markers to backend
+      syncTempoMarkersToBackend(get().tempoMarkers);
+      console.log("[DAW] Synced clips with backend (added: " + toAdd.length + ", removed: " + toRemove.length + ")");
     },
 
     importMedia: async (filePath, trackId, startTime) => {
@@ -3713,6 +4749,150 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         canUndo: commandManager.canUndo(),
         canRedo: commandManager.canRedo(),
       });
+    },
+
+    addClipGainPoint: (clipId, time, gain) => {
+      const state = get();
+      let oldEnvelope: Array<{ time: number; gain: number }> | undefined;
+      for (const track of state.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) {
+          oldEnvelope = clip.gainEnvelope ? [...clip.gainEnvelope] : undefined;
+          break;
+        }
+      }
+
+      const clampedGain = Math.max(0, Math.min(2, gain));
+      const newPoint = { time, gain: clampedGain };
+
+      const command: Command = {
+        type: "ADD_CLIP_GAIN_POINT",
+        description: "Add clip gain point",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) => {
+                if (clip.id !== clipId) return clip;
+                const envelope = clip.gainEnvelope ? [...clip.gainEnvelope, newPoint] : [newPoint];
+                envelope.sort((a, b) => a.time - b.time);
+                return { ...clip, gainEnvelope: envelope };
+              }),
+            })),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, gainEnvelope: oldEnvelope } : clip,
+              ),
+            })),
+          }));
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    removeClipGainPoint: (clipId, pointIndex) => {
+      const state = get();
+      let oldEnvelope: Array<{ time: number; gain: number }> | undefined;
+      for (const track of state.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) {
+          oldEnvelope = clip.gainEnvelope ? [...clip.gainEnvelope] : undefined;
+          break;
+        }
+      }
+
+      if (!oldEnvelope || pointIndex < 0 || pointIndex >= oldEnvelope.length) return;
+
+      const command: Command = {
+        type: "REMOVE_CLIP_GAIN_POINT",
+        description: "Remove clip gain point",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) => {
+                if (clip.id !== clipId) return clip;
+                const envelope = clip.gainEnvelope ? [...clip.gainEnvelope] : [];
+                envelope.splice(pointIndex, 1);
+                return { ...clip, gainEnvelope: envelope.length > 0 ? envelope : undefined };
+              }),
+            })),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, gainEnvelope: oldEnvelope } : clip,
+              ),
+            })),
+          }));
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    moveClipGainPoint: (clipId, pointIndex, time, gain) => {
+      const state = get();
+      let oldEnvelope: Array<{ time: number; gain: number }> | undefined;
+      for (const track of state.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) {
+          oldEnvelope = clip.gainEnvelope ? [...clip.gainEnvelope] : undefined;
+          break;
+        }
+      }
+
+      if (!oldEnvelope || pointIndex < 0 || pointIndex >= oldEnvelope.length) return;
+
+      const clampedGain = Math.max(0, Math.min(2, gain));
+
+      const command: Command = {
+        type: "MOVE_CLIP_GAIN_POINT",
+        description: "Move clip gain point",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) => {
+                if (clip.id !== clipId) return clip;
+                const envelope = clip.gainEnvelope ? [...clip.gainEnvelope] : [];
+                if (pointIndex < envelope.length) {
+                  envelope[pointIndex] = { time, gain: clampedGain };
+                  envelope.sort((a, b) => a.time - b.time);
+                }
+                return { ...clip, gainEnvelope: envelope };
+              }),
+            })),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, gainEnvelope: oldEnvelope } : clip,
+              ),
+            })),
+          }));
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     copyClip: (clipId) => {
@@ -4512,10 +5692,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         type: "DELETE_RAZOR_EDIT",
         description: "Delete razor edit content",
         timestamp: Date.now(),
-        execute: () => set({ tracks: newTracks, razorEdits: [], isModified: true }),
-        undo: () => set({ tracks: oldTracks, razorEdits: oldRazorEdits, isModified: true }),
+        execute: () => {
+          set({ tracks: newTracks, razorEdits: [], isModified: true });
+          if (get().transport.isPlaying) get().syncClipsWithBackend();
+        },
+        undo: () => {
+          set({ tracks: oldTracks, razorEdits: oldRazorEdits, isModified: true });
+          if (get().transport.isPlaying) get().syncClipsWithBackend();
+        },
       });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      // Sync backend immediately if playing
+      if (get().transport.isPlaying) get().syncClipsWithBackend();
     },
 
     // ========== Track Automation (Phase 5) ==========
@@ -4525,6 +5713,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           t.id === trackId ? { ...t, showAutomation: !t.showAutomation } : t,
         ),
       }));
+    },
+
+    addAutomationLane: (trackId, param, _label) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      if (!track) return null;
+      // Don't add duplicate lanes for the same param
+      const existing = track.automationLanes.find((l) => l.param === param);
+      if (existing) return existing.id;
+      const laneId = `lane_${param}_${Date.now()}`;
+      const newLane: AutomationLane = { id: laneId, param, points: [], visible: true };
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return { ...t, automationLanes: [...t.automationLanes, newLane], showAutomation: true };
+        }),
+        isModified: true,
+      }));
+      return laneId;
     },
 
     addAutomationPoint: (trackId, laneId, time, value) => {
@@ -4544,6 +5750,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }),
         isModified: true,
       }));
+      // Sync to C++ backend
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.id === laneId);
+      if (lane) syncAutomationLaneToBackend(trackId, lane);
     },
 
     removeAutomationPoint: (trackId, laneId, pointIndex) => {
@@ -4560,6 +5770,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }),
         isModified: true,
       }));
+      // Sync to C++ backend
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.id === laneId);
+      if (lane) syncAutomationLaneToBackend(trackId, lane);
     },
 
     moveAutomationPoint: (trackId, laneId, pointIndex, time, value) => {
@@ -4580,6 +5794,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }),
         isModified: true,
       }));
+      // Sync to C++ backend
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.id === laneId);
+      if (lane) syncAutomationLaneToBackend(trackId, lane);
     },
 
     toggleAutomationLaneVisibility: (trackId, laneId) => {
@@ -4597,37 +5815,208 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     clearAutomationLane: (trackId, laneId) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.id === laneId);
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
           return {
             ...t,
-            automationLanes: t.automationLanes.map((lane) =>
-              lane.id === laneId ? { ...lane, points: [] } : lane,
+            automationLanes: t.automationLanes.map((l) =>
+              l.id === laneId ? { ...l, points: [] } : l,
             ),
           };
         }),
         isModified: true,
       }));
+      // Sync to C++ backend — clear the automation for this parameter
+      if (lane) {
+        const parameterId = lane.param === "mute" ? "mute" : lane.param;
+        nativeBridge.clearAutomation(trackId, parameterId).catch(() => {});
+      }
     },
 
-    // ========== Track Freeze (Phase 5) ==========
+    // ========== Strip Silence (Phase 3.12) ==========
+    stripSilence: (clipId, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs) => {
+      const state = get();
+      let sourceTrack: Track | undefined;
+      let sourceClip: AudioClip | undefined;
+      for (const t of state.tracks) {
+        const c = t.clips.find((cl) => cl.id === clipId);
+        if (c) { sourceTrack = t; sourceClip = c; break; }
+      }
+      if (!sourceTrack || !sourceClip) return;
+
+      const trackId = sourceTrack.id;
+      const clip = sourceClip;
+
+      nativeBridge.detectSilentRegions(clip.filePath, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs)
+        .then((regions) => {
+          if (!regions || regions.length === 0) return;
+
+          const oldClips = get().tracks.find((t) => t.id === trackId)?.clips ?? [];
+
+          // Create new clips from detected regions
+          const newClips: AudioClip[] = [];
+          for (let i = 0; i < regions.length; i++) {
+            const r = regions[i];
+            // Region times are relative to the file; clip may have offset
+            const regionStartInFile = r.startTime;
+            const regionEndInFile = r.endTime;
+
+            // Only include regions that overlap with the clip's content window
+            const clipContentStart = clip.offset;
+            const clipContentEnd = clip.offset + clip.duration;
+            const overlapStart = Math.max(regionStartInFile, clipContentStart);
+            const overlapEnd = Math.min(regionEndInFile, clipContentEnd);
+            if (overlapEnd <= overlapStart) continue;
+
+            const overlapDuration = overlapEnd - overlapStart;
+            const timelineOffset = overlapStart - clipContentStart;
+
+            newClips.push({
+              ...clip,
+              id: clip.id + "_ss_" + i,
+              name: clip.name + " (" + (i + 1) + ")",
+              startTime: clip.startTime + timelineOffset,
+              duration: overlapDuration,
+              offset: overlapStart,
+              fadeIn: i === 0 ? clip.fadeIn : 0,
+              fadeOut: i === regions.length - 1 ? clip.fadeOut : 0,
+            });
+          }
+
+          if (newClips.length === 0) return;
+
+          // Replace the original clip with the new clips
+          const updatedClips = oldClips.filter((c) => c.id !== clipId).concat(newClips);
+
+          const command: Command = {
+            type: "strip-silence",
+            description: `Strip silence from "${clip.name}"`,
+            timestamp: Date.now(),
+            execute: () => {
+              set((s) => ({
+                tracks: s.tracks.map((t) =>
+                  t.id === trackId ? { ...t, clips: updatedClips } : t
+                ),
+                isModified: true,
+              }));
+            },
+            undo: () => {
+              set((s) => ({
+                tracks: s.tracks.map((t) =>
+                  t.id === trackId ? { ...t, clips: oldClips } : t
+                ),
+                isModified: true,
+              }));
+            },
+          };
+          commandManager.execute(command);
+          set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+        })
+        .catch((err) => console.error("stripSilence failed:", err));
+    },
+
+    // ========== Track Freeze (Phase 3.13) ==========
     freezeTrack: (trackId) => {
-      // Mark track as frozen — in a full implementation this would
-      // render the track to a temp audio file and bypass FX
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === trackId ? { ...t, frozen: true } : t,
-        ),
-      }));
+      const state = get();
+      const track = state.tracks.find((t) => t.id === trackId);
+      if (!track || track.frozen) return;
+
+      // Save current clips before freeze
+      const originalClips = [...track.clips];
+
+      nativeBridge.freezeTrack(trackId)
+        .then((result) => {
+          if (!result.success || !result.filePath) {
+            console.error("freezeTrack failed:", result.error);
+            return;
+          }
+
+          const freezeClip: AudioClip = {
+            id: trackId + "_freeze",
+            filePath: result.filePath,
+            name: track.name + " (frozen)",
+            startTime: result.startTime ?? 0,
+            duration: result.duration ?? 0,
+            offset: 0,
+            color: "#60a5fa", // blue tint for frozen
+            volumeDB: 0,
+            fadeIn: 0,
+            fadeOut: 0,
+            sampleRate: result.sampleRate,
+          };
+
+          const command: Command = {
+            type: "freeze-track",
+            description: `Freeze track "${track.name}"`,
+            timestamp: Date.now(),
+            execute: () => {
+              set((s) => ({
+                tracks: s.tracks.map((t) =>
+                  t.id === trackId
+                    ? { ...t, frozen: true, freezeFilePath: result.filePath, frozenOriginalClips: originalClips, clips: [freezeClip] }
+                    : t
+                ),
+                isModified: true,
+              }));
+            },
+            undo: () => {
+              set((s) => ({
+                tracks: s.tracks.map((t) =>
+                  t.id === trackId
+                    ? { ...t, frozen: false, freezeFilePath: undefined, frozenOriginalClips: undefined, clips: originalClips }
+                    : t
+                ),
+                isModified: true,
+              }));
+              nativeBridge.unfreezeTrack(trackId).catch(() => {});
+            },
+          };
+          commandManager.execute(command);
+          set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+        })
+        .catch((err) => console.error("freezeTrack failed:", err));
     },
 
     unfreezeTrack: (trackId) => {
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === trackId ? { ...t, frozen: false, freezeFilePath: undefined } : t,
-        ),
-      }));
+      const state = get();
+      const track = state.tracks.find((t) => t.id === trackId);
+      if (!track || !track.frozen) return;
+
+      const restoredClips = track.frozenOriginalClips ?? [];
+      const frozenClips = [...track.clips];
+      const frozenFilePath = track.freezeFilePath;
+
+      const command: Command = {
+        type: "unfreeze-track",
+        description: `Unfreeze track "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === trackId
+                ? { ...t, frozen: false, freezeFilePath: undefined, frozenOriginalClips: undefined, clips: restoredClips }
+                : t
+            ),
+            isModified: true,
+          }));
+          nativeBridge.unfreezeTrack(trackId).catch(() => {});
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) =>
+              t.id === trackId
+                ? { ...t, frozen: true, freezeFilePath: frozenFilePath, frozenOriginalClips: restoredClips, clips: frozenClips }
+                : t
+            ),
+            isModified: true,
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Comping / Takes (Phase 6) ==========
@@ -4645,6 +6034,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }),
         isModified: true,
       }));
+      // Re-sync backend since clips[] changed (now empty for this track)
+      if (get().transport.isPlaying) get().syncClipsWithBackend();
     },
 
     setActiveTake: (trackId, takeIndex) => {
@@ -4668,6 +6059,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           return t;
         }),
       }));
+      // Re-sync backend since clips[] swapped with a different take
+      if (get().transport.isPlaying) get().syncClipsWithBackend();
     },
 
     deleteTake: (trackId, takeIndex) => {
@@ -4750,6 +6143,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         tempoMarkers: [...state.tempoMarkers, marker].sort((a, b) => a.time - b.time),
         isModified: true,
       }));
+      syncTempoMarkersToBackend(get().tempoMarkers);
     },
 
     removeTempoMarker: (id) => {
@@ -4757,6 +6151,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         tempoMarkers: state.tempoMarkers.filter((m) => m.id !== id),
         isModified: true,
       }));
+      syncTempoMarkersToBackend(get().tempoMarkers);
     },
 
     updateTempoMarker: (id, updates) => {
@@ -4766,6 +6161,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           .sort((a, b) => a.time - b.time),
         isModified: true,
       }));
+      syncTempoMarkersToBackend(get().tempoMarkers);
     },
 
     getTempoAtTime: (time) => {
@@ -4812,12 +6208,27 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set((state) => ({ bigClockFormat: state.bigClockFormat === "time" ? "beats" : "time" })),
     toggleKeyboardShortcuts: () =>
       set((state) => ({ showKeyboardShortcuts: !state.showKeyboardShortcuts })),
+    toggleContextualHelp: () =>
+      set((state) => ({ showContextualHelp: !state.showContextualHelp })),
     togglePreferences: () =>
       set((state) => ({ showPreferences: !state.showPreferences })),
     toggleScriptConsole: () =>
       set((state) => ({ showScriptConsole: !state.showScriptConsole })),
     setTimecodeMode: (mode) => set({ timecodeMode: mode }),
     setSmpteFrameRate: (rate) => set({ smpteFrameRate: rate }),
+    setUIFontScale: (scale) => set({ uiFontScale: Math.max(0.75, Math.min(1.5, scale)) }),
+
+    // ========== Detachable Panels ==========
+    detachPanel: (panelId) =>
+      set((state) => ({
+        detachedPanels: state.detachedPanels.includes(panelId)
+          ? state.detachedPanels
+          : [...state.detachedPanels, panelId],
+      })),
+    attachPanel: (panelId) =>
+      set((state) => ({
+        detachedPanels: state.detachedPanels.filter((id) => id !== panelId),
+      })),
 
     // ========== Cut/Copy within Time Selection ==========
     cutWithinTimeSelection: () => {
@@ -6082,6 +7493,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           }),
         })),
       }));
+      // Re-sync backend since the active clip's audio changed
+      if (get().transport.isPlaying) get().syncClipsWithBackend();
     },
     explodeTakes: (clipId) => {
       const state = get();
@@ -6151,30 +7564,155 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     setClipPlaybackRate: async (clipId, rate) => {
       const state = get();
       let clip: AudioClip | undefined;
+      let trackId: string | undefined;
       for (const track of state.tracks) {
-        clip = track.clips.find((c) => c.id === clipId);
-        if (clip) break;
+        const found = track.clips.find((c) => c.id === clipId);
+        if (found) { clip = found; trackId = track.id; break; }
       }
-      if (!clip) return;
-      // Update the rate property (actual stretching requires backend call)
-      set((s) => ({
-        tracks: s.tracks.map((t) => ({
-          ...t,
-          clips: t.clips.map((c) =>
-            c.id === clipId ? { ...c, playbackRate: rate } : c,
-          ),
-        })),
-      }));
+      if (!clip || !trackId) return;
+      if (rate <= 0 || Math.abs(rate - 1.0) < 0.0001) {
+        // Reset to original if rate ~1.0
+        if (clip.originalFilePath && clip.originalFilePath !== clip.filePath) {
+          const origPath = clip.originalFilePath;
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === clipId ? { ...c, playbackRate: 1.0, filePath: origPath, originalFilePath: undefined } : c,
+              ),
+            })),
+          }));
+        }
+        return;
+      }
+
+      // Snapshot for undo
+      const oldClip = { ...clip };
+      const sourceFile = clip.originalFilePath || clip.filePath;
+
+      // Call backend to process
+      const result = await nativeBridge.timeStretchClip(sourceFile, rate);
+      if (!result.success || !result.filePath) return;
+
+      const newDuration = result.duration || clip.duration / rate;
+      const newSampleRate = result.sampleRate || clip.sampleRate;
+
+      const command: Command = {
+        type: "TIME_STRETCH_CLIP",
+        description: `Time stretch clip to ${rate}x`,
+        timestamp: Date.now(),
+        execute: async () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === clipId ? {
+                  ...c,
+                  playbackRate: rate,
+                  filePath: result.filePath!,
+                  originalFilePath: sourceFile,
+                  duration: newDuration,
+                  sampleRate: newSampleRate,
+                  offset: 0,
+                } : c,
+              ),
+            })),
+          }));
+        },
+        undo: async () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === clipId ? {
+                  ...c,
+                  playbackRate: oldClip.playbackRate,
+                  filePath: oldClip.filePath,
+                  originalFilePath: oldClip.originalFilePath,
+                  duration: oldClip.duration,
+                  sampleRate: oldClip.sampleRate,
+                  offset: oldClip.offset,
+                } : c,
+              ),
+            })),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
     setClipPitch: async (clipId, semitones) => {
-      set((s) => ({
-        tracks: s.tracks.map((t) => ({
-          ...t,
-          clips: t.clips.map((c) =>
-            c.id === clipId ? { ...c, pitchSemitones: semitones } : c,
-          ),
-        })),
-      }));
+      const state = get();
+      let clip: AudioClip | undefined;
+      let trackId: string | undefined;
+      for (const track of state.tracks) {
+        const found = track.clips.find((c) => c.id === clipId);
+        if (found) { clip = found; trackId = track.id; break; }
+      }
+      if (!clip || !trackId) return;
+      if (Math.abs(semitones) < 0.01) {
+        // Reset to original if ~0 semitones
+        if (clip.originalFilePath && clip.originalFilePath !== clip.filePath) {
+          const origPath = clip.originalFilePath;
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === clipId ? { ...c, pitchSemitones: 0, filePath: origPath, originalFilePath: undefined } : c,
+              ),
+            })),
+          }));
+        }
+        return;
+      }
+
+      // Snapshot for undo
+      const oldClip = { ...clip };
+      const sourceFile = clip.originalFilePath || clip.filePath;
+
+      // Call backend to process
+      const result = await nativeBridge.pitchShiftClip(sourceFile, semitones);
+      if (!result.success || !result.filePath) return;
+
+      const command: Command = {
+        type: "PITCH_SHIFT_CLIP",
+        description: `Pitch shift clip by ${semitones} semitones`,
+        timestamp: Date.now(),
+        execute: async () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === clipId ? {
+                  ...c,
+                  pitchSemitones: semitones,
+                  filePath: result.filePath!,
+                  originalFilePath: sourceFile,
+                  sampleRate: result.sampleRate || c.sampleRate,
+                } : c,
+              ),
+            })),
+          }));
+        },
+        undo: async () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => ({
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === clipId ? {
+                  ...c,
+                  pitchSemitones: oldClip.pitchSemitones,
+                  filePath: oldClip.filePath,
+                  originalFilePath: oldClip.originalFilePath,
+                  sampleRate: oldClip.sampleRate,
+                } : c,
+              ),
+            })),
+          }));
+        },
+      };
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     toggleFreePositioning: () =>
@@ -6393,14 +7931,1322 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     toggleDDPExport: () =>
       set((s) => ({ showDDPExport: !s.showDDPExport })),
-    exportDDP: async (outputDir) => {
+    exportDDP: async (sourceWavPath, outputDir, catalogNumber) => {
       try {
         const regions = get().regions;
-        return await nativeBridge.exportDDP(outputDir, regions);
+        // Convert regions to DDP track format: { startTime, endTime, title, isrc }
+        const tracks = regions.map((r: any) => ({
+          startTime: r.startTime ?? r.time ?? 0,
+          endTime: r.endTime ?? (r.time + (r.duration ?? 0)),
+          title: r.name ?? r.label ?? "",
+          isrc: r.isrc ?? "",
+        }));
+        return await nativeBridge.exportDDP(sourceWavPath, outputDir, tracks, catalogNumber);
       } catch (err) {
         console.error("[Store] Failed to export DDP:", err);
         return false;
       }
+    },
+
+    // ========== Phase 4.2: Step Sequencer ==========
+    toggleStep: (pitch, step) => {
+      const s = get();
+      const oldSteps = s.stepSequencer.steps;
+      const oldValue = oldSteps[pitch]?.[step] ?? false;
+      const newValue = !oldValue;
+
+      // Build new steps array
+      const newSteps = oldSteps.map((row, r) =>
+        r === pitch ? row.map((v, c) => (c === step ? newValue : v)) : row,
+      );
+
+      set({
+        stepSequencer: { ...s.stepSequencer, steps: newSteps },
+        isModified: true,
+      });
+
+      // Undo support
+      const undoSteps = oldSteps;
+      commandManager.push({
+        type: "step_sequencer_toggle",
+        description: `Toggle step [${pitch}, ${step}] ${newValue ? "on" : "off"}`,
+        timestamp: Date.now(),
+        execute: () => set({ stepSequencer: { ...get().stepSequencer, steps: newSteps } }),
+        undo: () => set({ stepSequencer: { ...get().stepSequencer, steps: undoSteps } }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    setStepVelocity: (pitch, step, velocity) => {
+      const s = get();
+      const newVelocities = s.stepSequencer.velocities.map((row, r) =>
+        r === pitch ? row.map((v, c) => (c === step ? Math.max(0, Math.min(127, velocity)) : v)) : row,
+      );
+      set({ stepSequencer: { ...s.stepSequencer, velocities: newVelocities } });
+    },
+
+    setStepCount: (count) => {
+      const clamped = Math.max(4, Math.min(64, count));
+      const s = get();
+      const { steps, velocities, pitchCount } = s.stepSequencer;
+
+      // Resize each row to the new step count
+      const newSteps = Array.from({ length: pitchCount }, (_, r) => {
+        const existing = steps[r] || [];
+        return Array.from({ length: clamped }, (_, c) => existing[c] ?? false);
+      });
+      const newVelocities = Array.from({ length: pitchCount }, (_, r) => {
+        const existing = velocities[r] || [];
+        return Array.from({ length: clamped }, (_, c) => existing[c] ?? 100);
+      });
+
+      set({
+        stepSequencer: { ...s.stepSequencer, stepCount: clamped, steps: newSteps, velocities: newVelocities },
+      });
+    },
+
+    setStepSize: (size) => {
+      set((s) => ({
+        stepSequencer: { ...s.stepSequencer, stepSize: size },
+      }));
+    },
+
+    clearStepSequencer: () => {
+      const s = get();
+      const oldSteps = s.stepSequencer.steps;
+      const oldVelocities = s.stepSequencer.velocities;
+      const { stepCount, pitchCount } = s.stepSequencer;
+
+      const emptySteps = Array.from({ length: pitchCount }, () => Array(stepCount).fill(false));
+      const defaultVelocities = Array.from({ length: pitchCount }, () => Array(stepCount).fill(100));
+
+      set({
+        stepSequencer: { ...s.stepSequencer, steps: emptySteps, velocities: defaultVelocities },
+        isModified: true,
+      });
+
+      // Undo support
+      commandManager.push({
+        type: "step_sequencer_clear",
+        description: "Clear step sequencer",
+        timestamp: Date.now(),
+        execute: () => set({ stepSequencer: { ...get().stepSequencer, steps: emptySteps, velocities: defaultVelocities } }),
+        undo: () => set({ stepSequencer: { ...get().stepSequencer, steps: oldSteps, velocities: oldVelocities } }),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    generateMIDIClipFromSteps: () => {
+      const s = get();
+      const { steps, velocities, stepCount, stepSize, pitchCount } = s.stepSequencer;
+      const tempo = s.transport.tempo;
+
+      // Calculate step duration in seconds
+      let beatsPerStep = 0.25; // default 1/16
+      if (stepSize === "1/8") beatsPerStep = 0.5;
+      else if (stepSize === "1/4") beatsPerStep = 1;
+      else if (stepSize === "1/16") beatsPerStep = 0.25;
+      const stepDurationSec = (60 / tempo) * beatsPerStep;
+
+      // Generate MIDI events from the step grid
+      const events: MIDIEvent[] = [];
+      const basePitch = 60 - Math.floor(pitchCount / 2); // Center around middle C
+
+      for (let row = 0; row < pitchCount; row++) {
+        for (let col = 0; col < stepCount; col++) {
+          if (steps[row]?.[col]) {
+            const time = col * stepDurationSec;
+            const note = basePitch + (pitchCount - 1 - row); // Bottom row = lowest pitch
+            const vel = velocities[row]?.[col] ?? 100;
+
+            events.push({
+              timestamp: time,
+              type: "noteOn",
+              note,
+              velocity: vel,
+            });
+            events.push({
+              timestamp: time + stepDurationSec * 0.9, // 90% gate
+              type: "noteOff",
+              note,
+              velocity: 0,
+            });
+          }
+        }
+      }
+
+      const totalDuration = stepCount * stepDurationSec;
+      console.log(
+        `[StepSequencer] Generated ${events.length} MIDI events, duration: ${totalDuration.toFixed(2)}s`,
+        events,
+      );
+
+      // If a MIDI track is selected, add the clip to it
+      const selectedTrackId = s.selectedTrackId;
+      if (selectedTrackId) {
+        const track = s.tracks.find((t) => t.id === selectedTrackId);
+        if (track && (track.type === "midi" || track.type === "instrument")) {
+          const clipId = crypto.randomUUID();
+          const midiClip: MIDIClip = {
+            id: clipId,
+            name: "Step Pattern",
+            startTime: s.transport.currentTime,
+            duration: totalDuration,
+            events,
+            color: track.color || "#4361ee",
+          };
+
+          const newMidiClips = [...(track.midiClips || []), midiClip];
+          set({
+            tracks: s.tracks.map((t) =>
+              t.id === selectedTrackId ? { ...t, midiClips: newMidiClips } : t,
+            ),
+            isModified: true,
+          });
+
+          commandManager.push({
+            type: "step_sequencer_generate",
+            description: "Generate MIDI clip from step sequencer",
+            timestamp: Date.now(),
+            execute: () => set({
+              tracks: get().tracks.map((t) =>
+                t.id === selectedTrackId ? { ...t, midiClips: [...(t.midiClips || []), midiClip] } : t,
+              ),
+            }),
+            undo: () => set({
+              tracks: get().tracks.map((t) =>
+                t.id === selectedTrackId ? { ...t, midiClips: (t.midiClips || []).filter((c) => c.id !== clipId) } : t,
+              ),
+            }),
+          });
+          set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+        }
+      }
+    },
+
+    toggleStepSequencer: () =>
+      set((s) => ({ showStepSequencer: !s.showStepSequencer })),
+
+    // ========== Phase 4.1: Clip Launcher ==========
+    triggerSlot: (trackIndex, slotIndex) => {
+      nativeBridge.triggerSlot(trackIndex, slotIndex).catch((err) => {
+        console.error("[Store] Failed to trigger slot:", err);
+      });
+
+      // Optimistically update local state
+      set((s) => {
+        const slots = s.clipLauncher.slots.map((trackSlots, ti) =>
+          trackSlots.map((slot, si) => {
+            if (ti === trackIndex && si === slotIndex) {
+              return { ...slot, isPlaying: true, isQueued: false };
+            }
+            // Stop other slots on the same track
+            if (ti === trackIndex && si !== slotIndex && slot.isPlaying) {
+              return { ...slot, isPlaying: false, isQueued: false };
+            }
+            return slot;
+          }),
+        );
+        return { clipLauncher: { ...s.clipLauncher, slots } };
+      });
+    },
+
+    stopSlot: (trackIndex, slotIndex) => {
+      nativeBridge.stopSlot(trackIndex, slotIndex).catch((err) => {
+        console.error("[Store] Failed to stop slot:", err);
+      });
+
+      set((s) => {
+        const slots = s.clipLauncher.slots.map((trackSlots, ti) =>
+          trackSlots.map((slot, si) =>
+            ti === trackIndex && si === slotIndex
+              ? { ...slot, isPlaying: false, isQueued: false }
+              : slot,
+          ),
+        );
+        return { clipLauncher: { ...s.clipLauncher, slots } };
+      });
+    },
+
+    triggerScene: (slotIndex) => {
+      nativeBridge.triggerScene(slotIndex).catch((err) => {
+        console.error("[Store] Failed to trigger scene:", err);
+      });
+
+      // Trigger all slots in this row
+      set((s) => {
+        const slots = s.clipLauncher.slots.map((trackSlots) =>
+          trackSlots.map((slot, si) => {
+            if (si === slotIndex && slot.filePath) {
+              return { ...slot, isPlaying: true, isQueued: false };
+            }
+            if (si !== slotIndex && slot.isPlaying) {
+              return { ...slot, isPlaying: false };
+            }
+            return slot;
+          }),
+        );
+        return { clipLauncher: { ...s.clipLauncher, slots } };
+      });
+    },
+
+    stopAllSlots: () => {
+      nativeBridge.stopAllSlots().catch((err) => {
+        console.error("[Store] Failed to stop all slots:", err);
+      });
+
+      set((s) => {
+        const slots = s.clipLauncher.slots.map((trackSlots) =>
+          trackSlots.map((slot) => ({ ...slot, isPlaying: false, isQueued: false })),
+        );
+        return { clipLauncher: { ...s.clipLauncher, slots } };
+      });
+    },
+
+    setSlotClip: (trackIndex, slotIndex, filePath, name, duration) => {
+      nativeBridge.setSlotClip(trackIndex, slotIndex, filePath, duration).catch((err) => {
+        console.error("[Store] Failed to set slot clip:", err);
+      });
+
+      set((s) => {
+        // Ensure the slots array is large enough
+        const numTracks = Math.max(s.clipLauncher.numTracks, trackIndex + 1);
+        const numSlots = Math.max(s.clipLauncher.numSlots, slotIndex + 1);
+        const slots = Array.from({ length: numTracks }, (_, ti) =>
+          Array.from({ length: numSlots }, (_, si) => {
+            const existing = s.clipLauncher.slots[ti]?.[si] || {};
+            if (ti === trackIndex && si === slotIndex) {
+              return { ...existing, filePath, name, duration, isPlaying: false, isQueued: false };
+            }
+            return existing;
+          }),
+        );
+        return {
+          clipLauncher: { ...s.clipLauncher, slots, numTracks, numSlots },
+          isModified: true,
+        };
+      });
+    },
+
+    clearSlot: (trackIndex, slotIndex) => {
+      nativeBridge.clearSlot(trackIndex, slotIndex).catch((err) => {
+        console.error("[Store] Failed to clear slot:", err);
+      });
+
+      set((s) => {
+        const slots = s.clipLauncher.slots.map((trackSlots, ti) =>
+          trackSlots.map((slot, si) =>
+            ti === trackIndex && si === slotIndex
+              ? { isPlaying: false, isQueued: false }
+              : slot,
+          ),
+        );
+        return { clipLauncher: { ...s.clipLauncher, slots }, isModified: true };
+      });
+    },
+
+    setClipLauncherQuantize: (quantize) => {
+      set((s) => ({
+        clipLauncher: { ...s.clipLauncher, quantize },
+      }));
+    },
+
+    toggleClipLauncher: () =>
+      set((s) => ({ showClipLauncher: !s.showClipLauncher })),
+
+    // Sprint 17: Visual Improvements
+    addRecentColor: (color) => {
+      set((s) => {
+        const filtered = s.recentColors.filter((c) => c !== color);
+        return { recentColors: [color, ...filtered].slice(0, 8) };
+      });
+    },
+
+    // Sprint 18: Interaction/Workflow
+    toggleAutoScroll: () =>
+      set((s) => ({ autoScrollDuringPlayback: !s.autoScrollDuringPlayback })),
+
+    zoomToSelection: () => {
+      const { timeSelection } = get();
+      if (!timeSelection) return;
+      const duration = timeSelection.end - timeSelection.start;
+      if (duration <= 0) return;
+      // Fit selection into ~80% of viewport
+      const viewportWidth = document.querySelector("[data-workspace]")?.clientWidth ?? 800;
+      const newPps = (viewportWidth * 0.8) / duration;
+      set({
+        pixelsPerSecond: Math.max(1, Math.min(1000, newPps)),
+        scrollX: Math.max(0, timeSelection.start * newPps - viewportWidth * 0.1),
+      });
+    },
+
+    toggleQuantizeDialog: () =>
+      set((s) => ({ showQuantizeDialog: !s.showQuantizeDialog })),
+
+    toggleDrumEditor: () =>
+      set((s) => ({ showDrumEditor: !s.showDrumEditor })),
+
+    selectAllMIDINotes: () => {
+      const { pianoRollClipId, tracks } = get();
+      if (!pianoRollClipId) return;
+      const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === pianoRollClipId);
+      if (!(clip as any).notes) return;
+      const midiClip = clip as any;
+      if (midiClip.notes) {
+        set({ selectedNoteIds: midiClip.notes.map((n: any) => n.id) });
+      }
+    },
+
+    updateMIDINotes: (clipId: string, notes: any[]) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId ? { ...c, notes } : c,
+          ),
+        })),
+        isModified: true,
+      }));
+    },
+
+    updateMIDINoteVelocity: (trackId, clipId, noteTimestamp, noteNumber, velocity) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const noteOnIdx = clip.events.findIndex((e) => e.type === "noteOn" && e.note === noteNumber && Math.abs(e.timestamp - noteTimestamp) < 0.001);
+      if (noteOnIdx === -1) return;
+      const oldVelocity = clip.events[noteOnIdx].velocity || 80;
+      const clampedVelocity = Math.max(1, Math.min(127, Math.round(velocity)));
+      const applyVel = (s: any, vel: number) => ({ tracks: s.tracks.map((t: any) => t.id === trackId ? { ...t, midiClips: t.midiClips.map((c: any) => c.id === clipId ? { ...c, events: c.events.map((e: any) => e.type === "noteOn" && e.note === noteNumber && Math.abs(e.timestamp - noteTimestamp) < 0.001 ? { ...e, velocity: vel } : e) } : c) } : t) });
+      set((s) => ({ ...applyVel(s, clampedVelocity), isModified: true }));
+      commandManager.push({ type: "midi_velocity", description: `Set velocity to ${clampedVelocity}`, timestamp: Date.now(), execute: () => { set((s) => applyVel(s, clampedVelocity)); }, undo: () => { set((s) => applyVel(s, oldVelocity)); } });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    updateMIDICCEvents: (trackId, clipId, newCCEvents) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const oldCCEvents = clip.ccEvents ? [...clip.ccEvents] : [];
+      const applyCc = (s: any, evts: MIDICCEvent[]) => ({ tracks: s.tracks.map((t: any) => t.id === trackId ? { ...t, midiClips: t.midiClips.map((c: any) => c.id === clipId ? { ...c, ccEvents: evts } : c) } : t) });
+      set((s) => ({ ...applyCc(s, newCCEvents), isModified: true }));
+      commandManager.push({ type: "midi_cc", description: "Update MIDI CC events", timestamp: Date.now(), execute: () => { set((s) => applyCc(s, newCCEvents)); }, undo: () => { set((s) => applyCc(s, oldCCEvents)); } });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    setPianoRollScaleRoot: (root) => set({ pianoRollScaleRoot: root }),
+    setPianoRollScaleType: (scaleType) => set({ pianoRollScaleType: scaleType }),
+
+    // ========== Step Input Mode ==========
+    toggleStepInput: () => set((s) => ({
+      stepInputEnabled: !s.stepInputEnabled,
+      stepInputPosition: !s.stepInputEnabled ? 0 : s.stepInputPosition,
+    })),
+    setStepInputSize: (beats) => set({ stepInputSize: beats }),
+    setStepInputPosition: (time) => set({ stepInputPosition: Math.max(0, time) }),
+    advanceStepInput: () => {
+      const { stepInputSize, stepInputPosition, transport } = get();
+      const beatsPerSecond = transport.tempo / 60;
+      const advanceSeconds = stepInputSize / beatsPerSecond;
+      set({ stepInputPosition: stepInputPosition + advanceSeconds });
+    },
+
+    // ========== MIDI Transform ==========
+    transposeMIDINotes: (clipId, semitones) => {
+      const { pianoRollTrackId } = get();
+      if (!pianoRollTrackId) return;
+      const track = get().tracks.find((t) => t.id === pianoRollTrackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const oldEvents = [...clip.events];
+
+      // Transpose all noteOn/noteOff events in the clip by the given semitones.
+      // Operates on all notes (selectedNoteIds is not used for filtering since
+      // the piano roll events don't carry per-note IDs).
+      const newEvents = clip.events.map((e) => {
+        if ((e.type === "noteOn" || e.type === "noteOff") && e.note !== undefined) {
+          const newNote = Math.max(0, Math.min(127, e.note + semitones));
+          return { ...e, note: newNote };
+        }
+        return e;
+      });
+
+      const applyEvents = (s: any, events: MIDIEvent[]) => ({
+        tracks: s.tracks.map((t: any) =>
+          t.id === pianoRollTrackId
+            ? { ...t, midiClips: t.midiClips.map((c: any) => c.id === clipId ? { ...c, events } : c) }
+            : t,
+        ),
+      });
+      set((s) => ({ ...applyEvents(s, newEvents), isModified: true }));
+      commandManager.push({
+        type: "midi_transpose",
+        description: `Transpose ${semitones > 0 ? "+" : ""}${semitones} semitones`,
+        timestamp: Date.now(),
+        execute: () => set((s) => applyEvents(s, newEvents)),
+        undo: () => set((s) => applyEvents(s, oldEvents)),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    scaleMIDINoteVelocity: (clipId, factor) => {
+      const { pianoRollTrackId } = get();
+      if (!pianoRollTrackId) return;
+      const track = get().tracks.find((t) => t.id === pianoRollTrackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const oldEvents = [...clip.events];
+
+      const newEvents = clip.events.map((e) => {
+        if (e.type === "noteOn" && e.velocity !== undefined) {
+          const newVel = Math.max(1, Math.min(127, Math.round(e.velocity * factor)));
+          return { ...e, velocity: newVel };
+        }
+        return e;
+      });
+
+      const applyEvents = (s: any, events: MIDIEvent[]) => ({
+        tracks: s.tracks.map((t: any) =>
+          t.id === pianoRollTrackId
+            ? { ...t, midiClips: t.midiClips.map((c: any) => c.id === clipId ? { ...c, events } : c) }
+            : t,
+        ),
+      });
+      set((s) => ({ ...applyEvents(s, newEvents), isModified: true }));
+      commandManager.push({
+        type: "midi_velocity_scale",
+        description: `Scale velocity x${factor.toFixed(2)}`,
+        timestamp: Date.now(),
+        execute: () => set((s) => applyEvents(s, newEvents)),
+        undo: () => set((s) => applyEvents(s, oldEvents)),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    reverseMIDINotes: (clipId) => {
+      const { pianoRollTrackId } = get();
+      if (!pianoRollTrackId) return;
+      const track = get().tracks.find((t) => t.id === pianoRollTrackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const oldEvents = [...clip.events];
+
+      // Collect noteOn/noteOff pairs
+      const noteOns = clip.events.filter((e) => e.type === "noteOn");
+      const noteOffs = clip.events.filter((e) => e.type === "noteOff");
+      const otherEvents = clip.events.filter((e) => e.type !== "noteOn" && e.type !== "noteOff");
+
+      // Find the max end time of all notes
+      let maxTime = 0;
+      for (const on of noteOns) {
+        const off = noteOffs.find((e) => e.note === on.note && e.timestamp > on.timestamp);
+        if (off && off.timestamp > maxTime) maxTime = off.timestamp;
+      }
+      if (maxTime === 0) maxTime = clip.duration;
+
+      // Reverse: mirror each note around the midpoint of the clip
+      const newNoteEvents: MIDIEvent[] = [];
+      for (const on of noteOns) {
+        const off = noteOffs.find((e) => e.note === on.note && e.timestamp > on.timestamp);
+        if (!off) continue;
+        const dur = off.timestamp - on.timestamp;
+        const newStart = maxTime - off.timestamp;
+        newNoteEvents.push({ ...on, timestamp: Math.max(0, newStart) });
+        newNoteEvents.push({ ...off, timestamp: Math.max(0, newStart + dur) });
+      }
+
+      const newEvents = [...otherEvents, ...newNoteEvents].sort((a, b) => a.timestamp - b.timestamp);
+
+      const applyEvents = (s: any, events: MIDIEvent[]) => ({
+        tracks: s.tracks.map((t: any) =>
+          t.id === pianoRollTrackId
+            ? { ...t, midiClips: t.midiClips.map((c: any) => c.id === clipId ? { ...c, events } : c) }
+            : t,
+        ),
+      });
+      set((s) => ({ ...applyEvents(s, newEvents), isModified: true }));
+      commandManager.push({
+        type: "midi_reverse",
+        description: "Reverse MIDI notes",
+        timestamp: Date.now(),
+        execute: () => set((s) => applyEvents(s, newEvents)),
+        undo: () => set((s) => applyEvents(s, oldEvents)),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    invertMIDINotes: (clipId) => {
+      const { pianoRollTrackId } = get();
+      if (!pianoRollTrackId) return;
+      const track = get().tracks.find((t) => t.id === pianoRollTrackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const oldEvents = [...clip.events];
+
+      // Find center pitch from noteOn events
+      const noteOnPitches = clip.events
+        .filter((e) => e.type === "noteOn" && e.note !== undefined)
+        .map((e) => e.note!);
+      if (noteOnPitches.length === 0) return;
+      const minPitch = Math.min(...noteOnPitches);
+      const maxPitch = Math.max(...noteOnPitches);
+      const centerPitch = (minPitch + maxPitch) / 2;
+
+      const newEvents = clip.events.map((e) => {
+        if ((e.type === "noteOn" || e.type === "noteOff") && e.note !== undefined) {
+          const inverted = Math.round(2 * centerPitch - e.note);
+          const clamped = Math.max(0, Math.min(127, inverted));
+          return { ...e, note: clamped };
+        }
+        return e;
+      });
+
+      const applyEvents = (s: any, events: MIDIEvent[]) => ({
+        tracks: s.tracks.map((t: any) =>
+          t.id === pianoRollTrackId
+            ? { ...t, midiClips: t.midiClips.map((c: any) => c.id === clipId ? { ...c, events } : c) }
+            : t,
+        ),
+      });
+      set((s) => ({ ...applyEvents(s, newEvents), isModified: true }));
+      commandManager.push({
+        type: "midi_invert",
+        description: "Invert MIDI note pitches",
+        timestamp: Date.now(),
+        execute: () => set((s) => applyEvents(s, newEvents)),
+        undo: () => set((s) => applyEvents(s, oldEvents)),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    setNoteExpression: (clipId, noteId, expr) => {
+      const { pianoRollTrackId } = get();
+      if (!pianoRollTrackId) return;
+      const track = get().tracks.find((t) => t.id === pianoRollTrackId);
+      if (!track) return;
+      const clip = track.midiClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const [tsStr, noteStr] = noteId.split(":");
+      const noteTimestamp = parseFloat(tsStr);
+      const noteNumber = parseInt(noteStr, 10);
+      const noteIdx = clip.events.findIndex(
+        (e) => e.type === "noteOn" && e.note === noteNumber && Math.abs(e.timestamp - noteTimestamp) < 0.001,
+      );
+      if (noteIdx === -1) return;
+      const oldEvent = clip.events[noteIdx];
+      const oldExpr = { pitchBend: oldEvent.pitchBend, pressure: oldEvent.pressure, slide: oldEvent.slide };
+      const newExpr = {
+        pitchBend: expr.pitchBend !== undefined ? Math.max(-1, Math.min(1, expr.pitchBend)) : oldEvent.pitchBend,
+        pressure: expr.pressure !== undefined ? Math.max(0, Math.min(1, expr.pressure)) : oldEvent.pressure,
+        slide: expr.slide !== undefined ? Math.max(0, Math.min(1, expr.slide)) : oldEvent.slide,
+      };
+      const applyExpr = (s: any, ex: { pitchBend?: number; pressure?: number; slide?: number }) => ({
+        tracks: s.tracks.map((t: any) =>
+          t.id === pianoRollTrackId
+            ? {
+                ...t,
+                midiClips: t.midiClips.map((c: any) =>
+                  c.id === clipId
+                    ? {
+                        ...c,
+                        events: c.events.map((e: any) =>
+                          e.type === "noteOn" && e.note === noteNumber && Math.abs(e.timestamp - noteTimestamp) < 0.001
+                            ? { ...e, ...ex }
+                            : e,
+                        ),
+                      }
+                    : c,
+                ),
+              }
+            : t,
+        ),
+      });
+      set((s) => ({ ...applyExpr(s, newExpr), isModified: true }));
+      commandManager.push({
+        type: "note_expression",
+        description: "Set note expression",
+        timestamp: Date.now(),
+        execute: () => set((s) => applyExpr(s, newExpr)),
+        undo: () => set((s) => applyExpr(s, oldExpr)),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    // Sprint 19: Plugin + Mixing
+    toggleMediaPool: () =>
+      set((s) => ({ showMediaPool: !s.showMediaPool })),
+
+    // ========== Plugin A/B Comparison ==========
+    storePluginState: async (trackId, fxIndex, slot, isInputFX) => {
+      const key = `${trackId}-${fxIndex}`;
+      const storeFn = slot === "a" ? nativeBridge.storePluginStateA : nativeBridge.storePluginStateB;
+      try {
+        const success = await storeFn.call(nativeBridge, trackId, fxIndex, isInputFX);
+        if (success) {
+          set((s) => ({
+            pluginABStates: {
+              ...s.pluginABStates,
+              [key]: {
+                ...s.pluginABStates[key],
+                [slot]: "stored",
+                active: s.pluginABStates[key]?.active || "a",
+              },
+            },
+          }));
+        }
+      } catch (e) {
+        console.error("[Store] Failed to store plugin state:", e);
+      }
+    },
+
+    recallPluginState: async (trackId, fxIndex, slot, isInputFX) => {
+      const key = `${trackId}-${fxIndex}`;
+      const recallFn = slot === "a" ? nativeBridge.recallPluginStateA : nativeBridge.recallPluginStateB;
+      try {
+        const success = await recallFn.call(nativeBridge, trackId, fxIndex, isInputFX);
+        if (success) {
+          set((s) => ({
+            pluginABStates: {
+              ...s.pluginABStates,
+              [key]: {
+                ...s.pluginABStates[key],
+                active: slot,
+              },
+            },
+          }));
+        }
+      } catch (e) {
+        console.error("[Store] Failed to recall plugin state:", e);
+      }
+    },
+
+    togglePluginAB: async (trackId, fxIndex, isInputFX) => {
+      const key = `${trackId}-${fxIndex}`;
+      const current = get().pluginABStates[key];
+      const currentSlot = current?.active || "a";
+      const targetSlot = currentSlot === "a" ? "b" : "a";
+
+      // First store the current state into the current slot
+      const storeFn = currentSlot === "a" ? nativeBridge.storePluginStateA : nativeBridge.storePluginStateB;
+      await storeFn.call(nativeBridge, trackId, fxIndex, isInputFX);
+
+      // Then recall the target slot
+      const recallFn = targetSlot === "a" ? nativeBridge.recallPluginStateA : nativeBridge.recallPluginStateB;
+      const success = await recallFn.call(nativeBridge, trackId, fxIndex, isInputFX);
+
+      if (success) {
+        set((s) => ({
+          pluginABStates: {
+            ...s.pluginABStates,
+            [key]: {
+              ...s.pluginABStates[key],
+              [currentSlot]: "stored",
+              active: targetSlot,
+            },
+          },
+        }));
+      }
+    },
+
+    // ========== FX Chain Presets ==========
+    saveFXChainPreset: async (trackId, name, chainType) => {
+      try {
+        let fxSlots: Array<{ name: string; pluginPath?: string }> = [];
+        if (chainType === "master") {
+          fxSlots = await nativeBridge.getMasterFX();
+        } else if (chainType === "input") {
+          fxSlots = await nativeBridge.getTrackInputFX(trackId);
+        } else {
+          fxSlots = await nativeBridge.getTrackFX(trackId);
+        }
+
+        const preset = {
+          name,
+          plugins: fxSlots.map((fx) => ({
+            pluginId: fx.pluginPath || fx.name,
+          })),
+        };
+
+        set((s) => ({
+          fxChainPresets: [...s.fxChainPresets, preset],
+          isModified: true,
+        }));
+
+        get().showToast(`FX chain preset "${name}" saved`, "success");
+      } catch (e) {
+        console.error("[Store] Failed to save FX chain preset:", e);
+        get().showToast("Failed to save FX chain preset", "error");
+      }
+    },
+
+    loadFXChainPreset: async (trackId, presetIndex, chainType) => {
+      const { fxChainPresets, showToast } = get();
+      const preset = fxChainPresets[presetIndex];
+      if (!preset) return;
+
+      try {
+        // First, remove all existing FX from the chain
+        let currentFx: Array<{ index: number }> = [];
+        if (chainType === "master") {
+          currentFx = await nativeBridge.getMasterFX();
+        } else if (chainType === "input") {
+          currentFx = await nativeBridge.getTrackInputFX(trackId);
+        } else {
+          currentFx = await nativeBridge.getTrackFX(trackId);
+        }
+
+        // Remove in reverse order so indices stay valid
+        for (let i = currentFx.length - 1; i >= 0; i--) {
+          if (chainType === "master") {
+            await nativeBridge.removeMasterFX(currentFx[i].index);
+          } else if (chainType === "input") {
+            await nativeBridge.removeTrackInputFX(trackId, currentFx[i].index);
+          } else {
+            await nativeBridge.removeTrackFX(trackId, currentFx[i].index);
+          }
+        }
+
+        // Add each plugin from the preset
+        for (const plugin of preset.plugins) {
+          if (chainType === "master") {
+            await nativeBridge.addMasterFX(plugin.pluginId);
+          } else if (chainType === "input") {
+            await nativeBridge.addTrackInputFX(trackId, plugin.pluginId);
+          } else {
+            await nativeBridge.addTrackFX(trackId, plugin.pluginId);
+          }
+        }
+
+        showToast(`Loaded FX chain preset "${preset.name}"`, "success");
+      } catch (e) {
+        console.error("[Store] Failed to load FX chain preset:", e);
+        showToast("Failed to load FX chain preset", "error");
+      }
+    },
+
+    deleteFXChainPreset: (index) => {
+      set((s) => ({
+        fxChainPresets: s.fxChainPresets.filter((_, i) => i !== index),
+        isModified: true,
+      }));
+    },
+
+    // Sprint 20: Metering + Analysis + Project
+    toggleLoudnessMeter: () =>
+      set((s) => ({ showLoudnessMeter: !s.showLoudnessMeter })),
+
+    toggleSpectrumAnalyzer: () =>
+      set((s) => ({ showSpectrumAnalyzer: !s.showSpectrumAnalyzer })),
+
+    togglePhaseCorrelation: () =>
+      set((s) => ({ showPhaseCorrelation: !s.showPhaseCorrelation })),
+
+    toggleProjectTemplates: () =>
+      set((s) => ({ showProjectTemplates: !s.showProjectTemplates })),
+
+    archiveSession: async () => {
+      const { projectPath, showToast } = get();
+      if (!projectPath) {
+        showToast("Save the project first before archiving.", "info");
+        return;
+      }
+      try {
+        const zipPath = projectPath.replace(/\.s13$/, "") + "_archive.zip";
+        const success = await nativeBridge.archiveSession(projectPath, zipPath);
+        if (success) {
+          showToast(`Session archived to ${zipPath}`, "success");
+        } else {
+          showToast("Archive failed.", "error");
+        }
+      } catch {
+        showToast("Archive not available.", "error");
+      }
+    },
+
+    // Sprint 21: Timeline Interaction
+    setTrackWaveformZoom: (trackId, zoom) => {
+      const clamped = Math.max(0.1, Math.min(5.0, zoom));
+      set((s) => ({
+        tracks: s.tracks.map((t) =>
+          t.id === trackId ? { ...t, waveformZoom: clamped } : t,
+        ),
+      }));
+    },
+
+    toggleSpectralView: (trackId: string) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) =>
+          t.id === trackId ? { ...t, spectralView: !t.spectralView } : t,
+        ),
+      }));
+    },
+
+    toggleCrosshair: () =>
+      set((s) => ({ showCrosshair: !s.showCrosshair })),
+
+    slipEditClip: (clipId, newOffset) => {
+      const state = get();
+
+      // Find the clip and its old offset
+      let oldOffset: number | null = null;
+      for (const track of state.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) {
+          oldOffset = clip.offset;
+          break;
+        }
+      }
+      if (oldOffset === null || oldOffset === newOffset) return;
+
+      const capturedOldOffset = oldOffset;
+      const command: Command = {
+        type: "SLIP_EDIT_CLIP",
+        description: "Slip edit clip",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId
+                  ? { ...clip, offset: newOffset }
+                  : clip,
+              ),
+            })),
+          }));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId
+                  ? { ...clip, offset: capturedOldOffset }
+                  : clip,
+              ),
+            })),
+          }));
+        },
+      };
+
+      commandManager.execute(command);
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+        isModified: true,
+      });
+    },
+
+    // ========== Mixer Snapshots ==========
+    saveMixerSnapshot: (name: string) => {
+      const state = get();
+      const snapshot: MixerSnapshot = {
+        name,
+        timestamp: Date.now(),
+        tracks: state.tracks.map((t) => ({
+          id: t.id,
+          volume: t.volumeDB,
+          pan: t.pan,
+          mute: t.muted,
+          solo: t.soloed,
+        })),
+      };
+      set((s) => {
+        const updated = [...s.mixerSnapshots, snapshot];
+        localStorage.setItem("s13_mixerSnapshots", JSON.stringify(updated));
+        return { mixerSnapshots: updated, isModified: true };
+      });
+      get().showToast(`Mixer snapshot "${name}" saved`, "success");
+    },
+
+    recallMixerSnapshot: (index: number) => {
+      const state = get();
+      const snapshot = state.mixerSnapshots[index];
+      if (!snapshot) return;
+
+      // Capture old state for undo
+      const oldTrackStates = state.tracks.map((t) => ({
+        id: t.id,
+        volumeDB: t.volumeDB,
+        volume: t.volume,
+        pan: t.pan,
+        muted: t.muted,
+        soloed: t.soloed,
+      }));
+
+      const command: Command = {
+        type: "RECALL_MIXER_SNAPSHOT",
+        description: `Recall mixer snapshot "${snapshot.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => {
+              const saved = snapshot.tracks.find((st) => st.id === t.id);
+              if (!saved) return t;
+              const volume = saved.volume <= -60 ? 0 : Math.pow(10, saved.volume / 20);
+              return {
+                ...t,
+                volumeDB: saved.volume,
+                volume,
+                pan: saved.pan,
+                muted: saved.mute,
+                soloed: saved.solo,
+              };
+            }),
+          }));
+          // Sync to backend
+          for (const saved of snapshot.tracks) {
+            nativeBridge.setTrackVolume(saved.id, saved.volume).catch(() => {});
+            nativeBridge.setTrackPan(saved.id, saved.pan).catch(() => {});
+            nativeBridge.setTrackMute(saved.id, saved.mute).catch(() => {});
+            nativeBridge.setTrackSolo(saved.id, saved.solo).catch(() => {});
+          }
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => {
+              const old = oldTrackStates.find((ot) => ot.id === t.id);
+              if (!old) return t;
+              return {
+                ...t,
+                volumeDB: old.volumeDB,
+                volume: old.volume,
+                pan: old.pan,
+                muted: old.muted,
+                soloed: old.soloed,
+              };
+            }),
+          }));
+          // Sync old state to backend
+          for (const old of oldTrackStates) {
+            nativeBridge.setTrackVolume(old.id, old.volumeDB).catch(() => {});
+            nativeBridge.setTrackPan(old.id, old.pan).catch(() => {});
+            nativeBridge.setTrackMute(old.id, old.muted).catch(() => {});
+            nativeBridge.setTrackSolo(old.id, old.soloed).catch(() => {});
+          }
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      get().showToast(`Recalled mixer snapshot "${snapshot.name}"`, "success");
+    },
+
+    deleteMixerSnapshot: (index: number) => {
+      set((s) => {
+        const updated = s.mixerSnapshots.filter((_, i) => i !== index);
+        localStorage.setItem("s13_mixerSnapshots", JSON.stringify(updated));
+        return { mixerSnapshots: updated };
+      });
+    },
+
+    // ========== Bus/Group Creation ==========
+    createBusFromSelectedTracks: () => {
+      const state = get();
+      const selectedIds = state.selectedTrackIds;
+      if (selectedIds.length === 0) {
+        get().showToast("Select tracks first to create a bus.", "info");
+        return;
+      }
+
+      const busId = crypto.randomUUID();
+      const busName = `Bus ${state.tracks.filter((t) => t.type === "bus").length + 1}`;
+
+      // Create the bus track (through addTrack which handles undo for the track creation)
+      get().addTrack({ id: busId, name: busName, type: "bus" });
+
+      // Set up sends from each selected track to the new bus
+      for (const trackId of selectedIds) {
+        get().addTrackSend(trackId, busId);
+      }
+
+      get().showToast(`Created bus "${busName}" with ${selectedIds.length} sends`, "success");
+    },
+
+    // ========== Project Templates ==========
+    saveAsTemplate: (name: string) => {
+      const state = get();
+      // Capture track layout without clips
+      const templateTracks = state.tracks.map((t) => ({
+        ...t,
+        clips: [],        // No clips in templates
+        midiClips: [],     // No MIDI clips
+        takes: [],         // No takes
+        meterLevel: 0,
+        peakLevel: 0,
+        clipping: false,
+      }));
+
+      const template: ProjectTemplate = {
+        name,
+        tracks: templateTracks,
+        masterVolume: state.masterVolume,
+        masterPan: state.masterPan,
+        tempo: state.transport.tempo,
+        timeSignature: { ...state.timeSignature },
+      };
+
+      set((s) => {
+        const updated = [...s.projectTemplates, template];
+        localStorage.setItem("s13_projectTemplates", JSON.stringify(updated));
+        return { projectTemplates: updated };
+      });
+      get().showToast(`Template "${name}" saved`, "success");
+    },
+
+    loadTemplate: (index: number) => {
+      const state = get();
+      const template = state.projectTemplates[index];
+      if (!template) return;
+
+      // Capture old state for undo
+      const oldTracks = JSON.parse(JSON.stringify(state.tracks)) as Track[];
+      const oldMasterVolume = state.masterVolume;
+      const oldMasterPan = state.masterPan;
+      const oldTempo = state.transport.tempo;
+      const oldTimeSig = { ...state.timeSignature };
+
+      const command: Command = {
+        type: "LOAD_TEMPLATE",
+        description: `Load template "${template.name}"`,
+        timestamp: Date.now(),
+        execute: async () => {
+          // Clear current project
+          await get().newProject();
+
+          // Restore global settings from template
+          get().setTempo(template.tempo);
+          get().setTimeSignature(template.timeSignature.numerator, template.timeSignature.denominator);
+          get().setMasterVolume(template.masterVolume);
+          get().setMasterPan(template.masterPan);
+
+          // Add template tracks (skip undo for individual tracks during template load)
+          for (const trackData of template.tracks) {
+            const newId = crypto.randomUUID();
+            const newTrack = {
+              ...trackData,
+              id: newId,
+              clips: [],
+              midiClips: [],
+              takes: [],
+              meterLevel: 0,
+              peakLevel: 0,
+              clipping: false,
+            };
+            set((s) => ({ tracks: [...s.tracks, newTrack] }));
+            nativeBridge.addTrack(newId).catch(() => {});
+            // Sync track properties to backend
+            nativeBridge.setTrackVolume(newId, trackData.volumeDB).catch(() => {});
+            nativeBridge.setTrackPan(newId, trackData.pan).catch(() => {});
+            if (trackData.muted) nativeBridge.setTrackMute(newId, true).catch(() => {});
+            if (trackData.soloed) nativeBridge.setTrackSolo(newId, true).catch(() => {});
+          }
+
+          set({ isModified: true });
+          get().showToast(`Loaded template "${template.name}"`, "success");
+        },
+        undo: async () => {
+          // Clear current project
+          const currentTracks = get().tracks;
+          for (let i = currentTracks.length - 1; i >= 0; i--) {
+            await nativeBridge.removeTrack(currentTracks[i].id).catch(() => {});
+          }
+
+          // Restore old state
+          set({
+            tracks: oldTracks,
+            masterVolume: oldMasterVolume,
+            masterPan: oldMasterPan,
+            transport: { ...get().transport, tempo: oldTempo },
+            timeSignature: oldTimeSig,
+          });
+
+          // Sync old tracks to backend
+          for (const t of oldTracks) {
+            await nativeBridge.addTrack(t.id).catch(() => {});
+            nativeBridge.setTrackVolume(t.id, t.volumeDB).catch(() => {});
+            nativeBridge.setTrackPan(t.id, t.pan).catch(() => {});
+          }
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    deleteTemplate: (index: number) => {
+      set((s) => {
+        const updated = s.projectTemplates.filter((_, i) => i !== index);
+        localStorage.setItem("s13_projectTemplates", JSON.stringify(updated));
+        return { projectTemplates: updated };
+      });
+    },
+
+    // ========== Project Compare ==========
+    toggleProjectCompare: () =>
+      set((s) => ({ showProjectCompare: !s.showProjectCompare })),
+
+    compareWithSavedProject: async () => {
+      const state = get();
+      const filePath = state.projectPath;
+      if (!filePath) {
+        set({ projectCompareData: { tracksDiff: [], clipsDiff: [], settingsDiff: [{ field: "Project", oldValue: "-", newValue: "Project has not been saved yet" }] } });
+        set({ showProjectCompare: true });
+        return;
+      }
+
+      try {
+        const json = await nativeBridge.loadProjectFromFile(filePath);
+        if (!json) {
+          get().showToast("Could not read saved project file", "error");
+          return;
+        }
+        const saved = JSON.parse(json);
+
+        // --- Settings diff ---
+        const settingsDiff: Array<{ field: string; oldValue: string; newValue: string }> = [];
+        if (saved.projectName !== state.projectName) {
+          settingsDiff.push({ field: "Project Name", oldValue: saved.projectName || "", newValue: state.projectName });
+        }
+        if ((saved.tempo || 120) !== state.transport.tempo) {
+          settingsDiff.push({ field: "Tempo (BPM)", oldValue: String(saved.tempo || 120), newValue: String(state.transport.tempo) });
+        }
+        if (saved.timeSignature) {
+          const savedTS = `${saved.timeSignature.numerator}/${saved.timeSignature.denominator}`;
+          const currentTS = `${state.timeSignature.numerator}/${state.timeSignature.denominator}`;
+          if (savedTS !== currentTS) {
+            settingsDiff.push({ field: "Time Signature", oldValue: savedTS, newValue: currentTS });
+          }
+        }
+        if ((saved.masterVolume ?? 1.0) !== state.masterVolume) {
+          settingsDiff.push({ field: "Master Volume", oldValue: String(saved.masterVolume ?? 1.0), newValue: String(state.masterVolume) });
+        }
+        if ((saved.masterPan ?? 0.0) !== state.masterPan) {
+          settingsDiff.push({ field: "Master Pan", oldValue: String(saved.masterPan ?? 0.0), newValue: String(state.masterPan) });
+        }
+        if ((saved.projectSampleRate || 44100) !== state.projectSampleRate) {
+          settingsDiff.push({ field: "Sample Rate", oldValue: String(saved.projectSampleRate || 44100), newValue: String(state.projectSampleRate) });
+        }
+        if ((saved.projectBitDepth || 24) !== state.projectBitDepth) {
+          settingsDiff.push({ field: "Bit Depth", oldValue: String(saved.projectBitDepth || 24), newValue: String(state.projectBitDepth) });
+        }
+
+        // --- Tracks diff ---
+        const savedTrackMap = new Map<string, any>();
+        for (const t of saved.tracks || []) savedTrackMap.set(t.id, t);
+        const currentTrackMap = new Map<string, any>();
+        for (const t of state.tracks) currentTrackMap.set(t.id, t);
+
+        const tracksDiff: Array<{ type: "added" | "removed" | "modified"; id: string; name: string; details?: string }> = [];
+
+        // Added tracks (in current but not saved)
+        for (const t of state.tracks) {
+          if (!savedTrackMap.has(t.id)) {
+            tracksDiff.push({ type: "added", id: t.id, name: t.name });
+          }
+        }
+        // Removed tracks (in saved but not current)
+        for (const t of saved.tracks || []) {
+          if (!currentTrackMap.has(t.id)) {
+            tracksDiff.push({ type: "removed", id: t.id, name: t.name });
+          }
+        }
+        // Modified tracks
+        for (const t of state.tracks) {
+          const st = savedTrackMap.get(t.id);
+          if (!st) continue;
+          const changes: string[] = [];
+          if (st.name !== t.name) changes.push(`renamed: "${st.name}" -> "${t.name}"`);
+          if (st.volumeDB !== t.volumeDB) changes.push(`volume: ${st.volumeDB}dB -> ${t.volumeDB}dB`);
+          if (st.pan !== t.pan) changes.push(`pan: ${st.pan} -> ${t.pan}`);
+          if (st.muted !== t.muted) changes.push(`muted: ${st.muted} -> ${t.muted}`);
+          if (st.soloed !== t.soloed) changes.push(`soloed: ${st.soloed} -> ${t.soloed}`);
+          if (changes.length > 0) {
+            tracksDiff.push({ type: "modified", id: t.id, name: t.name, details: changes.join(", ") });
+          }
+        }
+
+        // --- Clips diff ---
+        const clipsDiff: Array<{ type: "added" | "removed" | "modified"; id: string; name: string; trackName: string; details?: string }> = [];
+
+        // Build clip maps: clipId -> { clip, trackName }
+        const savedClipMap = new Map<string, { clip: any; trackName: string }>();
+        for (const t of saved.tracks || []) {
+          for (const c of t.clips || []) {
+            savedClipMap.set(c.id, { clip: c, trackName: t.name });
+          }
+        }
+        const currentClipMap = new Map<string, { clip: any; trackName: string }>();
+        for (const t of state.tracks) {
+          for (const c of t.clips || []) {
+            currentClipMap.set(c.id, { clip: c, trackName: t.name });
+          }
+        }
+
+        // Added clips
+        for (const [id, { clip, trackName }] of currentClipMap) {
+          if (!savedClipMap.has(id)) {
+            clipsDiff.push({ type: "added", id, name: clip.name || clip.filePath?.split(/[/\\]/).pop() || id, trackName });
+          }
+        }
+        // Removed clips
+        for (const [id, { clip, trackName }] of savedClipMap) {
+          if (!currentClipMap.has(id)) {
+            clipsDiff.push({ type: "removed", id, name: clip.name || clip.filePath?.split(/[/\\]/).pop() || id, trackName });
+          }
+        }
+        // Modified clips
+        for (const [id, { clip: cur, trackName }] of currentClipMap) {
+          const saved = savedClipMap.get(id);
+          if (!saved) continue;
+          const sc = saved.clip;
+          const changes: string[] = [];
+          if (Math.abs((sc.startTime || 0) - (cur.startTime || 0)) > 0.001) changes.push(`moved: ${sc.startTime?.toFixed(3)}s -> ${cur.startTime?.toFixed(3)}s`);
+          if (Math.abs((sc.duration || 0) - (cur.duration || 0)) > 0.001) changes.push(`duration: ${sc.duration?.toFixed(3)}s -> ${cur.duration?.toFixed(3)}s`);
+          if ((sc.volumeDB || 0) !== (cur.volumeDB || 0)) changes.push(`volume: ${sc.volumeDB || 0}dB -> ${cur.volumeDB || 0}dB`);
+          if (sc.muted !== cur.muted) changes.push(`muted: ${sc.muted} -> ${cur.muted}`);
+          if (changes.length > 0) {
+            clipsDiff.push({ type: "modified", id, name: cur.name || cur.filePath?.split(/[/\\]/).pop() || id, trackName, details: changes.join(", ") });
+          }
+        }
+
+        set({ projectCompareData: { tracksDiff, clipsDiff, settingsDiff }, showProjectCompare: true });
+      } catch (e) {
+        console.error("[compareWithSavedProject]", e);
+        get().showToast("Failed to compare project: " + String(e), "error");
+      }
+    },
+
+    // ========== Collaborative Metadata ==========
+    setProjectAuthor: (author: string) => {
+      localStorage.setItem("s13_projectAuthor", author);
+      set({ projectAuthor: author, isModified: true });
+    },
+
+    addRevisionNote: (note: string) => {
+      const state = get();
+      const entry = {
+        timestamp: Date.now(),
+        author: state.projectAuthor,
+        note,
+      };
+      set((s) => ({
+        projectRevisionNotes: [...s.projectRevisionNotes, entry],
+        isModified: true,
+      }));
+    },
+
+    deleteRevisionNote: (index: number) => {
+      set((s) => ({
+        projectRevisionNotes: s.projectRevisionNotes.filter((_, i) => i !== index),
+        isModified: true,
+      }));
     },
   })),
 );
@@ -6475,9 +9321,25 @@ export const THEME_PRESETS: ThemePreset[] = [
       "--color-daw-text": "#ffffff",
       "--color-daw-text-muted": "#cccccc",
       "--color-daw-text-dim": "#888888",
-      "--color-daw-accent": "#00aaff",
-      "--color-daw-border": "#444444",
-      "--color-daw-border-light": "#666666",
+      "--color-daw-accent": "#ffcc00",
+      "--color-daw-border": "#555555",
+      "--color-daw-border-light": "#777777",
+    },
+  },
+  {
+    name: "reaper-gray",
+    label: "REAPER Gray",
+    colors: {
+      "--color-daw-dark": "#484848",
+      "--color-daw-panel": "#5a5a5a",
+      "--color-daw-lighter": "#6a6a6a",
+      "--color-daw-selection": "#7a7a7a",
+      "--color-daw-text": "#e8e8e8",
+      "--color-daw-text-muted": "#b0b0b0",
+      "--color-daw-text-dim": "#8a8a8a",
+      "--color-daw-accent": "#5b9bd5",
+      "--color-daw-border": "#3e3e3e",
+      "--color-daw-border-light": "#707070",
     },
   },
 ];

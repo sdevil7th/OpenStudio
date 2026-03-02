@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import classNames from "classnames";
 import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS } from "../store/useDAWStore";
@@ -7,16 +7,16 @@ import { FXChainPanel } from "./FXChainPanel";
 import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
 import { ColorPicker } from "./ColorPicker";
 import { PluginBrowser } from "./PluginBrowser";
-import { PianoIcon } from "./icons";
-import { Power } from "lucide-react";
-import { Button, Input, Select, Knob } from "./ui";
+import { PianoIcon, TRACK_ICONS, TRACK_ICON_LABELS } from "./icons";
+import { Power, StickyNote } from "lucide-react";
+import { Button, Input, Select, Knob, Textarea } from "./ui";
 
 interface TrackHeaderProps {
   track: Track;
   isSelected?: boolean;
 }
 
-export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
+export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }: TrackHeaderProps) {
   // Isolated meter subscription — this component re-renders at 10Hz for the
   // mini activity bar, but that's cheap and doesn't affect Timeline/App.
   const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
@@ -38,6 +38,7 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
     refreshAudioDeviceSetup,
     trackHeight,
     trackGroups,
+    setTrackNotes,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -56,6 +57,7 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
       refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
       trackHeight: s.trackHeight,
       trackGroups: s.trackGroups,
+      setTrackNotes: s.setTrackNotes,
     })),
   );
 
@@ -63,9 +65,14 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
   const groupColor = groupInfo ? TRACK_GROUP_COLORS[groupInfo.colorIndex] : null;
 
   const colorBarRef = useRef<HTMLDivElement>(null);
+  const iconBtnRef = useRef<HTMLButtonElement>(null);
+  const notesBtnRef = useRef<HTMLButtonElement>(null);
   const [showFXChain, setShowFXChain] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showInstrumentBrowser, setShowInstrumentBrowser] = useState(false);
+  const [showIconPicker, setShowIconPicker] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
+  const [notesValue, setNotesValue] = useState(track.notes || "");
   const [inputType, setInputType] = useState<"stereo" | "mono">(
     track.inputChannelCount === 1 ? "mono" : "stereo",
   );
@@ -215,11 +222,62 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
             active={track.armed}
             activeStyle="glow"
             onClick={handleRecordArm}
-            title="Record Arm"
+            title="Record Arm (R)"
+            aria-label={track.armed ? "Disarm track recording" : "Arm track for recording"}
             className="shrink-0"
           >
-            ●
+            R
           </Button>
+
+          {/* Track Icon */}
+          <button
+            ref={iconBtnRef}
+            onClick={() => setShowIconPicker(!showIconPicker)}
+            className="shrink-0 w-5 h-5 flex items-center justify-center rounded hover:bg-neutral-600 text-neutral-400 hover:text-neutral-200 transition-colors"
+            title={track.icon ? TRACK_ICON_LABELS[track.icon] || "Track icon" : "Set track icon"}
+            data-no-drag
+            data-no-select
+          >
+            {track.icon && TRACK_ICONS[track.icon]
+              ? (() => { const Icon = TRACK_ICONS[track.icon!]; return <Icon size={12} />; })()
+              : <span className="text-[9px] leading-none">&#9835;</span>}
+          </button>
+          {showIconPicker && iconBtnRef.current &&
+            createPortal(
+              <div
+                className="fixed z-50"
+                style={{
+                  top: iconBtnRef.current.getBoundingClientRect().bottom + 2,
+                  left: iconBtnRef.current.getBoundingClientRect().left,
+                }}
+              >
+                <div className="bg-neutral-800 border border-neutral-600 rounded shadow-lg p-1.5 grid grid-cols-3 gap-1"
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  {/* Clear icon option */}
+                  <button
+                    className={`w-7 h-7 flex items-center justify-center rounded hover:bg-neutral-600 text-neutral-400 text-[9px] ${!track.icon ? "bg-neutral-600 ring-1 ring-blue-500" : ""}`}
+                    onClick={() => { updateTrack(track.id, { icon: undefined }); setShowIconPicker(false); }}
+                    title="No icon"
+                  >
+                    --
+                  </button>
+                  {Object.entries(TRACK_ICONS).map(([id, Icon]) => (
+                    <button
+                      key={id}
+                      className={`w-7 h-7 flex items-center justify-center rounded hover:bg-neutral-600 text-neutral-300 ${track.icon === id ? "bg-neutral-600 ring-1 ring-blue-500" : ""}`}
+                      onClick={() => { updateTrack(track.id, { icon: id }); setShowIconPicker(false); }}
+                      title={TRACK_ICON_LABELS[id]}
+                    >
+                      <Icon size={14} />
+                    </button>
+                  ))}
+                </div>
+                {/* Backdrop to close */}
+                <div className="fixed inset-0 -z-10" onClick={() => setShowIconPicker(false)} />
+              </div>,
+              document.body,
+            )}
 
           {/* Track Name */}
           <Input
@@ -276,7 +334,8 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
               shape="square"
               active={track.muted}
               onClick={handleMute}
-              title="Mute"
+              title="Mute (M)"
+              aria-label={track.muted ? "Unmute track" : "Mute track"}
               className="rounded-l"
             >
               M
@@ -287,7 +346,8 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
               shape="square"
               active={track.soloed}
               onClick={handleSolo}
-              title="Solo"
+              title="Solo (S)"
+              aria-label={track.soloed ? "Unsolo track" : "Solo track"}
             >
               S
             </Button>
@@ -341,6 +401,65 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
               ❄
             </span>
           )}
+
+          {/* Track Notes Button */}
+          <button
+            ref={notesBtnRef}
+            onClick={() => {
+              setNotesValue(track.notes || "");
+              setShowNotes(!showNotes);
+            }}
+            className={`shrink-0 w-5 h-5 flex items-center justify-center rounded hover:bg-neutral-600 transition-colors ${track.notes ? "text-yellow-400" : "text-neutral-500 hover:text-neutral-300"}`}
+            title={track.notes ? `Notes: ${track.notes.slice(0, 50)}${track.notes.length > 50 ? "..." : ""}` : "Add track notes"}
+            data-no-drag
+            data-no-select
+          >
+            <StickyNote size={11} />
+          </button>
+          {showNotes && notesBtnRef.current &&
+            createPortal(
+              <div
+                className="fixed z-50"
+                style={{
+                  top: notesBtnRef.current.getBoundingClientRect().bottom + 4,
+                  left: notesBtnRef.current.getBoundingClientRect().left,
+                }}
+              >
+                <div
+                  className="bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl p-2 w-56"
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <div className="text-[10px] text-neutral-400 mb-1 font-medium">Track Notes</div>
+                  <Textarea
+                    size="sm"
+                    value={notesValue}
+                    onChange={(e) => setNotesValue(e.target.value)}
+                    onBlur={() => {
+                      if (notesValue !== (track.notes || "")) {
+                        setTrackNotes(track.id, notesValue);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        setShowNotes(false);
+                      }
+                    }}
+                    placeholder="Add notes about this track..."
+                    rows={3}
+                    className="w-full"
+                    autoFocus
+                  />
+                </div>
+                {/* Backdrop to close */}
+                <div className="fixed inset-0 -z-10" onClick={() => {
+                  if (notesValue !== (track.notes || "")) {
+                    setTrackNotes(track.id, notesValue);
+                  }
+                  setShowNotes(false);
+                }} />
+              </div>,
+              document.body,
+            )}
 
           {/* Track Type Selector */}
           <Select
@@ -477,4 +596,4 @@ export function TrackHeader({ track, isSelected }: TrackHeaderProps) {
       )}
     </>
   );
-}
+});

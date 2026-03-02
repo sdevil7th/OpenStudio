@@ -49,9 +49,11 @@ const TimeDisplay = memo(function TimeDisplay() {
 
     return (
       <div
-        className="bg-neutral-950 text-sky-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none"
+        className="bg-neutral-950 text-sky-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none tabular-nums"
         onClick={cycleTimecodeMode}
         title="Click to cycle: Beats → SMPTE → Time"
+        aria-live="polite"
+        aria-label={`Position: bar ${bars}, beat ${beats}, tick ${ticks}`}
       >
         {`${bars}.${beats}.${ticks.toString().padStart(2, "0")}`}
       </div>
@@ -61,9 +63,11 @@ const TimeDisplay = memo(function TimeDisplay() {
   if (timecodeMode === "smpte") {
     return (
       <div
-        className="bg-neutral-950 text-amber-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none font-mono"
+        className="bg-neutral-950 text-amber-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none font-mono tabular-nums"
         onClick={cycleTimecodeMode}
         title={`SMPTE ${smpteFrameRate}fps — Click to cycle`}
+        aria-live="polite"
+        aria-label={`SMPTE time: ${formatSMPTE(currentTime, smpteFrameRate)}`}
       >
         {formatSMPTE(currentTime, smpteFrameRate)}
       </div>
@@ -77,9 +81,11 @@ const TimeDisplay = memo(function TimeDisplay() {
 
   return (
     <div
-      className="bg-neutral-950 text-emerald-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none"
+      className="bg-neutral-950 text-emerald-500 px-3 py-1 rounded text-sm min-w-[100px] text-center cursor-pointer select-none tabular-nums"
       onClick={cycleTimecodeMode}
       title="Click to cycle: Time → Beats → SMPTE"
+      aria-live="polite"
+      aria-label={`Time: ${mins} minutes ${secs} seconds`}
     >
       {`${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`}
     </div>
@@ -198,11 +204,16 @@ export function TransportBar() {
         <div className="flex items-center gap-2 font-mono">
           <TimeDisplay />
           <div
-            className={classNames("text-xs px-2", {
+            className={classNames("text-xs px-2 flex items-center gap-1.5", {
               "text-red-500": isRecording,
               "text-neutral-500": !isRecording,
             })}
+            aria-live="polite"
+            aria-label={`Transport status: ${getStatusText()}`}
           >
+            {isRecording && (
+              <span className="inline-block w-2 h-2 rounded-full bg-red-500 recording-dot" aria-hidden="true" />
+            )}
             [{getStatusText()}]
           </div>
           {recordMode !== "normal" && (
@@ -223,7 +234,8 @@ export function TransportBar() {
             variant="default"
             size="icon-lg"
             onClick={handleGoToStart}
-            title="Go to Start"
+            title="Go to Start (Home)"
+            aria-label="Go to Start"
           >
             <SkipBack size={16} />
           </Button>
@@ -233,7 +245,8 @@ export function TransportBar() {
             active={isRecording}
             disabled={!hasArmedTracks}
             onClick={handleRecord}
-            title={hasArmedTracks ? "Play & Record" : "Arm a track to record"}
+            title={hasArmedTracks ? "Record (Ctrl+R)" : "Arm a track to record"}
+            aria-label={hasArmedTracks ? "Record" : "Arm a track to record"}
           >
             <Circle size={16} fill="currentColor" />
           </Button>
@@ -243,7 +256,8 @@ export function TransportBar() {
             active={isPlaying && !isRecording}
             disabled={isPlaying && !isPaused}
             onClick={handlePlay}
-            title="Play"
+            title="Play (Space)"
+            aria-label="Play"
           >
             <Play size={16} fill="currentColor" />
           </Button>
@@ -252,7 +266,8 @@ export function TransportBar() {
             size="icon-lg"
             disabled={!isPlaying && !isPaused}
             onClick={handleStop}
-            title="Stop"
+            title="Stop (Space)"
+            aria-label="Stop"
           >
             <Square size={14} fill="currentColor" />
           </Button>
@@ -262,7 +277,8 @@ export function TransportBar() {
             active={isPaused}
             disabled={!isPlaying}
             onClick={handlePause}
-            title="Pause"
+            title="Pause (Space)"
+            aria-label="Pause"
           >
             <Pause size={16} fill="currentColor" />
           </Button>
@@ -271,7 +287,8 @@ export function TransportBar() {
             size="icon-lg"
             active={loopEnabled}
             onClick={toggleLoop}
-            title="Loop"
+            title="Toggle Loop (L)"
+            aria-label={loopEnabled ? "Disable Loop" : "Enable Loop"}
           >
             <Repeat size={16} />
           </Button>
@@ -282,7 +299,8 @@ export function TransportBar() {
             size="icon-lg"
             active={metronomeEnabled}
             onClick={toggleMetronome}
-            title="Metronome Click"
+            title="Toggle Metronome"
+            aria-label={metronomeEnabled ? "Disable Metronome" : "Enable Metronome"}
           >
             <MetronomeIcon size={16} />
           </Button>

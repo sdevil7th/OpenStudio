@@ -1,43 +1,47 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
 import { X } from "lucide-react";
 import { nativeBridge } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
+import { getRegisteredActions } from "./store/actionRegistry";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { MixerPanel } from "./components/MixerPanel";
 import { MainToolbar } from "./components/MainToolbar";
 import { TransportBar as BottomTransportBar } from "./components/TransportBar";
-import { SettingsModal } from "./components/SettingsModal";
-import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
-import { RenderModal } from "./components/RenderModal";
-import { VirtualPianoKeyboard } from "./components/VirtualPianoKeyboard";
-import { PianoRoll } from "./components/PianoRoll";
-import { UndoHistoryPanel } from "./components/UndoHistoryPanel";
-import { CommandPalette } from "./components/CommandPalette";
-import { RegionMarkerManager } from "./components/RegionMarkerManager";
-import { ClipPropertiesPanel } from "./components/ClipPropertiesPanel";
-import { BigClock } from "./components/BigClock";
-import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
-import { PreferencesModal } from "./components/PreferencesModal";
 import { MenuBar } from "./components/MenuBar";
 import { MasterTrackHeader } from "./components/MasterTrackHeader";
-import { RenderQueuePanel } from "./components/RenderQueuePanel";
-import { DynamicSplitModal } from "./components/DynamicSplitModal";
-import { RegionRenderMatrix } from "./components/RegionRenderMatrix";
-import { RoutingMatrix } from "./components/RoutingMatrix";
-import { MediaExplorer } from "./components/MediaExplorer";
-import { CleanProjectModal } from "./components/CleanProjectModal";
-import { BatchConverterModal } from "./components/BatchConverterModal";
-import { CrossfadeEditor } from "./components/CrossfadeEditor";
-import { ThemeEditor } from "./components/ThemeEditor";
-import { VideoWindow } from "./components/VideoWindow";
-import { ScriptEditor } from "./components/ScriptEditor";
 import { ProjectTabBar } from "./components/ProjectTabBar";
-import { ToolbarEditor, CustomToolbarStrip } from "./components/ToolbarEditor";
-import { DDPExportModal } from "./components/DDPExportModal";
-import { PluginBrowser } from "./components/PluginBrowser";
+import { CustomToolbarStrip } from "./components/ToolbarEditor";
 import { SortableTrackHeader } from "./components/SortableTrackHeader";
+
+const SettingsModal = React.lazy(() => import("./components/SettingsModal").then(m => ({ default: m.SettingsModal })));
+const ProjectSettingsModal = React.lazy(() => import("./components/ProjectSettingsModal").then(m => ({ default: m.ProjectSettingsModal })));
+const RenderModal = React.lazy(() => import("./components/RenderModal").then(m => ({ default: m.RenderModal })));
+const VirtualPianoKeyboard = React.lazy(() => import("./components/VirtualPianoKeyboard").then(m => ({ default: m.VirtualPianoKeyboard })));
+const PianoRoll = React.lazy(() => import("./components/PianoRoll").then(m => ({ default: m.PianoRoll })));
+const UndoHistoryPanel = React.lazy(() => import("./components/UndoHistoryPanel").then(m => ({ default: m.UndoHistoryPanel })));
+const CommandPalette = React.lazy(() => import("./components/CommandPalette").then(m => ({ default: m.CommandPalette })));
+const RegionMarkerManager = React.lazy(() => import("./components/RegionMarkerManager").then(m => ({ default: m.RegionMarkerManager })));
+const ClipPropertiesPanel = React.lazy(() => import("./components/ClipPropertiesPanel").then(m => ({ default: m.ClipPropertiesPanel })));
+const BigClock = React.lazy(() => import("./components/BigClock").then(m => ({ default: m.BigClock })));
+const KeyboardShortcutsModal = React.lazy(() => import("./components/KeyboardShortcutsModal").then(m => ({ default: m.KeyboardShortcutsModal })));
+const PreferencesModal = React.lazy(() => import("./components/PreferencesModal").then(m => ({ default: m.PreferencesModal })));
+const RenderQueuePanel = React.lazy(() => import("./components/RenderQueuePanel").then(m => ({ default: m.RenderQueuePanel })));
+const DynamicSplitModal = React.lazy(() => import("./components/DynamicSplitModal").then(m => ({ default: m.DynamicSplitModal })));
+const RegionRenderMatrix = React.lazy(() => import("./components/RegionRenderMatrix").then(m => ({ default: m.RegionRenderMatrix })));
+const RoutingMatrix = React.lazy(() => import("./components/RoutingMatrix").then(m => ({ default: m.RoutingMatrix })));
+const MediaExplorer = React.lazy(() => import("./components/MediaExplorer").then(m => ({ default: m.MediaExplorer })));
+const CleanProjectModal = React.lazy(() => import("./components/CleanProjectModal").then(m => ({ default: m.CleanProjectModal })));
+const BatchConverterModal = React.lazy(() => import("./components/BatchConverterModal").then(m => ({ default: m.BatchConverterModal })));
+const CrossfadeEditor = React.lazy(() => import("./components/CrossfadeEditor").then(m => ({ default: m.CrossfadeEditor })));
+const ThemeEditor = React.lazy(() => import("./components/ThemeEditor").then(m => ({ default: m.ThemeEditor })));
+const VideoWindow = React.lazy(() => import("./components/VideoWindow").then(m => ({ default: m.VideoWindow })));
+const ScriptEditor = React.lazy(() => import("./components/ScriptEditor").then(m => ({ default: m.ScriptEditor })));
+const ToolbarEditor = React.lazy(() => import("./components/ToolbarEditor").then(m => ({ default: m.ToolbarEditor })));
+const DDPExportModal = React.lazy(() => import("./components/DDPExportModal").then(m => ({ default: m.DDPExportModal })));
+const ProjectCompareModal = React.lazy(() => import("./components/ProjectCompareModal").then(m => ({ default: m.ProjectCompareModal })));
+const PluginBrowser = React.lazy(() => import("./components/PluginBrowser").then(m => ({ default: m.PluginBrowser })));
 import {
   DndContext,
   DragOverlay,
@@ -73,6 +77,7 @@ function App() {
     showPianoRoll,
     pianoRollTrackId,
     pianoRollClipId,
+    selectedClipIds,
     closePianoRoll,
     showUndoHistory,
     showCommandPalette,
@@ -93,10 +98,14 @@ function App() {
     showScriptEditor,
     showToolbarEditor,
     showDDPExport,
+    showProjectCompare,
     showPluginBrowser,
     pluginBrowserTrackId,
     tcpWidth,
     setTcpWidth,
+    detachedPanels,
+    detachPanel,
+    attachPanel,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
@@ -118,6 +127,7 @@ function App() {
       showPianoRoll: state.showPianoRoll,
       pianoRollTrackId: state.pianoRollTrackId,
       pianoRollClipId: state.pianoRollClipId,
+      selectedClipIds: state.selectedClipIds,
       closePianoRoll: state.closePianoRoll,
       showUndoHistory: state.showUndoHistory,
       showCommandPalette: state.showCommandPalette,
@@ -138,15 +148,42 @@ function App() {
       showScriptEditor: state.showScriptEditor,
       showToolbarEditor: state.showToolbarEditor,
       showDDPExport: state.showDDPExport,
+      showProjectCompare: state.showProjectCompare,
       showPluginBrowser: state.showPluginBrowser,
       pluginBrowserTrackId: state.pluginBrowserTrackId,
       tcpWidth: state.tcpWidth,
       setTcpWidth: state.setTcpWidth,
+      detachedPanels: state.detachedPanels,
+      detachPanel: state.detachPanel,
+      attachPanel: state.attachPanel,
     }))
   );
 
+  // Compute visible tracks — hides children of collapsed folder tracks
+  const visibleTracks = useMemo(() => {
+    const collapsedFolderIds = new Set<string>();
+    for (const t of tracks) {
+      if (t.isFolder && t.folderCollapsed) collapsedFolderIds.add(t.id);
+    }
+    if (collapsedFolderIds.size === 0) return tracks;
+    return tracks.filter((t) => {
+      let current = t;
+      while (current.parentFolderId) {
+        if (collapsedFolderIds.has(current.parentFolderId)) return false;
+        const parent = tracks.find((p) => p.id === current.parentFolderId);
+        if (!parent) break;
+        current = parent;
+      }
+      return true;
+    });
+  }, [tracks]);
+
   // Ref for workspace wheel handling
   const workspaceRef = useRef<HTMLDivElement>(null);
+
+  // OS file drag-drop visual indicator
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const dragCounterRef = useRef(0);
 
   // Project loading state (separate selector to avoid unnecessary re-renders)
   const isProjectLoading = useDAWStore((state) => state.isProjectLoading);
@@ -159,6 +196,12 @@ function App() {
 
   // Subscribe only to isPlaying to avoid re-rendering App on every time update
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
+
+  // Accessibility: UI font scale — apply to root element
+  const uiFontScale = useDAWStore((state) => state.uiFontScale);
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${16 * uiFontScale}px`;
+  }, [uiFontScale]);
 
   // Playback Loop - updates time smoothly at 60fps
   // Memoization in Timeline prevents expensive recalculations
@@ -186,6 +229,19 @@ function App() {
         }
 
         currentState.setCurrentTime(newTime);
+
+        // Auto-scroll during playback (Sprint 18.7)
+        const autoScroll = currentState.autoScrollDuringPlayback;
+        if (autoScroll) {
+          const { pixelsPerSecond, scrollX, scrollY } = currentState;
+          const viewportWidth = workspaceRef.current?.clientWidth ?? 800;
+          const playheadX = newTime * pixelsPerSecond - scrollX;
+          // When playhead passes 80% of viewport, snap scroll so playhead is at 30%
+          if (playheadX > viewportWidth * 0.8) {
+            const newScrollX = newTime * pixelsPerSecond - viewportWidth * 0.3;
+            currentState.setScroll(Math.max(0, newScrollX), scrollY);
+          }
+        }
       }
 
       frameId = requestAnimationFrame(loop);
@@ -218,22 +274,65 @@ function App() {
     return unsub;
   }, []);
 
-  // Auto-backup timer
+  // Auto-save with rotating backups (Sprint 20.8)
   useEffect(() => {
     const state = useDAWStore.getState();
     if (!state.autoBackupEnabled) return;
 
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       const s = useDAWStore.getState();
       if (s.isModified && s.projectPath) {
-        s.saveProject(false).then((ok) => {
-          if (ok) console.log("[App] Auto-backup saved");
-        });
+        try {
+          const ok = await s.saveProject(false);
+          if (ok) console.log("[App] Auto-save completed");
+        } catch {
+          // Auto-save failure is non-critical
+        }
       }
     }, state.autoBackupInterval);
 
     return () => clearInterval(interval);
   }, []);
+
+  // Enhanced auto-save: uses autoSaveEnabled / autoSaveIntervalMinutes from store.
+  // Reactively subscribes to changes so toggling or changing interval takes effect immediately.
+  useEffect(() => {
+    const unsubscribe = useDAWStore.subscribe(
+      (state) => ({ enabled: state.autoSaveEnabled, minutes: state.autoSaveIntervalMinutes }),
+      ({ enabled, minutes }) => {
+        // Clear any previous timer first (handled below via closure)
+        // This subscription just triggers re-evaluation; the actual timer is managed
+        // by the outer effect dependencies.
+        void enabled;
+        void minutes;
+      },
+      { equalityFn: (a, b) => a.enabled === b.enabled && a.minutes === b.minutes },
+    );
+    return unsubscribe;
+  }, []);
+
+  // Separate interval effect for the improved auto-save
+  const autoSaveEnabled = useDAWStore((s) => s.autoSaveEnabled);
+  const autoSaveIntervalMinutes = useDAWStore((s) => s.autoSaveIntervalMinutes);
+
+  useEffect(() => {
+    if (!autoSaveEnabled) return;
+
+    const intervalMs = autoSaveIntervalMinutes * 60 * 1000;
+    const timerId = setInterval(async () => {
+      const s = useDAWStore.getState();
+      if (s.isModified && s.projectPath) {
+        try {
+          const ok = await s.saveProject(false);
+          if (ok) console.log("[App] Auto-save completed");
+        } catch {
+          // Auto-save failure is non-critical
+        }
+      }
+    }, intervalMs);
+
+    return () => clearInterval(timerId);
+  }, [autoSaveEnabled, autoSaveIntervalMinutes]);
 
   const syncedRef = useRef(false);
 
@@ -291,6 +390,42 @@ function App() {
         target.isContentEditable
       ) {
         return;
+      }
+
+      // --- Custom Shortcut Override Layer ---
+      // Convert the KeyboardEvent to a shortcut string and check if any
+      // custom shortcut binding matches. If so, execute the action from
+      // the registry and return, bypassing all hardcoded shortcuts below.
+      {
+        const parts: string[] = [];
+        if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
+        if (e.shiftKey) parts.push("Shift");
+        if (e.altKey) parts.push("Alt");
+        let key = e.key;
+        if (!["Control", "Shift", "Alt", "Meta"].includes(key)) {
+          if (key === " ") key = "Space";
+          else if (key === "ArrowLeft") key = "Left";
+          else if (key === "ArrowRight") key = "Right";
+          else if (key === "ArrowUp") key = "Up";
+          else if (key === "ArrowDown") key = "Down";
+          else if (key === "Escape") key = "Esc";
+          else if (key.length === 1) key = key.toUpperCase();
+          parts.push(key);
+          const pressed = parts.join("+");
+          const customShortcuts = useDAWStore.getState().customShortcuts;
+          // Find an action whose custom shortcut matches the pressed combo
+          for (const [actionId, shortcut] of Object.entries(customShortcuts)) {
+            if (shortcut === pressed) {
+              const actions = getRegisteredActions();
+              const action = actions.find((a) => a.id === actionId);
+              if (action) {
+                e.preventDefault();
+                action.execute();
+                return;
+              }
+            }
+          }
+        }
       }
 
       // Spacebar: Toggle play/stop (must be in keydown to prevent native page scroll)
@@ -602,9 +737,12 @@ function App() {
     const MEDIA_EXTENSIONS = new Set([
       // Audio
       ".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".wma", ".m4a", ".aac",
+      // MIDI
+      ".mid", ".midi",
       // Video (audio will be extracted via FFmpeg)
       ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv", ".m4v",
     ]);
+    const MIDI_EXTENSIONS = new Set([".mid", ".midi"]);
     const MAX_DROP_SIZE = 500 * 1024 * 1024; // 500MB limit for base64 transfer
 
     const handleDragOver = (e: DragEvent) => {
@@ -615,9 +753,33 @@ function App() {
       }
     };
 
+    // Use dragenter/dragleave counter to reliably track drag state across child elements
+    const handleDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounterRef.current++;
+      if (dragCounterRef.current === 1) {
+        // Only show overlay for external file drags (not internal Konva/dnd-kit drags)
+        if (e.dataTransfer?.types?.includes("Files")) {
+          setIsDraggingFiles(true);
+        }
+      }
+    };
+
+    const handleDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounterRef.current--;
+      if (dragCounterRef.current === 0) {
+        setIsDraggingFiles(false);
+      }
+    };
+
     const handleDrop = async (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
+
+      // Reset drag indicator
+      dragCounterRef.current = 0;
+      setIsDraggingFiles(false);
 
       const files = e.dataTransfer?.files;
       if (!files || files.length === 0) return;
@@ -640,6 +802,9 @@ function App() {
 
       for (const file of mediaFiles) {
         try {
+          const ext = "." + file.name.split(".").pop()?.toLowerCase();
+          const isMidi = MIDI_EXTENSIONS.has(ext);
+
           // Read file data and convert to base64 (chunked for performance)
           const arrayBuffer = await file.arrayBuffer();
           const bytes = new Uint8Array(arrayBuffer);
@@ -657,7 +822,7 @@ function App() {
             continue;
           }
 
-          // Create a new track for this file
+          // Create a new track for this file (MIDI track for .mid/.midi, audio track otherwise)
           const { tracks, transport, importMedia } = useDAWStore.getState();
           const result = await nativeBridge.addTrack();
           const trackId = typeof result === "string" ? result : `${Date.now()}`;
@@ -666,12 +831,13 @@ function App() {
           addTrack({
             id: trackId,
             name: trackName,
+            type: isMidi ? "midi" : "audio",
             color: `hsl(${(tracks.length * 60) % 360}, 60%, 50%)`,
-          });
+          } as any);
 
           // Import from the saved path
           await importMedia(savedPath, trackId, transport.currentTime);
-          console.log(`[App] Imported dropped file: ${file.name} → track ${trackId}`);
+          console.log(`[App] Imported dropped file: ${file.name} → track ${trackId} (${isMidi ? "MIDI" : "audio"})`);
         } catch (error) {
           console.error(`[App] Failed to import dropped file: ${file.name}`, error);
         }
@@ -679,9 +845,13 @@ function App() {
     };
 
     document.addEventListener("dragover", handleDragOver);
+    document.addEventListener("dragenter", handleDragEnter);
+    document.addEventListener("dragleave", handleDragLeave);
     document.addEventListener("drop", handleDrop);
     return () => {
       document.removeEventListener("dragover", handleDragOver);
+      document.removeEventListener("dragenter", handleDragEnter);
+      document.removeEventListener("dragleave", handleDragLeave);
       document.removeEventListener("drop", handleDrop);
     };
   }, [addTrack]);
@@ -768,10 +938,12 @@ function App() {
       {/* Media Explorer (left panel) + Main Workspace */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
       {showMediaExplorer && (
-        <MediaExplorer
-          isVisible={showMediaExplorer}
-          onClose={() => useDAWStore.getState().toggleMediaExplorer()}
-        />
+        <Suspense fallback={null}>
+          <MediaExplorer
+            isVisible={showMediaExplorer}
+            onClose={() => useDAWStore.getState().toggleMediaExplorer()}
+          />
+        </Suspense>
       )}
       <div ref={workspaceRef} className="workspace flex-1">
         {/* Track Control Panel (Left Sidebar) */}
@@ -814,10 +986,10 @@ function App() {
               onDragEnd={handleDragEnd}
             >
               <SortableContext
-                items={tracks.map((t) => t.id)}
+                items={visibleTracks.map((t) => t.id)}
                 strategy={verticalListSortingStrategy}
               >
-                {tracks.map((track) => {
+                {visibleTracks.map((track) => {
                   const spacer = useDAWStore.getState().spacers.find(
                     (s) => s.afterTrackId === track.id
                   );
@@ -886,6 +1058,20 @@ function App() {
                 })()}
               </DragOverlay>
             </DndContext>
+
+            {/* Empty state prompt in TCP when no tracks */}
+            {tracks.length === 0 && (
+              <div className="flex flex-col items-center justify-center px-3 py-6 text-center">
+                <div className="text-daw-text-muted text-xs mb-2 opacity-60">
+                  No tracks in project
+                </div>
+                <div className="text-neutral-600 text-[11px] leading-relaxed">
+                  Click <span className="text-daw-accent font-medium">+ Add Track</span> above,
+                  press <kbd className="px-1 py-0.5 rounded bg-neutral-700/80 text-neutral-300 text-[10px] font-mono border border-daw-border">Ctrl+T</kbd>,
+                  or drop audio files into the timeline
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Master Track in TCP */}
@@ -917,7 +1103,7 @@ function App() {
         </div>
 
         {/* Timeline (Canvas-based) */}
-        <Timeline tracks={tracks} />
+        <Timeline tracks={visibleTracks} />
       </div>
       </div>{/* Close Media Explorer + Workspace wrapper */}
 
@@ -925,7 +1111,11 @@ function App() {
       <BottomTransportBar />
 
       {/* Virtual MIDI Keyboard */}
-      {showVirtualKeyboard && <VirtualPianoKeyboard />}
+      {showVirtualKeyboard && (
+        <Suspense fallback={null}>
+          <VirtualPianoKeyboard />
+        </Suspense>
+      )}
 
       {/* Piano Roll Editor Modal */}
       {showPianoRoll && pianoRollTrackId && pianoRollClipId && (
@@ -945,7 +1135,24 @@ function App() {
             </div>
             {/* Piano Roll Content */}
             <div className="flex-1 overflow-hidden">
-              <PianoRoll trackId={pianoRollTrackId} clipId={pianoRollClipId} />
+              <Suspense fallback={<div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading...</div>}>
+                <PianoRoll
+                  trackId={pianoRollTrackId}
+                  clipId={pianoRollClipId}
+                  additionalClipIds={
+                    selectedClipIds.length > 1
+                      ? (() => {
+                          const prTrack = tracks.find((t) => t.id === pianoRollTrackId);
+                          if (!prTrack) return [];
+                          const midiClipIdSet = new Set(prTrack.midiClips.map((c) => c.id));
+                          return selectedClipIds.filter(
+                            (id) => id !== pianoRollClipId && midiClipIdSet.has(id),
+                          );
+                        })()
+                      : []
+                  }
+                />
+              </Suspense>
             </div>
           </div>
         </div>
@@ -954,143 +1161,236 @@ function App() {
       {/* Undo History Panel */}
       {showUndoHistory && (
         <div className="fixed right-2 top-20 z-1000">
-          <UndoHistoryPanel />
+          <Suspense fallback={null}>
+            <UndoHistoryPanel />
+          </Suspense>
         </div>
       )}
 
       {/* Big Clock */}
       {showBigClock && (
         <div className="fixed left-1/2 top-16 -translate-x-1/2 z-1000">
-          <BigClock />
+          <Suspense fallback={null}>
+            <BigClock />
+          </Suspense>
         </div>
       )}
 
       {/* Clip Properties Panel */}
       {showClipProperties && (
         <div className="fixed left-2 top-20 z-1000">
-          <ClipPropertiesPanel />
+          <Suspense fallback={null}>
+            <ClipPropertiesPanel />
+          </Suspense>
         </div>
       )}
 
       {/* Region/Marker Manager */}
       {showRegionMarkerManager && (
         <div className="fixed right-2 top-20 z-1000 w-72 h-96 rounded border border-daw-border shadow-lg overflow-hidden">
-          <RegionMarkerManager />
+          <Suspense fallback={null}>
+            <RegionMarkerManager />
+          </Suspense>
         </div>
       )}
 
       {/* Render Queue Panel */}
       {showRenderQueue && (
         <div className="fixed right-2 bottom-16 z-1000">
-          <RenderQueuePanel />
+          <Suspense fallback={null}>
+            <RenderQueuePanel />
+          </Suspense>
         </div>
       )}
 
       {/* Preferences Modal */}
-      <PreferencesModal
-        isOpen={showPreferences}
-        onClose={() => useDAWStore.getState().togglePreferences()}
-      />
+      {showPreferences && (
+        <Suspense fallback={null}>
+          <PreferencesModal
+            isOpen={showPreferences}
+            onClose={() => useDAWStore.getState().togglePreferences()}
+          />
+        </Suspense>
+      )}
 
       {/* Keyboard Shortcuts Modal */}
-      <KeyboardShortcutsModal
-        isOpen={showKeyboardShortcuts}
-        onClose={() => useDAWStore.getState().toggleKeyboardShortcuts()}
-      />
+      {showKeyboardShortcuts && (
+        <Suspense fallback={null}>
+          <KeyboardShortcutsModal
+            isOpen={showKeyboardShortcuts}
+            onClose={() => useDAWStore.getState().toggleKeyboardShortcuts()}
+          />
+        </Suspense>
+      )}
 
       {/* Command Palette */}
-      <CommandPalette
-        isOpen={showCommandPalette}
-        onClose={() => useDAWStore.getState().toggleCommandPalette()}
-      />
+      {showCommandPalette && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            isOpen={showCommandPalette}
+            onClose={() => useDAWStore.getState().toggleCommandPalette()}
+          />
+        </Suspense>
+      )}
 
       {/* Dynamic Split Modal (Phase 9B) */}
-      <DynamicSplitModal
-        isOpen={showDynamicSplit}
-        onClose={() => useDAWStore.getState().closeDynamicSplit()}
-      />
+      {showDynamicSplit && (
+        <Suspense fallback={null}>
+          <DynamicSplitModal
+            isOpen={showDynamicSplit}
+            onClose={() => useDAWStore.getState().closeDynamicSplit()}
+          />
+        </Suspense>
+      )}
 
       {/* Mixer Panel */}
-      <MixerPanel isVisible={showMixer} onClose={toggleMixer} />
-      
+      <MixerPanel
+        isVisible={showMixer || detachedPanels.includes("mixer")}
+        isDetached={detachedPanels.includes("mixer")}
+        onDetach={() => detachPanel("mixer")}
+        onAttach={() => attachPanel("mixer")}
+        onClose={toggleMixer}
+      />
 
       {/* Settings Modal */}
-      <SettingsModal isOpen={showSettings} onClose={closeSettings} />
+      {showSettings && (
+        <Suspense fallback={null}>
+          <SettingsModal isOpen={showSettings} onClose={closeSettings} />
+        </Suspense>
+      )}
 
       {/* Project Settings Modal */}
-      <ProjectSettingsModal
-        isOpen={showProjectSettings}
-        onClose={closeProjectSettings}
-      />
+      {showProjectSettings && (
+        <Suspense fallback={null}>
+          <ProjectSettingsModal
+            isOpen={showProjectSettings}
+            onClose={closeProjectSettings}
+          />
+        </Suspense>
+      )}
+
+      {/* Project Compare Modal */}
+      {showProjectCompare && (
+        <Suspense fallback={null}>
+          <ProjectCompareModal
+            isOpen={showProjectCompare}
+            onClose={() => useDAWStore.getState().toggleProjectCompare()}
+          />
+        </Suspense>
+      )}
 
       {/* Render Modal */}
-      <RenderModal isOpen={showRenderModal} onClose={closeRenderModal} />
+      {showRenderModal && (
+        <Suspense fallback={null}>
+          <RenderModal isOpen={showRenderModal} onClose={closeRenderModal} />
+        </Suspense>
+      )}
 
       {/* Routing Matrix (Phase 11B) */}
-      <RoutingMatrix
-        isOpen={showRoutingMatrix}
-        onClose={() => useDAWStore.getState().toggleRoutingMatrix()}
-      />
+      {showRoutingMatrix && (
+        <Suspense fallback={null}>
+          <RoutingMatrix
+            isOpen={showRoutingMatrix}
+            onClose={() => useDAWStore.getState().toggleRoutingMatrix()}
+          />
+        </Suspense>
+      )}
 
       {/* Region Render Matrix (Phase 10A) */}
-      <RegionRenderMatrix
-        isOpen={showRegionRenderMatrix}
-        onClose={() => useDAWStore.getState().toggleRegionRenderMatrix()}
-      />
+      {showRegionRenderMatrix && (
+        <Suspense fallback={null}>
+          <RegionRenderMatrix
+            isOpen={showRegionRenderMatrix}
+            onClose={() => useDAWStore.getState().toggleRegionRenderMatrix()}
+          />
+        </Suspense>
+      )}
 
       {/* Clean Project Directory (Phase 12B) */}
-      <CleanProjectModal
-        isOpen={showCleanProject}
-        onClose={() => useDAWStore.getState().toggleCleanProject()}
-      />
+      {showCleanProject && (
+        <Suspense fallback={null}>
+          <CleanProjectModal
+            isOpen={showCleanProject}
+            onClose={() => useDAWStore.getState().toggleCleanProject()}
+          />
+        </Suspense>
+      )}
 
       {/* Batch File Converter (Phase 12E) */}
-      <BatchConverterModal
-        isOpen={showBatchConverter}
-        onClose={() => useDAWStore.getState().toggleBatchConverter()}
-      />
+      {showBatchConverter && (
+        <Suspense fallback={null}>
+          <BatchConverterModal
+            isOpen={showBatchConverter}
+            onClose={() => useDAWStore.getState().toggleBatchConverter()}
+          />
+        </Suspense>
+      )}
 
       {/* Crossfade Editor (Phase 13A) */}
-      <CrossfadeEditor
-        isOpen={showCrossfadeEditor}
-        onClose={() => useDAWStore.getState().closeCrossfadeEditor()}
-      />
+      {showCrossfadeEditor && (
+        <Suspense fallback={null}>
+          <CrossfadeEditor
+            isOpen={showCrossfadeEditor}
+            onClose={() => useDAWStore.getState().closeCrossfadeEditor()}
+          />
+        </Suspense>
+      )}
 
       {/* Theme Editor (Phase 14A+B) */}
-      <ThemeEditor
-        isOpen={showThemeEditor}
-        onClose={() => useDAWStore.getState().toggleThemeEditor()}
-      />
+      {showThemeEditor && (
+        <Suspense fallback={null}>
+          <ThemeEditor
+            isOpen={showThemeEditor}
+            onClose={() => useDAWStore.getState().toggleThemeEditor()}
+          />
+        </Suspense>
+      )}
 
       {/* Video Window (Phase 15A) */}
-      <VideoWindow />
+      <Suspense fallback={null}>
+        <VideoWindow />
+      </Suspense>
 
       {/* Script Editor (Phase 15B) */}
-      {showScriptEditor && <ScriptEditor />}
+      {showScriptEditor && (
+        <Suspense fallback={null}>
+          <ScriptEditor />
+        </Suspense>
+      )}
 
       {/* Toolbar Editor (Phase 15D) */}
-      <ToolbarEditor
-        isOpen={showToolbarEditor}
-        onClose={() => useDAWStore.getState().toggleToolbarEditor()}
-      />
+      {showToolbarEditor && (
+        <Suspense fallback={null}>
+          <ToolbarEditor
+            isOpen={showToolbarEditor}
+            onClose={() => useDAWStore.getState().toggleToolbarEditor()}
+          />
+        </Suspense>
+      )}
 
       {/* DDP Export (Phase 16C) */}
-      <DDPExportModal
-        isOpen={showDDPExport}
-        onClose={() => useDAWStore.getState().toggleDDPExport()}
-      />
+      {showDDPExport && (
+        <Suspense fallback={null}>
+          <DDPExportModal
+            isOpen={showDDPExport}
+            onClose={() => useDAWStore.getState().toggleDDPExport()}
+          />
+        </Suspense>
+      )}
 
       {/* Plugin Browser (from action registry — instrument track creation) */}
       {showPluginBrowser && pluginBrowserTrackId && (
-        <PluginBrowser
-          trackId={pluginBrowserTrackId}
-          targetChain={
-            tracks.find((t) => t.id === pluginBrowserTrackId)?.type === "instrument"
-              ? "instrument"
-              : "track"
-          }
-          onClose={() => useDAWStore.getState().closePluginBrowser()}
-        />
+        <Suspense fallback={null}>
+          <PluginBrowser
+            trackId={pluginBrowserTrackId}
+            targetChain={
+              tracks.find((t) => t.id === pluginBrowserTrackId)?.type === "instrument"
+                ? "instrument"
+                : "track"
+            }
+            onClose={() => useDAWStore.getState().closePluginBrowser()}
+          />
+        </Suspense>
       )}
 
       {/* Project Loading Overlay */}
@@ -1101,6 +1401,31 @@ function App() {
             <p className="text-sm text-neutral-300 font-medium">
               {projectLoadingMessage || "Loading project..."}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* File Drop Overlay — shown when dragging files from OS file explorer */}
+      {isDraggingFiles && (
+        <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+          <div className="flex flex-col items-center gap-3 px-8 py-6 rounded-xl border-2 border-dashed border-daw-accent bg-neutral-900/90 shadow-2xl">
+            <svg
+              className="text-daw-accent"
+              width="48"
+              height="48"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <span className="text-white text-base font-medium">Drop files here</span>
+            <span className="text-neutral-400 text-xs">Audio, MIDI, or video files</span>
           </div>
         </div>
       )}

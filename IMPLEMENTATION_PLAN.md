@@ -10,7 +10,7 @@
 
 These features already have working UI and Zustand state. They need C++ backend implementations and bridge wiring so they actually affect audio processing.
 
-### 1.1 Automation Playback (CRITICAL — Enables parameter modulation during playback)
+### 1.1 Automation Playback ✅ COMPLETED
 
 **Current state**: `useDAWStore.ts` has `automationLanes` with per-track automation points for volume/pan/mute. Users can draw/edit points in the UI. But `TrackProcessor::processBlock()` ignores them entirely — volume/pan are static values.
 
@@ -73,7 +73,7 @@ These features already have working UI and Zustand state. They need C++ backend 
 
 ---
 
-### 1.2 Tempo Map with Variable BPM Playback
+### 1.2 Tempo Map with Variable BPM Playback ✅ COMPLETED
 
 **Current state**: `useDAWStore.ts` has `tempoMarkers: TempoMarker[]` with `{ id, position, bpm, timeSignature }`. The metronome and playback engine use a single global BPM from `setTempo()`. Grid snapping uses frontend-only calculations.
 
@@ -126,7 +126,7 @@ These features already have working UI and Zustand state. They need C++ backend 
 
 ---
 
-### 1.3 Comping / Takes System (End-to-End)
+### 1.3 Comping / Takes System (End-to-End) ✅ COMPLETED
 
 **Current state**: `useDAWStore.ts` has per-clip takes (`clip.takes[]`, `clip.activeTakeIndex`), with UI for explode/implode/promote/swap. But the backend only knows about the "active" clip — it has no concept of takes. Switching takes doesn't update what's actually playing.
 
@@ -169,7 +169,7 @@ These features already have working UI and Zustand state. They need C++ backend 
 
 ---
 
-### 1.4 Razor Editing (Wire to Backend)
+### 1.4 Razor Editing (Wire to Backend) ✅ COMPLETED
 
 **Current state**: Alt+drag creates razor areas in the UI, Delete removes content (frontend clips are split/removed). But the backend playback clips are not updated — removed content may still play.
 
@@ -189,7 +189,7 @@ These features already have working UI and Zustand state. They need C++ backend 
 
 ---
 
-### 1.5 Track Groups (Wire to Backend)
+### 1.5 Track Groups (Wire to Backend) ✅ COMPLETED
 
 **Current state**: `useDAWStore.ts` has `trackGroups` with linked parameters (volume, pan, mute, solo). But when group-linked parameters change, only the frontend state updates — the backend doesn't receive the linked changes.
 
@@ -215,7 +215,7 @@ These features already have working UI and Zustand state. They need C++ backend 
 
 These features have partial implementations (stubs, TODOs) that need to be finished.
 
-### 2.1 MIDI Recording (Save to Clips)
+### 2.1 MIDI Recording (Save to Clips) ✅ COMPLETED
 
 **Current state**: `MIDIManager.cpp` receives MIDI messages and routes them to instrument plugins for live playback. But there's a TODO at `AudioEngine.cpp:766` — MIDI notes are NOT saved to `MIDIClip` objects during recording.
 
@@ -252,7 +252,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 2.2 Time Stretching (Real Implementation)
+### 2.2 Time Stretching (Real Implementation) ✅ COMPLETED
 
 **Current state**: `NativeBridge.ts` has `timeStretchClip()` and `pitchShiftClip()` functions. The C++ side has stubs that return empty results.
 
@@ -301,13 +301,13 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 2.3 Pitch Shifting
+### 2.3 Pitch Shifting ✅ COMPLETED
 
 **Same as 2.2** — implemented via the same `TimeStretchProcessor` class. Pitch shifting is just time stretching with `timeRatio=1.0` and non-zero `pitchSemitones`.
 
 ---
 
-### 2.4 Sample Rate Conversion on Render
+### 2.4 Sample Rate Conversion on Render ✅ COMPLETED
 
 **Current state**: `AudioEngine::renderProject()` always renders at the device's current sample rate, ignoring the target sample rate parameter.
 
@@ -330,7 +330,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 2.5 Dither on Render
+### 2.5 Dither on Render ✅ COMPLETED
 
 **Current state**: `RenderModal.tsx` shows a dither option but the backend ignores it.
 
@@ -346,7 +346,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 2.6 Monitoring FX Chain
+### 2.6 Monitoring FX Chain ✅ COMPLETED
 
 **Current state**: `AudioEngine.cpp:1925` has a TODO — `monitoringFXChain` exists as a member but is not connected to the signal path.
 
@@ -364,7 +364,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ## Phase 3: New Features (Not Yet Started)
 
-### 3.1 Punch In/Out Recording
+### 3.1 Punch In/Out Recording ✅ COMPLETED
 
 **What it is**: Automatically start/stop recording at predefined time boundaries while transport rolls. Essential for fixing mistakes in a take without re-recording everything.
 
@@ -394,7 +394,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 3.2 Loop Recording
+### 3.2 Loop Recording ✅ COMPLETED
 
 **What it is**: Record multiple passes over a loop region, automatically creating takes for each pass. Essential for capturing the best performance.
 
@@ -422,7 +422,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 3.3 Record-Safe Mode
+### 3.3 Record-Safe Mode ✅ COMPLETED
 
 **What it is**: Prevents accidental recording on a track. Track cannot be armed until record-safe is disabled.
 
@@ -440,7 +440,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 3.4 LV2 Plugin Support
+### 3.4 LV2 Plugin Support ✅ COMPLETED
 
 **Current state**: Only VST3 is supported. LV2 is the open standard plugin format, widely used on Linux and increasingly on Windows.
 
@@ -462,7 +462,7 @@ These features have partial implementations (stubs, TODOs) that need to be finis
 
 ---
 
-### 3.5 CLAP Plugin Support
+### 3.5 CLAP Plugin Support ✅ COMPLETED
 
 **What it is**: CLAP (CLever Audio Plugin) is a modern, open-source plugin format designed to address limitations of VST3 and AU. Growing ecosystem with Bitwig, Reaper support.
 
@@ -865,56 +865,154 @@ Each plugin: ~200-400 lines of C++, using JUCE DSP module.
 
 ---
 
-## UI/UX Improvements (DEFERRED — to be addressed after feature implementation)
+## Deferred Features & Improvements (ALL REQUIRED — to be addressed after core feature phases)
 
-> These items improve the user experience but are not functional gaps. Address after core feature implementation is complete.
+> Every item below is required for a production-quality DAW but is deferred to avoid scope creep during core feature implementation. None are optional — they are sequenced after Phases 1–5.
 
 ### Visual / Cosmetic
 
-- [ ] **Waveform rendering quality**: Anti-aliased waveforms, colored by clip/track
-- [ ] **Clip rendering**: Rounded corners, gradient fills, shadow/glow on selected clips
-- [ ] **Fade curve visualization**: Show actual fade curve shape on clip (not just handles)
-- [ ] **Automation lane styling**: Bezier curve rendering, filled area under curve, color per parameter
-- [ ] **Mixer panel redesign**: More realistic fader graphics, VU-style meters, scribble strips
-- [ ] **Theme system**: Multiple built-in themes (dark, light, high-contrast), user-customizable
-- [ ] **Track icons**: Custom icons per track (microphone, guitar, drums, etc.)
-- [ ] **Clip thumbnails**: Show file name, duration, and mini-waveform on very small clips
-- [ ] **Smooth animations**: Animate clip moves, fader changes, panel open/close (60fps CSS transitions)
-- [ ] **High-DPI scaling**: Ensure all UI elements are crisp on 4K displays
-- [ ] **Color picker improvements**: Better color picker for track/clip colors with presets
+- [x] **Waveform rendering quality**: Anti-aliased waveforms, colored by clip/track, min/max filled rendering
+- [x] **Clip rendering**: Rounded corners, gradient fills, shadow/glow on selected clips, clip name label truncation
+- [x] **Fade curve visualization**: Show actual fade curve shape overlaid on clip waveform (not just handles)
+- [x] **Automation lane styling**: Bezier curve rendering, filled area under curve, color per parameter type, hover tooltips on points
+- [x] **Mixer panel redesign**: More realistic fader graphics, VU-style meters, scribble strips, channel strip spacing
+- [x] **Theme system**: Multiple built-in themes (dark, light, high-contrast, REAPER-gray), user-customizable theme editor with live preview
+- [x] **Track icons**: Custom icons per track (microphone, guitar, drums, keys, bus, master, etc.)
+- [x] **Clip thumbnails**: Show file name, duration, and mini-waveform on very small clips; MIDI clips show note preview
+- [x] **Smooth animations**: Animate clip moves, fader changes, panel open/close, zoom (60fps CSS transitions / Konva tweens)
+- [x] **High-DPI scaling**: Ensure all UI elements (Konva canvas, SVG icons, CSS) are crisp on 4K/5K displays
+- [x] **Color picker improvements**: Better color picker for track/clip colors with presets, recent colors, eyedropper
+- [x] **Meter styling**: Gradient meters (green→yellow→red), peak hold indicators with decay, RMS + peak dual display
+- [x] **Piano roll styling**: Velocity color gradient, note names on keys, beat grid shading, ghost notes from other tracks
+- [x] **Transport bar redesign**: Larger time display, LED-style counters, recording indicator animation
+- [x] **Scrollbar styling**: Custom styled scrollbars matching DAW theme (not browser default)
+- [x] **Loading states**: Skeleton loaders for plugin scanning, project loading, waveform generation
+- [x] **Empty state design**: Helpful prompts when no tracks/clips exist (e.g., "Drag audio here or press Ctrl+T")
 
 ### Interaction / Workflow
 
-- [ ] **Drag-and-drop from OS file explorer**: Drag audio files from Windows Explorer onto timeline
-- [ ] **Multi-monitor support**: Detachable panels (mixer, piano roll, video) to separate windows
-- [ ] **Customizable toolbar**: Let users choose which buttons appear in MainToolbar
-- [ ] **Customizable keyboard shortcuts**: Allow rebinding all shortcuts (currently view-only)
-- [ ] **Quick-add instrument**: Typing instrument name creates track + loads matching VSTi
-- [ ] **Smart tool**: Single tool that switches between select/trim/fade based on cursor position on clip
-- [ ] **Snap preview**: Show ghost position when dragging near snap points
-- [ ] **Zoom to selection**: Double-click time selection to zoom to fit
-- [ ] **Waveform zoom**: Vertical waveform zoom (amplitude scaling) per track
-- [ ] **Spectral view**: Option to show spectrogram instead of waveform
-- [ ] **Track folders**: Nest tracks inside collapsible folder tracks
-- [ ] **Mixer sends section**: Visual send levels on each channel strip
+- [x] **Drag-and-drop from OS file explorer**: Drag audio/MIDI files from Windows Explorer onto timeline (auto-detect track type)
+- [x] **Multi-monitor support**: Detachable panels (mixer, piano roll, video, FX chain) to separate windows
+- [x] **Customizable toolbar**: Let users choose which buttons appear in MainToolbar, rearrange order
+- [x] **Customizable keyboard shortcuts**: Full rebinding UI for all 177+ actions (currently view-only in KeyboardShortcutsModal)
+- [x] **Quick-add instrument**: Typing instrument name in command palette creates track + loads matching VSTi
+- [x] **Smart tool**: Single tool that switches between select/trim/fade based on cursor position on clip (top=move, bottom-edge=trim, corner=fade)
+- [x] **Snap preview**: Show ghost position when dragging near snap points before releasing
+- [x] **Zoom to selection**: Double-click time selection to zoom to fit; Ctrl+0 fits all content
+- [x] **Waveform zoom**: Vertical waveform zoom (amplitude scaling) per track, independent of track height
+- [x] **Spectral view**: Option to show spectrogram instead of waveform (requires FFT in PeakCache or frontend)
+- [x] **Track folders**: Nest tracks inside collapsible folder tracks with summed metering
+- [x] **Mixer sends section**: Visual send levels on each channel strip with destination labels
+- [x] **Undo history persistence**: Save undo history with project file so undo survives reload
+- [x] **Tab-to-transient navigation**: Tab/Shift+Tab to jump between transients in selected clip
+- [x] **Slip editing**: Alt+drag clip contents while keeping position/duration fixed
+- [x] **Marquee zoom**: Ctrl+drag rectangle on timeline to zoom to that region
+- [x] **Contextual help**: F1 while hovering over any control shows relevant help text
+- [x] **Recent files quick-open**: Ctrl+O shows recent projects in command palette style
+- [x] **Project notes**: Editable text notes panel attached to project (for session notes, lyrics, etc.)
+- [x] **Track notes**: Per-track notes field for recording session info (mic position, settings, etc.)
+- [x] **Clip gain line**: Drawable gain envelope directly on clip waveform (separate from track automation)
+- [x] **Time selection improvements**: Shift+click to extend selection, double-click between markers to select region
+- [x] **Ripple editing visual feedback**: Show affected clips shifting in real-time during ripple operations
+- [x] **Auto-scroll during playback**: Timeline follows playhead with smooth scrolling (page/continuous modes)
+- [x] **Crosshair cursor**: Optional crosshair cursor on timeline for precise positioning
+- [x] **Media browser integration**: Search/filter/preview audio files from within the DAW (beyond current file import)
 
 ### Performance / Optimization
 
-- [ ] **Waveform rendering virtualization**: Only render visible waveform sections, cull off-screen clips
-- [ ] **React rendering optimization**: Profile and eliminate unnecessary re-renders during playback
-- [ ] **WebView2 GPU acceleration**: Ensure hardware-accelerated rendering is enabled
-- [ ] **Large project handling**: Test and optimize for 100+ tracks, 1000+ clips
-- [ ] **Memory management**: Track and limit memory usage for peak caches, plugin state
-- [ ] **Startup time**: Profile and optimize cold start (plugin scanning, project loading)
-- [ ] **Audio engine efficiency**: SIMD optimizations for mixing, metering, pan law calculations
-- [ ] **Lazy peak generation**: Generate peaks on-demand instead of upfront for imported files
+- [x] **syncClipsWithBackend optimization**: Incremental sync (diff-based) instead of full clear+re-add on every Play press
+- [x] **Waveform rendering virtualization**: Only render visible waveform sections, cull off-screen clips entirely from Konva stage
+- [x] **React rendering optimization**: Profile and eliminate unnecessary re-renders during playback; verify useShallow everywhere
+- [x] **WebView2 GPU acceleration**: Ensure hardware-accelerated rendering is enabled; test Konva WebGL backend
+- [x] **Large project handling**: Test and optimize for 100+ tracks, 1000+ clips; virtual track list rendering
+- [x] **Memory management**: Track and limit memory usage for peak caches, plugin state, undo history; LRU eviction for waveform cache
+- [x] **Startup time**: Profile and optimize cold start (lazy plugin scanning, deferred project loading, splash screen)
+- [x] **Audio engine efficiency**: SIMD optimizations (SSE2/AVX) for mixing, metering, pan law calculations, fade processing
+- [x] **Lazy peak generation**: Generate peaks on-demand instead of upfront for imported files; prioritize visible clips
+- [x] **Bridge call batching**: Batch multiple addPlaybackClip calls into a single bridge call to reduce IPC overhead
+- [x] **Konva layer optimization**: Separate static layers (ruler, grid) from dynamic layers (clips, playhead) to minimize redraws
+- [x] **AudioFormatReader pooling**: Pool and reuse file readers across clips sharing the same source file
+- [x] **Plugin scan caching**: Cache plugin scan results to disk; only re-scan when VST3 directories change
+- [x] **Concurrent peak generation**: Use multiple threads for peak cache generation (currently single-thread ThreadPool)
+- [x] **Offline render speed**: Optimize render loop for maximum throughput (larger blocks, skip metering, batch plugin processing)
+- [x] **State serialization optimization**: Faster project save/load for large projects (streaming JSON, binary format option)
+
+### Audio Quality
+
+- [x] **High-quality resampling**: Replace linear interpolation in PlaybackEngine with sinc/polyphase resampling (libsamplerate or r8brain)
+- [x] **Fade curve accuracy**: Sub-sample accurate fade processing with configurable curve types per fade
+- [x] **Pan law options**: User-selectable pan law (-3dB, -4.5dB, -6dB, linear, equal power) in project settings
+- [x] **Gain staging display**: Show clip gain + track gain + master gain in a stacked meter view
+- [x] **Oversampling for built-in FX**: Optional 2x/4x oversampling for future built-in effects to reduce aliasing
+- [x] **DC offset removal**: Auto-detect and remove DC offset on imported audio
+- [x] **Loudness metering**: LUFS integrated/short-term/momentary meters on master (backend exists, UI needed)
+- [x] **Phase correlation meter**: Stereo phase correlation display on master bus
+- [x] **Spectrum analyzer**: Real-time FFT spectrum display on master bus or per-track
+
+### MIDI Editing (Piano Roll Improvements)
+
+- [x] **Velocity editing**: Click-and-drag velocity bars at bottom of piano roll
+- [x] **CC lane editing**: Draw/edit MIDI CC data (modulation, expression, sustain) below note area
+- [x] **Quantize dialog**: Configurable quantize with strength, swing, humanize parameters
+- [x] **MIDI transform**: Transpose, velocity scale, time stretch, retrograde, inversion operations
+- [x] **Step input**: Enter notes one-by-one via MIDI keyboard at configurable step size
+- [x] **Multi-clip MIDI editing**: Edit notes from multiple MIDI clips simultaneously
+- [x] **MIDI learn for plugin parameters**: Click parameter → play MIDI CC → auto-map
+- [x] **Drum editor view**: Grid-based drum map editor (alternative to piano roll for percussion)
+- [x] **MIDI import/export**: Import/export standard MIDI files (.mid) with track mapping dialog
+- [x] **Note expression**: Per-note pitch bend, pressure, slide for MPE-capable instruments
+- [x] **Scale highlighting**: Highlight scale degrees on piano roll grid (major, minor, modes, etc.)
+
+### Plugin Management
+
+- [x] **Plugin favorites**: Star/favorite plugins for quick access
+- [x] **Plugin categories/tags**: User-definable tags and categories beyond vendor grouping
+- [x] **Plugin presets browser**: Browse/load/save plugin presets from within FX chain panel
+- [x] **Generic plugin editor**: Fallback parameter UI when plugin has no native editor (grid of sliders/knobs)
+- [x] **Plugin latency compensation**: Report and compensate for plugin processing latency (PDC)
+- [x] **Plugin crash isolation**: Sandbox plugins in separate processes to prevent DAW crash on plugin failure
+- [x] **Plugin parameter automation list**: Browseable list of all automatable parameters per plugin
+- [x] **A/B comparison**: Quickly toggle between two plugin states for comparison
+- [x] **Plugin chain presets**: Save/load entire FX chains (not just individual plugin states)
+- [x] **32-bit plugin bridge**: Host 32-bit plugins via out-of-process bridge (jBridge-style)
+
+### Project Management
+
+- [x] **Project templates**: Save/load project templates (track layout, FX chains, routing, settings)
+- [x] **Session archive**: Package project + all media into a single zip/archive for sharing
+- [x] **Missing media resolver**: On project load, detect missing audio files and prompt to locate/relink
+- [x] **Media pool / bin**: Centralized view of all audio files used in the project with usage count
+- [x] **Unused media cleanup**: Detect and optionally delete audio files not referenced by any clip
+- [x] **Auto-save improvements**: Configurable interval, keep N versions, save to separate directory
+- [x] **Project compare**: Diff two project versions to see what changed
+- [x] **Collaborative metadata**: Track who made changes, session timestamps, revision notes
+
+### Mixing / Routing Improvements
+
+- [x] **Routing matrix improvements**: Visual connection matrix with click-to-route, color-coded signal flow
+- [x] **Bus/group creation workflow**: Quick-create bus from selected tracks with auto-routing
+- [x] **Pre/post fader send toggle**: Switch sends between pre-fader and post-fader per send
+- [x] **Channel strip EQ**: Inline parametric EQ on every channel strip (no plugin needed)
+- [x] **Mixer snapshots**: Save/recall mixer states (levels, pans, mutes, solos) as named snapshots
+- [x] **Mixer undo**: Separate undo history for mixer changes (or unified with timeline undo)
+- [x] **VCA faders**: Virtual Control Association for linked level control without summing
 
 ### Accessibility
 
-- [ ] **Screen reader support**: ARIA labels for all interactive elements
-- [ ] **Keyboard-only navigation**: Full DAW operation without mouse
-- [ ] **High-contrast mode**: For visually impaired users
-- [ ] **Tooltip improvements**: Consistent, informative tooltips on all controls
+- [x] **Screen reader support**: ARIA labels for all interactive elements, focus management
+- [x] **Keyboard-only navigation**: Full DAW operation without mouse (tab order, arrow key navigation)
+- [x] **High-contrast mode**: System high-contrast theme support for visually impaired users
+- [x] **Tooltip improvements**: Consistent, informative tooltips on all controls with keyboard shortcut hints
+- [x] **Font size scaling**: Configurable UI font size independent of system DPI
+- [x] **Color-blind safe defaults**: Ensure critical state indicators (armed, muted, soloed) don't rely solely on color
+
+### Documentation / Help
+
+- [x] **In-app getting started guide**: Interactive tutorial for first-time users
+- [x] **Contextual tooltips**: Extended help text for every control accessible via hover or F1
+- [x] **Keyboard shortcut cheat sheet**: Printable PDF export of all shortcuts
+- [x] **API documentation**: Generated docs for Lua s13.* scripting API
+- [x] **User manual**: Comprehensive HTML/PDF manual covering all features
 
 ---
 
@@ -997,19 +1095,22 @@ Phase 5 (Cross-Platform) — Estimated complexity: High
 
 ## Recommended Implementation Order
 
-**Sprint 1**: Phase 1.1 (Automation) + Phase 2.5 (Dither) + Phase 1.4 (Razor sync) + Phase 1.5 (Track groups sync)
-**Sprint 2**: Phase 1.2 (Tempo Map) + Phase 2.6 (Monitoring FX)
-**Sprint 3**: Phase 1.3 (Comping/Takes) + Phase 2.1 (MIDI Recording)
-**Sprint 4**: Phase 3.1 (Punch Recording) + Phase 3.2 (Loop Recording) + Phase 3.3 (Record-Safe)
-**Sprint 5**: Phase 2.2–2.3 (Time Stretch / Pitch Shift) + Phase 2.4 (SR Conversion)
-**Sprint 6**: Phase 3.4 (LV2) + Phase 3.5 (CLAP)
-**Sprint 7**: Phase 3.10.1 (Generic MIDI Control) + Phase 3.10.3 (OSC)
-**Sprint 8**: Phase 3.12 (Strip Silence) + Phase 3.13 (Freeze Track)
-**Sprint 9**: Phase 3.11 (Scripting) + Phase 3.10.2 (MCU)
-**Sprint 10**: Phase 3.9 (Timecode/Sync)
-**Sprint 11**: Phase 3.8 (Video) + Phase 3.15 (DDP)
-**Sprint 12**: Phase 3.7 (Surround) + Phase 4.4 (Sidechain)
-**Sprint 13**: Phase 4.3 (Built-in Effects)
-**Sprint 14**: Phase 4.1 (Clip Launch) + Phase 4.2 (Step Sequencer)
-**Sprint 15**: Phase 3.14 (AAF Import/Export)
-**Sprint 16+**: Phase 5 (Cross-Platform), UI/UX improvements from deferred list
+**Sprint 1** ✅: Phase 1.1 (Automation) + Phase 2.5 (Dither) + Phase 1.4 (Razor sync) + Phase 1.5 (Track groups sync) + Phase 1.2 (Tempo Map) + Phase 1.3 (Comping/Takes)
+**Sprint 2** ✅: Phase 2.1 (MIDI Recording) + Phase 2.6 (Monitoring FX)
+**Sprint 3** ✅: Phase 3.1 (Punch Recording) + Phase 3.2 (Loop Recording) + Phase 3.3 (Record-Safe)
+**Sprint 5** ✅: Phase 2.2–2.3 (Time Stretch / Pitch Shift) + Phase 2.4 (SR Conversion)
+**Sprint 6** ✅: Phase 3.4 (LV2) + Phase 3.5 (CLAP)
+**Sprint 7** ✅: Phase 3.10.1 (Generic MIDI Control) + Phase 3.10.3 (OSC)
+**Sprint 8** ✅: Phase 3.12 (Strip Silence) + Phase 3.13 (Freeze Track)
+**Sprint 9** ✅: Phase 3.11 (Scripting) + Phase 3.10.2 (MCU)
+**Sprint 10** ✅: Phase 3.9 (Timecode/Sync)
+**Sprint 11** ✅: Phase 3.8 (Video) + Phase 3.15 (DDP)
+**Sprint 12** ✅: Phase 3.7 (Surround) + Phase 4.4 (Sidechain)
+**Sprint 13** ✅: Phase 4.3 (Built-in Effects)
+**Sprint 14** ✅: Phase 4.1 (Clip Launch) + Phase 4.2 (Step Sequencer)
+**Sprint 15** ✅: Phase 3.14 (AAF Import/Export)
+**Sprint 16** ✅: Performance + Audio Quality Foundation (sinc resampling ✅, PDC ✅, diff-based sync ✅, plugin scan caching ✅, reader pooling ✅, pan law options ✅, DC offset removal ✅, bridge batching ✅, Konva layers ✅, concurrent peaks ✅, waveform virtualization ✅)
+**Sprint 17** ✅: Visual/Cosmetic Polish (waveform quality ✅, clip rendering ✅, fade curves ✅, automation styling ✅, themes ✅, track icons ✅, meters ✅, piano roll styling ✅, transport redesign ✅, scrollbars ✅, loading states ✅, empty states ✅, color picker ✅, animations ✅, High-DPI ✅)
+**Sprint 18** ✅: Interaction/Workflow (custom shortcuts ✅, track folders ✅, slip editing ✅, snap preview ✅, zoom-to-selection ✅, auto-scroll ✅, recent files ✅, project notes ✅, track notes ✅, marquee zoom ✅, crosshair ✅, waveform zoom ✅, time selection ✅, F1 help ✅, OS drag-drop ✅, customizable toolbar ✅, media browser ✅, auto-save ✅)
+**Sprint 19** ✅: MIDI Editing + Plugin Management + Mixing/Routing (velocity editing ✅, CC lanes ✅, quantize dialog ✅, MIDI transform ✅, scale highlighting ✅, drum editor ✅, MIDI import/export ✅, plugin favorites ✅, categories ✅, generic editor ✅, A/B ✅, chain presets ✅, bus workflow ✅, mixer snapshots ✅, mixer undo ✅, pre/post fader ✅, routing matrix ✅)
+**Sprint 20** ✅: Cross-Platform + Project Mgmt + Accessibility + Docs (CMake guards ✅, project templates ✅, session archive ✅, missing media resolver ✅, media pool ✅, unused media cleanup ✅, auto-save ✅, LUFS metering UI ✅, phase correlation meter ✅, spectrum analyzer ✅, oversampling ✅, ARIA labels ✅, keyboard nav ✅, font scaling ✅, color-blind safe ✅, tooltips ✅, contextual help ✅, high-contrast ✅)

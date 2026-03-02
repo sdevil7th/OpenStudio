@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button, Slider } from "./ui";
 import { Volume2, VolumeX, Power } from "lucide-react";
 import { FXChainPanel } from "./FXChainPanel";
@@ -9,11 +10,13 @@ import { FXChainPanel } from "./FXChainPanel";
  * Shows master volume fader, mute, FX button with bypass toggle
  */
 export function MasterTrackHeader() {
-  const masterVolume = useDAWStore((s) => s.masterVolume);
-  const isMasterMuted = useDAWStore((s) => s.isMasterMuted);
-  const masterFxCount = useDAWStore((s) => s.masterFxCount);
-  const setMasterVolume = useDAWStore((s) => s.setMasterVolume);
-  const toggleMasterMute = useDAWStore((s) => s.toggleMasterMute);
+  const { masterVolume, isMasterMuted, masterFxCount, setMasterVolume, toggleMasterMute } = useDAWStore(useShallow((s) => ({
+    masterVolume: s.masterVolume,
+    isMasterMuted: s.isMasterMuted,
+    masterFxCount: s.masterFxCount,
+    setMasterVolume: s.setMasterVolume,
+    toggleMasterMute: s.toggleMasterMute,
+  })));
 
   const [showFXChain, setShowFXChain] = useState(false);
   const [fxBypassed, setFxBypassed] = useState(false);

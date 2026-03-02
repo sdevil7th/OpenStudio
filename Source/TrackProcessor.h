@@ -1,6 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "AutomationList.h"
+#include "BuiltInEffects.h"
+#include <map>
 
 // Track type enumeration
 enum class TrackType
@@ -8,6 +11,15 @@ enum class TrackType
     Audio,       // Audio-only track
     MIDI,        // MIDI-only track (no instrument)
     Instrument   // MIDI track with VST instrument
+};
+
+// Pan law options
+enum class PanLaw
+{
+    ConstantPower,  // -3dB at center (cos/sin)
+    Minus4_5dB,     // Blend between constant power and linear
+    Minus6dB,       // Linear pan law (-6dB at center)
+    Linear          // 0dB at center (no center attenuation)
 };
 
 class TrackProcessor  : public juce::AudioProcessor
@@ -46,8 +58,11 @@ public:
     void resetRMS() { currentRMS.store (0.0f, std::memory_order_relaxed); meterPeakAccum = 0.0f; meterSampleCount = 0; }
     
     // Recording & Monitoring (Phase 1)
-    void setRecordArmed(bool armed) { isRecordArmed = armed; }
+    void setRecordArmed(bool armed) { if (!isRecordSafe) isRecordArmed = armed; }
     bool getRecordArmed() const { return isRecordArmed; }
+
+    void setRecordSafe(bool safe) { isRecordSafe = safe; if (safe) isRecordArmed = false; }
+    bool getRecordSafe() const { return isRecordSafe; }
     
     void setInputMonitoring(bool enabled) { isInputMonitoringEnabled = enabled; }
     bool getInputMonitoring() const { return isInputMonitoringEnabled; }
@@ -73,6 +88,13 @@ public:
     juce::AudioProcessor* getInputFXProcessor(int index);
     juce::AudioProcessor* getTrackFXProcessor(int index);
     
+    // Sidechain Routing (Phase 4.4)
+    void setSidechainSource(int pluginIndex, const juce::String& sourceTrackId);
+    void clearSidechainSource(int pluginIndex);
+    juce::String getSidechainSource(int pluginIndex) const;
+    void setSidechainBuffer(const juce::AudioBuffer<float>* buffer);
+    bool hasAnySidechainSources() const;
+
     // Sends (Phase 4 / Phase 11)
     int addSend(const juce::String& destTrackId);
     void removeSend(int sendIndex);
@@ -97,6 +119,10 @@ public:
     void setPan(float newPan);  // -1.0 (L) to 1.0 (R)
     float getVolume() const { return trackVolumeDB; }  // Returns dB value
     float getPan() const { return trackPan; }
+
+    // Pan Law
+    void setPanLaw(PanLaw law) { panLaw = law; recomputePanGains(); }
+    PanLaw getPanLaw() const { return panLaw; }
     
     // Mute/Solo
     void setMute(bool shouldMute);
@@ -121,6 +147,39 @@ public:
     void setInstrument(std::unique_ptr<juce::AudioPluginInstance> plugin);
     juce::AudioPluginInstance* getInstrument() const { return instrumentPlugin.get(); }
 
+    // Plugin Delay Compensation (PDC)
+    int getChainLatency() const;
+    void setPDCDelay(int delaySamples);
+    int getPDCDelay() const { return pdcDelaySamples; }
+
+    // DC Offset Removal
+    void setDCOffsetRemoval(bool enabled) { dcOffsetRemoval = enabled; }
+    bool getDCOffsetRemoval() const { return dcOffsetRemoval; }
+
+    // Channel Strip EQ — always-available inline parametric EQ (not a plugin slot)
+    void setChannelStripEQEnabled(bool enabled) { channelStripEQEnabled = enabled; }
+    bool getChannelStripEQEnabled() const { return channelStripEQEnabled; }
+    S13EQ* getChannelStripEQ() { return &channelStripEQ; }
+    void setChannelStripEQParam(int paramIndex, float value);
+    float getChannelStripEQParam(int paramIndex) const;
+
+    // Automation (Phase 1.1)
+    // Each track has automation for volume and pan. Plugin param automation
+    // uses the paramId "plugin-{index}-param-{paramIndex}" key in AudioEngine's
+    // per-track automation map — TrackProcessor only handles volume + pan.
+    AutomationList& getVolumeAutomation() { return volumeAutomation; }
+    AutomationList& getPanAutomation() { return panAutomation; }
+    const AutomationList& getVolumeAutomation() const { return volumeAutomation; }
+    const AutomationList& getPanAutomation() const { return panAutomation; }
+
+    // Set the current timeline position for this block (called by AudioEngine
+    // before processBlock so automation knows where it is on the timeline).
+    void setCurrentBlockPosition(double samplePosition, double sRate)
+    {
+        blockStartSample = samplePosition;
+        blockSampleRate = sRate;
+    }
+
 private:
     // Current peak level (was named currentRMS but now holds peak — kept as-is
     // to avoid changing the public getRMSLevel() / resetRMS() API used by AudioEngine).
@@ -138,6 +197,7 @@ private:
     
     // Recording state (Phase 1)
     bool isRecordArmed = false;
+    bool isRecordSafe = false;  // Phase 3.3 — prevents arming
     bool isInputMonitoringEnabled = false;
     int inputStartChannel = 0;    // Hardware input start (0-based)
     int inputChannelCount = 2;     // Stereo by default
@@ -165,9 +225,21 @@ private:
     // than our 2-channel track buffer (avoids heap allocation on audio thread)
     juce::AudioBuffer<float> fxProcessBuffer;
 
+    // Sidechain Routing (Phase 4.4)
+    // Maps trackFX plugin index -> source track ID that provides sidechain audio.
+    // Set from the message thread, read from the audio thread.
+    std::map<int, juce::String> sidechainSources;
+    // Pointer to the sidechain input buffer, set by AudioEngine before processBlock.
+    // Lifetime is managed by AudioEngine (points to a buffer that lives for the
+    // duration of the audio callback). Null when no sidechain data is available.
+    const juce::AudioBuffer<float>* sidechainInputBuffer = nullptr;
+
     // Mix (Phase 1)
     float trackVolumeDB = 0.0f;  // -60 to +12 dB
     float trackPan = 0.0f;        // -1.0 (L) to +1.0 (R)
+
+    // Pan Law
+    PanLaw panLaw { PanLaw::ConstantPower };
 
     // Cached pan gains — pre-computed in setPan()/setVolume(), avoids trig on audio thread
     std::atomic<float> cachedPanL { 0.707107f };  // cos(pi/4) for center pan
@@ -180,6 +252,30 @@ private:
     int midiChannel = 0;  // 0 = all channels, 1-16 = specific channel
     std::unique_ptr<juce::AudioPluginInstance> instrumentPlugin;
     juce::MidiBuffer midiBuffer;  // For MIDI event storage
+
+    // Automation (Phase 1.1)
+    AutomationList volumeAutomation;
+    AutomationList panAutomation;
+    double blockStartSample { 0.0 };  // Set by AudioEngine before processBlock
+    double blockSampleRate { 44100.0 };
+
+    // Pre-allocated buffer for per-sample automation gain (avoids alloc on audio thread)
+    juce::AudioBuffer<float> automationGainBuffer;
+
+    // Plugin Delay Compensation (PDC)
+    juce::dsp::DelayLine<float> pdcDelayLine { 96000 };  // max 2 seconds at 48kHz
+    int pdcDelaySamples { 0 };
+
+    // DC Offset Removal
+    bool dcOffsetRemoval { false };
+    float dcFilterStateL { 0.0f };
+    float dcFilterStateR { 0.0f };
+    float dcPrevInputL { 0.0f };
+    float dcPrevInputR { 0.0f };
+
+    // Channel Strip EQ
+    S13EQ channelStripEQ;
+    bool channelStripEQEnabled { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackProcessor)
 };

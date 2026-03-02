@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Plus, Trash2, GripVertical } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { getRegisteredActions } from "../store/actionRegistry";
 import { Modal, Button, Select } from "./ui";
 
@@ -10,7 +11,7 @@ interface ToolbarEditorProps {
 }
 
 export function ToolbarEditor({ isOpen, onClose }: ToolbarEditorProps) {
-  const customToolbars = useDAWStore((s) => s.customToolbars);
+  const { customToolbars } = useDAWStore(useShallow((s) => ({ customToolbars: s.customToolbars })));
   const [selectedToolbarId, setSelectedToolbarId] = useState<string | null>(
     customToolbars[0]?.id || null,
   );
@@ -178,7 +179,7 @@ export function ToolbarEditor({ isOpen, onClose }: ToolbarEditorProps) {
  * Placed below MainToolbar in App.tsx.
  */
 export function CustomToolbarStrip() {
-  const customToolbars = useDAWStore((s) => s.customToolbars);
+  const { customToolbars } = useDAWStore(useShallow((s) => ({ customToolbars: s.customToolbars })));
   const visibleToolbars = customToolbars.filter((t) => t.visible && t.buttons.length > 0);
 
   if (visibleToolbars.length === 0) return null;

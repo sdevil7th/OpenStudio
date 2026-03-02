@@ -47,10 +47,18 @@ public:
     // Get the stock effects directory (app bundle/effects/)
     static juce::File getStockEffectsDirectory();
 
+    // Plugin crash isolation: check if a plugin previously crashed
+    bool isPluginBlacklisted(const juce::String& pluginId) const;
+    void blacklistPlugin(const juce::String& pluginId);
+    void removeFromBlacklist(const juce::String& pluginId);
+    juce::StringArray getBlacklistedPlugins() const;
+
 private:
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPluginList;
     juce::File pluginListFile;
+    juce::File blacklistFile;
+    juce::StringArray blacklistedPlugins;
     std::vector<S13FXInfo> s13fxList;
 
     void savePluginList();

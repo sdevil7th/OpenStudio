@@ -1,5 +1,6 @@
 import { X, Trash2, Play, CheckCircle, AlertCircle, Clock } from "lucide-react";
 import { useDAWStore, RenderJob } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 
 function StatusIcon({ status }: { status: RenderJob["status"] }) {
@@ -16,11 +17,16 @@ function StatusIcon({ status }: { status: RenderJob["status"] }) {
 }
 
 export function RenderQueuePanel() {
-  const renderQueue = useDAWStore((s) => s.renderQueue);
-  const removeFromRenderQueue = useDAWStore((s) => s.removeFromRenderQueue);
-  const clearRenderQueue = useDAWStore((s) => s.clearRenderQueue);
-  const executeRenderQueue = useDAWStore((s) => s.executeRenderQueue);
-  const toggleRenderQueue = useDAWStore((s) => s.toggleRenderQueue);
+  const {
+    renderQueue, removeFromRenderQueue, clearRenderQueue,
+    executeRenderQueue, toggleRenderQueue,
+  } = useDAWStore(useShallow((s) => ({
+    renderQueue: s.renderQueue,
+    removeFromRenderQueue: s.removeFromRenderQueue,
+    clearRenderQueue: s.clearRenderQueue,
+    executeRenderQueue: s.executeRenderQueue,
+    toggleRenderQueue: s.toggleRenderQueue,
+  })));
 
   const pendingCount = renderQueue.filter((j) => j.status === "pending").length;
   const isRunning = renderQueue.some((j) => j.status === "rendering");

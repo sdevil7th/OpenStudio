@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { Button, Slider } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
@@ -10,9 +11,11 @@ interface DynamicSplitModalProps {
 }
 
 export function DynamicSplitModal({ isOpen, onClose }: DynamicSplitModalProps) {
-  const clipId = useDAWStore((s) => s.dynamicSplitClipId);
-  const tracks = useDAWStore((s) => s.tracks);
-  const executeDynamicSplit = useDAWStore((s) => s.executeDynamicSplit);
+  const { clipId, tracks, executeDynamicSplit } = useDAWStore(useShallow((s) => ({
+    clipId: s.dynamicSplitClipId,
+    tracks: s.tracks,
+    executeDynamicSplit: s.executeDynamicSplit,
+  })));
 
   const [sensitivity, setSensitivity] = useState(0.5);
   const [minGapMs, setMinGapMs] = useState(100);

@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import classNames from "classnames";
 import { Button, TimeSignatureInput, Slider } from "./ui";
 
@@ -24,7 +25,21 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     removeMetronomeTrack,
     metronomeClickPath,
     metronomeAccentPath,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    timeSignature: s.timeSignature,
+    setTimeSignature: s.setTimeSignature,
+    metronomeAccentBeats: s.metronomeAccentBeats,
+    setMetronomeAccentBeats: s.setMetronomeAccentBeats,
+    metronomeEnabled: s.metronomeEnabled,
+    toggleMetronome: s.toggleMetronome,
+    metronomeVolume: s.metronomeVolume,
+    setMetronomeVolume: s.setMetronomeVolume,
+    metronomeTrackId: s.metronomeTrackId,
+    generateMetronomeTrack: s.generateMetronomeTrack,
+    removeMetronomeTrack: s.removeMetronomeTrack,
+    metronomeClickPath: s.metronomeClickPath,
+    metronomeAccentPath: s.metronomeAccentPath,
+  })));
 
   if (!isOpen) return null;
 

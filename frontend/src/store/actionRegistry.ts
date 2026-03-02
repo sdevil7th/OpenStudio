@@ -28,10 +28,41 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "transport.rewind", name: "Go to Start", category: "Transport", execute: () => s().setCurrentTime(0) },
     { id: "transport.loop", name: "Toggle Loop", category: "Transport", shortcut: "L", execute: () => s().toggleLoop() },
 
+    // ===== Navigation =====
+    { id: "navigate.nextTransient", name: "Next Transient", category: "Navigation", shortcut: "Tab", execute: () => {
+      const state = s();
+      const selectedIds = state.selectedClipIds;
+      if (selectedIds.length === 0) return;
+      const clip = state.tracks.flatMap(t => t.clips).find(c => selectedIds.includes(c.id));
+      if (!clip?.filePath) return;
+      import("../services/NativeBridge").then(({ nativeBridge }) => {
+        nativeBridge.detectTransients(clip.filePath!, 0.3, 50).then((transients: number[]) => {
+          const currentTime = state.transport.currentTime - clip.startTime + (clip.offset || 0);
+          const next = transients.find(t => t > currentTime + 0.01);
+          if (next !== undefined) state.setCurrentTime(clip.startTime + next - (clip.offset || 0));
+        });
+      });
+    }},
+    { id: "navigate.prevTransient", name: "Previous Transient", category: "Navigation", shortcut: "Shift+Tab", execute: () => {
+      const state = s();
+      const selectedIds = state.selectedClipIds;
+      if (selectedIds.length === 0) return;
+      const clip = state.tracks.flatMap(t => t.clips).find(c => selectedIds.includes(c.id));
+      if (!clip?.filePath) return;
+      import("../services/NativeBridge").then(({ nativeBridge }) => {
+        nativeBridge.detectTransients(clip.filePath!, 0.3, 50).then((transients: number[]) => {
+          const currentTime = state.transport.currentTime - clip.startTime + (clip.offset || 0);
+          const prev = [...transients].reverse().find(t => t < currentTime - 0.01);
+          if (prev !== undefined) state.setCurrentTime(clip.startTime + prev - (clip.offset || 0));
+        });
+      });
+    }},
+
     // ===== Tools =====
     { id: "tools.selectTool", name: "Select Tool", category: "Tools", shortcut: "V", execute: () => s().setToolMode("select") },
     { id: "tools.splitTool", name: "Split Tool", category: "Tools", shortcut: "B", execute: () => s().toggleSplitTool() },
     { id: "tools.muteTool", name: "Mute Tool", category: "Tools", shortcut: "X", execute: () => s().toggleMuteTool() },
+    { id: "tools.smartTool", name: "Smart Tool", category: "Tools", shortcut: "Y", execute: () => s().setToolMode("smart") },
 
     // ===== Edit =====
     { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", execute: () => s().undo() },
@@ -75,6 +106,16 @@ export function getRegisteredActions(): ActionDef[] {
       state.addTrack({ id: trackId, name: `Instrument ${state.tracks.filter((t) => t.type === "instrument").length + 1}`, type: "instrument", armed: true, monitorEnabled: true });
       state.openPluginBrowser(trackId);
     }},
+    { id: "insert.quickAddInstrument", name: "Quick Add Instrument Track", category: "Insert", shortcut: "Ctrl+Shift+I", execute: () => {
+      const state = s();
+      const trackId = crypto.randomUUID();
+      state.addTrack({ id: trackId, name: `Instrument ${state.tracks.filter((t) => t.type === "instrument").length + 1}`, type: "instrument", armed: true, monitorEnabled: true });
+      state.openPluginBrowser(trackId);
+    }},
+    { id: "insert.folderTrack", name: "New Folder Track", category: "Insert", execute: () => {
+      const state = s();
+      state.createFolderTrack(`Folder ${state.tracks.filter((t: any) => t.isFolder).length + 1}`);
+    }},
     { id: "insert.marker", name: "Add Marker at Playhead", category: "Insert", shortcut: "M", execute: () => s().addMarker(s().transport.currentTime) },
 
     // ===== View =====
@@ -92,6 +133,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "file.projectSettings", name: "Project Settings", category: "File", shortcut: "Alt+Enter", execute: () => s().openProjectSettings() },
     { id: "file.render", name: "Render / Export", category: "File", shortcut: "Ctrl+Alt+R", execute: () => s().openRenderModal() },
     { id: "file.settings", name: "Audio Settings", category: "File", execute: () => s().openSettings() },
+    { id: "project.compare", name: "Compare with Saved Version", category: "File", execute: () => { void s().compareWithSavedProject(); } },
 
     // ===== Options =====
     { id: "options.tapTempo", name: "Tap Tempo", category: "Options", shortcut: "T", execute: () => s().tapTempo() },
@@ -174,5 +216,54 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "file.ddpExport", name: "DDP Disc Image Export...", category: "File", execute: () => s().toggleDDPExport() },
     { id: "file.captureOutput", name: "Toggle Capture Output", category: "File", execute: () => { if (s().liveCaptureEnabled) { void s().stopLiveCapture(); } else { void s().startLiveCapture(); } } },
     { id: "options.pluginBridge", name: "Toggle 32-bit Plugin Bridge", category: "Options", execute: () => s().togglePluginBridge() },
+
+    // ===== Sprint 18: Interaction/Workflow =====
+    { id: "view.zoomToSelection", name: "Zoom to Time Selection", category: "View", shortcut: "Ctrl+Shift+E", execute: () => s().zoomToSelection() },
+    { id: "view.autoScroll", name: "Toggle Auto-Scroll During Playback", category: "View", execute: () => s().toggleAutoScroll() },
+    { id: "edit.transpose", name: "Transpose Selected Notes", category: "Edit", execute: () => { /* Handled in PianoRoll */ } },
+    { id: "edit.velocityScale", name: "Scale Velocity of Selected Notes", category: "Edit", execute: () => { /* Handled in PianoRoll */ } },
+
+    // ===== MIDI Transform =====
+    { id: "edit.transposeUp", name: "Transpose Up (+1 semitone)", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.transposeMIDINotes(st.pianoRollClipId, 1); } },
+    { id: "edit.transposeDown", name: "Transpose Down (-1 semitone)", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.transposeMIDINotes(st.pianoRollClipId, -1); } },
+    { id: "edit.transposeOctaveUp", name: "Transpose Octave Up (+12)", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.transposeMIDINotes(st.pianoRollClipId, 12); } },
+    { id: "edit.transposeOctaveDown", name: "Transpose Octave Down (-12)", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.transposeMIDINotes(st.pianoRollClipId, -12); } },
+    { id: "edit.velocityUp", name: "Velocity +10%", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.scaleMIDINoteVelocity(st.pianoRollClipId, 1.1); } },
+    { id: "edit.velocityDown", name: "Velocity -10%", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.scaleMIDINoteVelocity(st.pianoRollClipId, 0.9); } },
+    { id: "edit.reverseNotes", name: "Reverse MIDI Notes", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.reverseMIDINotes(st.pianoRollClipId); } },
+    { id: "edit.invertNotes", name: "Invert MIDI Note Pitches", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.invertMIDINotes(st.pianoRollClipId); } },
+
+    // ===== Sprint 19: MIDI + Plugin + Mixing =====
+    { id: "midi.quantize", name: "Quantize Notes...", category: "MIDI", shortcut: "Q", execute: () => s().toggleQuantizeDialog() },
+    { id: "midi.transpose", name: "Transpose Notes...", category: "MIDI", execute: () => { /* PianoRoll modal */ } },
+    { id: "midi.selectAll", name: "Select All Notes", category: "MIDI", execute: () => s().selectAllMIDINotes() },
+    { id: "view.drumEditor", name: "Toggle Drum Editor", category: "View", execute: () => s().toggleDrumEditor() },
+    { id: "insert.busTrack", name: "Insert Bus/Group Track", category: "Insert", execute: () => {
+      const state = s();
+      const id = crypto.randomUUID();
+      state.addTrack({ id, name: `Bus ${state.tracks.filter((t: any) => t.type === "bus").length + 1}`, type: "bus" });
+    }},
+    { id: "view.mediaPool", name: "Toggle Media Pool", category: "View", execute: () => s().toggleMediaPool() },
+
+    // ===== Sprint 20: Cross-Platform + Accessibility =====
+    { id: "view.loudnessMeter", name: "Toggle Loudness Meter", category: "View", execute: () => s().toggleLoudnessMeter() },
+    { id: "view.spectrumAnalyzer", name: "Toggle Spectrum Analyzer", category: "View", execute: () => s().toggleSpectrumAnalyzer() },
+    { id: "view.phaseCorrelation", name: "Toggle Phase Correlation Meter", category: "View", execute: () => s().togglePhaseCorrelation() },
+    { id: "file.archiveSession", name: "Archive Session...", category: "File", execute: () => { void s().archiveSession(); } },
+    { id: "file.newFromTemplate", name: "New from Template...", category: "File", execute: () => s().toggleProjectTemplates() },
+
+    // ===== Sprint 21: Timeline Interaction =====
+    { id: "view.toggleCrosshair", name: "Toggle Crosshair Cursor", category: "View", execute: () => s().toggleCrosshair() },
+
+    // ===== Mixer Snapshots & Bus/Group & Templates =====
+    { id: "insert.bus", name: "Create Bus from Selected Tracks", category: "Insert", execute: () => s().createBusFromSelectedTracks() },
+    { id: "mixer.saveSnapshot", name: "Save Mixer Snapshot", category: "Mixer", execute: () => {
+      const name = prompt("Snapshot name:", `Snapshot ${s().mixerSnapshots.length + 1}`);
+      if (name) s().saveMixerSnapshot(name);
+    }},
+    { id: "file.saveAsTemplate", name: "Save as Template...", category: "File", execute: () => {
+      const name = prompt("Template name:");
+      if (name) s().saveAsTemplate(name);
+    }},
   ];
 }

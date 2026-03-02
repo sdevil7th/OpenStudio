@@ -6,6 +6,12 @@
   align-items: center;
   justify-content: center;
   z-index: 2000;
+  animation: fx-overlay-fade-in 0.15s ease-out;
+}
+
+@keyframes fx-overlay-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* Two-column layout */
@@ -19,6 +25,18 @@
   display: flex;
   flex-direction: column;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: fx-panel-slide-in 0.2s ease-out;
+}
+
+@keyframes fx-panel-slide-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 .fx-chain-header {

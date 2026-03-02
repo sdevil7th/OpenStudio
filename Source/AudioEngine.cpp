@@ -1,5 +1,7 @@
 #include "AudioEngine.h"
 #include "S13FXProcessor.h"
+#include "BuiltInEffects.h"
+#include "BuiltInEffects2.h"
 
 // Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
@@ -26,6 +28,9 @@ AudioEngine::AudioEngine()
     midiManager->setMessageCallback([this](const juce::String& deviceName, int channel, const juce::MidiMessage& message) {
         handleMIDIMessage(deviceName, channel, message);
     });
+
+    // Initialize Control Surface Manager (Phase 3.10)
+    controlSurfaceManager.setCallback(this);
 
     // Now open the audio device and register the callback. This is done last so
     // that all members above are valid when audioDeviceAboutToStart() fires.
@@ -113,6 +118,10 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         reusableMasterBuffer.setSize (device->getActiveOutputChannels().countNumberOfSetBits(),
                                       device->getCurrentBufferSizeSamples());
 
+        // Pre-allocate sidechain output buffers for all existing tracks
+        for (const auto& id : trackOrder)
+            sidechainOutputBuffers[id].setSize(2, device->getCurrentBufferSizeSamples());
+
         // Metronome Init
         metronome.prepareToPlay(device->getCurrentSampleRate(), device->getCurrentBufferSizeSamples());
         metronome.setBpm(tempo);
@@ -127,6 +136,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
                 propagatePlayHead (it->second);
         }
         for (auto& node : masterFXNodes)
+            if (node && node->getProcessor())
+                node->getProcessor()->setPlayHead (this);
+        for (auto& node : monitoringFXNodes)
             if (node && node->getProcessor())
                 node->getProcessor()->setPlayHead (this);
 
@@ -205,6 +217,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // position for the samples being output right now.  The increment is at the
     // very end of the callback (search "Advance transport position").
 
+    // Update metronome BPM from tempo map at current position
+    {
+        double currentBpm = getTempoAtTime(currentSamplePosition / currentSampleRate);
+        metronome.setBpm(currentBpm);
+    }
+
     // Mix Metronome (if enabled and transport is running)
     if (isPlaying || isRecordMode)
     {
@@ -215,10 +233,102 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Use cached solo state (updated when solo changes, avoids scanning every callback)
     bool anySoloed = cachedAnySoloed.load();
 
-    // Process each track
-    for (size_t i = 0; i < trackOrder.size(); ++i)
+    // ========== Determine sidechain-aware processing order ==========
+    // Build a topological ordering so that sidechain source tracks are processed
+    // before destination tracks.  For small track counts (<32) a simple multi-pass
+    // algorithm is efficient and avoids any heap allocation on the audio thread.
+    //
+    // processedOrder: indices into trackOrder in the order they should be processed.
+    // We use a fixed-size stack array (max 64 tracks) to avoid heap allocation.
+    constexpr int MAX_TRACKS = 64;
+    int processedOrder[MAX_TRACKS];
+    bool trackProcessed[MAX_TRACKS];
+    int numTracks = juce::jmin((int)trackOrder.size(), MAX_TRACKS);
+    int orderCount = 0;
+
+    for (int t = 0; t < numTracks; ++t)
+        trackProcessed[t] = false;
+
+    // Check if any track has sidechain routing (fast path: skip sorting if none)
+    bool anySidechainRouting = false;
+    for (int t = 0; t < numTracks && !anySidechainRouting; ++t)
     {
-        const auto& trackId = trackOrder[i];
+        auto tIt = trackMap.find(trackOrder[static_cast<size_t>(t)]);
+        if (tIt != trackMap.end() && tIt->second && tIt->second->hasAnySidechainSources())
+            anySidechainRouting = true;
+    }
+
+    if (anySidechainRouting)
+    {
+        // Simple iterative topological sort: in each pass, add tracks whose
+        // sidechain sources have already been processed.
+        int maxPasses = numTracks + 1;
+        for (int pass = 0; pass < maxPasses && orderCount < numTracks; ++pass)
+        {
+            for (int t = 0; t < numTracks; ++t)
+            {
+                if (trackProcessed[t]) continue;
+
+                auto tIt = trackMap.find(trackOrder[static_cast<size_t>(t)]);
+                if (tIt == trackMap.end() || !tIt->second)
+                {
+                    trackProcessed[t] = true;
+                    processedOrder[orderCount++] = t;
+                    continue;
+                }
+
+                // Check if all sidechain source tracks are already processed
+                bool depsReady = true;
+                auto* trk = tIt->second;
+                for (int fx = 0; fx < trk->getNumTrackFX() && depsReady; ++fx)
+                {
+                    auto srcId = trk->getSidechainSource(fx);
+                    if (srcId.isEmpty()) continue;
+
+                    // Find source track index in trackOrder
+                    bool srcFound = false;
+                    for (int s = 0; s < numTracks; ++s)
+                    {
+                        if (trackOrder[static_cast<size_t>(s)] == srcId)
+                        {
+                            if (!trackProcessed[s])
+                                depsReady = false;
+                            srcFound = true;
+                            break;
+                        }
+                    }
+                    juce::ignoreUnused(srcFound);
+                    // If source not found in trackOrder, treat dep as ready (missing track)
+                }
+
+                if (depsReady)
+                {
+                    trackProcessed[t] = true;
+                    processedOrder[orderCount++] = t;
+                }
+            }
+        }
+
+        // Any remaining tracks (circular deps) — add them at the end
+        for (int t = 0; t < numTracks; ++t)
+        {
+            if (!trackProcessed[t])
+                processedOrder[orderCount++] = t;
+        }
+    }
+    else
+    {
+        // No sidechain routing — use original order (no sorting overhead)
+        for (int t = 0; t < numTracks; ++t)
+            processedOrder[t] = t;
+        orderCount = numTracks;
+    }
+
+    // Process each track in sidechain-aware order
+    for (int orderIdx = 0; orderIdx < orderCount; ++orderIdx)
+    {
+        int trackIdx = processedOrder[orderIdx];
+        const auto& trackId = trackOrder[static_cast<size_t>(trackIdx)];
         auto trackIt = trackMap.find(trackId);  // Single lookup, reuse iterator
         if (trackIt == trackMap.end()) continue;
 
@@ -237,22 +347,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
         // Monitor hardware input when track is armed and not muted
         bool shouldMonitor = track->getRecordArmed() && !track->getMute();
-        
 
-        
         // Get track's input configuration
         int startChan = track->getInputStartChannel();
         int numChans = track->getInputChannelCount();
-        
+
         if (shouldMonitor)
         {
-
-            
             // Safety check
             if (startChan < 0 || startChan >= numInputChannels)
                 continue;
         }
-        
+
         // Skip this track if it's not playing clips and not monitoring
         // This prevents unarmed tracks from passing through input audio
         if (!isPlaying && !shouldMonitor)
@@ -260,7 +366,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             track->resetRMS();  // Clear meter so it drops to zero when idle
             continue;
         }
-        
+
         // Non-owning view of the pre-allocated buffer — avoids heap alloc on audio thread.
         // ALWAYS 2 channels (stereo) for proper pan support.
         //
@@ -280,11 +386,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                   reusableTrackBuffer.getWritePointer (1) };
         juce::AudioBuffer<float> trackBuffer (trackChans, 2, numSamples);
         trackBuffer.clear();
-        
+
         // PLAYBACK MODE: Read from clips if transport is playing
         if (isPlaying)
         {
-            // Fill buffer with playback audio from clips
             // Fill buffer with playback audio from clips
             playbackEngine.fillTrackBuffer(
                 trackId,
@@ -294,12 +399,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 currentSampleRate
             );
         }
-        
+
         // MONITORING/RECORDING MODE: Mix in input audio if monitoring
         if (shouldMonitor)
         {
-
-            
             // Copy hardware inputs to track buffer (mix with playback if both active)
             // If input is mono, copy to both L/R channels for proper pan support
             for (int ch = 0; ch < numChans && (startChan + ch) < numInputChannels; ++ch)
@@ -319,14 +422,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     trackBuffer.copyFrom(ch, 0, inputChannelData[startChan + ch], numSamples);
                 }
             }
-            
+
             // If input is mono but trackBuffer is stereo, duplicate to right channel
             if (numChans == 1 && trackBuffer.getNumChannels() >= 2)
             {
                 trackBuffer.copyFrom(1, 0, trackBuffer, 0, 0, numSamples);
             }
         }
-        
+
         // ========== RECORD RAW AUDIO (BEFORE FX) ==========
         // Write to recorder if transport is playing AND in record mode
         // This captures the raw input BEFORE any FX processing
@@ -347,16 +450,78 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     juce::ignoreUnused(recTrack);
                     if (audioRecorder.isRecording(recId))
                         audioRecorder.setRecordingStartTime(recId, startPos);
+                    if (midiRecorder.isRecording(recId))
+                        midiRecorder.setRecordingStartTime(recId, startPos);
                 }
             }
 
-            audioRecorder.writeBlock(trackId, trackBuffer, numSamples);
+            // Punch recording: only write audio within punch range
+            bool shouldWrite = true;
+            if (punchEnabled.load(std::memory_order_acquire))
+            {
+                double posSeconds = currentSamplePosition / currentSampleRate;
+                double punchStart = punchStartTime.load(std::memory_order_relaxed);
+                double punchEnd = punchEndTime.load(std::memory_order_relaxed);
+                shouldWrite = (posSeconds >= punchStart && posSeconds < punchEnd);
+            }
+
+            if (shouldWrite)
+                audioRecorder.writeBlock(trackId, trackBuffer, numSamples);
         }
-        
-        // Process through track (applies volume, pan, FX)
+
+        // Tell the track where we are on the timeline so automation can evaluate
+        track->setCurrentBlockPosition(currentSamplePosition, currentSampleRate);
+
+        // ========== SIDECHAIN: provide source track's output to this track ==========
+        // If this track has any sidechain-routed FX plugins, find the first sidechain
+        // source track and point the track's sidechainInputBuffer to its stored output.
+        if (track->hasAnySidechainSources())
+        {
+            // Find the first sidechain source track ID (all SC FX on this track
+            // share the same sidechain input buffer for simplicity — the source is
+            // determined by the first configured sidechain FX)
+            const juce::AudioBuffer<float>* scBuffer = nullptr;
+            for (int fx = 0; fx < track->getNumTrackFX(); ++fx)
+            {
+                auto srcId = track->getSidechainSource(fx);
+                if (srcId.isNotEmpty())
+                {
+                    auto scIt = sidechainOutputBuffers.find(srcId);
+                    if (scIt != sidechainOutputBuffers.end())
+                    {
+                        scBuffer = &scIt->second;
+                        break;
+                    }
+                }
+            }
+            track->setSidechainBuffer(scBuffer);
+        }
+        else
+        {
+            track->setSidechainBuffer(nullptr);
+        }
+
+        // Process through track (applies volume, pan, FX, automation)
         juce::MidiBuffer midiMessages;
         track->processBlock(trackBuffer, midiMessages);
-        
+
+        // ========== SIDECHAIN: store this track's output for downstream tracks ==========
+        // Copy the processed output into the pre-allocated sidechain buffer so that
+        // tracks processed later can use it as sidechain input.
+        {
+            auto scOutIt = sidechainOutputBuffers.find(trackId);
+            if (scOutIt != sidechainOutputBuffers.end())
+            {
+                auto& scOut = scOutIt->second;
+                // Guard: ensure buffer is large enough (shouldn't need resize normally)
+                if (scOut.getNumSamples() < numSamples)
+                    scOut.setSize(2, numSamples, false, false, true);
+
+                for (int ch = 0; ch < juce::jmin(2, trackBuffer.getNumChannels()); ++ch)
+                    scOut.copyFrom(ch, 0, trackBuffer, ch, 0, numSamples);
+            }
+        }
+
         // Mix track output to device outputs
         // Tracks output stereo, so mix channels 0->0, 1->1
         for (int ch = 0; ch < std::min(trackBuffer.getNumChannels(), numOutputChannels); ++ch)
@@ -367,7 +532,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 numSamples
             );
         }
-        
+
         // Recording already done above (before FX) - this section removed
     }   
     
@@ -397,6 +562,26 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             juce::FloatVectorOperations::copy (outputChannelData[ch], masterBuffer.getReadPointer (ch), numSamples);
     }
     
+    // ========== Process Monitoring FX Chain (real-time only, not in render) ==========
+    if (!monitoringFXNodes.empty() && !isRendering.load())
+    {
+        const int monChans = juce::jmin(numOutputChannels, reusableMasterBuffer.getNumChannels());
+        juce::AudioBuffer<float> monBuffer(reusableMasterBuffer.getArrayOfWritePointers(), monChans, numSamples);
+
+        for (int ch = 0; ch < monChans; ++ch)
+            monBuffer.copyFrom(ch, 0, outputChannelData[ch], numSamples);
+
+        juce::MidiBuffer dummyMidi;
+        for (auto& node : monitoringFXNodes)
+        {
+            if (node && node->getProcessor())
+                node->getProcessor()->processBlock(monBuffer, dummyMidi);
+        }
+
+        for (int ch = 0; ch < monChans; ++ch)
+            juce::FloatVectorOperations::copy(outputChannelData[ch], monBuffer.getReadPointer(ch), numSamples);
+    }
+
     // ========== Apply Master Pan ==========
     // Uses pre-computed gains (updated in setMasterPan) — no trig on audio thread
     if (numOutputChannels >= 2)
@@ -446,6 +631,78 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         );
     }
 
+    // ========== Phase Correlation Meter (Phase 20.10) ==========
+    if (numOutputChannels >= 2)
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            double l = static_cast<double>(outputChannelData[0][i]);
+            double r = static_cast<double>(outputChannelData[1][i]);
+            phaseCorr_sumLR += l * r;
+            phaseCorr_sumLL += l * l;
+            phaseCorr_sumRR += r * r;
+        }
+        phaseCorrSampleCount += numSamples;
+
+        if (phaseCorrSampleCount >= PHASE_CORR_UPDATE_SAMPLES)
+        {
+            double denom = std::sqrt(phaseCorr_sumLL * phaseCorr_sumRR);
+            float corr = (denom > 1e-20) ? static_cast<float>(phaseCorr_sumLR / denom) : 0.0f;
+            corr = juce::jlimit(-1.0f, 1.0f, corr);
+            phaseCorrelationValue.store(corr, std::memory_order_relaxed);
+
+            phaseCorr_sumLR = 0.0;
+            phaseCorr_sumLL = 0.0;
+            phaseCorr_sumRR = 0.0;
+            phaseCorrSampleCount = 0;
+        }
+    }
+
+    // ========== Spectrum Analyzer (Phase 20.11) ==========
+    // Feed mono-summed output into FFT ring buffer
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float monoSample = 0.0f;
+            for (int ch = 0; ch < numOutputChannels; ++ch)
+                monoSample += outputChannelData[ch][i];
+            if (numOutputChannels > 1)
+                monoSample /= static_cast<float>(numOutputChannels);
+
+            spectrumInputBuffer[spectrumWritePos] = monoSample;
+            spectrumWritePos++;
+
+            if (spectrumWritePos >= FFT_SIZE)
+            {
+                spectrumWritePos = 0;
+
+                // Copy input, apply window, perform FFT
+                float fftData[FFT_SIZE * 2] = {};
+                std::memcpy(fftData, spectrumInputBuffer, sizeof(float) * static_cast<size_t>(FFT_SIZE));
+                spectrumWindow.multiplyWithWindowingTable(fftData, static_cast<size_t>(FFT_SIZE));
+                spectrumFFT.performFrequencyOnlyForwardTransform(fftData);
+
+                // Store magnitude spectrum (thread-safe)
+                {
+                    const juce::ScopedLock specLock(spectrumLock);
+                    std::memcpy(spectrumOutputBuffer, fftData, sizeof(float) * static_cast<size_t>(FFT_SIZE));
+                    spectrumReady = true;
+                }
+            }
+        }
+    }
+
+    // ========== Timecode / Sync Output (Phase 3.9) ==========
+    timecodeSyncManager.processBlock(numSamples, currentSampleRate, tempo,
+                                      currentSamplePosition / currentSampleRate,
+                                      isPlaying.load());
+
+    // ========== Clip Launch / Trigger Engine (Phase 4.1) ==========
+    {
+        double currentBeat = (currentSamplePosition / currentSampleRate) * (tempo / 60.0);
+        triggerEngine.processBlock(numSamples, currentSampleRate, tempo, currentBeat);
+    }
+
     // ========== Advance transport position ==========
     // IMPORTANT: This is intentionally AFTER all processing (metronome, playback,
     // recording) so they use the position corresponding to the samples being
@@ -453,6 +710,49 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // causing a systematic one-buffer-length delay.
     if (isPlaying)
     {
+        // Loop recording detection (Phase 3.2): if position jumped backward
+        // (frontend wrapped the loop), finalize current takes and start new ones.
+        // setTransportPosition() may have been called from the message thread
+        // between callbacks, causing currentSamplePosition to jump backward.
+        if (isRecordMode && isLooping && currentSamplePosition < prevSamplePosition - numSamples)
+        {
+            // Position jumped backward — loop wrap detected
+            loopTakeCounter++;
+
+            // Finalize current audio recordings and start new takes
+            auto completedTakes = audioRecorder.stopAllRecordings(currentSampleRate);
+            for (auto& take : completedTakes)
+                lastCompletedClips.push_back(std::move(take));
+
+            // Finalize MIDI recordings
+            auto completedMIDITakes = midiRecorder.stopAllRecordings(projectAudioFolder, tempo);
+            for (auto& take : completedMIDITakes)
+                lastCompletedMIDIClips.push_back(std::move(take));
+
+            // Start new recordings for next loop pass
+            for (auto const& [tId, tTrack] : trackMap)
+            {
+                if (!tTrack || !tTrack->getRecordArmed()) continue;
+
+                auto trackType = tTrack->getTrackType();
+                if (trackType == TrackType::MIDI || trackType == TrackType::Instrument)
+                {
+                    midiRecorder.startRecording(tId, currentSampleRate);
+                    midiRecorder.setRecordingStartTime(tId, currentSamplePosition / currentSampleRate);
+                }
+                else
+                {
+                    auto timestamp = juce::Time::getCurrentTime().toMilliseconds();
+                    auto filename = "Track_" + tId + "_Take_" + juce::String(timestamp) +
+                                    "_L" + juce::String(loopTakeCounter) + ".wav";
+                    auto outputFile = projectAudioFolder.getChildFile(filename);
+                    audioRecorder.startRecording(tId, outputFile, currentSampleRate, tTrack->getInputChannelCount());
+                    audioRecorder.setRecordingStartTime(tId, currentSamplePosition / currentSampleRate);
+                }
+            }
+        }
+
+        prevSamplePosition = currentSamplePosition;
         currentSamplePosition += numSamples;
     }
 }
@@ -497,6 +797,10 @@ juce::String AudioEngine::addTrack(const juce::String& explicitId)
 
         trackMap[trackId] = rawTrackPtr;
         trackOrder.push_back(trackId);
+
+        // Pre-allocate sidechain output buffer for this track (avoids heap alloc on audio thread)
+        int scBlockSize = juce::jmax(currentBlockSize, 512);
+        sidechainOutputBuffers[trackId].setSize(2, scBlockSize);
 
         logToDisk("Track added. ID: " + trackId + " Total: " + juce::String((int)trackOrder.size()));
 
@@ -545,7 +849,8 @@ bool AudioEngine::removeTrack(const juce::String& trackId)
     
     trackMap.erase(it);
     trackOrder.erase(std::remove(trackOrder.begin(), trackOrder.end(), trackId), trackOrder.end());
-    
+    sidechainOutputBuffers.erase(trackId);
+
     return true;
 }
 
@@ -589,6 +894,24 @@ juce::var AudioEngine::getMeterLevels()
     }
 
     return juce::var (meterObj.get());
+}
+
+juce::var AudioEngine::getMeteringData()
+{
+    // Return an array with one entry per track (used by ScriptEngine for track count etc.)
+    juce::Array<juce::var> result;
+    for (const auto& trackId : trackOrder)
+    {
+        auto it = trackMap.find(trackId);
+        if (it != trackMap.end() && it->second)
+        {
+            juce::DynamicObject::Ptr obj (new juce::DynamicObject());
+            obj->setProperty("id", trackId);
+            obj->setProperty("rms", it->second->getRMSLevel());
+            result.add(juce::var(obj.get()));
+        }
+    }
+    return juce::var(result);
 }
 
 //==============================================================================
@@ -727,6 +1050,58 @@ bool AudioEngine::loadInstrument(const juce::String& trackId, const juce::String
 
 void AudioEngine::handleMIDIMessage(const juce::String& deviceName, int channel, const juce::MidiMessage& message)
 {
+    // MIDI Learn: if active and we receive a CC, create a mapping
+    if (midiLearnActive.load() && message.isController())
+    {
+        const juce::ScopedLock sl(midiLearnLock);
+        int ccNum = message.getControllerNumber();
+
+        // Remove existing mapping for this CC
+        midiLearnMappings.erase(
+            std::remove_if(midiLearnMappings.begin(), midiLearnMappings.end(),
+                            [ccNum](const MIDILearnMapping& m) { return m.ccNumber == ccNum; }),
+            midiLearnMappings.end());
+
+        MIDILearnMapping mapping;
+        mapping.ccNumber = ccNum;
+        mapping.trackId = midiLearnTrackId;
+        mapping.pluginIndex = midiLearnPluginIndex;
+        mapping.paramIndex = midiLearnParamIndex;
+        midiLearnMappings.push_back(mapping);
+
+        midiLearnActive.store(false);
+        juce::Logger::writeToLog("MIDI Learn: Mapped CC " + juce::String(ccNum) +
+                                 " -> track=" + mapping.trackId +
+                                 " plugin=" + juce::String(mapping.pluginIndex) +
+                                 " param=" + juce::String(mapping.paramIndex));
+    }
+
+    // Apply MIDI CC mappings: route incoming CC values to mapped plugin parameters
+    if (message.isController())
+    {
+        const juce::ScopedLock sl(midiLearnLock);
+        int ccNum = message.getControllerNumber();
+        float normalizedValue = message.getControllerValue() / 127.0f;
+
+        for (const auto& mapping : midiLearnMappings)
+        {
+            if (mapping.ccNumber == ccNum)
+            {
+                auto it = trackMap.find(mapping.trackId);
+                if (it != trackMap.end() && it->second)
+                {
+                    auto* processor = it->second->getTrackFXProcessor(mapping.pluginIndex);
+                    if (processor)
+                    {
+                        const auto& params = processor->getParameters();
+                        if (params.size() > mapping.paramIndex)
+                            params[mapping.paramIndex]->setValueNotifyingHost(normalizedValue);
+                    }
+                }
+            }
+        }
+    }
+
     // Route MIDI to appropriate tracks
     for (auto const& [id, track] : trackMap)
     {
@@ -762,14 +1137,11 @@ void AudioEngine::handleMIDIMessage(const juce::String& deviceName, int channel,
             }
         }
         
-        // If recording and armed, log the MIDI event
-        // TODO: Store in thread-safe recording buffer for actual MIDI clip creation
+        // Record MIDI event if armed and in record mode
         if (isPlaying && isRecordMode && track->getRecordArmed())
         {
             double timestamp = currentSamplePosition / currentSampleRate;
-            juce::Logger::writeToLog("MIDI Recorded: " + message.getDescription() + 
-                                   " at time: " + juce::String(timestamp, 3) + 
-                                   " on device: " + deviceName);
+            midiRecorder.recordEvent(id, timestamp, message);
         }
     }
 }
@@ -1069,6 +1441,39 @@ void AudioEngine::setTrackSolo(const juce::String& trackId, bool soloed)
 }
 
 //==============================================================================
+// Punch In/Out (Phase 3.1)
+
+void AudioEngine::setPunchRange(double startTime, double endTime, bool enabled)
+{
+    punchStartTime.store(startTime, std::memory_order_relaxed);
+    punchEndTime.store(endTime, std::memory_order_relaxed);
+    punchEnabled.store(enabled, std::memory_order_release);
+    juce::Logger::writeToLog("AudioEngine: Punch range " + juce::String(enabled ? "enabled" : "disabled") +
+                             " [" + juce::String(startTime, 3) + "s - " + juce::String(endTime, 3) + "s]");
+}
+
+//==============================================================================
+// Record-Safe (Phase 3.3)
+
+void AudioEngine::setTrackRecordSafe(const juce::String& trackId, bool safe)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+    {
+        it->second->setRecordSafe(safe);
+        juce::Logger::writeToLog("AudioEngine: Track " + trackId + " record-safe: " + (safe ? "ON" : "OFF"));
+    }
+}
+
+bool AudioEngine::getTrackRecordSafe(const juce::String& trackId) const
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        return it->second->getRecordSafe();
+    return false;
+}
+
+//==============================================================================
 // Transport Control (Phase 2)
 
 void AudioEngine::setTransportPlaying(bool playing)
@@ -1105,9 +1510,12 @@ void AudioEngine::setTransportRecording(bool recording)
         return; // No change
         
     isRecordMode = recording;
-    
+
     if (recording)
     {
+        loopTakeCounter = 0;  // Reset loop take counter for new recording session
+        prevSamplePosition = currentSamplePosition;  // Initialize prev position tracking
+
         // Use standard documents folder (resolves to OneDrive if configured)
         auto docsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
         projectAudioFolder = docsDir.getChildFile("Studio13").getChildFile("Audio");
@@ -1122,40 +1530,55 @@ void AudioEngine::setTransportRecording(bool recording)
         
         // Start recording for each armed track
         logToDisk("Checking " + juce::String((int)trackMap.size()) + " tracks for arming...");
-        
+
+        bool anyAudioStarted = false;
         for (auto const& [trackId, track] : trackMap)
         {
             if (!track) continue;
-            
+
             bool isArmed = track->getRecordArmed();
-            
+
             if (isArmed)
             {
-                logToDisk("Track " + trackId + " IS ARMED. Starting record...");
-                
-                // Generate filename: Track_ID_Take_timestamp.wav
-                auto timestamp = juce::Time::getCurrentTime().toMilliseconds();
-                auto filename = "Track_" + trackId + "_Take_" + juce::String(timestamp) + ".wav";
-                auto outputFile = projectAudioFolder.getChildFile(filename);
-                
-                // Use the sample rate that was set in audioDeviceAboutToStart
-                // (currentSampleRate is updated when device starts and should match device's actual rate)
-                logToDisk("Recording at sample rate: " + juce::String(currentSampleRate) + " Hz");
-                
-                int numChannels = track->getInputChannelCount();
-                bool started = audioRecorder.startRecording(trackId, outputFile, currentSampleRate, numChannels);
+                auto trackType = track->getTrackType();
 
-                if (started) {
-                    // Defer start-time capture to the audio thread to avoid race
-                    // conditions — the message thread's view of currentSamplePosition
-                    // may be stale by the time the audio callback processes the first
-                    // buffer.  The audio thread sets the correct start time (with
-                    // input latency compensation) on the first write.
-                    pendingRecordStartCapture.store(true, std::memory_order_release);
+                if (trackType == TrackType::MIDI || trackType == TrackType::Instrument)
+                {
+                    // MIDI recording — in-memory accumulation
+                    logToDisk("Track " + trackId + " IS ARMED (MIDI). Starting MIDI record...");
+                    midiRecorder.startRecording(trackId, currentSampleRate);
+                    anyAudioStarted = true;  // Reuse flag for pending start capture
                 }
-                
-                logToDisk("Start Recording Track " + trackId + " -> " + (started ? "SUCCESS" : "FAIL to " + outputFile.getFullPathName()));
+                else
+                {
+                    // Audio recording — disk I/O via ThreadedWriter
+                    logToDisk("Track " + trackId + " IS ARMED. Starting record...");
+
+                    auto timestamp = juce::Time::getCurrentTime().toMilliseconds();
+                    auto filename = "Track_" + trackId + "_Take_" + juce::String(timestamp) + ".wav";
+                    auto outputFile = projectAudioFolder.getChildFile(filename);
+
+                    logToDisk("Recording at sample rate: " + juce::String(currentSampleRate) + " Hz");
+
+                    int numChannels = track->getInputChannelCount();
+                    bool started = audioRecorder.startRecording(trackId, outputFile, currentSampleRate, numChannels);
+
+                    if (started)
+                        anyAudioStarted = true;
+
+                    logToDisk("Start Recording Track " + trackId + " -> " + (started ? "SUCCESS" : "FAIL to " + outputFile.getFullPathName()));
+                }
             }
+        }
+
+        if (anyAudioStarted)
+        {
+            // Defer start-time capture to the audio thread to avoid race
+            // conditions — the message thread's view of currentSamplePosition
+            // may be stale by the time the audio callback processes the first
+            // buffer.  The audio thread sets the correct start time (with
+            // input latency compensation) on the first write.
+            pendingRecordStartCapture.store(true, std::memory_order_release);
         }
     }
     else
@@ -1163,9 +1586,13 @@ void AudioEngine::setTransportRecording(bool recording)
         // Stop all recordings and collect clip info
         logToDisk("Record mode OFF - stopping recordings");
         lastCompletedClips = audioRecorder.stopAllRecordings(currentSampleRate);
-        logToDisk("Recordings stopped. Completed " + juce::String(lastCompletedClips.size()) + " clips.");
+        logToDisk("Recordings stopped. Completed " + juce::String(lastCompletedClips.size()) + " audio clips.");
 
-        // Generate peak caches for recorded files in background (REAPER-style).
+        // Stop MIDI recordings
+        lastCompletedMIDIClips = midiRecorder.stopAllRecordings(projectAudioFolder, tempo);
+        logToDisk("MIDI recordings stopped. Completed " + juce::String(lastCompletedMIDIClips.size()) + " MIDI clips.");
+
+        // Generate peak caches for recorded audio files in background (REAPER-style).
         // The onComplete callback fires on the message thread; MainComponent uses
         // it to emit a "peaksReady" JS event so the Timeline refreshes waveforms.
         for (const auto& clip : lastCompletedClips)
@@ -1274,6 +1701,7 @@ bool AudioEngine::addTrackInputFX(const juce::String& trackId, const juce::Strin
         if (openEditor)
             openPluginEditor(trackId, fxIndex, true);
         juce::Logger::writeToLog("AudioEngine: Added input FX" + juce::String(openEditor ? " and opened editor" : ""));
+        recalculatePDC();
     }
     return success;
 }
@@ -1324,8 +1752,102 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
         if (openEditor)
             openPluginEditor(trackId, fxIndex, false);
         juce::Logger::writeToLog("AudioEngine: Added track FX" + juce::String(openEditor ? " and opened editor" : ""));
+        recalculatePDC();
     }
     return success;
+}
+
+//==============================================================================
+// Built-in Effects (Phase 4.3)
+
+static std::unique_ptr<juce::AudioProcessor> createBuiltInEffect(const juce::String& name)
+{
+    if (name == "S13 EQ")         return std::make_unique<S13EQ>();
+    if (name == "S13 Compressor") return std::make_unique<S13Compressor>();
+    if (name == "S13 Gate")       return std::make_unique<S13Gate>();
+    if (name == "S13 Limiter")    return std::make_unique<S13Limiter>();
+    if (name == "S13 Delay")      return std::make_unique<S13Delay>();
+    if (name == "S13 Reverb")     return std::make_unique<S13Reverb>();
+    if (name == "S13 Chorus")     return std::make_unique<S13Chorus>();
+    if (name == "S13 Saturator")  return std::make_unique<S13Saturator>();
+    return nullptr;
+}
+
+bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::String& effectName, bool isInputFX)
+{
+    auto plugin = createBuiltInEffect(effectName);
+    if (!plugin)
+    {
+        juce::Logger::writeToLog("AudioEngine: Unknown built-in effect: " + effectName);
+        return false;
+    }
+
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = juce::jmax(currentBlockSize > 0 ? currentBlockSize : 512, 512);
+    plugin->setPlayHead(this);
+    plugin->prepareToPlay(sr, bs);
+
+    bool success = false;
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        if (it != trackMap.end() && it->second)
+        {
+            if (isInputFX)
+                success = it->second->addInputFX(std::move(plugin), sr, bs);
+            else
+                success = it->second->addTrackFX(std::move(plugin), sr, bs);
+        }
+    }
+
+    if (success)
+    {
+        juce::Logger::writeToLog("AudioEngine: Added built-in FX '" + effectName + "' to track " + trackId);
+        recalculatePDC();
+    }
+    return success;
+}
+
+bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
+{
+    auto plugin = createBuiltInEffect(effectName);
+    if (!plugin)
+        return false;
+
+    double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
+    int bs = juce::jmax(currentBlockSize > 0 ? currentBlockSize : 512, 512);
+    plugin->setPlayHead(this);
+    plugin->prepareToPlay(sr, bs);
+
+    if (!masterFXChain)
+        return false;
+
+    auto node = masterFXChain->addNode(std::move(plugin));
+    if (!node)
+        return false;
+
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        masterFXNodes.push_back(node);
+    }
+
+    juce::Logger::writeToLog("AudioEngine: Added built-in master FX '" + effectName + "'");
+    return true;
+}
+
+juce::var AudioEngine::getAvailableBuiltInFX()
+{
+    juce::Array<juce::var> list;
+    const char* names[] = { "S13 EQ", "S13 Compressor", "S13 Gate", "S13 Limiter",
+                            "S13 Delay", "S13 Reverb", "S13 Chorus", "S13 Saturator" };
+    for (auto& n : names)
+    {
+        juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+        obj->setProperty("name", juce::String(n));
+        obj->setProperty("category", "Built-in");
+        list.add(juce::var(obj.get()));
+    }
+    return juce::var(list);
 }
 
 //==============================================================================
@@ -1361,7 +1883,10 @@ bool AudioEngine::addTrackS13FX(const juce::String& trackId, const juce::String&
     }
 
     if (success)
+    {
         juce::Logger::writeToLog("AudioEngine: Added S13FX to " + juce::String(isInputFX ? "input" : "track") + " chain: " + scriptPath);
+        recalculatePDC();
+    }
 
     return success;
 }
@@ -1739,6 +2264,7 @@ void AudioEngine::removeTrackInputFX(const juce::String& trackId, int fxIndex)
         it->second->removeInputFX(fxIndex);
         juce::Logger::writeToLog("AudioEngine: Removed input FX " + juce::String(fxIndex) + " from track " + trackId);
     }
+    recalculatePDC();
 }
 
 void AudioEngine::removeTrackFX(const juce::String& trackId, int fxIndex)
@@ -1750,6 +2276,7 @@ void AudioEngine::removeTrackFX(const juce::String& trackId, int fxIndex)
         it->second->removeTrackFX(fxIndex);
         juce::Logger::writeToLog("AudioEngine: Removed track FX " + juce::String(fxIndex) + " from track " + trackId);
     }
+    recalculatePDC();
 }
 
 void AudioEngine::bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed)
@@ -1762,6 +2289,7 @@ void AudioEngine::bypassTrackInputFX(const juce::String& trackId, int fxIndex, b
         juce::Logger::writeToLog("AudioEngine: " + juce::String(bypassed ? "Bypassed" : "Unbypassed") +
                                " input FX " + juce::String(fxIndex) + " on track " + trackId);
     }
+    recalculatePDC();
 }
 
 void AudioEngine::bypassTrackFX(const juce::String& trackId, int fxIndex, bool bypassed)
@@ -1774,6 +2302,7 @@ void AudioEngine::bypassTrackFX(const juce::String& trackId, int fxIndex, bool b
         juce::Logger::writeToLog("AudioEngine: " + juce::String(bypassed ? "Bypassed" : "Unbypassed") +
                                " track FX " + juce::String(fxIndex) + " on track " + trackId);
     }
+    recalculatePDC();
 }
 
 bool AudioEngine::reorderTrackInputFX(const juce::String& trackId, int fromIndex, int toIndex)
@@ -1922,27 +2451,116 @@ void AudioEngine::setMasterPan(float pan)
 
 bool AudioEngine::addMonitoringFX(const juce::String& pluginPath)
 {
-    // TODO: Implement monitoring FX chain when needed
-    juce::Logger::writeToLog("addMonitoringFX called with: " + pluginPath);
-    
-    // Load the plugin with actual device rate
+    juce::Logger::writeToLog("AudioEngine: addMonitoringFX called with: " + pluginPath);
+
     double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
     int bs = currentBlockSize > 0 ? currentBlockSize : 512;
     auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
     if (!plugin)
     {
-        juce::Logger::writeToLog("Failed to load plugin for monitoring FX");
+        juce::Logger::writeToLog("AudioEngine: Failed to load plugin for monitoring FX");
         return false;
     }
-    
-    juce::Logger::writeToLog("Monitoring FX plugin loaded successfully (not yet connected to chain)");
-    return true;
+
+    plugin->setPlayHead(this);
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device)
+    {
+        plugin->prepareToPlay(device->getCurrentSampleRate(),
+                              juce::jmax(device->getCurrentBufferSizeSamples(), 512));
+    }
+
+    auto node = monitoringFXChain->addNode(std::move(plugin));
+    if (node != nullptr)
+    {
+        const juce::ScopedLock lockSl(mainProcessorGraph->getCallbackLock());
+        monitoringFXNodes.push_back(node);
+        juce::Logger::writeToLog("AudioEngine: Added plugin to monitoring FX chain (total: " +
+                                 juce::String((int)monitoringFXNodes.size()) + ")");
+        return true;
+    }
+
+    juce::Logger::writeToLog("AudioEngine: Failed to add node to monitoring FX chain");
+    return false;
+}
+
+juce::var AudioEngine::getMonitoringFX()
+{
+    juce::Array<juce::var> fxList;
+    for (int i = 0; i < static_cast<int>(monitoringFXNodes.size()); ++i)
+    {
+        auto& node = monitoringFXNodes[i];
+        if (node && node->getProcessor())
+        {
+            juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
+            fxInfo->setProperty("index", i);
+            fxInfo->setProperty("name", node->getProcessor()->getName());
+            fxInfo->setProperty("bypassed", node->isBypassed());
+            if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(node->getProcessor()))
+            {
+                auto desc = pluginInstance->getPluginDescription();
+                fxInfo->setProperty("pluginPath", desc.fileOrIdentifier);
+            }
+            fxList.add(juce::var(fxInfo.get()));
+        }
+    }
+    return fxList;
+}
+
+void AudioEngine::removeMonitoringFX(int fxIndex)
+{
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    if (fxIndex >= 0 && fxIndex < static_cast<int>(monitoringFXNodes.size()))
+    {
+        auto node = monitoringFXNodes[fxIndex];
+        monitoringFXNodes.erase(monitoringFXNodes.begin() + fxIndex);
+        if (node)
+            monitoringFXChain->removeNode(node.get());
+        juce::Logger::writeToLog("AudioEngine: Removed monitoring FX " + juce::String(fxIndex));
+    }
+}
+
+void AudioEngine::openMonitoringFXEditor(int fxIndex)
+{
+    if (fxIndex >= 0 && fxIndex < static_cast<int>(monitoringFXNodes.size()))
+    {
+        auto& node = monitoringFXNodes[fxIndex];
+        if (node && node->getProcessor())
+        {
+            auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(node->getProcessor());
+            if (pluginInstance)
+                pluginWindowManager.openEditor(pluginInstance, pluginInstance->getName());
+        }
+    }
+}
+
+void AudioEngine::bypassMonitoringFX(int fxIndex, bool bypassed)
+{
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    if (fxIndex >= 0 && fxIndex < static_cast<int>(monitoringFXNodes.size()))
+    {
+        auto& node = monitoringFXNodes[fxIndex];
+        if (node)
+        {
+            node->setBypassed(bypassed);
+            juce::Logger::writeToLog("AudioEngine: Monitoring FX " + juce::String(fxIndex) +
+                                     (bypassed ? " bypassed" : " enabled"));
+        }
+    }
 }
 
 std::vector<AudioRecorder::CompletedRecording> AudioEngine::getLastCompletedClips()
 {
     auto clips = lastCompletedClips;
     lastCompletedClips.clear();  // Clear after reading
+    return clips;
+}
+
+std::vector<MIDIRecorder::CompletedMIDIRecording> AudioEngine::getLastCompletedMIDIClips()
+{
+    auto clips = std::move(lastCompletedMIDIClips);
+    lastCompletedMIDIClips.clear();
     return clips;
 }
 
@@ -2056,7 +2674,13 @@ juce::Optional<juce::AudioPlayHead::PositionInfo> AudioEngine::getPosition() con
 {
     PositionInfo info;
 
-    info.setBpm (tempo);
+    double timeInSeconds = (currentSampleRate > 0)
+                           ? currentSamplePosition / currentSampleRate
+                           : 0.0;
+
+    // Use tempo map if available, otherwise fall back to global BPM
+    double currentBpm = getTempoAtTime(timeInSeconds);
+    info.setBpm (currentBpm);
 
     juce::AudioPlayHead::TimeSignature timeSig;
     timeSig.numerator   = timeSigNumerator;
@@ -2066,14 +2690,13 @@ juce::Optional<juce::AudioPlayHead::PositionInfo> AudioEngine::getPosition() con
     info.setIsRecording (isRecordMode.load());
     info.setIsLooping (isLooping);
 
-    double timeInSeconds = (currentSampleRate > 0)
-                           ? currentSamplePosition / currentSampleRate
-                           : 0.0;
     info.setTimeInSamples (static_cast<juce::int64> (currentSamplePosition));
     info.setTimeInSeconds (timeInSeconds);
 
     // PPQ = position in quarter notes = seconds * (BPM / 60)
-    double ppqPosition = timeInSeconds * (tempo / 60.0);
+    // NOTE: With a tempo map, PPQ should integrate over tempo changes.
+    // For now, use instantaneous BPM (acceptable for step-wise tempo map).
+    double ppqPosition = timeInSeconds * (currentBpm / 60.0);
     info.setPpqPosition (ppqPosition);
 
     // Bar start in PPQ: quarter notes per bar depends on time signature
@@ -2114,6 +2737,127 @@ bool AudioEngine::setMetronomeAccentSound(const juce::String& filePath)
 void AudioEngine::resetMetronomeSounds()
 {
     metronome.resetToDefaultSounds();
+}
+
+//==============================================================================
+// Plugin Delay Compensation (PDC)
+
+void AudioEngine::recalculatePDC()
+{
+    // Find maximum chain latency across all tracks
+    int maxLatency = 0;
+    for (const auto& id : trackOrder)
+    {
+        auto it = trackMap.find(id);
+        if (it != trackMap.end() && it->second)
+        {
+            int lat = it->second->getChainLatency();
+            if (lat > maxLatency)
+                maxLatency = lat;
+        }
+    }
+
+    // Set PDC delay for each track: maxLatency - trackLatency
+    for (const auto& id : trackOrder)
+    {
+        auto it = trackMap.find(id);
+        if (it != trackMap.end() && it->second)
+        {
+            int trackLat = it->second->getChainLatency();
+            int delay = maxLatency - trackLat;
+            it->second->setPDCDelay(delay);
+        }
+    }
+
+    juce::Logger::writeToLog("AudioEngine: PDC recalculated - maxLatency=" + juce::String(maxLatency) + " samples");
+}
+
+//==============================================================================
+// Pan Law
+
+void AudioEngine::setPanLaw(const juce::String& law)
+{
+    PanLaw newLaw = PanLaw::ConstantPower;
+    if (law == "constant_power" || law == "minus3dB")
+        newLaw = PanLaw::ConstantPower;
+    else if (law == "minus4_5dB")
+        newLaw = PanLaw::Minus4_5dB;
+    else if (law == "minus6dB")
+        newLaw = PanLaw::Minus6dB;
+    else if (law == "linear")
+        newLaw = PanLaw::Linear;
+
+    currentPanLaw = newLaw;
+
+    // Apply to all tracks
+    for (const auto& id : trackOrder)
+    {
+        auto it = trackMap.find(id);
+        if (it != trackMap.end() && it->second)
+            it->second->setPanLaw(newLaw);
+    }
+
+    juce::Logger::writeToLog("AudioEngine: Pan law set to " + law);
+}
+
+juce::String AudioEngine::getPanLaw() const
+{
+    switch (currentPanLaw)
+    {
+        case PanLaw::ConstantPower: return "constant_power";
+        case PanLaw::Minus4_5dB:    return "minus4_5dB";
+        case PanLaw::Minus6dB:      return "minus6dB";
+        case PanLaw::Linear:        return "linear";
+        default:                    return "constant_power";
+    }
+}
+
+//==============================================================================
+// DC Offset per track
+
+void AudioEngine::setTrackDCOffset(const juce::String& trackId, bool enabled)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+    {
+        it->second->setDCOffsetRemoval(enabled);
+        juce::Logger::writeToLog("AudioEngine: DC offset removal " +
+                                 juce::String(enabled ? "enabled" : "disabled") +
+                                 " on track " + trackId);
+    }
+}
+
+//==============================================================================
+// Sidechain Routing (Phase 4.4)
+
+void AudioEngine::setSidechainSource(const juce::String& destTrackId, int pluginIndex, const juce::String& sourceTrackId)
+{
+    auto it = trackMap.find(destTrackId);
+    if (it != trackMap.end() && it->second)
+    {
+        it->second->setSidechainSource(pluginIndex, sourceTrackId);
+        juce::Logger::writeToLog("AudioEngine: Set sidechain for track " + destTrackId +
+                                 " FX[" + juce::String(pluginIndex) + "] = " + sourceTrackId);
+    }
+}
+
+void AudioEngine::clearSidechainSource(const juce::String& destTrackId, int pluginIndex)
+{
+    auto it = trackMap.find(destTrackId);
+    if (it != trackMap.end() && it->second)
+    {
+        it->second->clearSidechainSource(pluginIndex);
+        juce::Logger::writeToLog("AudioEngine: Cleared sidechain for track " + destTrackId +
+                                 " FX[" + juce::String(pluginIndex) + "]");
+    }
+}
+
+juce::String AudioEngine::getSidechainSource(const juce::String& destTrackId, int pluginIndex)
+{
+    auto it = trackMap.find(destTrackId);
+    if (it != trackMap.end() && it->second)
+        return it->second->getSidechainSource(pluginIndex);
+    return {};
 }
 
 //==============================================================================
@@ -2459,18 +3203,19 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                   ") <= startTime (" + juce::String(startTime) + ")");
         return false;
     }
-    // For V1, always render at the device sample rate (= rate audio was recorded at).
-    // Sample rate conversion is not yet implemented, so ignore renderSampleRate.
-    double actualSampleRate = currentSampleRate;
+    // Use requested sample rate for render if provided, otherwise fall back to device rate.
+    // PlaybackEngine::fillTrackBuffer() handles per-file SR conversion automatically,
+    // so rendering at a different rate than the device is fully supported.
+    double actualSampleRate = (renderSampleRate > 0) ? renderSampleRate : currentSampleRate;
     if (actualSampleRate <= 0) actualSampleRate = 44100.0;
     if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 24;
     if (numChannels < 1 || numChannels > 2) numChannels = 2;
 
-    // Determine if we need post-processing (lossy encoding or sample rate conversion)
+    // Determine if we need post-processing (lossy encoding only — SR conversion
+    // is now handled natively by rendering at the target rate)
     juce::String formatLower = format.toLowerCase();
     bool isLossyFormat = (formatLower == "mp3" || formatLower == "ogg");
-    bool needsSampleRateConversion = (renderSampleRate > 0 && renderSampleRate != actualSampleRate);
-    bool needsFFmpegPostProcess = isLossyFormat || needsSampleRateConversion;
+    bool needsFFmpegPostProcess = isLossyFormat;
 
     // For lossy formats, bitDepth holds codec quality:
     //   MP3: bitrate in kbps (128, 192, 256, 320)
@@ -2485,7 +3230,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         stemTrackId = source.substring(5); // After "stem:"
 
     logToDisk("renderProject: Using actualSampleRate=" + juce::String(actualSampleRate) +
-              (needsSampleRateConversion ? " (will convert to " + juce::String(renderSampleRate) + " via ffmpeg)" : " (device rate)"));
+              (actualSampleRate != currentSampleRate ? " (differs from device rate " + juce::String(currentSampleRate) + ")" : " (device rate)"));
     if (isLossyFormat)
         logToDisk("renderProject: Lossy format=" + formatLower + " codecQuality=" + juce::String(codecQuality));
     if (isStemRender)
@@ -2623,7 +3368,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     double tailSeconds = addTail ? (tailLengthMs / 1000.0) : 0.0;
     double totalDuration = (endTime - startTime) + tailSeconds;
     juce::int64 totalSamples = (juce::int64)(totalDuration * actualSampleRate);
-    const int blockSize = 512;
+    const int blockSize = 2048;  // Larger block size for faster offline rendering
 
     logToDisk("renderProject: totalDuration=" + juce::String(totalDuration) +
               "s totalSamples=" + juce::String(totalSamples) +
@@ -2681,6 +3426,12 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     float normGain = 1.0f;
     float peakLevel = 0.0f;
 
+    // Dither state (0 = off, 1 = TPDF, 2 = noise-shaped)
+    int ditherMode = pendingDitherMode_.load();
+    pendingDitherMode_ = 0; // Reset for next render call
+    juce::Random ditherRng;
+    float ditherErrorState[2] = { 0.0f, 0.0f }; // Per-channel error feedback for noise shaping
+
     // Check if metronome was enabled for render
     bool renderMetronomeAudio = metronome.isEnabled();
 
@@ -2703,6 +3454,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
         // Create fresh offline playback engine for each pass (deterministic reads)
         PlaybackEngine passPlayback;
+        passPlayback.setRenderMode(true);  // Use Lagrange interpolation for high-quality resampling
         for (const auto& clip : clipSnapshot)
         {
             passPlayback.addClip(clip.audioFile, clip.startTime, clip.duration,
@@ -2909,6 +3661,40 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             bool isFinalPass = (pass == numPasses - 1);
             if (isFinalPass)
             {
+                // Apply dither if requested (before bit-depth truncation by the writer)
+                if (ditherMode > 0 && bitDepth < 32)
+                {
+                    // ditherMode 1 = TPDF, 2 = noise-shaped (first-order high-pass)
+                    float ditherAmp = 1.0f / static_cast<float>(1 << (bitDepth - 1)); // 1 LSB
+                    for (int ch = 0; ch < masterBuffer.getNumChannels(); ++ch)
+                    {
+                        float* data = masterBuffer.getWritePointer(ch);
+                        for (int s = 0; s < samplesThisBlock; ++s)
+                        {
+                            // TPDF: two uniform randoms → triangular PDF
+                            float r1 = (ditherRng.nextFloat() * 2.0f - 1.0f) * ditherAmp;
+                            float r2 = (ditherRng.nextFloat() * 2.0f - 1.0f) * ditherAmp;
+                            float noise = r1 + r2;
+
+                            if (ditherMode == 2)
+                            {
+                                // First-order noise shaping: subtract previous quantization error
+                                float shaped = noise - ditherErrorState[ch];
+                                float original = data[s];
+                                data[s] = original + shaped;
+                                // Quantize to calculate error for next sample
+                                float scale = static_cast<float>(1 << (bitDepth - 1));
+                                float quantized = std::round(data[s] * scale) / scale;
+                                ditherErrorState[ch] = quantized - original;
+                            }
+                            else
+                            {
+                                data[s] += noise;
+                            }
+                        }
+                    }
+                }
+
                 if (numChannels == 1)
                 {
                     // Mono downmix: average L+R
@@ -2935,12 +3721,12 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     // Flush and close
     writer.reset();
 
-    // ========== 9. FFmpeg post-processing (lossy encoding / sample rate conversion) ==========
+    // ========== 9. FFmpeg post-processing (lossy encoding only) ==========
     if (needsFFmpegPostProcess)
     {
-        logToDisk("renderProject: Starting FFmpeg post-processing...");
-        double targetSR = needsSampleRateConversion ? renderSampleRate : 0;
-        bool ffmpegOk = convertWithFFmpeg(renderFile, outputFile, formatLower, targetSR, codecQuality);
+        logToDisk("renderProject: Starting FFmpeg post-processing (lossy encoding)...");
+        // SR conversion is already handled natively — no need to pass targetSR here
+        bool ffmpegOk = convertWithFFmpeg(renderFile, outputFile, formatLower, 0, codecQuality);
 
         // Clean up temp file
         renderFile.deleteFile();
@@ -2987,4 +3773,1053 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
               " (" + juce::String(outputFile.getSize() / 1024) + " KB)");
 
     return true;
+}
+
+bool AudioEngine::renderProjectWithDither(const juce::String& source, double startTime, double endTime,
+                                          const juce::String& filePath, const juce::String& format,
+                                          double renderSampleRate, int bitDepth, int numChannels,
+                                          bool normalize, bool addTail, double tailLengthMs,
+                                          const juce::String& ditherType)
+{
+    // Map dither type string to mode: "tpdf" → 1, "shaped" → 2, else → 0
+    if (ditherType == "tpdf")
+        pendingDitherMode_ = 1;
+    else if (ditherType == "shaped")
+        pendingDitherMode_ = 2;
+    else
+        pendingDitherMode_ = 0;
+
+    return renderProject(source, startTime, endTime, filePath, format,
+                         renderSampleRate, bitDepth, numChannels,
+                         normalize, addTail, tailLengthMs);
+}
+
+//==============================================================================
+// Automation (Phase 1.1)
+
+static AutomationList* getAutomationListForParam(TrackProcessor* track, const juce::String& parameterId)
+{
+    if (parameterId == "volume")
+        return &track->getVolumeAutomation();
+    if (parameterId == "pan")
+        return &track->getPanAutomation();
+    // Future: plugin parameter automation would go here
+    return nullptr;
+}
+
+static AutomationMode parseAutomationMode(const juce::String& modeStr)
+{
+    if (modeStr == "read")  return AutomationMode::Read;
+    if (modeStr == "write") return AutomationMode::Write;
+    if (modeStr == "touch") return AutomationMode::Touch;
+    if (modeStr == "latch") return AutomationMode::Latch;
+    return AutomationMode::Off;
+}
+
+static juce::String automationModeToString(AutomationMode mode)
+{
+    switch (mode)
+    {
+        case AutomationMode::Read:  return "read";
+        case AutomationMode::Write: return "write";
+        case AutomationMode::Touch: return "touch";
+        case AutomationMode::Latch: return "latch";
+        case AutomationMode::Off:
+        default:                    return "off";
+    }
+}
+
+void AudioEngine::setAutomationPoints(const juce::String& trackId, const juce::String& parameterId,
+                                       const juce::String& pointsJSON)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return;
+
+    auto* list = getAutomationListForParam(it->second, parameterId);
+    if (!list)
+        return;
+
+    // Parse JSON array of { time: <seconds>, value: <float> }
+    auto parsed = juce::JSON::parse(pointsJSON);
+    if (!parsed.isArray())
+        return;
+
+    auto* arr = parsed.getArray();
+    std::vector<AutomationPoint> points;
+    points.reserve(static_cast<size_t>(arr->size()));
+
+    for (const auto& item : *arr)
+    {
+        double timeSec = item.getProperty("time", 0.0);
+        float value = static_cast<float>(static_cast<double>(item.getProperty("value", 0.0)));
+        // Convert seconds to samples for the audio thread
+        double timeSamples = timeSec * currentSampleRate;
+        points.push_back({ timeSamples, value });
+    }
+
+    list->setPoints(std::move(points));
+
+    juce::Logger::writeToLog("AudioEngine: Set " + juce::String(static_cast<int>(points.size())) +
+                             " automation points for track " + trackId + " param " + parameterId);
+}
+
+void AudioEngine::setAutomationMode(const juce::String& trackId, const juce::String& parameterId,
+                                     const juce::String& modeStr)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return;
+
+    auto* list = getAutomationListForParam(it->second, parameterId);
+    if (!list)
+        return;
+
+    auto mode = parseAutomationMode(modeStr);
+    list->setMode(mode);
+
+    // When switching to Read/Touch/Latch, set the default value to the current
+    // fader position so there's no audible jump if automation has no points yet.
+    if (mode != AutomationMode::Off)
+    {
+        if (parameterId == "volume")
+            list->setDefaultValue(it->second->getVolume());
+        else if (parameterId == "pan")
+            list->setDefaultValue(it->second->getPan());
+    }
+
+    juce::Logger::writeToLog("AudioEngine: Set automation mode for track " + trackId +
+                             " param " + parameterId + " = " + modeStr);
+}
+
+juce::String AudioEngine::getAutomationMode(const juce::String& trackId, const juce::String& parameterId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return "off";
+
+    auto* list = getAutomationListForParam(it->second, parameterId);
+    if (!list)
+        return "off";
+
+    return automationModeToString(list->getMode());
+}
+
+void AudioEngine::clearAutomation(const juce::String& trackId, const juce::String& parameterId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return;
+
+    auto* list = getAutomationListForParam(it->second, parameterId);
+    if (list)
+        list->clear();
+}
+
+void AudioEngine::beginTouchAutomation(const juce::String& trackId, const juce::String& parameterId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return;
+
+    auto* list = getAutomationListForParam(it->second, parameterId);
+    if (list)
+        list->beginTouch();
+}
+
+void AudioEngine::endTouchAutomation(const juce::String& trackId, const juce::String& parameterId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return;
+
+    auto* list = getAutomationListForParam(it->second, parameterId);
+    if (list)
+        list->endTouch();
+}
+
+//==============================================================================
+// Tempo Map (Phase 1.2)
+
+void AudioEngine::setTempoMarkers(const juce::String& markersJSON)
+{
+    auto parsed = juce::JSON::parse(markersJSON);
+    if (!parsed.isArray())
+        return;
+
+    std::vector<TempoMarker> newMarkers;
+    auto* arr = parsed.getArray();
+    for (const auto& item : *arr)
+    {
+        if (auto* obj = item.getDynamicObject())
+        {
+            double t = obj->getProperty("time");
+            double b = obj->getProperty("tempo");
+            if (b > 0.0)
+                newMarkers.push_back({ t, b });
+        }
+    }
+
+    // Sort by time
+    std::sort(newMarkers.begin(), newMarkers.end(),
+              [](const TempoMarker& a, const TempoMarker& b) { return a.timeSeconds < b.timeSeconds; });
+
+    {
+        const juce::ScopedLock sl(tempoMapLock);
+        tempoMarkers = std::move(newMarkers);
+    }
+}
+
+double AudioEngine::getTempoAtTime(double timeSeconds) const
+{
+    const juce::ScopedTryLock stl(tempoMapLock);
+    if (!stl.isLocked() || tempoMarkers.empty())
+        return tempo;  // Fallback to global BPM
+
+    // Binary search for the last marker at or before timeSeconds
+    // std::upper_bound gives first marker AFTER timeSeconds, so decrement by 1
+    auto it = std::upper_bound(tempoMarkers.begin(), tempoMarkers.end(), timeSeconds,
+                               [](double t, const TempoMarker& m) { return t < m.timeSeconds; });
+
+    if (it == tempoMarkers.begin())
+        return tempo;  // Before first marker — use global BPM
+
+    --it;
+    return it->bpm;
+}
+
+void AudioEngine::clearTempoMarkers()
+{
+    const juce::ScopedLock sl(tempoMapLock);
+    tempoMarkers.clear();
+}
+
+//==============================================================================
+// Control Surface Callbacks (Phase 3.10)
+
+void AudioEngine::onControlSurfaceTrackVolume(const juce::String& trackId, float value01)
+{
+    // Convert 0..1 to dB: -60 to +6 dB range
+    float db = (value01 <= 0.0f) ? -60.0f : (value01 * 66.0f - 60.0f);
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        it->second->setVolume(db);
+}
+
+void AudioEngine::onControlSurfaceTrackPan(const juce::String& trackId, float valueMinus1To1)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        it->second->setPan(valueMinus1To1);
+}
+
+void AudioEngine::onControlSurfaceTrackMute(const juce::String& trackId, bool muted)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        it->second->setMute(muted);
+}
+
+void AudioEngine::onControlSurfaceTrackSolo(const juce::String& trackId, bool soloed)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+    {
+        it->second->setSolo(soloed);
+        // Recalculate cachedAnySoloed
+        bool anySoloed = false;
+        for (const auto& pair : trackMap)
+            if (pair.second && pair.second->getSolo()) anySoloed = true;
+        cachedAnySoloed = anySoloed;
+    }
+}
+
+void AudioEngine::onControlSurfaceTrackRecordArm(const juce::String& trackId, bool armed)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        it->second->setRecordArmed(armed);
+}
+
+void AudioEngine::onControlSurfaceTransportPlay()
+{
+    isPlaying = true;
+}
+
+void AudioEngine::onControlSurfaceTransportStop()
+{
+    isPlaying = false;
+}
+
+void AudioEngine::onControlSurfaceTransportRecord()
+{
+    isRecordMode = !isRecordMode.load();
+}
+
+void AudioEngine::onControlSurfaceMasterVolume(float value01)
+{
+    float db = (value01 <= 0.0f) ? -60.0f : (value01 * 66.0f - 60.0f);
+    masterVolume = juce::Decibels::decibelsToGain(db);
+}
+
+float AudioEngine::getTrackVolume01(const juce::String& trackId) const
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+    {
+        float db = it->second->getVolume();
+        return (db + 60.0f) / 66.0f; // Map -60..+6 to 0..1
+    }
+    return 0.0f;
+}
+
+float AudioEngine::getTrackPan(const juce::String& trackId) const
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        return it->second->getPan();
+    return 0.0f;
+}
+
+bool AudioEngine::getTrackMuted(const juce::String& trackId) const
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        return it->second->getMute();
+    return false;
+}
+
+bool AudioEngine::getTrackSoloed(const juce::String& trackId) const
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        return it->second->getSolo();
+    return false;
+}
+
+std::vector<juce::String> AudioEngine::getTrackIds() const
+{
+    return trackOrder;
+}
+
+//==============================================================================
+// Phase 3.12: Strip Silence
+//==============================================================================
+
+juce::var AudioEngine::detectSilentRegions(const juce::String& filePath, double thresholdDb,
+                                            double minSilenceMs, double minSoundMs,
+                                            double preAttackMs, double postReleaseMs)
+{
+    auto regions = audioAnalyzer.detectSilentRegions(filePath, thresholdDb,
+                                                      minSilenceMs, minSoundMs,
+                                                      preAttackMs, postReleaseMs);
+
+    // Get sample rate for time conversion
+    std::unique_ptr<juce::AudioFormatReader> reader(
+        juce::AudioFormatManager().createReaderFor(juce::File(filePath)));
+
+    // Need a fresh format manager for this
+    juce::AudioFormatManager fmgr;
+    fmgr.registerBasicFormats();
+    reader.reset(fmgr.createReaderFor(juce::File(filePath)));
+
+    double sr = reader ? reader->sampleRate : 44100.0;
+
+    juce::Array<juce::var> result;
+    for (const auto& r : regions)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("startTime", r.startSample / sr);
+        obj->setProperty("endTime", r.endSample / sr);
+        obj->setProperty("startSample", (juce::int64)r.startSample);
+        obj->setProperty("endSample", (juce::int64)r.endSample);
+        result.add(juce::var(obj));
+    }
+    return juce::var(result);
+}
+
+//==============================================================================
+// Phase 3.13: Freeze Track
+//==============================================================================
+
+juce::var AudioEngine::freezeTrack(const juce::String& trackId)
+{
+    auto* resultObj = new juce::DynamicObject();
+
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+    {
+        resultObj->setProperty("success", false);
+        resultObj->setProperty("error", "Track not found");
+        return juce::var(resultObj);
+    }
+
+    TrackProcessor* track = it->second;
+
+    // Use the playback engine's clips for this track to determine the range
+    double startTime = 0.0;
+    double endTime = 0.0;
+    auto allClips = playbackEngine.getClipSnapshot();
+    std::vector<PlaybackEngine::ClipInfo> clipList;
+    for (const auto& c : allClips)
+        if (c.trackId == trackId)
+            clipList.push_back(c);
+    if (clipList.empty())
+    {
+        resultObj->setProperty("success", false);
+        resultObj->setProperty("error", "No clips on track");
+        return juce::var(resultObj);
+    }
+
+    // Find the time range of all clips on this track
+    startTime = std::numeric_limits<double>::max();
+    endTime = 0.0;
+    for (const auto& clip : clipList)
+    {
+        startTime = std::min(startTime, clip.startTime);
+        endTime = std::max(endTime, clip.startTime + clip.duration);
+    }
+
+    // Add tail for FX (reverb, delay)
+    double tailMs = 2000.0; // 2 seconds of tail
+    endTime += tailMs / 1000.0;
+
+    // Create freeze file in project audio folder
+    juce::File freezeDir = projectAudioFolder.isDirectory()
+        ? projectAudioFolder
+        : juce::File::getSpecialLocation(juce::File::tempDirectory);
+    freezeDir.createDirectory();
+
+    juce::String freezeFileName = "freeze_" + trackId + "_" + juce::String(juce::Time::currentTimeMillis()) + ".wav";
+    juce::File freezeFile = freezeDir.getChildFile(freezeFileName);
+
+    // Render this single track offline
+    double renderRate = currentSampleRate;
+    int renderBlockSize = 512;
+    juce::int64 totalSamples = (juce::int64)((endTime - startTime) * renderRate);
+
+    if (totalSamples <= 0)
+    {
+        resultObj->setProperty("success", false);
+        resultObj->setProperty("error", "Empty render range");
+        return juce::var(resultObj);
+    }
+
+    // Prepare the track's FX for offline rendering
+    track->prepareToPlay(renderRate, renderBlockSize);
+
+    // Create output file
+    juce::WavAudioFormat wavFormat;
+    auto outputStream = std::make_unique<juce::FileOutputStream>(freezeFile);
+    if (outputStream->failedToOpen())
+    {
+        resultObj->setProperty("success", false);
+        resultObj->setProperty("error", "Failed to create freeze file");
+        return juce::var(resultObj);
+    }
+
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wavFormat.createWriterFor(outputStream.get(), renderRate, 2, 24, {}, 0));
+    if (!writer)
+    {
+        resultObj->setProperty("success", false);
+        resultObj->setProperty("error", "Failed to create WAV writer");
+        return juce::var(resultObj);
+    }
+    outputStream.release(); // writer owns it now
+
+    // Render loop
+    juce::AudioBuffer<float> renderBuffer(2, renderBlockSize);
+    juce::AudioBuffer<float> trackBuffer(2, renderBlockSize);
+    juce::MidiBuffer midiDummy;
+
+    juce::int64 samplesRendered = 0;
+    double samplePos = startTime * renderRate;
+
+    while (samplesRendered < totalSamples)
+    {
+        int blockSamples = (int)std::min((juce::int64)renderBlockSize, totalSamples - samplesRendered);
+        renderBuffer.clear();
+        trackBuffer.clear();
+
+        // Fill track buffer from playback engine
+        playbackEngine.fillTrackBuffer(trackId, trackBuffer, samplePos / renderRate, blockSamples, renderRate);
+
+        // Process through FX chain
+        track->setCurrentBlockPosition(samplePos, renderRate);
+        juce::AudioBuffer<float> fxBuffer(trackBuffer.getArrayOfWritePointers(), 2, blockSamples);
+        track->processBlock(fxBuffer, midiDummy);
+
+        // Write to output
+        writer->writeFromAudioSampleBuffer(fxBuffer, 0, blockSamples);
+
+        samplePos += blockSamples;
+        samplesRendered += blockSamples;
+    }
+
+    writer.reset(); // Flush
+
+    // Re-prepare track for live playback
+    track->prepareToPlay(currentSampleRate, currentBlockSize);
+
+    double duration = endTime - startTime;
+
+    resultObj->setProperty("success", true);
+    resultObj->setProperty("filePath", freezeFile.getFullPathName());
+    resultObj->setProperty("duration", duration);
+    resultObj->setProperty("sampleRate", renderRate);
+    resultObj->setProperty("startTime", startTime);
+
+    juce::Logger::writeToLog("FreezeTrack: " + trackId + " -> " + freezeFile.getFullPathName() +
+                             " (" + juce::String(duration, 2) + "s)");
+    return juce::var(resultObj);
+}
+
+bool AudioEngine::unfreezeTrack(const juce::String& trackId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return false;
+
+    // Re-prepare track FX for live playback (in case they were in frozen bypass state)
+    it->second->prepareToPlay(currentSampleRate, currentBlockSize);
+
+    juce::Logger::writeToLog("UnfreezeTrack: " + trackId);
+    return true;
+}
+
+// =============================================================================
+// Phase 18.10: Clip Gain Envelope
+// =============================================================================
+
+void AudioEngine::setClipGainEnvelope(const juce::String& trackId, const juce::String& clipId,
+                                       const juce::String& pointsJSON)
+{
+    // Parse JSON array of {time, gain} points
+    auto parsed = juce::JSON::parse(pointsJSON);
+    std::vector<PlaybackEngine::GainEnvelopePoint> points;
+
+    if (auto* arr = parsed.getArray())
+    {
+        for (const auto& item : *arr)
+        {
+            if (auto* obj = item.getDynamicObject())
+            {
+                PlaybackEngine::GainEnvelopePoint pt;
+                pt.time = static_cast<double>(obj->getProperty("time"));
+                pt.gain = static_cast<float>(static_cast<double>(obj->getProperty("gain")));
+                points.push_back(pt);
+            }
+        }
+    }
+
+    // Sort by time
+    std::sort(points.begin(), points.end(),
+              [](const PlaybackEngine::GainEnvelopePoint& a, const PlaybackEngine::GainEnvelopePoint& b) {
+                  return a.time < b.time;
+              });
+
+    playbackEngine.setClipGainEnvelope(trackId, clipId, points);
+    juce::Logger::writeToLog("setClipGainEnvelope: track=" + trackId + " clip=" + clipId +
+                             " points=" + juce::String(static_cast<int>(points.size())));
+}
+
+// =============================================================================
+// Phase 19.7: MIDI Learn
+// =============================================================================
+
+void AudioEngine::startMIDILearnForPlugin(const juce::String& trackId, int pluginIndex, int paramIndex)
+{
+    const juce::ScopedLock sl(midiLearnLock);
+    midiLearnTrackId = trackId;
+    midiLearnPluginIndex = pluginIndex;
+    midiLearnParamIndex = paramIndex;
+    midiLearnActive.store(true);
+    juce::Logger::writeToLog("MIDI Learn: Started for track=" + trackId +
+                             " plugin=" + juce::String(pluginIndex) +
+                             " param=" + juce::String(paramIndex));
+}
+
+void AudioEngine::stopMIDILearnMode()
+{
+    midiLearnActive.store(false);
+    juce::Logger::writeToLog("MIDI Learn: Stopped");
+}
+
+void AudioEngine::clearMIDILearnMapping(int ccNumber)
+{
+    const juce::ScopedLock sl(midiLearnLock);
+    midiLearnMappings.erase(
+        std::remove_if(midiLearnMappings.begin(), midiLearnMappings.end(),
+                        [ccNumber](const MIDILearnMapping& m) { return m.ccNumber == ccNumber; }),
+        midiLearnMappings.end());
+    juce::Logger::writeToLog("MIDI Learn: Cleared mapping for CC " + juce::String(ccNumber));
+}
+
+juce::var AudioEngine::getMIDILearnMappings()
+{
+    const juce::ScopedLock sl(midiLearnLock);
+    juce::Array<juce::var> result;
+
+    for (const auto& m : midiLearnMappings)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("ccNumber", m.ccNumber);
+        obj->setProperty("trackId", m.trackId);
+        obj->setProperty("pluginIndex", m.pluginIndex);
+        obj->setProperty("paramIndex", m.paramIndex);
+        result.add(juce::var(obj));
+    }
+
+    return juce::var(result);
+}
+
+// =============================================================================
+// Phase 19.9: MIDI Import/Export
+// =============================================================================
+
+juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
+{
+    juce::File file(filePath);
+    if (!file.existsAsFile())
+        return juce::var();
+
+    juce::FileInputStream stream(file);
+    if (stream.failedToOpen())
+        return juce::var();
+
+    juce::MidiFile midiFile;
+    if (!midiFile.readFrom(stream))
+        return juce::var();
+
+    // Convert to tick-based time, then convert to seconds
+    midiFile.convertTimestampTicksToSeconds();
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("numTracks", midiFile.getNumTracks());
+    result->setProperty("ticksPerQuarterNote", midiFile.getTimeFormat());
+
+    juce::Array<juce::var> tracksArray;
+
+    for (int t = 0; t < midiFile.getNumTracks(); ++t)
+    {
+        const auto* midiTrack = midiFile.getTrack(t);
+        if (!midiTrack) continue;
+
+        auto* trackObj = new juce::DynamicObject();
+        juce::Array<juce::var> eventsArray;
+
+        for (int i = 0; i < midiTrack->getNumEvents(); ++i)
+        {
+            const auto* holder = midiTrack->getEventPointer(i);
+            const auto& msg = holder->message;
+
+            auto* evtObj = new juce::DynamicObject();
+            evtObj->setProperty("timestamp", msg.getTimeStamp());
+
+            if (msg.isNoteOn())
+            {
+                evtObj->setProperty("type", "noteOn");
+                evtObj->setProperty("note", msg.getNoteNumber());
+                evtObj->setProperty("velocity", msg.getVelocity());
+                evtObj->setProperty("channel", msg.getChannel());
+            }
+            else if (msg.isNoteOff())
+            {
+                evtObj->setProperty("type", "noteOff");
+                evtObj->setProperty("note", msg.getNoteNumber());
+                evtObj->setProperty("velocity", 0);
+                evtObj->setProperty("channel", msg.getChannel());
+            }
+            else if (msg.isController())
+            {
+                evtObj->setProperty("type", "cc");
+                evtObj->setProperty("controller", msg.getControllerNumber());
+                evtObj->setProperty("value", msg.getControllerValue());
+                evtObj->setProperty("channel", msg.getChannel());
+            }
+            else if (msg.isPitchWheel())
+            {
+                evtObj->setProperty("type", "pitchBend");
+                evtObj->setProperty("value", msg.getPitchWheelValue());
+                evtObj->setProperty("channel", msg.getChannel());
+            }
+            else if (msg.isTempoMetaEvent())
+            {
+                evtObj->setProperty("type", "tempo");
+                evtObj->setProperty("bpm", 60000000.0 / msg.getTempoSecondsPerQuarterNote() / 1000000.0);
+            }
+            else
+            {
+                continue;
+            }
+
+            eventsArray.add(juce::var(evtObj));
+        }
+
+        trackObj->setProperty("events", eventsArray);
+        tracksArray.add(juce::var(trackObj));
+    }
+
+    result->setProperty("tracks", tracksArray);
+    juce::Logger::writeToLog("importMIDIFile: " + filePath + " - " +
+                             juce::String(midiFile.getNumTracks()) + " tracks");
+    return juce::var(result);
+}
+
+bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String& clipId,
+                                  const juce::String& eventsJSON, const juce::String& outputPath,
+                                  double clipTempo)
+{
+    juce::ignoreUnused(trackId, clipId);
+
+    if (clipTempo <= 0.0) clipTempo = 120.0;
+
+    juce::MidiFile midiFile;
+    midiFile.setTicksPerQuarterNote(480);
+
+    juce::MidiMessageSequence sequence;
+
+    // Add tempo event
+    sequence.addEvent(juce::MidiMessage::tempoMetaEvent(
+        static_cast<int>(60000000.0 / clipTempo)), 0.0);
+
+    // Parse events JSON
+    auto parsed = juce::JSON::parse(eventsJSON);
+    if (auto* arr = parsed.getArray())
+    {
+        for (const auto& item : *arr)
+        {
+            auto* obj = item.getDynamicObject();
+            if (!obj) continue;
+
+            juce::String eventType = obj->getProperty("type").toString();
+            double timestamp = static_cast<double>(obj->getProperty("timestamp"));
+            // Convert seconds to ticks: ticks = seconds * (BPM / 60) * ticksPerQN
+            double ticks = timestamp * (clipTempo / 60.0) * 480.0;
+
+            if (eventType == "noteOn")
+            {
+                int note = static_cast<int>(obj->getProperty("note"));
+                int velocity = static_cast<int>(obj->getProperty("velocity"));
+                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                sequence.addEvent(juce::MidiMessage::noteOn(channel, note, static_cast<juce::uint8>(velocity)), ticks);
+            }
+            else if (eventType == "noteOff")
+            {
+                int note = static_cast<int>(obj->getProperty("note"));
+                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                sequence.addEvent(juce::MidiMessage::noteOff(channel, note), ticks);
+            }
+            else if (eventType == "cc")
+            {
+                int controller = static_cast<int>(obj->getProperty("controller"));
+                int value = static_cast<int>(obj->getProperty("value"));
+                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                sequence.addEvent(juce::MidiMessage::controllerEvent(channel, controller, value), ticks);
+            }
+        }
+    }
+
+    sequence.updateMatchedPairs();
+    midiFile.addTrack(sequence);
+
+    juce::File outFile(outputPath);
+    outFile.deleteFile();
+    std::unique_ptr<juce::FileOutputStream> outputStream(outFile.createOutputStream());
+    if (!outputStream)
+        return false;
+
+    bool success = midiFile.writeTo(*outputStream);
+    juce::Logger::writeToLog("exportMIDIFile: " + outputPath + " success=" + juce::String(success ? "true" : "false"));
+    return success;
+}
+
+// =============================================================================
+// Phase 19.14: Plugin Presets
+// =============================================================================
+
+juce::var AudioEngine::getPluginPresets(const juce::String& trackId, int fxIndex, bool isInputFX)
+{
+    juce::ignoreUnused(trackId, fxIndex, isInputFX);
+
+    // List preset files from the presets directory
+    juce::File presetsDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                .getChildFile("Studio13").getChildFile("Presets");
+
+    juce::Array<juce::var> result;
+    if (presetsDir.isDirectory())
+    {
+        auto files = presetsDir.findChildFiles(juce::File::findFiles, true, "*.s13preset");
+        for (const auto& file : files)
+        {
+            auto* obj = new juce::DynamicObject();
+            obj->setProperty("name", file.getFileNameWithoutExtension());
+            obj->setProperty("path", file.getFullPathName());
+            result.add(juce::var(obj));
+        }
+    }
+
+    return juce::var(result);
+}
+
+bool AudioEngine::loadPluginPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
+                                    const juce::String& presetPath)
+{
+    juce::File presetFile(presetPath);
+    if (!presetFile.existsAsFile())
+        return false;
+
+    auto xml = juce::XmlDocument::parse(presetFile);
+    if (!xml)
+        return false;
+
+    juce::String base64State = xml->getStringAttribute("state");
+    if (base64State.isEmpty())
+        return false;
+
+    return setPluginState(trackId, fxIndex, isInputFX, base64State);
+}
+
+bool AudioEngine::savePluginPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
+                                    const juce::String& presetPath, const juce::String& presetName)
+{
+    juce::String base64State = getPluginState(trackId, fxIndex, isInputFX);
+    if (base64State.isEmpty())
+        return false;
+
+    // Create XML structure
+    juce::XmlElement xml("S13Preset");
+    xml.setAttribute("name", presetName);
+    xml.setAttribute("state", base64State);
+    xml.setAttribute("version", "1.0");
+
+    juce::File outFile(presetPath);
+    outFile.getParentDirectory().createDirectory();
+
+    bool success = xml.writeTo(outFile);
+    juce::Logger::writeToLog("savePluginPreset: " + presetPath + " success=" + juce::String(success ? "true" : "false"));
+    return success;
+}
+
+// =============================================================================
+// Phase 19.16: A/B Comparison
+// =============================================================================
+
+bool AudioEngine::storePluginABState(const juce::String& trackId, int fxIndex, bool isInputFX,
+                                      const juce::String& slot)
+{
+    juce::String base64State = getPluginState(trackId, fxIndex, isInputFX);
+    if (base64State.isEmpty())
+        return false;
+
+    juce::String key = trackId + ":" + juce::String(fxIndex) + ":" + juce::String(isInputFX ? 1 : 0) + ":" + slot;
+    pluginABStates[key] = base64State;
+
+    juce::String slotKey = trackId + ":" + juce::String(fxIndex) + ":" + juce::String(isInputFX ? 1 : 0);
+    pluginActiveSlots[slotKey] = slot;
+
+    juce::Logger::writeToLog("storePluginABState: " + key);
+    return true;
+}
+
+bool AudioEngine::loadPluginABState(const juce::String& trackId, int fxIndex, bool isInputFX,
+                                     const juce::String& slot)
+{
+    juce::String key = trackId + ":" + juce::String(fxIndex) + ":" + juce::String(isInputFX ? 1 : 0) + ":" + slot;
+    auto it = pluginABStates.find(key);
+    if (it == pluginABStates.end())
+        return false;
+
+    bool ok = setPluginState(trackId, fxIndex, isInputFX, it->second);
+    if (ok)
+    {
+        juce::String slotKey = trackId + ":" + juce::String(fxIndex) + ":" + juce::String(isInputFX ? 1 : 0);
+        pluginActiveSlots[slotKey] = slot;
+    }
+
+    juce::Logger::writeToLog("loadPluginABState: " + key + " ok=" + juce::String(ok ? "true" : "false"));
+    return ok;
+}
+
+juce::String AudioEngine::getPluginActiveSlot(const juce::String& trackId, int fxIndex, bool isInputFX)
+{
+    juce::String slotKey = trackId + ":" + juce::String(fxIndex) + ":" + juce::String(isInputFX ? 1 : 0);
+    auto it = pluginActiveSlots.find(slotKey);
+    return (it != pluginActiveSlots.end()) ? it->second : juce::String("A");
+}
+
+// =============================================================================
+// Phase 20.5: Session Archive
+// =============================================================================
+
+bool AudioEngine::archiveSession(const juce::String& projectJsonPath, const juce::String& outputZipPath)
+{
+    juce::File projectFile(projectJsonPath);
+    if (!projectFile.existsAsFile())
+        return false;
+
+    juce::File zipFile(outputZipPath);
+    zipFile.deleteFile();
+
+    auto outputStream = std::make_unique<juce::FileOutputStream>(zipFile);
+    if (outputStream->failedToOpen())
+        return false;
+
+    juce::ZipFile::Builder builder;
+
+    // Add the project JSON file
+    builder.addFile(projectFile, 9, projectFile.getFileName());
+
+    // Parse project JSON to find referenced media files
+    juce::String jsonContent = projectFile.loadFileAsString();
+    auto projectData = juce::JSON::parse(jsonContent);
+
+    // Collect all file paths from clip data
+    std::set<juce::String> mediaFiles;
+    if (auto* tracksArr = projectData.getProperty("tracks", juce::var()).getArray())
+    {
+        for (const auto& trackVar : *tracksArr)
+        {
+            if (auto* clipsArr = trackVar.getProperty("clips", juce::var()).getArray())
+            {
+                for (const auto& clipVar : *clipsArr)
+                {
+                    juce::String fp = clipVar.getProperty("filePath", "").toString();
+                    if (fp.isNotEmpty())
+                        mediaFiles.insert(fp);
+                }
+            }
+        }
+    }
+
+    // Add media files to archive
+    juce::File projectDir = projectFile.getParentDirectory();
+    for (const auto& mediaPath : mediaFiles)
+    {
+        juce::File mediaFile(mediaPath);
+        if (mediaFile.existsAsFile())
+        {
+            // Store relative to project directory if possible
+            juce::String relativePath = mediaFile.getRelativePathFrom(projectDir);
+            builder.addFile(mediaFile, 9, "media/" + relativePath);
+        }
+    }
+
+    bool success = builder.writeToStream(*outputStream, nullptr);
+    outputStream.reset();
+
+    juce::Logger::writeToLog("archiveSession: " + outputZipPath +
+                             " success=" + juce::String(success ? "true" : "false") +
+                             " files=" + juce::String(static_cast<int>(mediaFiles.size()) + 1));
+    return success;
+}
+
+bool AudioEngine::unarchiveSession(const juce::String& zipPath, const juce::String& outputDir)
+{
+    juce::File zipFile(zipPath);
+    if (!zipFile.existsAsFile())
+        return false;
+
+    juce::File outDir(outputDir);
+    outDir.createDirectory();
+
+    juce::ZipFile zip(zipFile);
+    if (zip.getNumEntries() == 0)
+        return false;
+
+    auto result = zip.uncompressTo(outDir);
+    bool success = (result.wasOk());
+
+    juce::Logger::writeToLog("unarchiveSession: " + zipPath + " -> " + outputDir +
+                             " entries=" + juce::String(zip.getNumEntries()) +
+                             " success=" + juce::String(success ? "true" : "false"));
+    return success;
+}
+
+// =============================================================================
+// Phase 20.11: Spectrum Analyzer
+// =============================================================================
+
+juce::var AudioEngine::getSpectrumData()
+{
+    const juce::ScopedLock sl(spectrumLock);
+
+    juce::Array<juce::var> result;
+    if (!spectrumReady)
+        return juce::var(result);
+
+    // Return first half of FFT (positive frequencies only): FFT_SIZE/2 + 1 bins
+    int numBins = FFT_SIZE / 2 + 1;
+    for (int i = 0; i < numBins; ++i)
+        result.add(static_cast<double>(spectrumOutputBuffer[i]));
+
+    return juce::var(result);
+}
+
+// =============================================================================
+// Phase 20.12: Built-in FX Oversampling
+// =============================================================================
+
+bool AudioEngine::setBuiltInFXOversampling(const juce::String& trackId, int fxIndex, bool isInputFX, bool enabled)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end())
+        return false;
+
+    auto* track = it->second;
+    juce::AudioProcessor* proc = nullptr;
+
+    if (isInputFX)
+        proc = track->getInputFXProcessor(fxIndex);
+    else
+        proc = track->getTrackFXProcessor(fxIndex);
+
+    if (!proc)
+        return false;
+
+    // Check if it's a built-in effect that inherits from S13BuiltInEffect
+    if (auto* builtIn = dynamic_cast<S13BuiltInEffect*>(proc))
+    {
+        builtIn->setOversamplingEnabled(enabled);
+        juce::Logger::writeToLog("setBuiltInFXOversampling: " + trackId + " fx=" + juce::String(fxIndex)
+                                 + " isInput=" + juce::String(isInputFX ? "true" : "false")
+                                 + " enabled=" + juce::String(enabled ? "true" : "false"));
+        return true;
+    }
+
+    // Check if it's an S13Saturator (doesn't inherit from S13BuiltInEffect)
+    if (auto* saturator = dynamic_cast<S13Saturator*>(proc))
+    {
+        saturator->setOversamplingEnabled(enabled);
+        juce::Logger::writeToLog("setBuiltInFXOversampling (Saturator): " + trackId + " fx=" + juce::String(fxIndex)
+                                 + " enabled=" + juce::String(enabled ? "true" : "false"));
+        return true;
+    }
+
+    return false;
+}
+
+// ========== Channel Strip EQ (Phase 19.18) ==========
+
+void AudioEngine::setChannelStripEQEnabled(const juce::String& trackId, bool enabled)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        it->second->setChannelStripEQEnabled(enabled);
+}
+
+void AudioEngine::setChannelStripEQParam(const juce::String& trackId, int paramIndex, float value)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        it->second->setChannelStripEQParam(paramIndex, value);
+}
+
+float AudioEngine::getChannelStripEQParam(const juce::String& trackId, int paramIndex)
+{
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second)
+        return it->second->getChannelStripEQParam(paramIndex);
+    return 0.0f;
 }

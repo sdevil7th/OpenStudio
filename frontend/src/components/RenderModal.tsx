@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import {
   Button,
@@ -79,14 +80,30 @@ function resolveWildcards(
  * Based on Reaper's render dialog design
  */
 export function RenderModal({ isOpen, onClose }: RenderModalProps) {
-  const { tracks, timeSelection, projectPath, projectRange, syncClipsWithBackend, selectedTrackIds, regions, selectedRegionIds, selectedClipIds, razorEdits } = useDAWStore();
-  const projectName = useDAWStore((s) => s.projectName);
-  const renderMetadata = useDAWStore((s) => s.renderMetadata);
-  const secondaryOutputEnabled = useDAWStore((s) => s.secondaryOutputEnabled);
-  const secondaryOutputFormat = useDAWStore((s) => s.secondaryOutputFormat);
-  const secondaryOutputBitDepth = useDAWStore((s) => s.secondaryOutputBitDepth);
-  const onlineRender = useDAWStore((s) => s.onlineRender);
-  const addToProjectAfterRender = useDAWStore((s) => s.addToProjectAfterRender);
+  const {
+    tracks, timeSelection, projectPath, projectRange, syncClipsWithBackend,
+    selectedTrackIds, regions, selectedRegionIds, selectedClipIds, razorEdits,
+    projectName, renderMetadata, secondaryOutputEnabled, secondaryOutputFormat,
+    secondaryOutputBitDepth, onlineRender, addToProjectAfterRender,
+  } = useDAWStore(useShallow((s) => ({
+    tracks: s.tracks,
+    timeSelection: s.timeSelection,
+    projectPath: s.projectPath,
+    projectRange: s.projectRange,
+    syncClipsWithBackend: s.syncClipsWithBackend,
+    selectedTrackIds: s.selectedTrackIds,
+    regions: s.regions,
+    selectedRegionIds: s.selectedRegionIds,
+    selectedClipIds: s.selectedClipIds,
+    razorEdits: s.razorEdits,
+    projectName: s.projectName,
+    renderMetadata: s.renderMetadata,
+    secondaryOutputEnabled: s.secondaryOutputEnabled,
+    secondaryOutputFormat: s.secondaryOutputFormat,
+    secondaryOutputBitDepth: s.secondaryOutputBitDepth,
+    onlineRender: s.onlineRender,
+    addToProjectAfterRender: s.addToProjectAfterRender,
+  })));
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState("");
@@ -253,12 +270,22 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     };
   };
 
+  /** Render with dither support — delegates to the appropriate bridge method */
+  const doRender = async (overrides: { source?: string; startTime?: number; endTime?: number; filePath: string }) => {
+    const params = buildRenderParams(overrides);
+    if (options.dither) {
+      const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
+      return nativeBridge.renderProjectWithDither({ ...params, ditherType });
+    }
+    return nativeBridge.renderProject(params);
+  };
+
   /** Run a secondary render (convert to secondary format) after primary render */
   const renderSecondary = async (primaryPath: string) => {
     if (!secondaryOutputEnabled) return;
     const ext = secondaryOutputFormat;
     const secPath = primaryPath.replace(/\.[^.]+$/, `.${ext}`);
-    await nativeBridge.renderProject(buildRenderParams({ filePath: secPath }));
+    await doRender({ filePath: secPath });
   };
 
   /** Add rendered file(s) to project after render */
@@ -338,7 +365,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           const resolvedMaster = range.name
             ? `${options.directory}\\${resolveWildcards(options.fileName, { projectName, index: 0, ...regionCtx })}.${options.format}`
             : masterPath;
-          await nativeBridge.renderProject(buildRenderParams({ source: "master", startTime: range.start, endTime: range.end, filePath: resolvedMaster }));
+          await doRender({ source: "master", startTime: range.start, endTime: range.end, filePath: resolvedMaster });
           renderedFiles.push(resolvedMaster);
           advanceProgress();
 
@@ -346,7 +373,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             const track = tracks[i];
             setRenderStatus(`Rendering stem ${i + 1} of ${tracks.length}: ${track.name}${range.name ? ` (${range.name})` : ""}...`);
             const stemPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`;
-            await nativeBridge.renderProject(buildRenderParams({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: stemPath }));
+            await doRender({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: stemPath });
             renderedFiles.push(stemPath);
             advanceProgress();
           }
@@ -361,7 +388,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             const track = tracksToRender[i];
             setRenderStatus(`Rendering track ${i + 1} of ${tracksToRender.length}: ${track.name}...`);
             const trackPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`;
-            await nativeBridge.renderProject(buildRenderParams({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: trackPath }));
+            await doRender({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: trackPath });
             renderedFiles.push(trackPath);
             advanceProgress();
           }
@@ -376,7 +403,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           // selected_items_master routes through master FX; selected_items renders direct
           const source = options.source === "selected_items_master" ? "master" : "selected_items";
           const itemPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`;
-          await nativeBridge.renderProject(buildRenderParams({ source, startTime: range.start, endTime: range.end, filePath: itemPath }));
+          await doRender({ source, startTime: range.start, endTime: range.end, filePath: itemPath });
           renderedFiles.push(itemPath);
           advanceProgress();
         } else if (options.source === "razor") {
@@ -391,7 +418,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             const track = tracks.find((t) => t.id === razor.trackId);
             setRenderStatus(`Rendering razor area ${i + 1} of ${razorEdits.length}...`);
             const razorPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, trackName: track?.name, index: i + 1 })}.${options.format}`;
-            await nativeBridge.renderProject(buildRenderParams({ source: `stem:${razor.trackId}`, startTime: razor.start, endTime: razor.end, filePath: razorPath }));
+            await doRender({ source: `stem:${razor.trackId}`, startTime: razor.start, endTime: razor.end, filePath: razorPath });
             renderedFiles.push(razorPath);
             advanceProgress();
           }
@@ -399,7 +426,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           // Master mix render
           setRenderStatus(`Rendering master mix${range.name ? ` (${range.name})` : ""}...`);
           const masterPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`;
-          await nativeBridge.renderProject(buildRenderParams({ source: options.source, startTime: range.start, endTime: range.end, filePath: masterPath }));
+          await doRender({ source: options.source, startTime: range.start, endTime: range.end, filePath: masterPath });
           renderedFiles.push(masterPath);
           advanceProgress();
         }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button, Checkbox, Input, NativeSelect } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
 
@@ -86,8 +87,10 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 // ========== General Tab ==========
 function GeneralTab() {
-  const snapEnabled = useDAWStore((s) => s.snapEnabled);
-  const gridSize = useDAWStore((s) => s.gridSize);
+  const { snapEnabled, gridSize } = useDAWStore(useShallow((s) => ({
+    snapEnabled: s.snapEnabled,
+    gridSize: s.gridSize,
+  })));
 
   return (
     <div>
@@ -124,10 +127,12 @@ function GeneralTab() {
 
 // ========== Editing Tab ==========
 function EditingTab() {
-  const autoCrossfade = useDAWStore((s) => s.autoCrossfade);
-  const defaultCrossfadeLength = useDAWStore((s) => s.defaultCrossfadeLength);
-  const rippleMode = useDAWStore((s) => s.rippleMode);
-  const recordMode = useDAWStore((s) => s.recordMode);
+  const { autoCrossfade, defaultCrossfadeLength, rippleMode, recordMode } = useDAWStore(useShallow((s) => ({
+    autoCrossfade: s.autoCrossfade,
+    defaultCrossfadeLength: s.defaultCrossfadeLength,
+    rippleMode: s.rippleMode,
+    recordMode: s.recordMode,
+  })));
 
   return (
     <div>
@@ -185,8 +190,11 @@ function EditingTab() {
 
 // ========== Display Tab ==========
 function DisplayTab() {
-  const timecodeMode = useDAWStore((s) => s.timecodeMode);
-  const smpteFrameRate = useDAWStore((s) => s.smpteFrameRate);
+  const { timecodeMode, smpteFrameRate, uiFontScale } = useDAWStore(useShallow((s) => ({
+    timecodeMode: s.timecodeMode,
+    smpteFrameRate: s.smpteFrameRate,
+    uiFontScale: s.uiFontScale,
+  })));
 
   return (
     <div>
@@ -212,6 +220,28 @@ function DisplayTab() {
           />
         </Row>
       )}
+
+      <SectionHeader>Accessibility</SectionHeader>
+      <Row label="UI Font Scale">
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={0.75}
+            max={1.5}
+            step={0.05}
+            value={uiFontScale}
+            onChange={(e) => useDAWStore.getState().setUIFontScale(Number.parseFloat(e.target.value))}
+            className="w-24 cursor-pointer accent-blue-600"
+            aria-label="UI Font Scale"
+            aria-valuemin={0.75}
+            aria-valuemax={1.5}
+            aria-valuenow={uiFontScale}
+          />
+          <span className="text-xs text-daw-text-muted w-10 text-right">
+            {Math.round(uiFontScale * 100)}%
+          </span>
+        </div>
+      </Row>
 
       <SectionHeader>Panels</SectionHeader>
       <Row label="Show Mixer on Start">
@@ -245,7 +275,9 @@ const ACTION_OPTIONS: Record<string, string[]> = {
 };
 
 function MouseModifierTab() {
-  const mouseModifiers = useDAWStore((s) => s.mouseModifiers);
+  const { mouseModifiers } = useDAWStore(useShallow((s) => ({
+    mouseModifiers: s.mouseModifiers,
+  })));
 
   return (
     <div>
@@ -315,8 +347,10 @@ function MouseModifierTab() {
 
 // ========== Backup Tab ==========
 function BackupTab() {
-  const autoBackupEnabled = useDAWStore((s) => s.autoBackupEnabled);
-  const autoBackupInterval = useDAWStore((s) => s.autoBackupInterval);
+  const { autoBackupEnabled, autoBackupInterval } = useDAWStore(useShallow((s) => ({
+    autoBackupEnabled: s.autoBackupEnabled,
+    autoBackupInterval: s.autoBackupInterval,
+  })));
 
   const intervalMinutes = Math.round(autoBackupInterval / 60000);
 

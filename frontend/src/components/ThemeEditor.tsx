@@ -1,4 +1,5 @@
 import { useDAWStore, THEME_PRESETS } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Modal, Button } from "./ui";
 
 interface ThemeEditorProps {
@@ -23,11 +24,13 @@ const EDITABLE_PROPS = [
 ];
 
 export function ThemeEditor({ isOpen, onClose }: ThemeEditorProps) {
-  const theme = useDAWStore((s) => s.theme);
-  const customThemeOverrides = useDAWStore((s) => s.customThemeOverrides);
-  const setTheme = useDAWStore((s) => s.setTheme);
-  const setCustomThemeOverride = useDAWStore((s) => s.setCustomThemeOverride);
-  const clearCustomThemeOverrides = useDAWStore((s) => s.clearCustomThemeOverrides);
+  const { theme, customThemeOverrides, setTheme, setCustomThemeOverride, clearCustomThemeOverrides } = useDAWStore(useShallow((s) => ({
+    theme: s.theme,
+    customThemeOverrides: s.customThemeOverrides,
+    setTheme: s.setTheme,
+    setCustomThemeOverride: s.setCustomThemeOverride,
+    clearCustomThemeOverrides: s.clearCustomThemeOverrides,
+  })));
 
   const currentPreset = THEME_PRESETS.find((t) => t.name === theme) || THEME_PRESETS[0];
 

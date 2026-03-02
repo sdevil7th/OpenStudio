@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 import { Modal, Button, Select } from "./ui";
 import { Slider } from "./ui";
 
@@ -35,7 +36,9 @@ interface CrossfadeEditorProps {
 }
 
 export function CrossfadeEditor({ isOpen, onClose }: CrossfadeEditorProps) {
-  const crossfadeEditorClipIds = useDAWStore((s) => s.crossfadeEditorClipIds);
+  const { crossfadeEditorClipIds } = useDAWStore(useShallow((s) => ({
+    crossfadeEditorClipIds: s.crossfadeEditorClipIds,
+  })));
 
   // Find the two clips
   const clip1 = crossfadeEditorClipIds

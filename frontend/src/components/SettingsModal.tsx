@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button, NativeSelect } from "./ui";
 
 interface SettingsModalProps {
@@ -15,7 +16,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [loading, setLoading] = useState(false);
   const [switching, setSwitching] = useState(false); // Track when switching audio types
   const [error, setError] = useState<string | null>(null);
-  const { refreshAudioDeviceSetup } = useDAWStore();
+  const { refreshAudioDeviceSetup } = useDAWStore(useShallow((s) => ({
+    refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
+  })));
 
   // Combined loading state for disabling dropdowns
   const isLoading = loading || switching;

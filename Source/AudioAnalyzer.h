@@ -47,6 +47,26 @@ public:
                            double startTime = 0.0,
                            double endTime = 0.0);
 
+    // ===== Strip Silence / Detect Silent Regions (Phase 3.12) =====
+    struct SoundRegion {
+        juce::int64 startSample;
+        juce::int64 endSample;
+    };
+
+    // Scans audio file for non-silent regions.
+    // thresholdDb: amplitude threshold (e.g., -48)
+    // minSilenceMs: minimum silence gap to split on
+    // minSoundMs: minimum sound region to keep
+    // preAttackMs: include audio before detected transient
+    // postReleaseMs: include audio after sound ends
+    // Returns list of non-silent regions as sample ranges.
+    std::vector<SoundRegion> detectSilentRegions(const juce::String& filePath,
+                                                  double thresholdDb,
+                                                  double minSilenceMs,
+                                                  double minSoundMs,
+                                                  double preAttackMs,
+                                                  double postReleaseMs);
+
 private:
     juce::AudioFormatManager formatManager;
 

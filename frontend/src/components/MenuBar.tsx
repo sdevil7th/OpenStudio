@@ -3,6 +3,7 @@ import { Minus, Square, X, Copy } from "lucide-react";
 import { EditMenu } from "./menus/EditMenu";
 import { MenuDropdown, MenuItemProps } from "./menus/MenuDropdown";
 import { useDAWStore, THEME_PRESETS } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 
 /**
@@ -31,7 +32,28 @@ export function MenuBar() {
     toggleVirtualKeyboard,
     showUndoHistory,
     toggleUndoHistory,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    toggleMixer: s.toggleMixer,
+    showMixer: s.showMixer,
+    showMasterTrackInTCP: s.showMasterTrackInTCP,
+    toggleMasterTrackInTCP: s.toggleMasterTrackInTCP,
+    openSettings: s.openSettings,
+    openProjectSettings: s.openProjectSettings,
+    openRenderModal: s.openRenderModal,
+    newProject: s.newProject,
+    saveProject: s.saveProject,
+    loadProject: s.loadProject,
+    snapEnabled: s.snapEnabled,
+    toggleSnap: s.toggleSnap,
+    gridSize: s.gridSize,
+    setGridSize: s.setGridSize,
+    recentProjects: s.recentProjects,
+    clearRecentProjects: s.clearRecentProjects,
+    showVirtualKeyboard: s.showVirtualKeyboard,
+    toggleVirtualKeyboard: s.toggleVirtualKeyboard,
+    showUndoHistory: s.showUndoHistory,
+    toggleUndoHistory: s.toggleUndoHistory,
+  })));
 
   const [isMaximized, setIsMaximized] = useState(false);
 
@@ -144,6 +166,50 @@ export function MenuBar() {
           if (success) console.log("New version saved");
         });
       },
+    },
+    {
+      label: "Save as Template...",
+      onClick: () => {
+        const name = prompt("Template name:");
+        if (name) useDAWStore.getState().saveAsTemplate(name);
+      },
+    },
+    {
+      label: "New from Template...",
+      onClick: () => {
+        const state = useDAWStore.getState();
+        const templates = state.projectTemplates;
+        if (templates.length === 0) {
+          alert("No templates saved yet. Use 'Save as Template' first.");
+          return;
+        }
+        state.toggleProjectTemplates();
+      },
+      submenu: (() => {
+        const templates = useDAWStore.getState().projectTemplates;
+        if (templates.length === 0) return [{ label: "(no templates)", disabled: true }];
+        return [
+          ...templates.map((t, i) => ({
+            label: t.name,
+            onClick: () => {
+              if (confirm(`Load template "${t.name}"? This will replace the current project.`)) {
+                useDAWStore.getState().loadTemplate(i);
+              }
+            },
+          })),
+          {
+            label: "Delete Template...",
+            submenu: templates.map((t, i) => ({
+              label: t.name,
+              onClick: () => {
+                if (confirm(`Delete template "${t.name}"?`)) {
+                  useDAWStore.getState().deleteTemplate(i);
+                }
+              },
+            })),
+          },
+        ];
+      })(),
       dividerAfter: true,
     },
     {
@@ -214,6 +280,14 @@ export function MenuBar() {
           if (success) console.log("Project loaded in Safe Mode (FX bypassed)");
         });
       },
+    },
+    {
+      label: "Archive Session...",
+      onClick: () => { useDAWStore.getState().archiveSession(); },
+    },
+    {
+      label: "Media Pool",
+      onClick: () => useDAWStore.getState().toggleMediaPool(),
       dividerAfter: true,
     },
     {
@@ -299,6 +373,23 @@ export function MenuBar() {
     {
       label: "Toolbar Editor...",
       onClick: () => useDAWStore.getState().toggleToolbarEditor(),
+    },
+    {
+      label: "Metering",
+      submenu: [
+        {
+          label: "Loudness Meter (LUFS)",
+          onClick: () => useDAWStore.getState().toggleLoudnessMeter(),
+        },
+        {
+          label: "Spectrum Analyzer",
+          onClick: () => useDAWStore.getState().toggleSpectrumAnalyzer(),
+        },
+        {
+          label: "Phase Correlation",
+          onClick: () => useDAWStore.getState().togglePhaseCorrelation(),
+        },
+      ],
     },
     {
       label: "Toolbars",
@@ -536,6 +627,21 @@ export function MenuBar() {
         openPluginBrowser(trackId);
       },
       dividerAfter: true,
+    },
+    {
+      label: "New Bus/Group Track",
+      onClick: () => {
+        const { addTrack, tracks } = useDAWStore.getState();
+        addTrack({
+          id: crypto.randomUUID(),
+          name: `Bus ${tracks.filter((t: any) => t.type === "bus").length + 1}`,
+          type: "bus",
+        });
+      },
+    },
+    {
+      label: "Create Bus from Selected Tracks",
+      onClick: () => useDAWStore.getState().createBusFromSelectedTracks(),
     },
     {
       label: "Insert Multiple Tracks...",

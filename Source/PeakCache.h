@@ -110,8 +110,8 @@ private:
     mutable std::map<juce::String, CacheEntry> memoryCache;
     mutable juce::CriticalSection cacheLock;
 
-    // Background thread for peak generation
-    juce::ThreadPool backgroundPool { 1 };
+    // Background thread pool for concurrent peak generation
+    juce::ThreadPool backgroundPool { juce::jmax(2, juce::SystemStats::getNumCpus() / 2) };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeakCache)
 };

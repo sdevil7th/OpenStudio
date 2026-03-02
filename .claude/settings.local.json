@@ -23,7 +23,9 @@
       "Read(//c/Users/srvds/OneDrive/Documents/Studio13/**)",
       "Read(//c/Users/srvds/**)",
       "Bash(find . -name \"*.tsx\" -type f -exec grep -l \"useSortable\\\\|@dnd-kit\" {} ;)",
-      "WebFetch(domain:forums.steinberg.net)"
+      "WebFetch(domain:forums.steinberg.net)",
+      "Bash(export PATH=\"$PATH:/c/Program Files/NASM\")",
+      "Bash(cmake -B build -DCMAKE_BUILD_TYPE=Debug)"
     ],
     "additionalDirectories": [
       "C:\\Users\\srvds\\OneDrive\\Documents\\Studio13"

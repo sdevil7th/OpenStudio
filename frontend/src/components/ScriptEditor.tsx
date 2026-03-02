@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { X, Play, Trash2, Plus, Save, FolderOpen, RefreshCw } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
 
@@ -12,9 +13,11 @@ interface NativeScript {
 }
 
 export function ScriptEditor() {
-  const showScriptEditor = useDAWStore((s) => s.showScriptEditor);
-  const scriptConsoleOutput = useDAWStore((s) => s.scriptConsoleOutput);
-  const userScripts = useDAWStore((s) => s.userScripts);
+  const { showScriptEditor, scriptConsoleOutput, userScripts } = useDAWStore(useShallow((s) => ({
+    showScriptEditor: s.showScriptEditor,
+    scriptConsoleOutput: s.scriptConsoleOutput,
+    userScripts: s.userScripts,
+  })));
 
   const [code, setCode] = useState(
     "-- Studio13 Lua Script\n-- API: s13.play(), s13.stop(), s13.getTempo(), s13.setTempo(bpm)\n-- s13.addTrack(), s13.removeTrack(id), s13.setTrackVolume(id, db)\n-- s13.print(msg) outputs to this console\n\ns13.print('Hello from Studio13!')\ns13.print('Tempo: ' .. s13.getTempo() .. ' BPM')\n",

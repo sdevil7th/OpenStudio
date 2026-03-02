@@ -18,6 +18,10 @@ import {
   snapToGrid,
   calculateGridInterval,
 } from "../utils/snapToGrid";
+import {
+  fadeInCurvePoints,
+  fadeOutCurvePoints,
+} from "../utils/fadeUtils";
 
 // Constants
 const RULER_HEIGHT = 30;
@@ -71,6 +75,17 @@ export function Timeline({ tracks }: TimelineProps) {
   // In-flight waveform fetches — prevents duplicate concurrent requests for same cache key
   const inFlightRef = useRef<Set<string>>(new Set());
 
+  // Hovered automation point — for tooltip display
+  const [hoveredAutoPoint, setHoveredAutoPoint] = useState<{
+    laneId: string;
+    pointIndex: number;
+    param: string;
+    value: number;
+    time: number;
+    screenX: number;
+    screenY: number;
+  } | null>(null);
+
   // Clip context menu state
   const [clipContextMenu, setClipContextMenu] =
     useState<ClipContextMenuState>(null);
@@ -88,6 +103,7 @@ export function Timeline({ tracks }: TimelineProps) {
     originalOffset: number;
     ghostX?: number; // Ghost preview position
     ghostY?: number;
+    isFadeDrag?: boolean; // Smart tool: drag adjusts fade instead of trim
     // Multi-clip drag info — populated when dragging a clip that's part of multi-selection
     multiClipInfo?: Array<{
       clipId: string;
@@ -110,6 +126,28 @@ export function Timeline({ tracks }: TimelineProps) {
   // Ghost track state for auto-creation when dragging to empty space
   const [showGhostTrack, setShowGhostTrack] = useState(false);
 
+  // Snap ghost preview state (ref-based to avoid re-renders during drag)
+  const snapGhostRef = useRef<{
+    x: number;        // snapped X position (screen px)
+    y: number;        // track Y position (screen px)
+    width: number;    // clip width (px)
+    height: number;   // clip height (px)
+    color: string;    // clip color
+    visible: boolean;
+  } | null>(null);
+  const [snapGhostRender, setSnapGhostRender] = useState<typeof snapGhostRef.current>(null);
+
+  // Marquee zoom state (Ctrl+drag on background)
+  const marqueeZoomRef = useRef<{
+    startX: number;   // screen X at mousedown
+    startTime: number;
+    currentX: number; // current screen X
+    currentTime: number;
+  } | null>(null);
+  const [marqueeZoomRect, setMarqueeZoomRect] = useState<{
+    x: number; width: number;
+  } | null>(null);
+
   // Reset drag state helper function
   const resetDragState = useCallback(() => {
     setDragState({
@@ -124,6 +162,9 @@ export function Timeline({ tracks }: TimelineProps) {
       originalOffset: 0,
     });
     setShowGhostTrack(false);
+    // Clear snap ghost preview
+    snapGhostRef.current = null;
+    setSnapGhostRender(null);
   }, []);
 
   // Global mouseup and blur handlers to prevent stuck drag/marquee state
@@ -131,6 +172,11 @@ export function Timeline({ tracks }: TimelineProps) {
     const resetMarquee = () => {
       marqueeRef.current = null;
       setMarqueeRect(null);
+    };
+
+    const resetMarqueeZoom = () => {
+      marqueeZoomRef.current = null;
+      setMarqueeZoomRect(null);
     };
 
     const handleGlobalMouseUp = () => {
@@ -141,6 +187,13 @@ export function Timeline({ tracks }: TimelineProps) {
       if (marqueeRef.current) {
         resetMarquee();
       }
+      if (marqueeZoomRef.current) {
+        resetMarqueeZoom();
+      }
+      // Reset slip edit state on global mouseup (safety net)
+      if (slipEditRef.current) {
+        slipEditRef.current = null;
+      }
     };
 
     const handleWindowBlur = () => {
@@ -150,6 +203,13 @@ export function Timeline({ tracks }: TimelineProps) {
       }
       if (marqueeRef.current) {
         resetMarquee();
+      }
+      if (marqueeZoomRef.current) {
+        resetMarqueeZoom();
+      }
+      // Reset slip edit state on window blur
+      if (slipEditRef.current) {
+        slipEditRef.current = null;
       }
     };
 
@@ -188,6 +248,19 @@ export function Timeline({ tracks }: TimelineProps) {
     x: number; y: number; width: number; height: number;
   } | null>(null);
   const marqueeJustCompletedRef = useRef(false);
+
+  // Crosshair cursor position (screen coordinates relative to Stage)
+  const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
+
+  // Slip editing state (Alt+drag on clip adjusts offset instead of position)
+  const slipEditRef = useRef<{
+    clipId: string;
+    trackId: string;
+    startX: number;
+    originalOffset: number;
+    sourceLength: number;
+    clipDuration: number;
+  } | null>(null);
 
   // Split tool preview line
   const [splitPreviewX, setSplitPreviewX] = useState<number | null>(null);
@@ -247,6 +320,11 @@ export function Timeline({ tracks }: TimelineProps) {
     toolMode,
     splitClipAtPosition,
     trackGroups,
+    showCrosshair,
+    setTrackWaveformZoom,
+    slipEditClip,
+    rippleMode,
+    addClipGainPoint,
   } = useDAWStore(
     useShallow((state) => ({
       recordingClips: state.recordingClips,
@@ -292,6 +370,11 @@ export function Timeline({ tracks }: TimelineProps) {
       toolMode: state.toolMode,
       splitClipAtPosition: state.splitClipAtPosition,
       trackGroups: state.trackGroups,
+      showCrosshair: state.showCrosshair,
+      setTrackWaveformZoom: state.setTrackWaveformZoom,
+      slipEditClip: state.slipEditClip,
+      rippleMode: state.rippleMode,
+      addClipGainPoint: state.addClipGainPoint,
     }))
   );
 
@@ -520,12 +603,31 @@ export function Timeline({ tracks }: TimelineProps) {
   tracksRef.current = tracks;
   const dimensionsWidthRef = useRef(dimensions.width);
   dimensionsWidthRef.current = dimensions.width;
+  const setTrackWaveformZoomRef = useRef(setTrackWaveformZoom);
+  setTrackWaveformZoomRef.current = setTrackWaveformZoom;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const handleWheel = (e: WheelEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+        // Waveform Vertical Zoom (Ctrl+Shift+Scroll) — per-track
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = container.getBoundingClientRect();
+        const mouseY = e.clientY - rect.top + scrollYRef.current;
+        const trackIdx = Math.floor(mouseY / trackHeightRef.current);
+        const currentTracks = tracksRef.current;
+        if (trackIdx >= 0 && trackIdx < currentTracks.length) {
+          const track = currentTracks[trackIdx];
+          const currentWaveformZoom = track.waveformZoom ?? 1.0;
+          const factor = e.deltaY > 0 ? 0.9 : 1.1;
+          const newZoom = Math.max(0.1, Math.min(5.0, currentWaveformZoom * factor));
+          setTrackWaveformZoomRef.current(track.id, newZoom);
+        }
+        return;
+      }
       if (e.ctrlKey || e.metaKey) {
         // Horizontal Zoom — accumulate delta, compute in rAF
         e.preventDefault();
@@ -607,8 +709,66 @@ export function Timeline({ tracks }: TimelineProps) {
       return;
     }
 
+    // Shift+click: extend current time selection to clicked position
+    if (e.evt?.shiftKey) {
+      const currentSel = useDAWStore.getState().timeSelection;
+      if (currentSel) {
+        // Extend toward whichever end is closer to the click
+        const distToStart = Math.abs(clickedTime - currentSel.start);
+        const distToEnd = Math.abs(clickedTime - currentSel.end);
+        if (distToStart < distToEnd) {
+          setTimeSelection(Math.min(clickedTime, currentSel.end), currentSel.end);
+        } else {
+          setTimeSelection(currentSel.start, Math.max(clickedTime, currentSel.start));
+        }
+      } else {
+        // No existing selection — create from playhead to clicked position
+        const playheadTime = useDAWStore.getState().transport.currentTime;
+        setTimeSelection(Math.min(playheadTime, clickedTime), Math.max(playheadTime, clickedTime));
+      }
+      return;
+    }
+
     // Not on a handle — record as pending (will become seek or range-create on mouseup/move)
     rulerDragRef.current = { type: "pending", startX: pointerPos.x, startTime: clickedTime };
+  };
+
+  // Double-click on ruler: select region between nearest markers on either side
+  const handleRulerDblClick = (e: any) => {
+    const stage = e.target.getStage();
+    const pointerPos = stage.getPointerPosition();
+    if (!pointerPos) return;
+
+    const clickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    const currentMarkers = useDAWStore.getState().markers;
+
+    if (!currentMarkers || currentMarkers.length === 0) return;
+
+    // Sort markers by time
+    const sortedTimes = currentMarkers.map((m) => m.time).sort((a, b) => a - b);
+
+    // Find nearest marker to the left (at or before clickedTime)
+    let leftBound = 0; // default to timeline start
+    for (let i = sortedTimes.length - 1; i >= 0; i--) {
+      if (sortedTimes[i] <= clickedTime) {
+        leftBound = sortedTimes[i];
+        break;
+      }
+    }
+
+    // Find nearest marker to the right (after clickedTime)
+    let rightBound = leftBound; // fallback
+    for (let i = 0; i < sortedTimes.length; i++) {
+      if (sortedTimes[i] > clickedTime) {
+        rightBound = sortedTimes[i];
+        break;
+      }
+    }
+
+    // Only create selection if we found distinct bounds
+    if (rightBound > leftBound) {
+      setTimeSelection(leftBound, rightBound);
+    }
   };
 
   // Global listeners for ruler drag (works even when mouse leaves the canvas)
@@ -685,6 +845,44 @@ export function Timeline({ tracks }: TimelineProps) {
 
   // Handle mouse move for time selection / razor edit dragging (on main stage)
   const handleStageMouseMove = (e: any) => {
+    // Track crosshair cursor position
+    if (showCrosshair) {
+      const stage = e.target.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      if (pointerPos) {
+        setCrosshairPos({ x: pointerPos.x, y: pointerPos.y });
+      }
+    }
+
+    // Slip editing: Alt+drag adjusts clip offset in real-time
+    if (slipEditRef.current) {
+      const stage = e.target.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      if (pointerPos) {
+        const deltaX = pointerPos.x - slipEditRef.current.startX;
+        const deltaTime = deltaX / pixelsPerSecond;
+        // Moving mouse right shifts content left (increases offset), moving left shifts content right (decreases offset)
+        const newOffset = Math.max(
+          0,
+          Math.min(
+            slipEditRef.current.sourceLength - slipEditRef.current.clipDuration,
+            slipEditRef.current.originalOffset - deltaTime,
+          ),
+        );
+        // Apply offset change live (without undo tracking — undo happens on mouseup)
+        useDAWStore.setState((s) => ({
+          tracks: s.tracks.map((track) => ({
+            ...track,
+            clips: track.clips.map((clip) =>
+              clip.id === slipEditRef.current!.clipId
+                ? { ...clip, offset: newOffset }
+                : clip,
+            ),
+          })),
+        }));
+      }
+    }
+
     // Split tool preview line
     if (toolModeRef.current === "split") {
       const stage = e.target.getStage();
@@ -723,6 +921,23 @@ export function Timeline({ tracks }: TimelineProps) {
       }
     }
 
+    // Marquee zoom drag (Ctrl+drag on background)
+    if (marqueeZoomRef.current) {
+      const stage = e.target.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      if (pointerPos) {
+        const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+        marqueeZoomRef.current.currentX = pointerPos.x;
+        marqueeZoomRef.current.currentTime = time;
+        const dx = pointerPos.x - marqueeZoomRef.current.startX;
+        if (Math.abs(dx) > 4) {
+          const left = Math.min(marqueeZoomRef.current.startX, pointerPos.x);
+          const w = Math.abs(dx);
+          setMarqueeZoomRect({ x: left, width: w });
+        }
+      }
+    }
+
     // Marquee selection drag
     if (marqueeRef.current) {
       const stage = e.target.getStage();
@@ -745,8 +960,33 @@ export function Timeline({ tracks }: TimelineProps) {
     }
   };
 
-  // Handle mouse up to finalize time selection / razor edit / marquee (on main stage)
+  // Handle mouse up to finalize time selection / razor edit / marquee / slip edit (on main stage)
   const handleStageMouseUp = () => {
+    // Finalize slip edit with undo support
+    if (slipEditRef.current) {
+      const { clipId, originalOffset } = slipEditRef.current;
+      // Read the current offset from store
+      const currentClip = useDAWStore.getState().tracks
+        .flatMap((t) => t.clips)
+        .find((c) => c.id === clipId);
+      const finalOffset = currentClip?.offset ?? originalOffset;
+      // Revert to original offset first, then use slipEditClip to push undo command
+      if (finalOffset !== originalOffset) {
+        useDAWStore.setState((s) => ({
+          tracks: s.tracks.map((track) => ({
+            ...track,
+            clips: track.clips.map((clip) =>
+              clip.id === clipId
+                ? { ...clip, offset: originalOffset }
+                : clip,
+            ),
+          })),
+        }));
+        slipEditClip(clipId, finalOffset);
+      }
+      slipEditRef.current = null;
+    }
+
     if (timeSelectionDrag && timeSelectionDrag.active) {
       setTimeSelectionDrag(null);
     }
@@ -792,6 +1032,32 @@ export function Timeline({ tracks }: TimelineProps) {
       // Was a click, not a drag — let onClick handle deselection
       marqueeRef.current = null;
       setMarqueeRect(null);
+    }
+
+    // Finalize marquee zoom (Ctrl+drag)
+    if (marqueeZoomRef.current && marqueeZoomRect) {
+      const mz = marqueeZoomRef.current;
+      const startTime = Math.min(mz.startTime, mz.currentTime);
+      const endTime = Math.max(mz.startTime, mz.currentTime);
+      const timeRange = endTime - startTime;
+
+      if (timeRange > 0.01) {
+        // Calculate new zoom to fit the selected time range into the viewport
+        const viewportWidth = dimensions.width;
+        const newPPS = viewportWidth / timeRange;
+        // Set zoom and scroll to the start of the selection
+        setZoom(newPPS);
+        setScroll(startTime * newPPS, scrollY);
+      }
+
+      marqueeZoomRef.current = null;
+      setMarqueeZoomRect(null);
+      // Prevent click handler from firing after zoom
+      marqueeJustCompletedRef.current = true;
+    } else if (marqueeZoomRef.current) {
+      // Was a click, not a drag — just clear
+      marqueeZoomRef.current = null;
+      setMarqueeZoomRect(null);
     }
   };
 
@@ -1254,14 +1520,18 @@ export function Timeline({ tracks }: TimelineProps) {
     // its stroke as a white hairline, which confuses users after a failed recording.
     if (width < 1) return null;
 
+    // Compact thumbnail view for very narrow clips — skip waveform fetch entirely
+    const isNarrowClip = width < 60;
+
     // Fetch waveform data if we don't have it (quantized cache key for stability)
+    // Skip waveform fetch for narrow clips — not enough room to display it
     const fileSR = clip.sampleRate || 44100;
     const renderSpp = Math.max(1, Math.round(fileSR / pixelsPerSecond));
     const cacheSpp = quantizeSpp(renderSpp);
     const cacheKey = `${clip.filePath}-${cacheSpp}`;
-    const waveformData = waveformCache.get(cacheKey);
+    const waveformData = isNarrowClip ? undefined : waveformCache.get(cacheKey);
     const neededPeaks = Math.ceil(((clip.offset || 0) + clip.duration) * fileSR / cacheSpp);
-    if (clip.filePath && (!waveformData || waveformData.length < neededPeaks)) {
+    if (!isNarrowClip && clip.filePath && (!waveformData || waveformData.length < neededPeaks)) {
       fetchWaveformData(clip.filePath, fileSR, (clip.offset || 0) + clip.duration);
     }
 
@@ -1278,8 +1548,10 @@ export function Timeline({ tracks }: TimelineProps) {
       const numChannels = waveformData[0]?.channels?.length || 1;
       const waveforms: React.ReactNode[] = [];
 
-      // Apply clip gain to waveform visualization
-      const gainFactor = clip.volumeDB <= -60 ? 0 : Math.pow(10, clip.volumeDB / 20);
+      // Apply clip gain and per-track waveform vertical zoom to visualization
+      const baseGain = clip.volumeDB <= -60 ? 0 : Math.pow(10, clip.volumeDB / 20);
+      const trackWaveformZoom = tracks.find((t) => t.id === trackId)?.waveformZoom ?? 1.0;
+      const gainFactor = baseGain * trackWaveformZoom;
 
       // Calculate dynamic waveform height based on current trackHeight
       const waveformHeight = trackHeight - 20;
@@ -1350,15 +1622,19 @@ export function Timeline({ tracks }: TimelineProps) {
         }
 
         if (points.length > 0) {
+          const waveColor = clip.color || trackColor;
           waveforms.push(
             <Line
               key={`waveform-${clip.id}-ch${ch}`}
               points={points}
-              fill={clip.color || trackColor}
-              opacity={0.7}
+              fill={waveColor}
+              opacity={0.6}
               closed
-              stroke={clip.color || trackColor}
-              strokeWidth={0.5}
+              stroke={waveColor}
+              strokeWidth={1}
+              tension={0.1}
+              lineCap="round"
+              lineJoin="round"
               listening={false}
             />,
           );
@@ -1368,8 +1644,52 @@ export function Timeline({ tracks }: TimelineProps) {
       return waveforms;
     };
 
-    // Skip expensive waveform generation during active zoom — just show clip rect
-    const waveformShapes = isZoomingRef.current ? [] : generateWaveformPoints();
+    // Spectral view: amplitude-based heat map rendering using existing peak data
+    const generateSpectralView = (): React.ReactNode[] => {
+      if (!waveformData || waveformData.length === 0) return [];
+      const shapes: React.ReactNode[] = [];
+      const wfHeight = trackHeight - 20;
+      const clipStartPeak = Math.max(0, Math.floor((clip.offset * fileSR) / cacheSpp));
+      const totalAvailablePeaks = Math.max(0, waveformData.length - clipStartPeak);
+      const totalClipPeaks = Math.min(Math.ceil(width), Math.ceil(totalAvailablePeaks / peakScale));
+      const visibleStart = Math.max(0, Math.floor(-x));
+      const visibleEnd = Math.min(totalClipPeaks, Math.ceil(dimensions.width - x));
+      if (visibleEnd <= visibleStart) return [];
+      const BAND_COUNT = 8;
+      const bandH = wfHeight / BAND_COUNT;
+      const colWidth = Math.max(1, Math.ceil(4 / peakScale));
+      for (let i = visibleStart; i < visibleEnd; i += colWidth) {
+        const dataIndex = clipStartPeak + Math.floor(i * peakScale);
+        const peak = waveformData[dataIndex];
+        if (!peak) continue;
+        const amp = Math.min(1, Math.max(0, Math.abs(peak.channels[0]?.max ?? 0)));
+        for (let b = 0; b < BAND_COUNT; b++) {
+          const bandAmp = Math.max(0, amp - b * 0.1) * (1 + b * 0.15);
+          const intensity = Math.min(1, bandAmp);
+          if (intensity < 0.02) continue;
+          const r = Math.round(intensity * 255);
+          const g = Math.round(Math.max(0, (1 - intensity) * 200));
+          const bv = Math.round((1 - intensity) * 180);
+          shapes.push(
+            <Rect
+              key={`spec-${clip.id}-${i}-${b}`}
+              x={x + i}
+              y={trackY + 10 + (BAND_COUNT - 1 - b) * bandH}
+              width={colWidth}
+              height={bandH}
+              fill={`rgb(${r},${g},${bv})`}
+              opacity={intensity * 0.85}
+              listening={false}
+            />,
+          );
+        }
+      }
+      return shapes;
+    };
+
+    const isSpectral = tracks.find((t) => t.id === trackId)?.spectralView;
+    // Skip expensive waveform generation during active zoom or for narrow clips — just show clip rect
+    const waveformShapes = (isZoomingRef.current || isNarrowClip) ? [] : (isSpectral ? generateSpectralView() : generateWaveformPoints());
 
     // Clip click — selection is handled in handleMouseDown to support drag
     const handleClipClick = () => {};
@@ -1395,18 +1715,39 @@ export function Timeline({ tracks }: TimelineProps) {
       // Calculate new time position for anchor clip
       const deltaX = pointerPos.x - dragState.startX;
       const deltaTime = deltaX / pixelsPerSecond;
-      let newStartTime = Math.max(0, dragState.originalStartTime + deltaTime);
+      const rawStartTime = Math.max(0, dragState.originalStartTime + deltaTime);
+      let newStartTime = rawStartTime;
 
       // Apply snap-to-grid if enabled
       if (snapEnabled) {
         newStartTime = snapToGrid(newStartTime, tempo, timeSignature, gridSize);
       }
 
-      // Compute actual timeDelta after snap (for multi-clip)
-      const timeDelta = newStartTime - dragState.originalStartTime;
-
       // Calculate target track based on Y position
       const targetTrackIdx = Math.floor(pointerPos.y / trackHeight);
+      const targetTY = Math.max(0, targetTrackIdx) * trackHeight;
+
+      // Update snap ghost preview: show semi-transparent rect at snapped position
+      if (snapEnabled && Math.abs(newStartTime - rawStartTime) > 0.001) {
+        const ghostScreenX = newStartTime * pixelsPerSecond - scrollX;
+        snapGhostRef.current = {
+          x: ghostScreenX,
+          y: targetTY + 5,
+          width: clip.duration * pixelsPerSecond,
+          height: trackHeight - 10,
+          color: clip.color || trackColor,
+          visible: true,
+        };
+        setSnapGhostRender(snapGhostRef.current);
+      } else {
+        if (snapGhostRef.current) {
+          snapGhostRef.current = null;
+          setSnapGhostRender(null);
+        }
+      }
+
+      // Compute actual timeDelta after snap (for multi-clip)
+      const timeDelta = newStartTime - dragState.originalStartTime;
 
       // Determine if multi-clip drag
       const multi = dragState.multiClipInfo && dragState.multiClipInfo.length > 1;
@@ -1574,6 +1915,21 @@ export function Timeline({ tracks }: TimelineProps) {
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
+      const clipTopY = trackY + 5; // clip has 5px top padding
+      const relativeY = pointerPos.y - clipTopY;
+
+      if (toolModeRef.current === "smart") {
+        // Smart tool: position-dependent cursor
+        const FADE_CORNER = 15;
+        if (relativeY < FADE_CORNER && (relativeX < FADE_CORNER || relativeX > width - FADE_CORNER)) {
+          stage.container().style.cursor = "crosshair"; // fade zone
+        } else if (relativeX < EDGE_THRESHOLD || relativeX > width - EDGE_THRESHOLD) {
+          stage.container().style.cursor = "ew-resize"; // trim zone
+        } else {
+          stage.container().style.cursor = "move"; // move zone
+        }
+        return;
+      }
 
       // Change cursor based on position
       if (relativeX < EDGE_THRESHOLD || relativeX > width - EDGE_THRESHOLD) {
@@ -1608,6 +1964,24 @@ export function Timeline({ tracks }: TimelineProps) {
         return;
       }
 
+      // Shift+click: add a gain envelope point at cursor position
+      if (e.evt?.shiftKey && !e.evt?.ctrlKey && !e.evt?.altKey) {
+        e.cancelBubble = true;
+        const stage = e.target.getStage();
+        const pointerPos = stage.getPointerPosition();
+        // Time relative to clip start
+        const timeInClip = (pointerPos.x + scrollX) / pixelsPerSecond - clip.startTime;
+        if (timeInClip >= 0 && timeInClip <= clip.duration) {
+          // Map Y position to gain: top of clip = 2.0, bottom = 0.0
+          const clipTopY = trackY + 5;
+          const clipH = trackHeight - 10;
+          const relativeY = pointerPos.y - clipTopY;
+          const gain = Math.max(0, Math.min(2, 2 * (1 - relativeY / clipH)));
+          addClipGainPoint(clip.id, timeInClip, gain);
+        }
+        return;
+      }
+
       const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
       // Preserve multi-selection: if the clip is already selected in a multi-selection
       // and no Ctrl modifier, don't call selectClip (which would clear the selection).
@@ -1623,6 +1997,42 @@ export function Timeline({ tracks }: TimelineProps) {
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
+
+      // Alt+drag on clip = slip editing (adjust offset, not position)
+      if (e.evt?.altKey && clip.filePath) {
+        e.cancelBubble = true;
+        slipEditRef.current = {
+          clipId: clip.id,
+          trackId: trackId,
+          startX: pointerPos.x,
+          originalOffset: clip.offset || 0,
+          sourceLength: clip.sourceLength ?? (clip.offset + clip.duration + 60), // fallback generous estimate
+          clipDuration: clip.duration,
+        };
+        stage.container().style.cursor = "grab";
+        return;
+      }
+
+      // Smart tool: detect fade corner zones
+      if (toolModeRef.current === "smart") {
+        const FADE_CORNER = 15;
+        const clipTopY = trackY + 5;
+        const relativeY = pointerPos.y - clipTopY;
+        if (relativeY < FADE_CORNER && relativeX < FADE_CORNER) {
+          // Top-left corner: fade-in adjustment via drag
+          e.cancelBubble = true;
+          setDragState({ type: "resize-left", clipId: clip.id, trackIndex, targetTrackIndex: trackIndex, startX: pointerPos.x, startTime: (pointerPos.x + scrollX) / pixelsPerSecond, originalStartTime: clip.startTime, originalDuration: clip.duration, originalOffset: clip.offset, isFadeDrag: true });
+          stage.container().style.cursor = "crosshair";
+          return;
+        }
+        if (relativeY < FADE_CORNER && relativeX > width - FADE_CORNER) {
+          // Top-right corner: fade-out adjustment via drag
+          e.cancelBubble = true;
+          setDragState({ type: "resize-right", clipId: clip.id, trackIndex, targetTrackIndex: trackIndex, startX: pointerPos.x, startTime: (pointerPos.x + scrollX) / pixelsPerSecond, originalStartTime: clip.startTime, originalDuration: clip.duration, originalOffset: clip.offset, isFadeDrag: true });
+          stage.container().style.cursor = "crosshair";
+          return;
+        }
+      }
 
       // Determine drag type based on cursor position
       let dragType: "move" | "resize-left" | "resize-right" = "move";
@@ -1678,6 +2088,19 @@ export function Timeline({ tracks }: TimelineProps) {
       const pointerPos = stage.getPointerPosition();
       const deltaX = pointerPos.x - dragState.startX;
       const deltaTime = deltaX / pixelsPerSecond;
+
+      // Smart tool fade drag: adjust fadeIn/fadeOut instead of resizing
+      if (dragState.isFadeDrag) {
+        const fadeDelta = Math.max(0, deltaTime);
+        if (dragState.type === "resize-left") {
+          const newFadeIn = Math.min(fadeDelta, clip.duration * 0.5);
+          useDAWStore.getState().setClipFades(clip.id, newFadeIn, clip.fadeOut || 0);
+        } else if (dragState.type === "resize-right") {
+          const newFadeOut = Math.min(Math.max(0, -deltaTime), clip.duration * 0.5);
+          useDAWStore.getState().setClipFades(clip.id, clip.fadeIn || 0, newFadeOut);
+        }
+        return;
+      }
 
       if (dragState.type === "resize-left") {
         let newStartTime = Math.max(
@@ -1752,46 +2175,186 @@ export function Timeline({ tracks }: TimelineProps) {
           return { x: 0, y: 0 };
         }}
       >
-        {/* Clip background */}
+        {/* Selected glow effect */}
+        {isSelected && !clip.muted && (
+          <Rect
+            x={x - 2}
+            y={trackY + 3}
+            width={width + 4}
+            height={trackHeight - 6}
+            fill="transparent"
+            cornerRadius={5}
+            shadowColor={clip.color || trackColor}
+            shadowBlur={10}
+            shadowOpacity={0.5}
+            listening={false}
+          />
+        )}
+        {/* Clip background with gradient-like layering */}
         <Rect
           x={x}
           y={trackY + 5}
           width={width}
           height={trackHeight - 10}
           fill={clip.color || trackColor}
-          opacity={clip.muted ? 0.1 : isCut ? 0.1 : 0.15}
-          cornerRadius={3}
+          opacity={clip.muted ? 0.1 : isCut ? 0.1 : 0.18}
+          cornerRadius={4}
           listening={false}
         />
+        {/* Gradient highlight at top of clip */}
+        {!clip.muted && !isCut && (
+          <Rect
+            x={x}
+            y={trackY + 5}
+            width={width}
+            height={Math.min(12, (trackHeight - 10) / 3)}
+            fill="#ffffff"
+            opacity={0.04}
+            cornerRadius={[4, 4, 0, 0]}
+            listening={false}
+          />
+        )}
+        {/* Waveform skeleton — shown while peaks are loading (skip for narrow clips) */}
+        {!clip.muted && !isNarrowClip && clip.filePath && waveformShapes.length === 0 && (() => {
+          const barCount = Math.min(32, Math.max(4, Math.floor(width / 6)));
+          const barSpacing = width / barCount;
+          const barWidth = Math.max(1.5, barSpacing * 0.4);
+          const skeletonBars: React.ReactNode[] = [];
+          // Deterministic pseudo-random heights based on clip id
+          const seed = clip.id.charCodeAt(0) + clip.id.charCodeAt(clip.id.length - 1);
+          for (let i = 0; i < barCount; i++) {
+            const pseudoRand = Math.abs(Math.sin(seed * (i + 1) * 2.654)) * 0.6 + 0.2;
+            const barH = (trackHeight - 20) * pseudoRand;
+            const barY = trackY + 10 + (trackHeight - 20 - barH) / 2;
+            skeletonBars.push(
+              <Rect
+                key={`skel-${clip.id}-${i}`}
+                x={x + i * barSpacing + (barSpacing - barWidth) / 2}
+                y={barY}
+                width={barWidth}
+                height={barH}
+                fill={clip.color || trackColor}
+                opacity={0.15}
+                cornerRadius={1}
+                listening={false}
+              />
+            );
+          }
+          return skeletonBars;
+        })()}
         {/* Waveform visualization */}
         {!clip.muted && waveformShapes}
-        {/* Fade envelope overlays — always visible */}
-        {clip.fadeIn > 0 && (
-          <Line
-            points={[
-              x, trackY + 5,
-              x + clip.fadeIn * pixelsPerSecond, trackY + 5,
-              x, trackY + trackHeight - 5,
-            ]}
-            fill="#000000"
-            opacity={0.25}
-            closed
-            listening={false}
-          />
-        )}
-        {clip.fadeOut > 0 && (
-          <Line
-            points={[
-              x + width, trackY + 5,
-              x + width - clip.fadeOut * pixelsPerSecond, trackY + 5,
-              x + width, trackY + trackHeight - 5,
-            ]}
-            fill="#000000"
-            opacity={0.25}
-            closed
-            listening={false}
-          />
-        )}
+        {/* Clip gain envelope line */}
+        {clip.gainEnvelope && clip.gainEnvelope.length >= 2 && (() => {
+          const clipH = trackHeight - 10;
+          const clipTopY = trackY + 5;
+          // Map gain envelope points to pixel coordinates
+          // gain 0.0 = bottom of clip, gain 2.0 = top of clip, gain 1.0 = center
+          const points: number[] = [];
+          for (const pt of clip.gainEnvelope) {
+            const px = x + pt.time * pixelsPerSecond;
+            const py = clipTopY + clipH * (1 - pt.gain / 2);
+            points.push(px, py);
+          }
+          return (
+            <Line
+              key={`gain-env-${clip.id}`}
+              points={points}
+              stroke="#ffd700"
+              strokeWidth={1.5}
+              opacity={0.7}
+              lineCap="round"
+              lineJoin="round"
+              listening={false}
+            />
+          );
+        })()}
+        {/* Gain envelope dots (when selected) */}
+        {isSelected && clip.gainEnvelope && clip.gainEnvelope.length >= 1 && (() => {
+          const clipH = trackHeight - 10;
+          const clipTopY = trackY + 5;
+          return clip.gainEnvelope.map((pt, idx) => {
+            const px = x + pt.time * pixelsPerSecond;
+            const py = clipTopY + clipH * (1 - pt.gain / 2);
+            return (
+              <Circle
+                key={`gain-pt-${clip.id}-${idx}`}
+                x={px}
+                y={py}
+                radius={3}
+                fill="#ffd700"
+                stroke="#fff"
+                strokeWidth={0.5}
+                listening={false}
+              />
+            );
+          });
+        })()}
+        {/* Fade envelope overlays — curve-shaped, always visible */}
+        {clip.fadeIn > 0 && (() => {
+          const fadeW = clip.fadeIn * pixelsPerSecond;
+          const clipH = trackHeight - 10;
+          const shape = (clip as AudioClip).fadeInShape ?? 0;
+          // Curve points trace the fade gain from left (silence) to right (full)
+          const curvePts = fadeInCurvePoints(x, trackY + 5, fadeW, clipH, shape, 24);
+          // Build a closed polygon: top-left corner -> along curve -> top edge back
+          // The darkened area is above the curve (where audio is attenuated)
+          const fillPts = [
+            x, trackY + 5, // top-left corner
+            ...curvePts,   // curve from bottom-left to top-right
+            x + fadeW, trackY + 5, // top-right corner (close along top)
+          ];
+          return (
+            <>
+              <Line
+                points={fillPts}
+                fill="#000000"
+                opacity={0.3}
+                closed
+                listening={false}
+              />
+              <Line
+                points={curvePts}
+                stroke="#ffffff"
+                strokeWidth={1}
+                opacity={0.5}
+                listening={false}
+              />
+            </>
+          );
+        })()}
+        {clip.fadeOut > 0 && (() => {
+          const fadeW = clip.fadeOut * pixelsPerSecond;
+          const clipH = trackHeight - 10;
+          const shape = (clip as AudioClip).fadeOutShape ?? 0;
+          // Curve points trace the fade gain from left (full) to right (silence)
+          const curvePts = fadeOutCurvePoints(x, trackY + 5, width, fadeW, clipH, shape, 24);
+          // Darkened area is above the curve (where audio is attenuated)
+          const fadeStartX = x + width - fadeW;
+          const fillPts = [
+            fadeStartX, trackY + 5,  // top-left of fade region
+            ...curvePts,             // curve from top-left to bottom-right
+            x + width, trackY + 5,   // top-right corner (close along top)
+          ];
+          return (
+            <>
+              <Line
+                points={fillPts}
+                fill="#000000"
+                opacity={0.3}
+                closed
+                listening={false}
+              />
+              <Line
+                points={curvePts}
+                stroke="#ffffff"
+                strokeWidth={1}
+                opacity={0.5}
+                listening={false}
+              />
+            </>
+          );
+        })()}
         {/* Muted clip dark overlay + diagonal stripes */}
         {clip.muted && (
           <>
@@ -1855,7 +2418,9 @@ export function Timeline({ tracks }: TimelineProps) {
           text={clip.locked ? `🔒 ${clip.muted ? "[M] " : ""}${clip.name}` : clip.muted ? `[M] ${clip.name}` : clip.name}
           fontSize={10}
           fill={clip.muted ? "#888" : "#fff"}
-          width={width - 10}
+          width={Math.max(0, width - 10)}
+          ellipsis={true}
+          wrap="none"
           listening={false}
         />
         {/* Volume line - draggable for per-clip gain */}
@@ -2028,6 +2593,32 @@ export function Timeline({ tracks }: TimelineProps) {
               </>
             );
           })()}
+        {/* Ripple editing indicator — shows arrow on clips that will shift */}
+        {rippleMode !== "off" &&
+          dragState.type !== null &&
+          dragState.clipId !== clip.id &&
+          (rippleMode === "all_tracks" || dragState.trackIndex === trackIndex) &&
+          clip.startTime >= dragState.originalStartTime && (
+          <Group listening={false}>
+            <Rect
+              x={x + 2}
+              y={trackY + trackHeight - 18}
+              width={16}
+              height={12}
+              fill="#000000"
+              opacity={0.5}
+              cornerRadius={2}
+            />
+            <Text
+              x={x + 3}
+              y={trackY + trackHeight - 18}
+              text={"\u2192"}
+              fontSize={11}
+              fill="#4cc9f0"
+              listening={false}
+            />
+          </Group>
+        )}
       </Group>
     );
   };
@@ -2169,6 +2760,7 @@ export function Timeline({ tracks }: TimelineProps) {
 
     // Get note events and calculate visual representation
     const noteOns = clip.events.filter((e) => e.type === "noteOn");
+    const isNarrowMidi = width < 60;
 
     // Generate simple visual representation of notes
     const renderNotePreview = () => {
@@ -2182,6 +2774,32 @@ export function Timeline({ tracks }: TimelineProps) {
       const minNote = Math.min(...notes);
       const maxNote = Math.max(...notes);
       const noteRange = Math.max(1, maxNote - minNote);
+
+      if (isNarrowMidi) {
+        // Compact thumbnail: tiny 1-2px bars showing note positions
+        // Limit to a subset of notes to keep rendering fast
+        const maxBars = Math.max(2, Math.floor(width / 3));
+        const step = Math.max(1, Math.floor(noteOns.length / maxBars));
+        for (let i = 0; i < noteOns.length && lines.length < maxBars; i += step) {
+          const noteOn = noteOns[i];
+          if (noteOn.note === undefined) continue;
+          const noteX = x + (noteOn.timestamp / clip.duration) * width;
+          const noteY = trackY + 10 + ((maxNote - noteOn.note) / noteRange) * (previewHeight - 4);
+          lines.push(
+            <Rect
+              key={`midi-thumb-${i}`}
+              x={noteX}
+              y={noteY}
+              width={Math.max(1, width * 0.05)}
+              height={Math.max(1.5, Math.min(3, previewHeight / noteRange))}
+              fill={clip.color || trackColor}
+              opacity={0.9}
+              listening={false}
+            />
+          );
+        }
+        return lines;
+      }
 
       noteOns.forEach((noteOn, i) => {
         const noteOff = clip.events.find(
@@ -2250,16 +2868,44 @@ export function Timeline({ tracks }: TimelineProps) {
           cornerRadius={3}
           listening={false}
         />
-        {/* MIDI indicator */}
+        {/* MIDI indicator — compact for narrow clips */}
         <Text
-          x={x + 5}
+          x={x + (isNarrowMidi ? 2 : 5)}
           y={trackY + 8}
-          text={`♪ ${clip.name}`}
-          fontSize={10}
+          text={isNarrowMidi ? "♪" : `♪ ${clip.name}`}
+          fontSize={isNarrowMidi ? 9 : 10}
           fill="#fff"
-          width={width - 10}
+          width={Math.max(0, width - (isNarrowMidi ? 4 : 10))}
+          ellipsis={true}
+          wrap="none"
           listening={false}
         />
+        {/* Ripple editing indicator — shows arrow on MIDI clips that will shift */}
+        {rippleMode !== "off" &&
+          dragState.type !== null &&
+          dragState.clipId !== clip.id &&
+          (rippleMode === "all_tracks" || dragState.trackIndex === _trackIndex) &&
+          clip.startTime >= dragState.originalStartTime && (
+          <Group listening={false}>
+            <Rect
+              x={x + 2}
+              y={trackY + trackHeight - 18}
+              width={16}
+              height={12}
+              fill="#000000"
+              opacity={0.5}
+              cornerRadius={2}
+            />
+            <Text
+              x={x + 3}
+              y={trackY + trackHeight - 18}
+              text={"\u2192"}
+              fontSize={11}
+              fill="#4cc9f0"
+              listening={false}
+            />
+          </Group>
+        )}
       </Group>
     );
   };
@@ -2322,64 +2968,208 @@ export function Timeline({ tracks }: TimelineProps) {
   const renderAutomationLanes = (track: Track, trackY: number) => {
     if (!track.showAutomation) return null;
 
+    // Color per parameter type
     const automationColors: Record<string, string> = {
-      volume: "#22c55e",
-      pan: "#3b82f6",
-      mute: "#ef4444",
+      volume: "#4488ff",
+      pan: "#44ff88",
+      mute: "#ff4444",
+    };
+    const defaultAutoColor = "#ffaa44";
+
+    // Catmull-Rom spline interpolation between automation points for smooth curves.
+    // Takes flat [x0,y0, x1,y1, ...] array of control points, returns denser flat array.
+    const interpolateAutomationCurve = (rawPts: number[], subdivisions: number = 8): number[] => {
+      const n = rawPts.length / 2; // number of control points
+      if (n < 2) return rawPts;
+      if (n === 2) return rawPts; // just a straight line
+
+      const result: number[] = [];
+      for (let i = 0; i < n - 1; i++) {
+        // Four control points for Catmull-Rom: p0, p1, p2, p3
+        const p0x = i > 0 ? rawPts[(i - 1) * 2] : rawPts[0];
+        const p0y = i > 0 ? rawPts[(i - 1) * 2 + 1] : rawPts[1];
+        const p1x = rawPts[i * 2];
+        const p1y = rawPts[i * 2 + 1];
+        const p2x = rawPts[(i + 1) * 2];
+        const p2y = rawPts[(i + 1) * 2 + 1];
+        const p3x = i + 2 < n ? rawPts[(i + 2) * 2] : rawPts[(n - 1) * 2];
+        const p3y = i + 2 < n ? rawPts[(i + 2) * 2 + 1] : rawPts[(n - 1) * 2 + 1];
+
+        for (let s = 0; s < subdivisions; s++) {
+          const t = s / subdivisions;
+          const t2 = t * t;
+          const t3 = t2 * t;
+          // Catmull-Rom basis (tension 0.5)
+          const cx = 0.5 * (
+            (2 * p1x) +
+            (-p0x + p2x) * t +
+            (2 * p0x - 5 * p1x + 4 * p2x - p3x) * t2 +
+            (-p0x + 3 * p1x - 3 * p2x + p3x) * t3
+          );
+          const cy = 0.5 * (
+            (2 * p1y) +
+            (-p0y + p2y) * t +
+            (2 * p0y - 5 * p1y + 4 * p2y - p3y) * t2 +
+            (-p0y + 3 * p1y - 3 * p2y + p3y) * t3
+          );
+          result.push(cx, cy);
+        }
+      }
+      // Add the last point
+      result.push(rawPts[(n - 1) * 2], rawPts[(n - 1) * 2 + 1]);
+      return result;
+    };
+
+    // Format automation value for tooltip display
+    const formatAutoValue = (param: string, value: number): string => {
+      switch (param) {
+        case "volume": {
+          // 0-1 normalized -> dB display (-60 to +6)
+          const db = value * 66 - 60;
+          return `${db.toFixed(1)} dB`;
+        }
+        case "pan": {
+          // 0-1 normalized -> -100 to +100
+          const pan = Math.round((value * 2 - 1) * 100);
+          if (pan === 0) return "C";
+          return pan < 0 ? `${pan}L` : `${pan}R`;
+        }
+        case "mute":
+          return value >= 0.5 ? "Muted" : "Active";
+        default:
+          return `${(value * 100).toFixed(0)}%`;
+      }
     };
 
     return track.automationLanes
       .filter((lane) => lane.visible && lane.points.length > 0)
       .map((lane) => {
-        const color = automationColors[lane.param] || "#888";
-        const points: number[] = [];
+        const color = automationColors[lane.param] || defaultAutoColor;
+        const rawPoints: number[] = [];
+        const laneBottom = trackY + trackHeight;
 
         for (const point of lane.points) {
-          const x = point.time * pixelsPerSecond - scrollX;
-          const y = trackY + trackHeight * (1 - point.value);
-          points.push(x, y);
+          const px = point.time * pixelsPerSecond - scrollX;
+          const py = trackY + trackHeight * (1 - point.value);
+          rawPoints.push(px, py);
+        }
+
+        // Smooth curve via Catmull-Rom interpolation
+        const smoothPoints = rawPoints.length >= 4
+          ? interpolateAutomationCurve(rawPoints, 8)
+          : rawPoints;
+
+        // Build filled area points: curve + bottom edge to close the polygon
+        const fillPoints: number[] = [];
+        if (smoothPoints.length >= 4) {
+          // Start at bottom-left (below first point)
+          fillPoints.push(smoothPoints[0], laneBottom);
+          // Add all smooth curve points
+          for (let i = 0; i < smoothPoints.length; i++) {
+            fillPoints.push(smoothPoints[i]);
+          }
+          // Close at bottom-right (below last point)
+          fillPoints.push(smoothPoints[smoothPoints.length - 2], laneBottom);
         }
 
         return (
           <Group key={`auto-${track.id}-${lane.id}`}>
-            {/* Automation line */}
-            {points.length >= 4 && (
+            {/* Semi-transparent filled area under the automation curve */}
+            {fillPoints.length >= 6 && (
               <Line
-                points={points}
-                stroke={color}
-                strokeWidth={1.5}
-                opacity={0.8}
+                points={fillPoints}
+                fill={color}
+                opacity={0.1}
+                closed
                 listening={false}
               />
             )}
-            {/* Automation points (circles) */}
+            {/* Smooth automation curve line */}
+            {smoothPoints.length >= 4 && (
+              <Line
+                points={smoothPoints}
+                stroke={color}
+                strokeWidth={1.5}
+                opacity={0.85}
+                listening={false}
+              />
+            )}
+            {/* Automation points (circles) with hover tooltip */}
             {lane.points.map((point, pi) => {
-              const x = point.time * pixelsPerSecond - scrollX;
-              const y = trackY + trackHeight * (1 - point.value);
+              const px = point.time * pixelsPerSecond - scrollX;
+              const py = trackY + trackHeight * (1 - point.value);
+              const isHovered = hoveredAutoPoint !== null
+                && hoveredAutoPoint.laneId === lane.id
+                && hoveredAutoPoint.pointIndex === pi;
               return (
-                <Circle
-                  key={`ap-${lane.id}-${pi}`}
-                  x={x}
-                  y={y}
-                  radius={4}
-                  fill={color}
-                  stroke="#fff"
-                  strokeWidth={1}
-                  opacity={0.9}
-                  draggable
-                  onDragMove={(e: any) => {
-                    const newX = e.target.x();
-                    const newY = e.target.y();
-                    const newTime = (newX + scrollX) / pixelsPerSecond;
-                    const newValue = 1 - (newY - trackY) / trackHeight;
-                    useDAWStore.getState().moveAutomationPoint(
-                      track.id, lane.id, pi, newTime, newValue,
-                    );
-                  }}
-                  onDblClick={() => {
-                    useDAWStore.getState().removeAutomationPoint(track.id, lane.id, pi);
-                  }}
-                />
+                <React.Fragment key={`ap-${lane.id}-${pi}`}>
+                  <Circle
+                    x={px}
+                    y={py}
+                    radius={isHovered ? 6 : 4}
+                    fill={color}
+                    stroke="#fff"
+                    strokeWidth={isHovered ? 2 : 1}
+                    opacity={0.9}
+                    draggable
+                    onMouseEnter={() => {
+                      setHoveredAutoPoint({
+                        laneId: lane.id,
+                        pointIndex: pi,
+                        param: lane.param,
+                        value: point.value,
+                        time: point.time,
+                        screenX: px,
+                        screenY: py,
+                      });
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredAutoPoint(null);
+                    }}
+                    onDragMove={(e: any) => {
+                      const newX = e.target.x();
+                      const newY = e.target.y();
+                      const newTime = (newX + scrollX) / pixelsPerSecond;
+                      const newValue = 1 - (newY - trackY) / trackHeight;
+                      useDAWStore.getState().moveAutomationPoint(
+                        track.id, lane.id, pi, newTime, newValue,
+                      );
+                      setHoveredAutoPoint(null);
+                    }}
+                    onDblClick={() => {
+                      useDAWStore.getState().removeAutomationPoint(track.id, lane.id, pi);
+                      setHoveredAutoPoint(null);
+                    }}
+                  />
+                  {/* Hover tooltip */}
+                  {isHovered && (
+                    <Group listening={false}>
+                      <Rect
+                        x={px - 30}
+                        y={py - 28}
+                        width={60}
+                        height={18}
+                        fill="#1a1a1a"
+                        stroke={color}
+                        strokeWidth={1}
+                        cornerRadius={3}
+                        opacity={0.95}
+                      />
+                      <Text
+                        x={px - 30}
+                        y={py - 27}
+                        width={60}
+                        height={18}
+                        text={formatAutoValue(lane.param, point.value)}
+                        fontSize={10}
+                        fontFamily="monospace"
+                        fill="#ffffff"
+                        align="center"
+                        verticalAlign="middle"
+                      />
+                    </Group>
+                  )}
+                </React.Fragment>
               );
             })}
           </Group>
@@ -2582,7 +3372,9 @@ export function Timeline({ tracks }: TimelineProps) {
         <Stage
           width={dimensions.width}
           height={RULER_HEIGHT}
+          pixelRatio={window.devicePixelRatio || 1}
           onMouseDown={handleRulerMouseDown}
+          onDblClick={handleRulerDblClick}
         >
           <Layer>
             {/* Ruler Background */}
@@ -2648,12 +3440,64 @@ export function Timeline({ tracks }: TimelineProps) {
         </Stage>
       </div>
 
+      {/* Empty State — shown when no tracks exist */}
+      {tracks.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center z-5 pointer-events-none" style={{ top: RULER_HEIGHT }}>
+          <div className="text-center max-w-sm px-6 py-8">
+            {/* Audio waveform icon */}
+            <svg
+              className="mx-auto mb-4 text-daw-text-muted opacity-30"
+              width="64"
+              height="64"
+              viewBox="0 0 64 64"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <line x1="8" y1="20" x2="8" y2="44" />
+              <line x1="14" y1="14" x2="14" y2="50" />
+              <line x1="20" y1="24" x2="20" y2="40" />
+              <line x1="26" y1="10" x2="26" y2="54" />
+              <line x1="32" y1="18" x2="32" y2="46" />
+              <line x1="38" y1="8" x2="38" y2="56" />
+              <line x1="44" y1="22" x2="44" y2="42" />
+              <line x1="50" y1="12" x2="50" y2="52" />
+              <line x1="56" y1="26" x2="56" y2="38" />
+            </svg>
+            <div className="text-daw-text-muted text-base font-medium mb-2">
+              Start creating
+            </div>
+            <div className="text-neutral-600 text-sm leading-relaxed">
+              Drag audio files here or press{" "}
+              <kbd className="px-1.5 py-0.5 rounded bg-neutral-700/80 text-neutral-300 text-xs font-mono border border-daw-border">
+                Ctrl+T
+              </kbd>{" "}
+              to add a track
+            </div>
+            <div className="mt-3 text-neutral-600 text-xs">
+              Use{" "}
+              <kbd className="px-1.5 py-0.5 rounded bg-neutral-700/80 text-neutral-300 text-xs font-mono border border-daw-border">
+                Insert
+              </kbd>{" "}
+              to import media or{" "}
+              <kbd className="px-1.5 py-0.5 rounded bg-neutral-700/80 text-neutral-300 text-xs font-mono border border-daw-border">
+                Ctrl+O
+              </kbd>{" "}
+              to open a project
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Timeline Stage */}
       <Stage
         width={dimensions.width}
         height={stageHeight}
+        pixelRatio={window.devicePixelRatio || 1}
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
+        onMouseLeave={() => { if (showCrosshair) setCrosshairPos(null); }}
         onMouseDown={(e: any) => {
           const targetName = e.target.name?.() || e.target.attrs?.name || "";
           // Alt+drag on background starts razor edit
@@ -2671,7 +3515,21 @@ export function Timeline({ tracks }: TimelineProps) {
               }
             }
           }
-          // Marquee selection: plain click+drag on background (no Alt, select tool)
+          // Marquee zoom: Ctrl+drag on background (not on a clip)
+          else if (targetName === "timeline-bg" && (e.evt?.ctrlKey || e.evt?.metaKey) && toolModeRef.current !== "split") {
+            const stage = e.target.getStage();
+            const pointerPos = stage.getPointerPosition();
+            if (pointerPos) {
+              const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+              marqueeZoomRef.current = {
+                startX: pointerPos.x,
+                startTime: time,
+                currentX: pointerPos.x,
+                currentTime: time,
+              };
+            }
+          }
+          // Marquee selection: plain click+drag on background (no Alt, no Ctrl, select tool)
           else if (targetName === "timeline-bg" && toolModeRef.current !== "split") {
             const stage = e.target.getStage();
             const pointerPos = stage.getPointerPosition();
@@ -2681,7 +3539,7 @@ export function Timeline({ tracks }: TimelineProps) {
                 startY: pointerPos.y + scrollY,
                 currentX: pointerPos.x + scrollX,
                 currentY: pointerPos.y + scrollY,
-                ctrlHeld: e.evt?.ctrlKey || e.evt?.metaKey || false,
+                ctrlHeld: false,
               };
             }
           }
@@ -2701,77 +3559,60 @@ export function Timeline({ tracks }: TimelineProps) {
           }
         }}
       >
-        <Layer>
-          {/* Background */}
+        {/* Static Layer: grid, track backgrounds, overlays — only redraws on zoom/scroll.
+            listening={false} skips Konva hit-testing for every child, reducing event overhead. */}
+        <Layer listening={false}>
+          {/* Background fill */}
           <Rect
-            name="timeline-bg"
             width={dimensions.width}
             height={stageHeight}
             fill="#121212"
           />
 
           {/* Tracks Background Alternating - rendered BEFORE grid lines so lines show on top */}
-          {tracks.map((track, i) => (
-            <Rect
-              name="timeline-bg"
-              key={`track-bg-${i}`}
-              x={0}
-              y={i * trackHeight}
-              width={dimensions.width}
-              height={trackHeight}
-              fill={i % 2 === 0 ? "#1a1a1a" : "#171717"}
-              opacity={1}
-              onDblClick={(e: any) => {
-                const stage = e.target.getStage();
-                const pointerPos = stage.getPointerPosition();
-                const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+          {/* Virtualized: only render backgrounds for tracks within the vertical viewport */}
+          {(() => {
+            const firstBg = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
+            const lastBg = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            const bgs: React.ReactNode[] = [];
+            for (let i = firstBg; i <= lastBg; i++) {
+              bgs.push(
+                <Rect
+                  key={`track-bg-${i}`}
+                  x={0}
+                  y={i * trackHeight}
+                  width={dimensions.width}
+                  height={trackHeight}
+                  fill={i % 2 === 0 ? "#1a1a1a" : "#171717"}
+                  opacity={1}
+                />,
+              );
+            }
+            return bgs;
+          })()}
 
-                // If automation is visible, add a point on the first visible lane
-                if (track.showAutomation) {
-                  const visibleLane = track.automationLanes.find((l) => l.visible);
-                  if (visibleLane) {
-                    const clickY = pointerPos.y;
-                    const trackY = i * trackHeight - scrollY;
-                    const value = 1 - (clickY - trackY) / trackHeight;
-                    useDAWStore.getState().addAutomationPoint(
-                      track.id, visibleLane.id, clickTime, value,
-                    );
-                    return;
-                  }
-                }
-
-                if (track.type === "midi" || track.type === "instrument") {
-                  handleTrackDoubleClick(track.id, track.type, clickTime);
-                }
-              }}
-              onDblTap={(e: any) => {
-                if (track.type === "midi" || track.type === "instrument") {
-                  const stage = e.target.getStage();
-                  const pointerPos = stage.getPointerPosition();
-                  const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
-                  handleTrackDoubleClick(track.id, track.type, clickTime);
-                }
-              }}
-            />
-          ))}
-
-          {/* Track group tint overlays */}
-          {tracks.map((track, i) => {
-            const gInfo = getTrackGroupInfo(track.id, trackGroups);
-            if (!gInfo) return null;
-            return (
-              <Rect
-                key={`group-tint-${i}`}
-                x={0}
-                y={i * trackHeight}
-                width={dimensions.width}
-                height={trackHeight}
-                fill={TRACK_GROUP_COLORS[gInfo.colorIndex]}
-                opacity={0.06}
-                listening={false}
-              />
-            );
-          })}
+          {/* Track group tint overlays — virtualized to visible tracks only */}
+          {(() => {
+            const firstTint = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
+            const lastTint = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            const tints: React.ReactNode[] = [];
+            for (let i = firstTint; i <= lastTint; i++) {
+              const gInfo = getTrackGroupInfo(tracks[i].id, trackGroups);
+              if (!gInfo) continue;
+              tints.push(
+                <Rect
+                  key={`group-tint-${i}`}
+                  x={0}
+                  y={i * trackHeight}
+                  width={dimensions.width}
+                  height={trackHeight}
+                  fill={TRACK_GROUP_COLORS[gInfo.colorIndex]}
+                  opacity={0.06}
+                />,
+              );
+            }
+            return tints;
+          })()}
 
           {/* Grid Lines - rendered after track backgrounds so they're visible on top */}
           {gridLines}
@@ -2785,56 +3626,172 @@ export function Timeline({ tracks }: TimelineProps) {
           {/* Time Selection */}
           {renderTimeSelection()}
 
-          {/* Razor Edit Highlights */}
-          {renderRazorEdits()}
-
           {/* Regions (behind markers) */}
           {renderRegions()}
 
           {/* Markers */}
           {renderMarkers()}
+        </Layer>
 
-          {/* Clips and Recording Clips */}
-          {tracks.map((track, i) => {
-            const trackY = i * trackHeight;
+        {/* Dynamic Layer: clips, playhead, selection rects, automation — changes during playback/editing */}
+        <Layer>
+          {/* Invisible full-stage rect for click/drag event detection */}
+          <Rect
+            name="timeline-bg"
+            width={dimensions.width}
+            height={stageHeight}
+            fill="transparent"
+          />
 
-            return (
-              <Group key={track.id}>
-                {/* Existing Audio Clips — render non-selected first, selected on top
-                    so that fade handles / volume line of the selected clip are always
-                    clickable even when two clips overlap. */}
-                {track.clips
-                  .filter((clip) => !selectedClipIds.includes(clip.id))
-                  .map((clip) =>
-                    renderClip(clip, i, trackY, track.color, track.id),
+          {/* Track hit areas for double-click events (automation point add, MIDI clip create) */}
+          {/* Virtualized: only render hit areas for tracks within the vertical viewport */}
+          {(() => {
+            const firstHit = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
+            const lastHit = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            const hitAreas: React.ReactNode[] = [];
+            for (let i = firstHit; i <= lastHit; i++) {
+              const track = tracks[i];
+              hitAreas.push(
+                <Rect
+                  name="timeline-bg"
+                  key={`track-hit-${i}`}
+                  x={0}
+                  y={i * trackHeight}
+                  width={dimensions.width}
+                  height={trackHeight}
+                  fill="transparent"
+                  onDblClick={(e: any) => {
+                    const stage = e.target.getStage();
+                    const pointerPos = stage.getPointerPosition();
+                    const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+
+                    // If automation is visible, add a point on the first visible lane
+                    if (track.showAutomation) {
+                      const visibleLane = track.automationLanes.find((l) => l.visible);
+                      if (visibleLane) {
+                        const clickY = pointerPos.y;
+                        const trackY = i * trackHeight - scrollY;
+                        const value = 1 - (clickY - trackY) / trackHeight;
+                        useDAWStore.getState().addAutomationPoint(
+                          track.id, visibleLane.id, clickTime, value,
+                        );
+                        return;
+                      }
+                    }
+
+                    if (track.type === "midi" || track.type === "instrument") {
+                      handleTrackDoubleClick(track.id, track.type, clickTime);
+                    }
+                  }}
+                  onDblTap={(e: any) => {
+                    if (track.type === "midi" || track.type === "instrument") {
+                      const stage = e.target.getStage();
+                      const pointerPos = stage.getPointerPosition();
+                      const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+                      handleTrackDoubleClick(track.id, track.type, clickTime);
+                    }
+                  }}
+                />,
+              );
+            }
+            return hitAreas;
+          })()}
+
+          {/* Razor Edit Highlights */}
+          {renderRazorEdits()}
+
+          {/* Clips and Recording Clips — virtualized: skip off-screen tracks/clips */}
+          {(() => {
+            // Visible time range (horizontal virtualization)
+            const visibleStartTime = scrollX / pixelsPerSecond;
+            const visibleEndTime = (scrollX + dimensions.width) / pixelsPerSecond;
+            // Visible track range (vertical virtualization)
+            const firstVisibleTrack = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
+            const lastVisibleTrack = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+
+            const isClipVisible = (clip: { startTime: number; duration: number }) =>
+              clip.startTime + clip.duration >= visibleStartTime && clip.startTime <= visibleEndTime;
+
+            return tracks.map((track, i) => {
+              // Skip tracks entirely outside vertical viewport
+              if (i < firstVisibleTrack || i > lastVisibleTrack) return null;
+
+              const trackY = i * trackHeight;
+
+              // Filter clips to only those visible in the horizontal viewport
+              const visibleClips = track.clips.filter(isClipVisible);
+              const visibleMidiClips = track.midiClips.filter(isClipVisible);
+
+              return (
+                <Group key={track.id}>
+                  {/* Existing Audio Clips — render non-selected first, selected on top
+                      so that fade handles / volume line of the selected clip are always
+                      clickable even when two clips overlap. */}
+                  {visibleClips
+                    .filter((clip) => !selectedClipIds.includes(clip.id))
+                    .map((clip) =>
+                      renderClip(clip, i, trackY, track.color, track.id),
+                    )}
+                  {visibleClips
+                    .filter((clip) => selectedClipIds.includes(clip.id))
+                    .map((clip) =>
+                      renderClip(clip, i, trackY, track.color, track.id),
+                    )}
+
+                  {/* Existing MIDI Clips */}
+                  {visibleMidiClips.map((clip) =>
+                    renderMIDIClip(clip, i, trackY, track.color, track.id),
                   )}
-                {track.clips
-                  .filter((clip) => selectedClipIds.includes(clip.id))
-                  .map((clip) =>
-                    renderClip(clip, i, trackY, track.color, track.id),
-                  )}
 
-                {/* Existing MIDI Clips */}
-                {track.midiClips.map((clip) =>
-                  renderMIDIClip(clip, i, trackY, track.color, track.id),
-                )}
+                  {/* Recording Clip (if this track is recording) */}
+                  {recordingClips.find((rc) => rc.trackId === track.id) &&
+                    renderRecordingClip(
+                      recordingClips.find((rc) => rc.trackId === track.id)!,
+                      trackY,
+                      track.color,
+                    )}
 
-                {/* Recording Clip (if this track is recording) */}
-                {recordingClips.find((rc) => rc.trackId === track.id) &&
-                  renderRecordingClip(
-                    recordingClips.find((rc) => rc.trackId === track.id)!,
-                    trackY,
-                    track.color,
-                  )}
-
-                {/* Automation Lanes */}
-                {renderAutomationLanes(track, trackY)}
-              </Group>
-            );
-          })}
+                  {/* Automation Lanes */}
+                  {renderAutomationLanes(track, trackY)}
+                </Group>
+              );
+            });
+          })()}
 
           {/* Ghost Track */}
           {renderGhostTrack()}
+
+          {/* Snap ghost preview — semi-transparent rect at snapped position during drag */}
+          {snapGhostRender && snapGhostRender.visible && (
+            <Rect
+              x={snapGhostRender.x}
+              y={snapGhostRender.y}
+              width={snapGhostRender.width}
+              height={snapGhostRender.height}
+              fill={snapGhostRender.color}
+              opacity={0.2}
+              cornerRadius={3}
+              stroke="#4cc9f0"
+              strokeWidth={1}
+              dash={[4, 2]}
+              listening={false}
+            />
+          )}
+
+          {/* Marquee zoom rectangle — Ctrl+drag on background */}
+          {marqueeZoomRect && (
+            <Rect
+              x={marqueeZoomRect.x}
+              y={0}
+              width={marqueeZoomRect.width}
+              height={stageHeight}
+              fill="rgba(76, 201, 240, 0.08)"
+              stroke="#4cc9f0"
+              strokeWidth={1}
+              dash={[6, 3]}
+              listening={false}
+            />
+          )}
 
           {/* Marquee selection rectangle */}
           {marqueeRect && (
@@ -2851,7 +3808,6 @@ export function Timeline({ tracks }: TimelineProps) {
             />
           )}
 
-          {/* Playhead - separate component to avoid Timeline re-renders */}
           {/* Split tool preview line */}
           {toolMode === "split" && splitPreviewX !== null && (
             <Line
@@ -2862,6 +3818,26 @@ export function Timeline({ tracks }: TimelineProps) {
               dash={[4, 4]}
               listening={false}
             />
+          )}
+
+          {/* Crosshair cursor (vertical + horizontal lines at mouse position) */}
+          {showCrosshair && crosshairPos && (
+            <>
+              <Line
+                points={[crosshairPos.x, 0, crosshairPos.x, stageHeight]}
+                stroke="#0078d4"
+                strokeWidth={1}
+                opacity={0.4}
+                listening={false}
+              />
+              <Line
+                points={[0, crosshairPos.y, dimensions.width, crosshairPos.y]}
+                stroke="#0078d4"
+                strokeWidth={1}
+                opacity={0.4}
+                listening={false}
+              />
+            </>
           )}
 
           <Playhead

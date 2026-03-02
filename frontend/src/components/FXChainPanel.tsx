@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   X,
@@ -16,6 +16,13 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronRight,
+  ArrowLeftRight,
+  Save,
+  FolderOpen,
+  Trash2,
+  List,
+  Disc3,
+  Radio,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
@@ -42,7 +49,7 @@ interface FXChainPanelProps {
 interface FXSlot {
   index: number;
   name: string;
-  type?: "vst3" | "s13fx";
+  type?: "vst3" | "lv2" | "clap" | "s13fx";
   pluginPath?: string;
 }
 
@@ -58,6 +65,13 @@ interface S13FXSlider {
   enumNames?: string[];
 }
 
+interface PluginParam {
+  index: number;
+  name: string;
+  value: number;
+  text: string;
+}
+
 interface Plugin {
   name: string;
   manufacturer: string;
@@ -65,7 +79,7 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string;
-  pluginType?: "vst3" | "s13fx";
+  pluginType?: "vst3" | "lv2" | "clap" | "s13fx";
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -105,11 +119,23 @@ export function FXChainPanel({
   chainType,
   onClose,
 }: FXChainPanelProps) {
-  const { updateTrack, addTrackFXWithUndo, removeTrackFXWithUndo } = useDAWStore(
+  const {
+    updateTrack, addTrackFXWithUndo, removeTrackFXWithUndo,
+    pluginABStates, togglePluginAB,
+    fxChainPresets, saveFXChainPreset, loadFXChainPreset, deleteFXChainPreset,
+    addAutomationLane,
+  } = useDAWStore(
     useShallow((s) => ({
       updateTrack: s.updateTrack,
       addTrackFXWithUndo: s.addTrackFXWithUndo,
       removeTrackFXWithUndo: s.removeTrackFXWithUndo,
+      pluginABStates: s.pluginABStates,
+      togglePluginAB: s.togglePluginAB,
+      fxChainPresets: s.fxChainPresets,
+      saveFXChainPreset: s.saveFXChainPreset,
+      loadFXChainPreset: s.loadFXChainPreset,
+      deleteFXChainPreset: s.deleteFXChainPreset,
+      addAutomationLane: s.addAutomationLane,
     }))
   );
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
@@ -120,6 +146,56 @@ export function FXChainPanel({
   const [expandedS13FX, setExpandedS13FX] = useState<number | null>(null);
   const [s13fxSliders, setS13fxSliders] = useState<S13FXSlider[]>([]);
   const [showRawSliders, setShowRawSliders] = useState(false);
+  const [showPresetMenu, setShowPresetMenu] = useState(false);
+  const [presetName, setPresetName] = useState("");
+
+  // Plugin parameter list state (per-slot)
+  const [expandedParamsFx, setExpandedParamsFx] = useState<number | null>(null);
+  const [pluginParams, setPluginParams] = useState<PluginParam[]>([]);
+  const [paramsLoading, setParamsLoading] = useState(false);
+
+  // Plugin presets state (per-slot)
+  const [expandedPresetsFx, setExpandedPresetsFx] = useState<number | null>(null);
+  const [pluginPresetsList, setPluginPresetsList] = useState<string[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(false);
+  const [savePresetName, setSavePresetName] = useState("");
+
+  // MIDI Learn state
+  const [midiLearnActive, setMidiLearnActive] = useState<{ fxIndex: number; paramIndex: number } | null>(null);
+  const midiLearnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleStartMIDILearn = useCallback(async (fxIndex: number, paramIndex: number) => {
+    // Cancel any existing learn session
+    if (midiLearnActive) {
+      await nativeBridge.cancelPluginMIDILearn();
+      if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
+    }
+    setMidiLearnActive({ fxIndex, paramIndex });
+    await nativeBridge.startPluginMIDILearn(trackId, fxIndex, paramIndex);
+    // Auto-cancel after 10 seconds
+    midiLearnTimerRef.current = setTimeout(async () => {
+      await nativeBridge.cancelPluginMIDILearn();
+      setMidiLearnActive(null);
+      midiLearnTimerRef.current = null;
+    }, 10000);
+  }, [midiLearnActive, trackId]);
+
+  const handleCancelMIDILearn = useCallback(async () => {
+    if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
+    midiLearnTimerRef.current = null;
+    await nativeBridge.cancelPluginMIDILearn();
+    setMidiLearnActive(null);
+  }, []);
+
+  // Clean up MIDI learn timer on unmount
+  useEffect(() => {
+    return () => {
+      if (midiLearnTimerRef.current) {
+        clearTimeout(midiLearnTimerRef.current);
+        nativeBridge.cancelPluginMIDILearn();
+      }
+    };
+  }, []);
 
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -175,10 +251,13 @@ export function FXChainPanel({
     setPluginsLoading(true);
     try {
       const pluginList = await nativeBridge.getAvailablePlugins();
-      const vst3Plugins: Plugin[] = pluginList.map((p: any) => ({
-        ...p,
-        pluginType: "vst3" as const,
-      }));
+      const vst3Plugins: Plugin[] = pluginList.map((p: any) => {
+        const fmt = (p.pluginFormatName || "").toLowerCase();
+        let pluginType: Plugin["pluginType"] = "vst3";
+        if (fmt.includes("lv2")) pluginType = "lv2";
+        else if (fmt.includes("clap")) pluginType = "clap";
+        return { ...p, pluginType };
+      });
 
       let s13fxPlugins: Plugin[] = [];
       try {
@@ -385,6 +464,82 @@ export function FXChainPanel({
     }
   };
 
+  // ---- Plugin Parameter List handlers ----
+  const handleToggleParams = async (fxIndex: number) => {
+    if (expandedParamsFx === fxIndex) {
+      setExpandedParamsFx(null);
+      setPluginParams([]);
+      return;
+    }
+    setParamsLoading(true);
+    try {
+      const isInputFX = chainType === "input";
+      const params = await nativeBridge.getPluginParameters(trackId, fxIndex, isInputFX);
+      setPluginParams(params);
+      setExpandedParamsFx(fxIndex);
+      // Close presets panel if open on another slot
+      setExpandedPresetsFx(null);
+    } catch (e) {
+      console.error("[FXChain] Failed to load plugin parameters:", e);
+    } finally {
+      setParamsLoading(false);
+    }
+  };
+
+  const handleAutomateParam = (fxIndex: number, param: PluginParam) => {
+    if (chainType === "master") return; // Master automation not supported
+    const automationParam = `plugin_${fxIndex}_${param.index}`;
+    addAutomationLane(trackId, automationParam, `${fxSlots.find((f) => f.index === fxIndex)?.name || "Plugin"}: ${param.name}`);
+  };
+
+  // ---- Plugin Presets handlers ----
+  const handleTogglePluginPresets = async (fxIndex: number) => {
+    if (expandedPresetsFx === fxIndex) {
+      setExpandedPresetsFx(null);
+      setPluginPresetsList([]);
+      return;
+    }
+    setPresetsLoading(true);
+    try {
+      const isInputFX = chainType === "input";
+      const presets = await nativeBridge.getPluginPresets(trackId, fxIndex, isInputFX);
+      setPluginPresetsList(presets);
+      setExpandedPresetsFx(fxIndex);
+      // Close params panel if open on another slot
+      setExpandedParamsFx(null);
+    } catch (e) {
+      console.error("[FXChain] Failed to load plugin presets:", e);
+    } finally {
+      setPresetsLoading(false);
+    }
+  };
+
+  const handleLoadPluginPreset = async (fxIndex: number, presetNameStr: string) => {
+    try {
+      const isInputFX = chainType === "input";
+      await nativeBridge.loadPluginPreset(trackId, fxIndex, isInputFX, presetNameStr);
+      console.log(`[FXChain] Loaded preset "${presetNameStr}" on FX ${fxIndex}`);
+    } catch (e) {
+      console.error("[FXChain] Failed to load plugin preset:", e);
+    }
+  };
+
+  const handleSavePluginPreset = async (fxIndex: number) => {
+    const name = savePresetName.trim();
+    if (!name) return;
+    try {
+      const isInputFX = chainType === "input";
+      await nativeBridge.savePluginPreset(trackId, fxIndex, isInputFX, name);
+      console.log(`[FXChain] Saved preset "${name}" on FX ${fxIndex}`);
+      setSavePresetName("");
+      // Refresh the presets list
+      const presets = await nativeBridge.getPluginPresets(trackId, fxIndex, isInputFX);
+      setPluginPresetsList(presets);
+    } catch (e) {
+      console.error("[FXChain] Failed to save plugin preset:", e);
+    }
+  };
+
   const categories = [
     "All",
     ...Array.from(new Set(plugins.map((p) => p.category))),
@@ -421,10 +576,95 @@ export function FXChainPanel({
           <div className="fx-chain-loaded-column">
             <div className="fx-column-header">
               <h4>Loaded FX</h4>
-              <span className="fx-count">
-                {fxSlots.length} plugin{fxSlots.length !== 1 ? "s" : ""}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="fx-count">
+                  {fxSlots.length} plugin{fxSlots.length !== 1 ? "s" : ""}
+                </span>
+                <button
+                  onClick={() => setShowPresetMenu(!showPresetMenu)}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors"
+                  title="FX Chain Presets"
+                >
+                  <FolderOpen size={11} />
+                  Presets
+                </button>
+              </div>
             </div>
+
+            {/* FX Chain Presets Panel */}
+            {showPresetMenu && (
+              <div className="bg-neutral-800 border border-neutral-700 rounded mx-1 mb-1 p-2 space-y-2">
+                {/* Save Current Chain */}
+                <div className="flex gap-1.5">
+                  <Input
+                    type="text"
+                    variant="default"
+                    size="sm"
+                    placeholder="Preset name..."
+                    value={presetName}
+                    onChange={(e) => setPresetName(e.target.value)}
+                    className="flex-1 text-xs"
+                  />
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!presetName.trim() || fxSlots.length === 0}
+                    onClick={async () => {
+                      await saveFXChainPreset(trackId, presetName.trim(), chainType);
+                      setPresetName("");
+                    }}
+                    title="Save current FX chain as preset"
+                  >
+                    <Save size={12} />
+                  </Button>
+                </div>
+
+                {/* Preset List */}
+                {fxChainPresets.length === 0 ? (
+                  <div className="text-[10px] text-neutral-500 text-center py-1">
+                    No presets saved yet
+                  </div>
+                ) : (
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {fxChainPresets.map((preset, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-700/50 hover:bg-neutral-700 transition-colors group"
+                      >
+                        <span className="flex-1 text-xs text-neutral-300 truncate">
+                          {preset.name}
+                        </span>
+                        <span className="text-[9px] text-neutral-500">
+                          {preset.plugins.length} fx
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={async () => {
+                            await loadFXChainPreset(trackId, idx, chainType);
+                            await loadPlugins();
+                            setShowPresetMenu(false);
+                          }}
+                          title={`Load preset "${preset.name}"`}
+                          className="opacity-60 group-hover:opacity-100"
+                        >
+                          <FolderOpen size={11} />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => deleteFXChainPreset(idx)}
+                          title={`Delete preset "${preset.name}"`}
+                          className="opacity-60 group-hover:opacity-100 hover:text-red-400"
+                        >
+                          <Trash2 size={11} />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="fx-slots-list overflow-y-auto">
               {loading ? (
@@ -483,6 +723,57 @@ export function FXChainPanel({
                             <RefreshCw size={12} />
                           </Button>
                         )}
+                        {/* A/B Comparison Toggle */}
+                        {!isS13FX && (() => {
+                          const abKey = `${trackId}-${fx.index}`;
+                          const abState = pluginABStates[abKey];
+                          const activeSlot = abState?.active || "a";
+                          return (
+                            <button
+                              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors shrink-0 ${
+                                activeSlot === "a"
+                                  ? "bg-blue-600/30 text-blue-400 border border-blue-500/50"
+                                  : "bg-orange-600/30 text-orange-400 border border-orange-500/50"
+                              }`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                togglePluginAB(trackId, fx.index, chainType === "input");
+                              }}
+                              title={`A/B Compare - Active: ${activeSlot.toUpperCase()}. Click to toggle.`}
+                            >
+                              <ArrowLeftRight size={10} />
+                              {activeSlot.toUpperCase()}
+                            </button>
+                          );
+                        })()}
+                        {/* Parameters button */}
+                        {!isS13FX && (
+                          <button
+                            className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
+                              expandedParamsFx === fx.index
+                                ? "bg-cyan-600/30 text-cyan-400 border border-cyan-500/50"
+                                : "text-neutral-400 hover:text-white hover:bg-neutral-700"
+                            }`}
+                            onClick={(e) => { e.stopPropagation(); handleToggleParams(fx.index); }}
+                            title="Browse automatable parameters"
+                          >
+                            <List size={10} />
+                          </button>
+                        )}
+                        {/* Presets button */}
+                        {!isS13FX && (
+                          <button
+                            className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
+                              expandedPresetsFx === fx.index
+                                ? "bg-purple-600/30 text-purple-400 border border-purple-500/50"
+                                : "text-neutral-400 hover:text-white hover:bg-neutral-700"
+                            }`}
+                            onClick={(e) => { e.stopPropagation(); handleTogglePluginPresets(fx.index); }}
+                            title="Plugin presets"
+                          >
+                            <Disc3 size={10} />
+                          </button>
+                        )}
                         <Button
                           variant="ghost"
                           size="icon-sm"
@@ -493,6 +784,111 @@ export function FXChainPanel({
                           <X size={14} />
                         </Button>
                       </div>
+
+                      {/* Plugin Parameter Automation List */}
+                      {!isS13FX && expandedParamsFx === fx.index && (
+                        <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
+                          <div className="text-[10px] text-neutral-400 mb-1.5 font-medium">Automatable Parameters</div>
+                          {paramsLoading ? (
+                            <div className="text-[10px] text-neutral-500 text-center py-2">Loading parameters...</div>
+                          ) : pluginParams.length === 0 ? (
+                            <div className="text-[10px] text-neutral-500 text-center py-2">No parameters available</div>
+                          ) : (
+                            <div className="max-h-[200px] overflow-y-auto space-y-0.5">
+                              {pluginParams.map((param) => {
+                                const isLearning = midiLearnActive?.fxIndex === fx.index && midiLearnActive?.paramIndex === param.index;
+                                return (
+                                  <div
+                                    key={param.index}
+                                    className={`flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-800/50 hover:bg-neutral-800 transition-colors group ${isLearning ? "ring-1 ring-amber-500/60" : ""}`}
+                                  >
+                                    <span className="flex-1 text-[11px] text-neutral-300 truncate" title={param.name}>
+                                      {param.name}
+                                    </span>
+                                    <span className="text-[9px] text-neutral-500 shrink-0 w-14 text-right truncate" title={param.text}>
+                                      {param.text}
+                                    </span>
+                                    {/* MIDI Learn button */}
+                                    {isLearning ? (
+                                      <button
+                                        className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-300 hover:bg-amber-700/70 transition-colors shrink-0 animate-pulse"
+                                        onClick={() => handleCancelMIDILearn()}
+                                        title="Cancel MIDI Learn"
+                                      >
+                                        Listening...
+                                      </button>
+                                    ) : (
+                                      <button
+                                        className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/20 text-amber-400 hover:bg-amber-700/50 transition-colors opacity-0 group-hover:opacity-100 shrink-0"
+                                        onClick={() => handleStartMIDILearn(fx.index, param.index)}
+                                        title={`MIDI Learn: assign a CC to "${param.name}"`}
+                                      >
+                                        <Radio size={9} className="inline mr-0.5" />
+                                        Learn
+                                      </button>
+                                    )}
+                                    {chainType !== "master" && (
+                                      <button
+                                        className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/30 text-cyan-400 hover:bg-cyan-700/60 transition-colors opacity-60 group-hover:opacity-100 shrink-0"
+                                        onClick={() => handleAutomateParam(fx.index, param)}
+                                        title={`Create automation lane for "${param.name}"`}
+                                      >
+                                        Automate
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Plugin Presets Browser */}
+                      {!isS13FX && expandedPresetsFx === fx.index && (
+                        <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
+                          <div className="text-[10px] text-neutral-400 mb-1.5 font-medium">Plugin Presets</div>
+                          {/* Save Preset */}
+                          <div className="flex gap-1.5 mb-2">
+                            <input
+                              type="text"
+                              placeholder="Save as..."
+                              value={savePresetName}
+                              onChange={(e) => setSavePresetName(e.target.value)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1.5 py-0.5 text-[11px] text-white placeholder-neutral-500 outline-none focus:border-purple-500"
+                            />
+                            <button
+                              className="text-[9px] px-2 py-0.5 rounded bg-purple-700/40 text-purple-300 hover:bg-purple-700/70 transition-colors disabled:opacity-30"
+                              onClick={() => handleSavePluginPreset(fx.index)}
+                              disabled={!savePresetName.trim()}
+                              title="Save current settings as a preset"
+                            >
+                              <Save size={10} />
+                            </button>
+                          </div>
+                          {/* Preset List */}
+                          {presetsLoading ? (
+                            <div className="text-[10px] text-neutral-500 text-center py-2">Loading presets...</div>
+                          ) : pluginPresetsList.length === 0 ? (
+                            <div className="text-[10px] text-neutral-500 text-center py-2">No presets available</div>
+                          ) : (
+                            <div className="max-h-[200px] overflow-y-auto space-y-0.5">
+                              {pluginPresetsList.map((preset, idx) => (
+                                <button
+                                  key={idx}
+                                  className="w-full text-left flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-800/50 hover:bg-neutral-800 transition-colors text-[11px] text-neutral-300"
+                                  onClick={() => handleLoadPluginPreset(fx.index, preset)}
+                                  title={`Load preset "${preset}"`}
+                                >
+                                  <Disc3 size={10} className="text-purple-400 shrink-0" />
+                                  <span className="truncate">{preset}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* S13FX inline sliders + advanced graph */}
                       {isS13FX && expandedS13FX === fx.index && s13fxSliders.length > 0 && (() => {

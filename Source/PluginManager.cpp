@@ -1,10 +1,14 @@
 #include "PluginManager.h"
 #include "S13FXProcessor.h"
+#include "CLAPPluginFormat.h"
 
 PluginManager::PluginManager()
 {
-    // Add default formats (VST3, AU, etc.)
+    // Add default formats (VST3, LV2, AU, etc.)
     formatManager.addDefaultFormats();
+
+    // Add CLAP hosting (not built into JUCE — custom format)
+    formatManager.addFormat(new CLAPPluginFormat());
 
     // Debug: Log how many formats were added
     juce::Logger::writeToLog("PluginManager: Constructor - formatManager has " +
@@ -19,6 +23,12 @@ PluginManager::PluginManager()
     // Get plugin list file location (Documents/Studio13/PluginList.xml)
     pluginListFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
         .getChildFile("Studio13").getChildFile("PluginList.xml");
+
+    // Plugin crash blacklist file
+    blacklistFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+        .getChildFile("Studio13").getChildFile("PluginBlacklist.txt");
+    if (blacklistFile.existsAsFile())
+        blacklistFile.readLines(blacklistedPlugins);
 
     // Load existing plugin list if available
     loadPluginList();
@@ -60,7 +70,7 @@ void PluginManager::scanForPlugins()
         // Get default plugin search paths for this format
         juce::FileSearchPath searchPaths = format->getDefaultLocationsToSearch();
         
-        // Add additional common VST3 locations manually
+        // Add additional common plugin locations manually
         if (format->getName().contains("VST3"))
         {
             // Common VST3 locations on Windows
@@ -69,6 +79,22 @@ void PluginManager::scanForPlugins()
             searchPaths.add(juce::File("C:\\Program Files\\VSTPlugins"));
             searchPaths.add(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
                            .getChildFile("VST3"));
+        }
+        else if (format->getName().contains("LV2"))
+        {
+            // Common LV2 locations on Windows
+            searchPaths.add(juce::File("C:\\Program Files\\Common Files\\LV2"));
+            searchPaths.add(juce::File("C:\\Program Files\\LV2"));
+            searchPaths.add(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                           .getChildFile("LV2"));
+            // User home .lv2
+            searchPaths.add(juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                           .getChildFile(".lv2"));
+        }
+        else if (format->getName() == "CLAP")
+        {
+            // Common CLAP locations on Windows
+            searchPaths.add(juce::File("C:\\Program Files\\Common Files\\CLAP"));
         }
         
         writeLog("PluginManager: Search paths: " + searchPaths.toString());
@@ -86,8 +112,8 @@ void PluginManager::scanForPlugins()
                 
                 // List files in this directory
                 juce::Array<juce::File> files;
-                path.findChildFiles(files, juce::File::findFiles, true, "*.vst3");
-                writeLog("PluginManager: Found " + juce::String(files.size()) + " .vst3 files in this path");
+                path.findChildFiles(files, juce::File::findFilesAndDirectories, true, "*.vst3;*.lv2");
+                writeLog("PluginManager: Found " + juce::String(files.size()) + " plugin files in this path");
             }
         }
         
@@ -149,6 +175,13 @@ juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
 std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::PluginDescription& description,
                                                                double sampleRate, int blockSize)
 {
+    // Refuse to load blacklisted plugins (previously crashed)
+    if (isPluginBlacklisted(description.fileOrIdentifier))
+    {
+        juce::Logger::writeToLog("PluginManager: Refusing to load blacklisted plugin: " + description.name);
+        return nullptr;
+    }
+
     juce::String errorMessage;
 
     // Clamp block size to at least 512 — ASIO buffers can be as small as 32 samples,
@@ -203,10 +236,12 @@ std::unique_ptr<juce::AudioProcessor> PluginManager::loadPluginFromFile(const ju
 
     // 3. Direct scan — try to load from the file path directly
     juce::File pluginFile(filePath);
-    // Walk up to find the .vst3 bundle directory if we have an inner path
+    // Walk up to find the plugin bundle directory if we have an inner path
     juce::File bundleFile = pluginFile;
     while (bundleFile.getParentDirectory() != bundleFile &&
-           bundleFile.getFileExtension() != ".vst3")
+           bundleFile.getFileExtension() != ".vst3" &&
+           bundleFile.getFileExtension() != ".lv2" &&
+           bundleFile.getFileExtension() != ".clap")
     {
         bundleFile = bundleFile.getParentDirectory();
     }
@@ -330,4 +365,38 @@ void PluginManager::scanDirectory(const juce::File& dir, bool isStock)
         juce::Logger::writeToLog("PluginManager: Found S13FX: " + info.name +
                                  (isStock ? " (stock)" : " (user)"));
     }
+}
+
+// ---- Plugin crash isolation (blacklist) ----
+
+bool PluginManager::isPluginBlacklisted(const juce::String& pluginId) const
+{
+    return blacklistedPlugins.contains(pluginId);
+}
+
+void PluginManager::blacklistPlugin(const juce::String& pluginId)
+{
+    if (!blacklistedPlugins.contains(pluginId))
+    {
+        blacklistedPlugins.add(pluginId);
+        blacklistFile.getParentDirectory().createDirectory();
+        blacklistFile.replaceWithText(blacklistedPlugins.joinIntoString("\n"));
+        juce::Logger::writeToLog("PluginManager: Blacklisted plugin: " + pluginId);
+    }
+}
+
+void PluginManager::removeFromBlacklist(const juce::String& pluginId)
+{
+    int idx = blacklistedPlugins.indexOf(pluginId);
+    if (idx >= 0)
+    {
+        blacklistedPlugins.remove(idx);
+        blacklistFile.replaceWithText(blacklistedPlugins.joinIntoString("\n"));
+        juce::Logger::writeToLog("PluginManager: Removed from blacklist: " + pluginId);
+    }
+}
+
+juce::StringArray PluginManager::getBlacklistedPlugins() const
+{
+    return blacklistedPlugins;
 }

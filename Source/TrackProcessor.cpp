@@ -68,9 +68,49 @@ const juce::String TrackProcessor::getProgramName (int index)
 void TrackProcessor::recomputePanGains()
 {
     float volumeGain = juce::Decibels::decibelsToGain(trackVolumeDB);
+    float p = (trackPan + 1.0f) * 0.5f;  // Normalize pan to 0..1 (0=left, 0.5=center, 1=right)
     float panAngle = (trackPan + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
-    cachedPanL.store(std::cos(panAngle) * volumeGain, std::memory_order_relaxed);
-    cachedPanR.store(std::sin(panAngle) * volumeGain, std::memory_order_relaxed);
+    float lGain, rGain;
+
+    switch (panLaw)
+    {
+        case PanLaw::Minus4_5dB:
+        {
+            // Blend between constant power (-3dB) and linear (-6dB)
+            float cpL = std::cos(panAngle);
+            float cpR = std::sin(panAngle);
+            float linL = 1.0f - p;
+            float linR = p;
+            lGain = (cpL + linL) * 0.5f * volumeGain;
+            rGain = (cpR + linR) * 0.5f * volumeGain;
+            break;
+        }
+        case PanLaw::Minus6dB:
+        {
+            // Linear law: -6dB at center
+            lGain = (1.0f - p) * volumeGain;
+            rGain = p * volumeGain;
+            break;
+        }
+        case PanLaw::Linear:
+        {
+            // 0dB at center: no center attenuation
+            lGain = std::min(1.0f, 2.0f * (1.0f - p)) * volumeGain;
+            rGain = std::min(1.0f, 2.0f * p) * volumeGain;
+            break;
+        }
+        case PanLaw::ConstantPower:
+        default:
+        {
+            // Constant power (-3dB at center): cos/sin
+            lGain = std::cos(panAngle) * volumeGain;
+            rGain = std::sin(panAngle) * volumeGain;
+            break;
+        }
+    }
+
+    cachedPanL.store(lGain, std::memory_order_relaxed);
+    cachedPanR.store(rGain, std::memory_order_relaxed);
 }
 
 void TrackProcessor::setVolume(float newVolume)
@@ -131,6 +171,17 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // Use the actual device block size here — the buffer just needs to hold one callback.
     fxProcessBuffer.setSize(8, samplesPerBlock);
 
+    // Prepare PDC delay line
+    {
+        juce::dsp::ProcessSpec spec;
+        spec.sampleRate = sampleRate;
+        spec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
+        spec.numChannels = 2;
+        pdcDelayLine.prepare(spec);
+        if (pdcDelaySamples > 0)
+            pdcDelayLine.setDelay(static_cast<float>(pdcDelaySamples));
+    }
+
     // Clamp max-block-size hint to at least 512.  ASIO buffers can be as small as
     // 32 samples; passing that to prepareToPlay forces plugins to resize their internal
     // DSP (FFT, convolution) for tiny blocks, causing crackling/distortion.
@@ -162,6 +213,9 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         preparePluginPreservingLayout(instrumentPlugin.get(), sampleRate, pluginMaxBlock);
         instrumentPlugin->reset();
     }
+
+    // Prepare channel strip EQ
+    channelStripEQ.prepareToPlay(sampleRate, samplesPerBlock);
 }
 
 void TrackProcessor::releaseResources()
@@ -191,6 +245,14 @@ void TrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
         buffer.clear();
         currentRMS = 0.0f;
         return;
+    }
+
+    // Apply Plugin Delay Compensation (PDC) before FX chains
+    if (pdcDelaySamples > 0)
+    {
+        juce::dsp::AudioBlock<float> block(buffer);
+        juce::dsp::ProcessContextReplacing<float> context(block);
+        pdcDelayLine.process(context);
     }
 
     bool hasAnyFX = !inputFXPlugins.empty() || !trackFXPlugins.empty();
@@ -287,6 +349,12 @@ void TrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
         }
     };
 
+    // Channel strip EQ (processed before plugin FX chains)
+    if (channelStripEQEnabled)
+    {
+        channelStripEQ.processBlock(buffer, midiMessages);
+    }
+
     // Process through input FX chain
     for (auto& plugin : inputFXPlugins)
     {
@@ -294,22 +362,172 @@ void TrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
             safeProcessFX(plugin.get());
     }
 
-    // Process through track FX chain
-    for (auto& plugin : trackFXPlugins)
+    // Process through track FX chain (with sidechain support)
+    for (int fxIdx = 0; fxIdx < (int)trackFXPlugins.size(); ++fxIdx)
     {
-        if (plugin)
-            safeProcessFX(plugin.get());
+        auto* proc = trackFXPlugins[fxIdx].get();
+        if (!proc) continue;
+
+        // Check if this plugin has a sidechain source configured AND
+        // the plugin actually supports sidechain input (more than 1 input bus)
+        auto scIt = sidechainSources.find(fxIdx);
+        bool hasSidechain = (scIt != sidechainSources.end())
+                            && sidechainInputBuffer != nullptr
+                            && proc->getBusCount(true) > 1;
+
+        if (hasSidechain)
+        {
+            // Sidechain path: expand buffer to include sidechain channels after
+            // the main stereo channels.  The plugin's second input bus receives
+            // the sidechain audio.
+            int numSamps2 = buffer.getNumSamples();
+
+            // Determine total channel count: main channels + sidechain channels.
+            // Most sidechain buses are stereo (2 channels), but query the plugin
+            // to be safe.
+            int mainCh = juce::jmax(proc->getMainBusNumInputChannels(),
+                                     proc->getMainBusNumOutputChannels());
+            if (mainCh < bufferChannels) mainCh = bufferChannels;
+
+            // The sidechain bus is the second input bus (index 1).
+            int scBusCh = 0;
+            if (auto* scBus = proc->getBus(true, 1))
+                scBusCh = scBus->getNumberOfChannels();
+            if (scBusCh <= 0) scBusCh = 2; // Fallback: stereo sidechain
+
+            int totalCh = mainCh + scBusCh;
+            int expandedCh = juce::jmin(totalCh, fxProcessBuffer.getNumChannels());
+
+            // Copy main audio into pre-allocated buffer
+            for (int ch = 0; ch < expandedCh; ++ch)
+            {
+                if (ch < bufferChannels)
+                    fxProcessBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamps2);
+                else
+                    juce::FloatVectorOperations::clear(fxProcessBuffer.getWritePointer(ch), numSamps2);
+            }
+
+            // Copy sidechain audio into channels after the main channels
+            int scInputCh = sidechainInputBuffer->getNumChannels();
+            for (int ch = 0; ch < scBusCh && (mainCh + ch) < expandedCh; ++ch)
+            {
+                if (ch < scInputCh)
+                {
+                    fxProcessBuffer.copyFrom(mainCh + ch, 0,
+                                             *sidechainInputBuffer, ch, 0, numSamps2);
+                }
+                // else: already cleared above
+            }
+
+            float* channelPtrs[8];
+            for (int ch = 0; ch < expandedCh; ++ch)
+                channelPtrs[ch] = fxProcessBuffer.getWritePointer(ch);
+
+            juce::AudioBuffer<float> pluginBuffer(channelPtrs, expandedCh, numSamps2);
+            proc->processBlock(pluginBuffer, midiMessages);
+
+            // Copy processed main channels back
+            for (int ch = 0; ch < bufferChannels; ++ch)
+                buffer.copyFrom(ch, 0, pluginBuffer, ch, 0, numSamps2);
+        }
+        else
+        {
+            // No sidechain — use normal channel-safe processing
+            safeProcessFX(proc);
+        }
     }
 
-    // Load pre-computed pan+volume gains (set from message thread, no trig on audio thread)
-    float leftGain  = cachedPanL.load(std::memory_order_relaxed);
-    float rightGain = cachedPanR.load(std::memory_order_relaxed);
+    // ===== DC OFFSET REMOVAL (after FX, before gain) =====
+    if (dcOffsetRemoval && bufferChannels >= 1)
+    {
+        double sr = getSampleRate();
+        if (sr <= 0) sr = 44100.0;
+        float alpha = 1.0f - (2.0f * juce::MathConstants<float>::pi * 5.0f / static_cast<float>(sr));
 
-    // Apply gains to channels
-    if (bufferChannels >= 1)
-        buffer.applyGain(0, 0, buffer.getNumSamples(), leftGain);
-    if (bufferChannels >= 2)
-        buffer.applyGain(1, 0, buffer.getNumSamples(), rightGain);
+        // Left channel
+        {
+            float prevIn = dcPrevInputL;
+            float prevOut = dcFilterStateL;
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float input = buffer.getSample(0, i);
+                float output = input - prevIn + alpha * prevOut;
+                prevIn = input;
+                prevOut = output;
+                buffer.setSample(0, i, output);
+            }
+            dcPrevInputL = prevIn;
+            dcFilterStateL = prevOut;
+        }
+
+        // Right channel
+        if (bufferChannels >= 2)
+        {
+            float prevIn = dcPrevInputR;
+            float prevOut = dcFilterStateR;
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float input = buffer.getSample(1, i);
+                float output = input - prevIn + alpha * prevOut;
+                prevIn = input;
+                prevOut = output;
+                buffer.setSample(1, i, output);
+            }
+            dcPrevInputR = prevIn;
+            dcFilterStateR = prevOut;
+        }
+    }
+
+    // ===== AUTOMATION-AWARE GAIN APPLICATION =====
+    int numSamps = buffer.getNumSamples();
+    bool volAutoActive = volumeAutomation.shouldPlayback() && volumeAutomation.getNumPoints() > 0;
+    bool panAutoActive = panAutomation.shouldPlayback() && panAutomation.getNumPoints() > 0;
+
+    if (volAutoActive || panAutoActive)
+    {
+        // Ensure pre-allocated automation buffer is large enough
+        if (automationGainBuffer.getNumSamples() < numSamps)
+            automationGainBuffer.setSize(2, numSamps, false, false, true);
+
+        // Evaluate volume automation (dB values) per sample, or use static fader value
+        float staticVolDB = trackVolumeDB;
+        float staticPan = trackPan;
+
+        for (int i = 0; i < numSamps; ++i)
+        {
+            double samplePos = blockStartSample + static_cast<double>(i);
+
+            float volDB = volAutoActive ? volumeAutomation.eval(samplePos) : staticVolDB;
+            float pan   = panAutoActive ? panAutomation.eval(samplePos)   : staticPan;
+
+            // Clamp to safe ranges
+            volDB = juce::jlimit(-60.0f, 6.0f, volDB);
+            pan   = juce::jlimit(-1.0f, 1.0f, pan);
+
+            // Compute gain (same constant-power formula as recomputePanGains)
+            float volumeGain = juce::Decibels::decibelsToGain(volDB);
+            float panAngle = (pan + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
+            float lGain = std::cos(panAngle) * volumeGain;
+            float rGain = std::sin(panAngle) * volumeGain;
+
+            // Apply per-sample gain
+            if (bufferChannels >= 1)
+                buffer.setSample(0, i, buffer.getSample(0, i) * lGain);
+            if (bufferChannels >= 2)
+                buffer.setSample(1, i, buffer.getSample(1, i) * rGain);
+        }
+    }
+    else
+    {
+        // No automation active — use pre-computed cached gains (original fast path)
+        float leftGain  = cachedPanL.load(std::memory_order_relaxed);
+        float rightGain = cachedPanR.load(std::memory_order_relaxed);
+
+        if (bufferChannels >= 1)
+            buffer.applyGain(0, 0, numSamps, leftGain);
+        if (bufferChannels >= 2)
+            buffer.applyGain(1, 0, numSamps, rightGain);
+    }
 
     // ---- REAPER-style peak metering with decimation ----
     // getMagnitude() uses FloatVectorOperations::findMinAndMax (SIMD, no sqrt),
@@ -533,6 +751,41 @@ bool TrackProcessor::reorderTrackFX(int fromIndex, int toIndex)
 }
 
 //==============================================================================
+// Sidechain Routing (Phase 4.4)
+
+void TrackProcessor::setSidechainSource(int pluginIndex, const juce::String& sourceTrackId)
+{
+    sidechainSources[pluginIndex] = sourceTrackId;
+    juce::Logger::writeToLog("TrackProcessor: Set sidechain source for FX[" +
+                             juce::String(pluginIndex) + "] = " + sourceTrackId);
+}
+
+void TrackProcessor::clearSidechainSource(int pluginIndex)
+{
+    sidechainSources.erase(pluginIndex);
+    juce::Logger::writeToLog("TrackProcessor: Cleared sidechain source for FX[" +
+                             juce::String(pluginIndex) + "]");
+}
+
+juce::String TrackProcessor::getSidechainSource(int pluginIndex) const
+{
+    auto it = sidechainSources.find(pluginIndex);
+    if (it != sidechainSources.end())
+        return it->second;
+    return {};
+}
+
+void TrackProcessor::setSidechainBuffer(const juce::AudioBuffer<float>* buffer)
+{
+    sidechainInputBuffer = buffer;
+}
+
+bool TrackProcessor::hasAnySidechainSources() const
+{
+    return !sidechainSources.empty();
+}
+
+//==============================================================================
 // Send Management (Phase 4 / Phase 11)
 
 int TrackProcessor::addSend(const juce::String& destTrackId)
@@ -669,4 +922,52 @@ void TrackProcessor::setInstrument(std::unique_ptr<juce::AudioPluginInstance> pl
         instrumentPlugin = std::move(plugin);
         juce::Logger::writeToLog("TrackProcessor: Instrument plugin loaded");
     }
+}
+
+//==============================================================================
+// Plugin Delay Compensation (PDC)
+
+int TrackProcessor::getChainLatency() const
+{
+    int totalLatency = 0;
+    for (const auto& plugin : inputFXPlugins)
+    {
+        if (plugin && !plugin->isSuspended())
+            totalLatency += plugin->getLatencySamples();
+    }
+    for (const auto& plugin : trackFXPlugins)
+    {
+        if (plugin && !plugin->isSuspended())
+            totalLatency += plugin->getLatencySamples();
+    }
+    return totalLatency;
+}
+
+void TrackProcessor::setPDCDelay(int delaySamples)
+{
+    pdcDelaySamples = delaySamples;
+    pdcDelayLine.setDelay(static_cast<float>(delaySamples));
+}
+
+void TrackProcessor::setChannelStripEQParam(int paramIndex, float value)
+{
+    const auto& params = channelStripEQ.getParameters();
+    if (paramIndex >= 0 && paramIndex < params.size())
+    {
+        auto* p = dynamic_cast<juce::RangedAudioParameter*>(params[paramIndex]);
+        if (p != nullptr)
+            p->setValueNotifyingHost(p->convertTo0to1(value));
+    }
+}
+
+float TrackProcessor::getChannelStripEQParam(int paramIndex) const
+{
+    const auto& params = channelStripEQ.getParameters();
+    if (paramIndex >= 0 && paramIndex < params.size())
+    {
+        auto* p = dynamic_cast<juce::RangedAudioParameter*>(params[paramIndex]);
+        if (p != nullptr)
+            return p->convertFrom0to1(p->getValue());
+    }
+    return 0.0f;
 }

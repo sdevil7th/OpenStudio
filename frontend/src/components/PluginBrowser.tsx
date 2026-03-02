@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   X,
@@ -12,10 +12,23 @@ import {
   Music,
   Box,
   Code,
+  Star,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input, Select } from "./ui";
+
+// Persist favorites in localStorage
+const FAVORITES_KEY = "studio13_plugin_favorites";
+function loadFavorites(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FAVORITES_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch { return new Set(); }
+}
+function saveFavorites(favs: Set<string>) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favs]));
+}
 
 interface Plugin {
   name: string;
@@ -24,7 +37,7 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string; // base64 data URL from C++ snapshot lookup
-  pluginType?: "vst3" | "s13fx"; // Distinguishes VST3 from S13FX scripts
+  pluginType?: "vst3" | "lv2" | "clap" | "s13fx"; // Plugin format type
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -58,6 +71,36 @@ function getCategoryIcon(category: string) {
   return { match: "Other", Icon: Box, color: "#6b7280" };
 }
 
+// ---- Plugin Category Groups ----
+// Maps VST3 category strings (e.g. "Fx|Dynamics", "Instrument|Synth") to
+// predefined groups for easy filtering.
+const CATEGORY_GROUPS = [
+  { id: "all",         label: "All",         keywords: [] },
+  { id: "instruments", label: "Instruments",  keywords: ["instrument", "synth", "sampler", "piano", "organ", "drum"] },
+  { id: "effects",     label: "Effects",      keywords: ["fx", "effect"] },
+  { id: "dynamics",    label: "Dynamics",     keywords: ["dynamics", "compressor", "limiter", "gate", "expander"] },
+  { id: "eq",          label: "EQ",           keywords: ["eq", "equalizer", "filter"] },
+  { id: "reverb",      label: "Reverb",       keywords: ["reverb", "room", "hall", "plate"] },
+  { id: "delay",       label: "Delay",        keywords: ["delay", "echo"] },
+  { id: "modulation",  label: "Modulation",   keywords: ["modulation", "chorus", "flanger", "phaser", "tremolo", "vibrato"] },
+  { id: "distortion",  label: "Distortion",   keywords: ["distortion", "saturation", "overdrive", "bitcrusher", "waveshaper"] },
+  { id: "other",       label: "Other",        keywords: [] },
+] as const;
+
+type CategoryGroupId = typeof CATEGORY_GROUPS[number]["id"];
+
+function getPluginGroupId(plugin: { category: string; isInstrument: boolean }): CategoryGroupId {
+  if (plugin.isInstrument) return "instruments";
+  const lowerCat = plugin.category.toLowerCase();
+  for (const group of CATEGORY_GROUPS) {
+    if (group.id === "all" || group.id === "other") continue;
+    if (group.keywords.some((kw) => lowerCat.includes(kw))) return group.id;
+  }
+  // If it has "Fx" in category but no specific match, classify as "effects"
+  if (lowerCat.includes("fx") || lowerCat.includes("effect")) return "effects";
+  return "other";
+}
+
 interface PluginBrowserProps {
   trackId: string;
   targetChain: "input" | "track" | "master" | "instrument";
@@ -75,7 +118,20 @@ export function PluginBrowser({
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
+  const [categoryGroupFilter, setCategoryGroupFilter] = useState<CategoryGroupId>("all");
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
+  const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+
+  const toggleFavorite = (pluginId: string) => {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(pluginId)) next.delete(pluginId);
+      else next.add(pluginId);
+      saveFavorites(next);
+      return next;
+    });
+  };
 
   useEffect(() => {
     loadPlugins();
@@ -85,10 +141,13 @@ export function PluginBrowser({
     setLoading(true);
     try {
       const pluginList = await nativeBridge.getAvailablePlugins();
-      const vst3Plugins: Plugin[] = pluginList.map((p: any) => ({
-        ...p,
-        pluginType: "vst3" as const,
-      }));
+      const vst3Plugins: Plugin[] = pluginList.map((p: any) => {
+        const fmt = (p.pluginFormatName || "").toLowerCase();
+        let pluginType: Plugin["pluginType"] = "vst3";
+        if (fmt.includes("lv2")) pluginType = "lv2";
+        else if (fmt.includes("clap")) pluginType = "clap";
+        return { ...p, pluginType };
+      });
 
       // Also load S13FX scripts (not for instrument target)
       let s13fxPlugins: Plugin[] = [];
@@ -193,6 +252,21 @@ export function PluginBrowser({
     ...Array.from(new Set(basePlugins.map((p) => p.category))),
   ];
 
+  // Compute available category groups (only show tabs that have plugins)
+  const availableGroups = useMemo(() => {
+    const groupCounts = new Map<CategoryGroupId, number>();
+    for (const p of basePlugins) {
+      const gid = getPluginGroupId(p);
+      groupCounts.set(gid, (groupCounts.get(gid) || 0) + 1);
+    }
+    return CATEGORY_GROUPS.filter(
+      (g) => g.id === "all" || (groupCounts.get(g.id) || 0) > 0
+    ).map((g) => ({
+      ...g,
+      count: g.id === "all" ? basePlugins.length : groupCounts.get(g.id) || 0,
+    }));
+  }, [basePlugins]);
+
   // Enhanced search: match against name, manufacturer, AND category
   const filteredPlugins = basePlugins.filter((p) => {
     const term = searchTerm.toLowerCase();
@@ -202,8 +276,21 @@ export function PluginBrowser({
       p.category.toLowerCase().includes(term);
     const matchesCategory =
       categoryFilter === "All" || p.category === categoryFilter;
-    return matchesSearch && matchesCategory;
+    const matchesGroup =
+      categoryGroupFilter === "all" || getPluginGroupId(p) === categoryGroupFilter;
+    const matchesFavorite = !showFavoritesOnly || favorites.has(p.fileOrIdentifier);
+    return matchesSearch && matchesCategory && matchesGroup && matchesFavorite;
   });
+
+  // Sort: favorites first, then alphabetical
+  const sortedPlugins = useMemo(() => {
+    return [...filteredPlugins].sort((a, b) => {
+      const aFav = favorites.has(a.fileOrIdentifier) ? 0 : 1;
+      const bFav = favorites.has(b.fileOrIdentifier) ? 0 : 1;
+      if (aFav !== bFav) return aFav - bFav;
+      return a.name.localeCompare(b.name);
+    });
+  }, [filteredPlugins, favorites]);
 
   const content = (
     <>
@@ -232,6 +319,14 @@ export function PluginBrowser({
           className="min-w-[150px]"
         />
         <Button
+          variant={showFavoritesOnly ? "primary" : "default"}
+          size="md"
+          onClick={() => setShowFavoritesOnly(!showFavoritesOnly)}
+          title="Show favorites only"
+        >
+          <Star size={14} fill={showFavoritesOnly ? "currentColor" : "none"} />
+        </Button>
+        <Button
           variant="primary"
           size="md"
           onClick={handleScan}
@@ -239,6 +334,32 @@ export function PluginBrowser({
         >
           {loading ? "Scanning..." : "Scan"}
         </Button>
+      </div>
+
+      {/* Category Group Filter Tabs */}
+      <div
+        className={
+          embedded
+            ? "flex gap-1 px-2 py-1.5 bg-neutral-850 overflow-x-auto"
+            : "flex gap-1 px-3 py-1.5 bg-neutral-800/50 border-b border-neutral-700 overflow-x-auto"
+        }
+      >
+        {availableGroups.map((group) => (
+          <button
+            key={group.id}
+            onClick={() => setCategoryGroupFilter(group.id)}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors ${
+              categoryGroupFilter === group.id
+                ? "bg-blue-600 text-white"
+                : "bg-neutral-700/50 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200"
+            }`}
+          >
+            {group.label}
+            <span className={`text-[10px] ${categoryGroupFilter === group.id ? "text-blue-200" : "text-neutral-500"}`}>
+              {group.count}
+            </span>
+          </button>
+        ))}
       </div>
 
       <div
@@ -249,16 +370,36 @@ export function PluginBrowser({
         }
       >
         {loading ? (
-          <div className="text-center p-10 text-neutral-400">
-            Loading plugins...
+          <div className="p-2 space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-3 p-3 bg-neutral-800 border border-daw-border rounded animate-pulse"
+              >
+                {/* Icon skeleton */}
+                <div className="w-10 h-10 rounded bg-neutral-700 shrink-0" />
+                {/* Text skeleton */}
+                <div className="flex-1 min-w-0 space-y-2">
+                  <div className="h-4 bg-neutral-700 rounded w-3/5" />
+                  <div className="h-3 bg-neutral-700/60 rounded w-2/5" />
+                  <div className="h-2.5 bg-neutral-700/40 rounded w-1/4" />
+                </div>
+                {/* Button skeleton */}
+                <div className="w-14 h-7 rounded bg-neutral-700 shrink-0" />
+              </div>
+            ))}
+            <div className="text-center text-xs text-daw-text-muted mt-2">
+              Scanning for plugins...
+            </div>
           </div>
-        ) : filteredPlugins.length === 0 ? (
+        ) : sortedPlugins.length === 0 ? (
           <div className="text-center p-10 text-neutral-400">
-            No plugins found. Click "Scan" to search your system.
+            {showFavoritesOnly ? "No favorite plugins. Click the star on a plugin to favorite it." : "No plugins found. Click \"Scan\" to search your system."}
           </div>
         ) : (
-          filteredPlugins.map((plugin, idx) => {
+          sortedPlugins.map((plugin, idx) => {
             const isScript = plugin.pluginType === "s13fx";
+            const isFav = favorites.has(plugin.fileOrIdentifier);
             const { Icon, color } = isScript
               ? { match: "Script", Icon: Code, color: "#84cc16" }
               : getCategoryIcon(plugin.category);
@@ -269,6 +410,14 @@ export function PluginBrowser({
                   isScript ? "border-lime-700/40" : "border-neutral-700"
                 }`}
               >
+                {/* Favorite star */}
+                <button
+                  className="shrink-0 p-0.5 hover:scale-110 transition-transform"
+                  onClick={() => toggleFavorite(plugin.fileOrIdentifier)}
+                  title={isFav ? "Remove from favorites" : "Add to favorites"}
+                >
+                  <Star size={14} fill={isFav ? "#eab308" : "none"} stroke={isFav ? "#eab308" : "#666"} />
+                </button>
                 {/* Snapshot or category icon */}
                 {plugin.snapshot ? (
                   <img

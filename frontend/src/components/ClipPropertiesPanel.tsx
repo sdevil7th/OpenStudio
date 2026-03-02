@@ -1,5 +1,6 @@
 import { X, Lock, Unlock } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button, Input, Slider } from "./ui";
 
 function formatTime(seconds: number): string {
@@ -13,13 +14,18 @@ function formatTime(seconds: number): string {
  * Opens with F2 or from View menu
  */
 export function ClipPropertiesPanel() {
-  const selectedClipId = useDAWStore((s) => s.selectedClipId);
-  const tracks = useDAWStore((s) => s.tracks);
-  const setClipVolume = useDAWStore((s) => s.setClipVolume);
-  const setClipFades = useDAWStore((s) => s.setClipFades);
-  const toggleClipMute = useDAWStore((s) => s.toggleClipMute);
-  const toggleClipLock = useDAWStore((s) => s.toggleClipLock);
-  const toggleClipProperties = useDAWStore((s) => s.toggleClipProperties);
+  const {
+    selectedClipId, tracks, setClipVolume, setClipFades,
+    toggleClipMute, toggleClipLock, toggleClipProperties,
+  } = useDAWStore(useShallow((s) => ({
+    selectedClipId: s.selectedClipId,
+    tracks: s.tracks,
+    setClipVolume: s.setClipVolume,
+    setClipFades: s.setClipFades,
+    toggleClipMute: s.toggleClipMute,
+    toggleClipLock: s.toggleClipLock,
+    toggleClipProperties: s.toggleClipProperties,
+  })));
 
   // Find the selected clip
   let clip = null;

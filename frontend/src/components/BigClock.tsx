@@ -1,20 +1,26 @@
 import { X } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 
 /**
  * BigClock - Large floating time/beat display
  */
 export function BigClock() {
-  const currentTime = useDAWStore((s) => s.transport.currentTime);
-  const tempo = useDAWStore((s) => s.transport.tempo);
-  const isPlaying = useDAWStore((s) => s.transport.isPlaying);
-  const isRecording = useDAWStore((s) => s.transport.isRecording);
-  const format = useDAWStore((s) => s.bigClockFormat);
-  const toggleBigClock = useDAWStore((s) => s.toggleBigClock);
-  const toggleBigClockFormat = useDAWStore((s) => s.toggleBigClockFormat);
-  const timeSignature = useDAWStore((s) => s.timeSignature);
-  const projectName = useDAWStore((s) => s.projectName);
+  const {
+    currentTime, tempo, isPlaying, isRecording,
+    format, toggleBigClock, toggleBigClockFormat, timeSignature, projectName,
+  } = useDAWStore(useShallow((s) => ({
+    currentTime: s.transport.currentTime,
+    tempo: s.transport.tempo,
+    isPlaying: s.transport.isPlaying,
+    isRecording: s.transport.isRecording,
+    format: s.bigClockFormat,
+    toggleBigClock: s.toggleBigClock,
+    toggleBigClockFormat: s.toggleBigClockFormat,
+    timeSignature: s.timeSignature,
+    projectName: s.projectName,
+  })));
 
   const formatTimeDisplay = (): string => {
     if (format === "beats") {

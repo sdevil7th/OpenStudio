@@ -76,6 +76,13 @@ declare global {
         getTransportPosition?: () => Promise<number>;
         setTransportPosition?: (seconds: number) => Promise<boolean>;
 
+        // Punch In/Out (Phase 3.1)
+        setPunchRange?: (startTime: number, endTime: number, enabled: boolean) => Promise<boolean>;
+
+        // Record-Safe (Phase 3.3)
+        setTrackRecordSafe?: (trackId: string, safe: boolean) => Promise<boolean>;
+        getTrackRecordSafe?: (trackId: string) => Promise<boolean>;
+
         // Metronome & Time Signature (Phase 3)
         setMetronomeEnabled?: (enabled: boolean) => Promise<boolean>;
         setMetronomeVolume?: (volume: number) => Promise<boolean>;
@@ -98,6 +105,23 @@ declare global {
             filePath: string;
             startTime: number;
             duration: number;
+          }>
+        >;
+        getLastCompletedMIDIClips?: () => Promise<
+          Array<{
+            trackId: string;
+            startTime: number;
+            duration: number;
+            filePath?: string;
+            events: Array<{
+              timestamp: number;
+              type: string;
+              note?: number;
+              velocity?: number;
+              controller?: number;
+              value?: number;
+              channel?: number;
+            }>;
           }>
         >;
         // Live recording waveform - returns peaks for recording in progress
@@ -140,6 +164,13 @@ declare global {
         setMasterPan?: (pan: number) => Promise<boolean>;
         getMasterPan?: () => Promise<number>;
 
+        // Monitoring FX (Phase 2.6)
+        addMonitoringFX?: (pluginPath: string) => Promise<boolean>;
+        getMonitoringFX?: () => Promise<any[]>;
+        removeMonitoringFX?: (fxIndex: number) => Promise<boolean>;
+        openMonitoringFXEditor?: (fxIndex: number) => Promise<boolean>;
+        bypassMonitoringFX?: (fxIndex: number, bypassed: boolean) => Promise<boolean>;
+
         // Waveform Visualization
         getWaveformPeaks?: (
           filePath: string,
@@ -163,6 +194,18 @@ declare global {
           filePath: string,
         ) => Promise<boolean>;
         clearPlaybackClips?: () => Promise<boolean>;
+
+        // Automation (Phase 1.1)
+        setAutomationPoints?: (trackId: string, parameterId: string, pointsJSON: string) => Promise<boolean>;
+        setAutomationMode?: (trackId: string, parameterId: string, mode: string) => Promise<boolean>;
+        getAutomationMode?: (trackId: string, parameterId: string) => Promise<string>;
+        clearAutomation?: (trackId: string, parameterId: string) => Promise<boolean>;
+        beginTouchAutomation?: (trackId: string, parameterId: string) => Promise<boolean>;
+        endTouchAutomation?: (trackId: string, parameterId: string) => Promise<boolean>;
+
+        // Tempo Map (Phase 1.2)
+        setTempoMarkers?: (markersJSON: string) => Promise<boolean>;
+        clearTempoMarkers?: () => Promise<boolean>;
 
         // FX Chain Management
         getTrackInputFX?: (trackId: string) => Promise<any[]>;
@@ -302,6 +345,12 @@ declare global {
           bitDepth: number, channels: number, normalize: boolean,
           addTail: boolean, tailLength: number,
         ) => Promise<boolean>;
+        renderProjectWithDither?: (
+          source: string, startTime: number, endTime: number,
+          filePath: string, format: string, sampleRate: number,
+          bitDepth: number, channels: number, normalize: boolean,
+          addTail: boolean, tailLength: number, ditherType: string,
+        ) => Promise<boolean>;
 
         // Phase 9: Audio Engine Enhancements
         reverseAudioFile?: (filePath: string) => Promise<string>;
@@ -343,12 +392,76 @@ declare global {
         getHomeDirectory?: () => Promise<string>;
 
         // Phase 13: Advanced Editing
-        timeStretchClip?: (filePath: string, factor: number) => Promise<string>;
-        pitchShiftClip?: (filePath: string, semitones: number) => Promise<string>;
+        timeStretchClip?: (filePath: string, factor: number) => Promise<string | { success: boolean; filePath?: string; duration?: number; sampleRate?: number }>;
+        pitchShiftClip?: (filePath: string, semitones: number) => Promise<string | { success: boolean; filePath?: string; duration?: number; sampleRate?: number }>;
+
+        // Phase 3.10: Control Surface Support
+        connectMIDIControlSurface?: (inputName: string, outputName: string) => Promise<boolean>;
+        disconnectMIDIControlSurface?: () => Promise<boolean>;
+        startMIDILearn?: (trackId: string, parameter: string) => Promise<boolean>;
+        cancelMIDILearn?: () => Promise<boolean>;
+        getMIDIMappings?: () => Promise<Array<{ channel: number; cc: number; trackId: string; parameter: string }>>;
+        addMIDIMapping?: (channel: number, cc: number, trackId: string, parameter: string) => Promise<boolean>;
+        removeMIDIMapping?: (channel: number, cc: number) => Promise<boolean>;
+        connectOSC?: (receivePort: number, sendHost: string, sendPort: number) => Promise<boolean>;
+        disconnectOSC?: () => Promise<boolean>;
+        getControlSurfaceMIDIDevices?: () => Promise<{ inputs: string[]; outputs: string[] }>;
+
+        // Phase 3.9: Timecode / Sync
+        connectMIDIClockOutput?: (midiOutputName: string) => Promise<boolean>;
+        setMIDIClockOutputEnabled?: (enabled: boolean) => Promise<boolean>;
+        connectMIDIClockInput?: (midiInputName: string) => Promise<boolean>;
+        setMIDIClockInputEnabled?: (enabled: boolean) => Promise<boolean>;
+        connectMTCOutput?: (midiOutputName: string) => Promise<boolean>;
+        setMTCEnabled?: (enabled: boolean) => Promise<boolean>;
+        setMTCFrameRate?: (rate: number) => Promise<boolean>;
+        connectMTCInput?: (midiInputName: string) => Promise<boolean>;
+        setSyncSource?: (source: string) => Promise<boolean>;
+        getSyncStatus?: () => Promise<{ locked: boolean; source: string; externalBPM: number; mtcPosition: number }>;
+
+        // Phase 3.10.2: MCU (Mackie Control Universal)
+        connectMCU?: (inputName: string, outputName: string) => Promise<boolean>;
+        disconnectMCU?: () => Promise<boolean>;
+        setMCUBankOffset?: (offset: number) => Promise<boolean>;
+
+        // Phase 3.12: Strip Silence
+        detectSilentRegions?: (filePath: string, thresholdDb: number, minSilenceMs: number,
+                               minSoundMs: number, preAttackMs: number, postReleaseMs: number) =>
+          Promise<Array<{ startTime: number; endTime: number; startSample: number; endSample: number }>>;
+
+        // Phase 4.1: Clip Launch
+        triggerSlot?: (trackIndex: number, slotIndex: number) => Promise<boolean>;
+        stopSlot?: (trackIndex: number, slotIndex: number) => Promise<boolean>;
+        triggerScene?: (slotIndex: number) => Promise<boolean>;
+        stopAllSlots?: () => Promise<boolean>;
+        setSlotClip?: (trackIndex: number, slotIndex: number, filePath: string, duration: number) => Promise<boolean>;
+        clearSlot?: (trackIndex: number, slotIndex: number) => Promise<boolean>;
+        getClipLauncherState?: () => Promise<any>;
+
+        // Phase 3.14: Session Interchange (AAF/RPP/EDL)
+        importSession?: (filePath: string) => Promise<{ success: boolean; tempo?: number; sampleRate?: number; tracks?: any[]; error?: string }>;
+        exportSession?: (filePath: string, format: string, sessionData: any) => Promise<boolean>;
+
+        // Phase 3.13: Freeze Track
+        freezeTrack?: (trackId: string) => Promise<{ success: boolean; filePath?: string; duration?: number; sampleRate?: number; startTime?: number; error?: string }>;
+        unfreezeTrack?: (trackId: string) => Promise<boolean>;
+
+        // Phase 4.3: Built-in Effects
+        addTrackBuiltInFX?: (trackId: string, effectName: string, isInputFX?: boolean) => Promise<boolean>;
+        addMasterBuiltInFX?: (effectName: string) => Promise<boolean>;
+        getAvailableBuiltInFX?: () => Promise<Array<{ name: string; category: string }>>;
+
+        // Phase 4.4: Sidechain Routing
+        setSidechainSource?: (destTrackId: string, pluginIndex: number, sourceTrackId: string) => Promise<boolean>;
+        clearSidechainSource?: (destTrackId: string, pluginIndex: number) => Promise<boolean>;
+        getSidechainSource?: (destTrackId: string, pluginIndex: number) => Promise<string>;
+
+        // Phase 3.7: Surround / Spatial Audio
+        getSurroundLayouts?: () => Promise<Array<{ name: string; channels: number }>>;
 
         // Phase 15: Platform & Extensibility
-        openVideoFile?: (filePath: string) => Promise<{ width: number; height: number; duration: number; fps: number }>;
-        getVideoFrame?: (time: number) => Promise<string>; // base64 image data
+        openVideoFile?: (filePath: string) => Promise<{ width: number; height: number; duration: number; fps: number; filePath: string; audioPath?: string; error?: string }>;
+        getVideoFrame?: (time: number, width?: number, height?: number) => Promise<string>; // base64 image data
         closeVideoFile?: () => void;
         executeScript?: (code: string) => Promise<{ result: string; error: string }>;
         loadScriptFile?: (filePath: string) => Promise<{ result: string; error: string }>;
@@ -357,7 +470,51 @@ declare global {
         // Phase 16: Pro Audio & Compatibility
         startLiveCapture?: (format: string) => Promise<string>; // returns filePath
         stopLiveCapture?: () => Promise<{ filePath: string; duration: number }>;
-        exportDDP?: (outputDir: string, regions: any[]) => Promise<boolean>;
+        exportDDP?: (sourceWavPath: string, outputDir: string, tracks: any[], catalogNumber?: string) => Promise<boolean>;
+
+        // Sprint 16: Performance + Audio Quality
+        setPanLaw?: (law: string) => Promise<boolean>;
+        getPanLaw?: () => Promise<string>;
+        setTrackDCOffset?: (trackId: string, enabled: boolean) => Promise<boolean>;
+
+        // Sprint 19: Plugin Management
+        getPluginParameters?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<Array<{ index: number; name: string; value: number; text: string }>>;
+        setPluginParameter?: (trackId: string, fxIndex: number, isInputFX: boolean, paramIndex: number, value: number) => Promise<boolean>;
+        getPluginPresets?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<string[]>;
+        loadPluginPreset?: (trackId: string, fxIndex: number, isInputFX: boolean, presetName: string) => Promise<boolean>;
+        savePluginPreset?: (trackId: string, fxIndex: number, isInputFX: boolean, presetName: string) => Promise<boolean>;
+
+        // Sprint 19: MIDI Learn (plugin params)
+        startPluginMIDILearn?: (trackId: string, pluginIndex: number, paramIndex: number) => Promise<boolean>;
+        cancelPluginMIDILearn?: () => Promise<boolean>;
+
+        // Sprint 19: MIDI Import/Export
+        importMIDIFile?: (filePath: string) => Promise<{ success: boolean; tracks: Array<{ name: string; channel: number; events: any[] }>; error?: string }>;
+        exportMIDIFile?: (filePath: string, tracksJSON: string) => Promise<boolean>;
+
+        // Sprint 19: A/B Plugin Comparison
+        storePluginStateA?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<boolean>;
+        storePluginStateB?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<boolean>;
+        recallPluginStateA?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<boolean>;
+        recallPluginStateB?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<boolean>;
+
+        // Sprint 20: Metering & Analysis
+        getLoudnessData?: () => Promise<{ integrated: number; shortTerm: number; momentary: number; truePeak: number; range: number }>;
+        getPhaseCorrelation?: () => Promise<number>;
+        getSpectrumData?: () => Promise<number[]>;
+
+        // Channel Strip EQ (Phase 19.18)
+        setChannelStripEQEnabled?: (trackId: string, enabled: boolean) => Promise<boolean>;
+        setChannelStripEQParam?: (trackId: string, paramIndex: number, value: number) => Promise<boolean>;
+        getChannelStripEQParam?: (trackId: string, paramIndex: number) => Promise<number>;
+
+        // Sprint 20: File System Helpers
+        browseForFile?: (title: string, filters?: string) => Promise<string>;
+        browseForFolder?: (title: string) => Promise<string>;
+        fileExists?: (filePath: string) => Promise<boolean>;
+
+        // Sprint 20: Session Archive
+        archiveSession?: (projectDir: string, outputPath: string) => Promise<boolean>;
 
         // Window Management
         minimizeWindow?: () => Promise<void>;
@@ -376,6 +533,13 @@ declare global {
       };
     };
   }
+}
+
+export interface StretchResult {
+  success: boolean;
+  filePath?: string;
+  duration?: number;
+  sampleRate?: number;
 }
 
 class NativeBridge {
@@ -658,6 +822,31 @@ class NativeBridge {
     }
   }
 
+  // Punch In/Out (Phase 3.1)
+  async setPunchRange(startTime: number, endTime: number, enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setPunchRange) {
+      return await window.__JUCE__.backend.setPunchRange(startTime, endTime, enabled);
+    }
+    console.log(`[NativeBridge] Mock setPunchRange: ${startTime}-${endTime} enabled=${enabled}`);
+    return true;
+  }
+
+  // Record-Safe (Phase 3.3)
+  async setTrackRecordSafe(trackId: string, safe: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackRecordSafe) {
+      return await window.__JUCE__.backend.setTrackRecordSafe(trackId, safe);
+    }
+    console.log(`[NativeBridge] Mock setTrackRecordSafe: ${trackId} safe=${safe}`);
+    return true;
+  }
+
+  async getTrackRecordSafe(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.getTrackRecordSafe) {
+      return await window.__JUCE__.backend.getTrackRecordSafe(trackId);
+    }
+    return false;
+  }
+
   async setTempo(bpm: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTempo) {
       return await window.__JUCE__.backend.setTempo(bpm);
@@ -772,6 +961,29 @@ class NativeBridge {
   > {
     if (this.isNative && window.__JUCE__?.backend.getLastCompletedClips) {
       return await window.__JUCE__.backend.getLastCompletedClips();
+    }
+    return [];
+  }
+
+  async getLastCompletedMIDIClips(): Promise<
+    Array<{
+      trackId: string;
+      startTime: number;
+      duration: number;
+      filePath?: string;
+      events: Array<{
+        timestamp: number;
+        type: string;
+        note?: number;
+        velocity?: number;
+        controller?: number;
+        value?: number;
+        channel?: number;
+      }>;
+    }>
+  > {
+    if (this.isNative && window.__JUCE__?.backend.getLastCompletedMIDIClips) {
+      return await window.__JUCE__.backend.getLastCompletedMIDIClips();
     }
     return [];
   }
@@ -1118,6 +1330,43 @@ class NativeBridge {
     return false;
   }
 
+  // Monitoring FX (Phase 2.6) — output-only, not included in offline renders
+  async addMonitoringFX(pluginPath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addMonitoringFX) {
+      return await window.__JUCE__.backend.addMonitoringFX(pluginPath);
+    }
+    console.log(`[NativeBridge] Mock addMonitoringFX: ${pluginPath}`);
+    return true;
+  }
+
+  async getMonitoringFX(): Promise<{ index: number; name: string; pluginPath?: string; bypassed?: boolean }[]> {
+    if (this.isNative && window.__JUCE__?.backend.getMonitoringFX) {
+      return await window.__JUCE__.backend.getMonitoringFX();
+    }
+    return [];
+  }
+
+  async removeMonitoringFX(fxIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.removeMonitoringFX) {
+      return await window.__JUCE__.backend.removeMonitoringFX(fxIndex);
+    }
+    return false;
+  }
+
+  async openMonitoringFXEditor(fxIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openMonitoringFXEditor) {
+      return await window.__JUCE__.backend.openMonitoringFXEditor(fxIndex);
+    }
+    return false;
+  }
+
+  async bypassMonitoringFX(fxIndex: number, bypassed: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.bypassMonitoringFX) {
+      return await window.__JUCE__.backend.bypassMonitoringFX(fxIndex, bypassed);
+    }
+    return false;
+  }
+
   async setMasterVolume(volume: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setMasterVolume) {
       return await window.__JUCE__.backend.setMasterVolume(volume);
@@ -1215,6 +1464,118 @@ class NativeBridge {
   async clearPlaybackClips(): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.clearPlaybackClips) {
       return await window.__JUCE__.backend.clearPlaybackClips();
+    }
+    return false;
+  }
+
+  /** Batch-add multiple playback clips in parallel using Promise.all().
+   *  Frontend-only optimization — each clip still calls addPlaybackClip individually
+   *  but all calls are dispatched concurrently instead of sequentially. */
+  async addPlaybackClipsBatch(
+    clips: Array<{
+      trackId: string;
+      filePath: string;
+      startTime: number;
+      duration: number;
+      offset: number;
+      volumeDB: number;
+      fadeIn: number;
+      fadeOut: number;
+    }>,
+  ): Promise<boolean[]> {
+    return Promise.all(
+      clips.map((clip) =>
+        this.addPlaybackClip(
+          clip.trackId,
+          clip.filePath,
+          clip.startTime,
+          clip.duration,
+          clip.offset,
+          clip.volumeDB,
+          clip.fadeIn,
+          clip.fadeOut,
+        ),
+      ),
+    );
+  }
+
+  // Automation (Phase 1.1)
+  async setAutomationPoints(
+    trackId: string,
+    parameterId: string,
+    points: { time: number; value: number }[],
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setAutomationPoints) {
+      const json = JSON.stringify(points);
+      return await window.__JUCE__.backend.setAutomationPoints(trackId, parameterId, json);
+    }
+    return false;
+  }
+
+  async setAutomationMode(
+    trackId: string,
+    parameterId: string,
+    mode: "off" | "read" | "write" | "touch" | "latch",
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setAutomationMode) {
+      return await window.__JUCE__.backend.setAutomationMode(trackId, parameterId, mode);
+    }
+    return false;
+  }
+
+  async getAutomationMode(
+    trackId: string,
+    parameterId: string,
+  ): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getAutomationMode) {
+      return await window.__JUCE__.backend.getAutomationMode(trackId, parameterId);
+    }
+    return "off";
+  }
+
+  async clearAutomation(
+    trackId: string,
+    parameterId: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.clearAutomation) {
+      return await window.__JUCE__.backend.clearAutomation(trackId, parameterId);
+    }
+    return false;
+  }
+
+  async beginTouchAutomation(
+    trackId: string,
+    parameterId: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.beginTouchAutomation) {
+      return await window.__JUCE__.backend.beginTouchAutomation(trackId, parameterId);
+    }
+    return false;
+  }
+
+  async endTouchAutomation(
+    trackId: string,
+    parameterId: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.endTouchAutomation) {
+      return await window.__JUCE__.backend.endTouchAutomation(trackId, parameterId);
+    }
+    return false;
+  }
+
+  // Tempo Map (Phase 1.2)
+  async setTempoMarkers(
+    markers: Array<{ time: number; tempo: number }>,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTempoMarkers) {
+      return await window.__JUCE__.backend.setTempoMarkers(JSON.stringify(markers));
+    }
+    return false;
+  }
+
+  async clearTempoMarkers(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.clearTempoMarkers) {
+      return await window.__JUCE__.backend.clearTempoMarkers();
     }
     return false;
   }
@@ -1374,6 +1735,40 @@ class NativeBridge {
     return new Promise((resolve) => {
       setTimeout(() => resolve(true), 2000);
     });
+  }
+
+  async renderProjectWithDither(options: {
+    source: string;
+    startTime: number;
+    endTime: number;
+    filePath: string;
+    format: string;
+    sampleRate: number;
+    bitDepth: number;
+    channels: number;
+    normalize: boolean;
+    addTail: boolean;
+    tailLength: number;
+    ditherType: string;
+  }): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.renderProjectWithDither) {
+      return await window.__JUCE__.backend.renderProjectWithDither(
+        options.source,
+        options.startTime,
+        options.endTime,
+        options.filePath,
+        options.format,
+        options.sampleRate,
+        options.bitDepth,
+        options.channels,
+        options.normalize,
+        options.addTail,
+        options.tailLength,
+        options.ditherType,
+      );
+    }
+    // Fallback to non-dither render
+    return this.renderProject(options);
   }
 
   // MIDI
@@ -1763,34 +2158,289 @@ class NativeBridge {
 
   // ===== Phase 13: Advanced Editing =====
 
-  async timeStretchClip(filePath: string, factor: number): Promise<string> {
+  async timeStretchClip(filePath: string, factor: number): Promise<StretchResult> {
     if (this.isNative && window.__JUCE__?.backend.timeStretchClip) {
-      return await window.__JUCE__.backend.timeStretchClip(filePath, factor);
+      const raw = await window.__JUCE__.backend.timeStretchClip(filePath, factor);
+      if (typeof raw === "string") {
+        // Legacy string response — empty = failure
+        return raw ? { success: true, filePath: raw } : { success: false };
+      }
+      return raw as StretchResult;
     }
     console.log("[NativeBridge] Mock timeStretchClip:", filePath, factor);
-    return filePath; // Mock: return same file
+    return { success: true, filePath, duration: 0, sampleRate: 44100 };
   }
 
-  async pitchShiftClip(filePath: string, semitones: number): Promise<string> {
+  async pitchShiftClip(filePath: string, semitones: number): Promise<StretchResult> {
     if (this.isNative && window.__JUCE__?.backend.pitchShiftClip) {
-      return await window.__JUCE__.backend.pitchShiftClip(filePath, semitones);
+      const raw = await window.__JUCE__.backend.pitchShiftClip(filePath, semitones);
+      if (typeof raw === "string") {
+        return raw ? { success: true, filePath: raw } : { success: false };
+      }
+      return raw as StretchResult;
     }
     console.log("[NativeBridge] Mock pitchShiftClip:", filePath, semitones);
-    return filePath;
+    return { success: true, filePath, duration: 0, sampleRate: 44100 };
+  }
+
+  // ===== Phase 3.10: Control Surface Support =====
+
+  async connectMIDIControlSurface(inputName: string, outputName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectMIDIControlSurface)
+      return await window.__JUCE__.backend.connectMIDIControlSurface(inputName, outputName);
+    console.log("[NativeBridge] Mock connectMIDIControlSurface:", inputName, outputName);
+    return true;
+  }
+
+  async disconnectMIDIControlSurface(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.disconnectMIDIControlSurface)
+      return await window.__JUCE__.backend.disconnectMIDIControlSurface();
+    return true;
+  }
+
+  async startMIDILearn(trackId: string, parameter: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.startMIDILearn)
+      return await window.__JUCE__.backend.startMIDILearn(trackId, parameter);
+    return true;
+  }
+
+  async cancelMIDILearn(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.cancelMIDILearn)
+      return await window.__JUCE__.backend.cancelMIDILearn();
+    return true;
+  }
+
+  async getMIDIMappings(): Promise<Array<{ channel: number; cc: number; trackId: string; parameter: string }>> {
+    if (this.isNative && window.__JUCE__?.backend.getMIDIMappings)
+      return await window.__JUCE__.backend.getMIDIMappings();
+    return [];
+  }
+
+  async addMIDIMapping(channel: number, cc: number, trackId: string, parameter: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addMIDIMapping)
+      return await window.__JUCE__.backend.addMIDIMapping(channel, cc, trackId, parameter);
+    return true;
+  }
+
+  async removeMIDIMapping(channel: number, cc: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.removeMIDIMapping)
+      return await window.__JUCE__.backend.removeMIDIMapping(channel, cc);
+    return true;
+  }
+
+  async connectOSC(receivePort: number, sendHost: string, sendPort: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectOSC)
+      return await window.__JUCE__.backend.connectOSC(receivePort, sendHost, sendPort);
+    console.log("[NativeBridge] Mock connectOSC:", receivePort, sendHost, sendPort);
+    return true;
+  }
+
+  async disconnectOSC(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.disconnectOSC)
+      return await window.__JUCE__.backend.disconnectOSC();
+    return true;
+  }
+
+  async getControlSurfaceMIDIDevices(): Promise<{ inputs: string[]; outputs: string[] }> {
+    if (this.isNative && window.__JUCE__?.backend.getControlSurfaceMIDIDevices)
+      return await window.__JUCE__.backend.getControlSurfaceMIDIDevices();
+    return { inputs: ["Mock MIDI Controller"], outputs: ["Mock MIDI Output"] };
+  }
+
+  // Phase 3.12: Strip Silence
+  async detectSilentRegions(
+    filePath: string, thresholdDb: number, minSilenceMs: number,
+    minSoundMs: number, preAttackMs: number, postReleaseMs: number
+  ): Promise<Array<{ startTime: number; endTime: number; startSample: number; endSample: number }>> {
+    if (this.isNative && window.__JUCE__?.backend.detectSilentRegions)
+      return await window.__JUCE__.backend.detectSilentRegions(filePath, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs);
+    return [];
+  }
+
+  // Phase 3.9: Timecode / Sync
+  async connectMIDIClockOutput(midiOutputName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectMIDIClockOutput)
+      return await window.__JUCE__.backend.connectMIDIClockOutput(midiOutputName);
+    return false;
+  }
+
+  async setMIDIClockOutputEnabled(enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMIDIClockOutputEnabled)
+      return await window.__JUCE__.backend.setMIDIClockOutputEnabled(enabled);
+    return false;
+  }
+
+  async connectMIDIClockInput(midiInputName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectMIDIClockInput)
+      return await window.__JUCE__.backend.connectMIDIClockInput(midiInputName);
+    return false;
+  }
+
+  async setMIDIClockInputEnabled(enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMIDIClockInputEnabled)
+      return await window.__JUCE__.backend.setMIDIClockInputEnabled(enabled);
+    return false;
+  }
+
+  async connectMTCOutput(midiOutputName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectMTCOutput)
+      return await window.__JUCE__.backend.connectMTCOutput(midiOutputName);
+    return false;
+  }
+
+  async setMTCEnabled(enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMTCEnabled)
+      return await window.__JUCE__.backend.setMTCEnabled(enabled);
+    return false;
+  }
+
+  async setMTCFrameRate(rate: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMTCFrameRate)
+      return await window.__JUCE__.backend.setMTCFrameRate(rate);
+    return false;
+  }
+
+  async connectMTCInput(midiInputName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectMTCInput)
+      return await window.__JUCE__.backend.connectMTCInput(midiInputName);
+    return false;
+  }
+
+  async setSyncSource(source: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setSyncSource)
+      return await window.__JUCE__.backend.setSyncSource(source);
+    return false;
+  }
+
+  async getSyncStatus(): Promise<{ locked: boolean; source: string; externalBPM: number; mtcPosition: number }> {
+    if (this.isNative && window.__JUCE__?.backend.getSyncStatus)
+      return await window.__JUCE__.backend.getSyncStatus();
+    return { locked: true, source: "internal", externalBPM: 120, mtcPosition: 0 };
+  }
+
+  // Phase 3.10.2: MCU (Mackie Control Universal)
+  async connectMCU(inputName: string, outputName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.connectMCU)
+      return await window.__JUCE__.backend.connectMCU(inputName, outputName);
+    return false;
+  }
+
+  async disconnectMCU(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.disconnectMCU)
+      return await window.__JUCE__.backend.disconnectMCU();
+    return false;
+  }
+
+  async setMCUBankOffset(offset: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMCUBankOffset)
+      return await window.__JUCE__.backend.setMCUBankOffset(offset);
+    return false;
+  }
+
+  // Phase 3.14: Session Interchange
+  async importSession(filePath: string): Promise<{ success: boolean; tempo?: number; sampleRate?: number; tracks?: any[]; error?: string }> {
+    if (this.isNative && window.__JUCE__?.backend.importSession)
+      return await window.__JUCE__.backend.importSession(filePath);
+    console.log("[NativeBridge] Mock importSession:", filePath);
+    return { success: false, error: "Not available in mock mode" };
+  }
+
+  async exportSession(filePath: string, format: string, sessionData: any): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.exportSession)
+      return await window.__JUCE__.backend.exportSession(filePath, format, sessionData);
+    console.log("[NativeBridge] Mock exportSession:", filePath, format);
+    return true;
+  }
+
+  // Phase 3.13: Freeze Track
+  async freezeTrack(trackId: string): Promise<{ success: boolean; filePath?: string; duration?: number; sampleRate?: number; startTime?: number; error?: string }> {
+    if (this.isNative && window.__JUCE__?.backend.freezeTrack)
+      return await window.__JUCE__.backend.freezeTrack(trackId);
+    return { success: false, error: "Not available in mock mode" };
+  }
+
+  async unfreezeTrack(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.unfreezeTrack)
+      return await window.__JUCE__.backend.unfreezeTrack(trackId);
+    return false;
+  }
+
+  // Phase 4.3: Built-in Effects
+  async addTrackBuiltInFX(trackId: string, effectName: string, isInputFX?: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addTrackBuiltInFX)
+      return await window.__JUCE__.backend.addTrackBuiltInFX(trackId, effectName, isInputFX);
+    console.log("[NativeBridge] Mock addTrackBuiltInFX:", trackId, effectName, isInputFX);
+    return true;
+  }
+
+  async addMasterBuiltInFX(effectName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addMasterBuiltInFX)
+      return await window.__JUCE__.backend.addMasterBuiltInFX(effectName);
+    console.log("[NativeBridge] Mock addMasterBuiltInFX:", effectName);
+    return true;
+  }
+
+  async getAvailableBuiltInFX(): Promise<Array<{ name: string; category: string }>> {
+    if (this.isNative && window.__JUCE__?.backend.getAvailableBuiltInFX)
+      return await window.__JUCE__.backend.getAvailableBuiltInFX();
+    return [
+      { name: "S13 EQ", category: "Built-in" },
+      { name: "S13 Compressor", category: "Built-in" },
+      { name: "S13 Gate", category: "Built-in" },
+      { name: "S13 Limiter", category: "Built-in" },
+      { name: "S13 Delay", category: "Built-in" },
+      { name: "S13 Reverb", category: "Built-in" },
+      { name: "S13 Chorus", category: "Built-in" },
+      { name: "S13 Saturator", category: "Built-in" },
+    ];
+  }
+
+  // Phase 4.4: Sidechain Routing
+  async setSidechainSource(destTrackId: string, pluginIndex: number, sourceTrackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setSidechainSource)
+      return await window.__JUCE__.backend.setSidechainSource(destTrackId, pluginIndex, sourceTrackId);
+    console.log("[NativeBridge] Mock setSidechainSource:", destTrackId, pluginIndex, sourceTrackId);
+    return true;
+  }
+
+  async clearSidechainSource(destTrackId: string, pluginIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.clearSidechainSource)
+      return await window.__JUCE__.backend.clearSidechainSource(destTrackId, pluginIndex);
+    console.log("[NativeBridge] Mock clearSidechainSource:", destTrackId, pluginIndex);
+    return true;
+  }
+
+  async getSidechainSource(destTrackId: string, pluginIndex: number): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getSidechainSource)
+      return await window.__JUCE__.backend.getSidechainSource(destTrackId, pluginIndex);
+    return "";
+  }
+
+  // Phase 3.7: Surround / Spatial Audio
+  async getSurroundLayouts(): Promise<Array<{ name: string; channels: number }>> {
+    if (this.isNative && window.__JUCE__?.backend.getSurroundLayouts)
+      return await window.__JUCE__.backend.getSurroundLayouts();
+    return [
+      { name: "Stereo", channels: 2 },
+      { name: "Quad", channels: 4 },
+      { name: "5.1 Surround", channels: 6 },
+      { name: "7.1 Surround", channels: 8 },
+      { name: "7.1.4 Atmos", channels: 12 },
+    ];
   }
 
   // Phase 15: Platform & Extensibility
-  async openVideoFile(filePath: string): Promise<{ width: number; height: number; duration: number; fps: number }> {
+  async openVideoFile(filePath: string): Promise<{ width: number; height: number; duration: number; fps: number; filePath: string; audioPath?: string; error?: string }> {
     if (this.isNative && window.__JUCE__?.backend.openVideoFile) {
       return await window.__JUCE__.backend.openVideoFile(filePath);
     }
     console.log("[NativeBridge] Mock openVideoFile:", filePath);
-    return { width: 1920, height: 1080, duration: 120, fps: 30 };
+    return { width: 1920, height: 1080, duration: 120, fps: 30, filePath };
   }
 
-  async getVideoFrame(time: number): Promise<string> {
+  async getVideoFrame(time: number, width?: number, height?: number): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.getVideoFrame) {
-      return await window.__JUCE__.backend.getVideoFrame(time);
+      return await window.__JUCE__.backend.getVideoFrame(time, width, height);
     }
     // Mock: return empty 1x1 transparent pixel
     return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -1854,12 +2504,61 @@ class NativeBridge {
     return { filePath: "mock_capture.wav", duration: 0 };
   }
 
-  async exportDDP(outputDir: string, regions: any[]): Promise<boolean> {
+  async exportDDP(sourceWavPath: string, outputDir: string, tracks: any[], catalogNumber?: string): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.exportDDP) {
-      return await window.__JUCE__.backend.exportDDP(outputDir, regions);
+      return await window.__JUCE__.backend.exportDDP(sourceWavPath, outputDir, tracks, catalogNumber);
     }
-    console.log("[NativeBridge] Mock exportDDP:", outputDir, regions.length, "regions");
+    console.log("[NativeBridge] Mock exportDDP:", sourceWavPath, outputDir, tracks.length, "tracks");
     return true;
+  }
+
+  // ==================== Phase 4.1: Clip Launcher ====================
+  async triggerSlot(trackIndex: number, slotIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.triggerSlot)
+      return await window.__JUCE__.backend.triggerSlot(trackIndex, slotIndex);
+    console.log("[NativeBridge] Mock triggerSlot:", trackIndex, slotIndex);
+    return true;
+  }
+
+  async stopSlot(trackIndex: number, slotIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.stopSlot)
+      return await window.__JUCE__.backend.stopSlot(trackIndex, slotIndex);
+    console.log("[NativeBridge] Mock stopSlot:", trackIndex, slotIndex);
+    return true;
+  }
+
+  async triggerScene(slotIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.triggerScene)
+      return await window.__JUCE__.backend.triggerScene(slotIndex);
+    console.log("[NativeBridge] Mock triggerScene:", slotIndex);
+    return true;
+  }
+
+  async stopAllSlots(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.stopAllSlots)
+      return await window.__JUCE__.backend.stopAllSlots();
+    console.log("[NativeBridge] Mock stopAllSlots");
+    return true;
+  }
+
+  async setSlotClip(trackIndex: number, slotIndex: number, filePath: string, duration: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setSlotClip)
+      return await window.__JUCE__.backend.setSlotClip(trackIndex, slotIndex, filePath, duration);
+    console.log("[NativeBridge] Mock setSlotClip:", trackIndex, slotIndex, filePath, duration);
+    return true;
+  }
+
+  async clearSlot(trackIndex: number, slotIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.clearSlot)
+      return await window.__JUCE__.backend.clearSlot(trackIndex, slotIndex);
+    console.log("[NativeBridge] Mock clearSlot:", trackIndex, slotIndex);
+    return true;
+  }
+
+  async getClipLauncherState(): Promise<any> {
+    if (this.isNative && window.__JUCE__?.backend.getClipLauncherState)
+      return await window.__JUCE__.backend.getClipLauncherState();
+    return { slots: [], numTracks: 0, numSlots: 8 };
   }
 
   // ==================== Window Management ====================
@@ -1914,6 +2613,194 @@ class NativeBridge {
         this.eventListeners.get(eventId)?.delete(callback);
       };
     }
+  }
+
+  // Sprint 16: Performance + Audio Quality
+
+  async setPanLaw(law: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setPanLaw)
+      return await window.__JUCE__.backend.setPanLaw(law);
+    console.log("[NativeBridge] Mock setPanLaw:", law);
+    return true;
+  }
+
+  async getPanLaw(): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getPanLaw)
+      return await window.__JUCE__.backend.getPanLaw();
+    return "constant_power";
+  }
+
+  async setTrackDCOffset(trackId: string, enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackDCOffset)
+      return await window.__JUCE__.backend.setTrackDCOffset(trackId, enabled);
+    console.log("[NativeBridge] Mock setTrackDCOffset:", trackId, enabled);
+    return true;
+  }
+
+  // ==================== Sprint 19: Plugin Management ====================
+
+  async getPluginParameters(trackId: string, fxIndex: number, isInputFX: boolean): Promise<Array<{ index: number; name: string; value: number; text: string }>> {
+    if (this.isNative && window.__JUCE__?.backend.getPluginParameters)
+      return await window.__JUCE__.backend.getPluginParameters(trackId, fxIndex, isInputFX);
+    console.log("[NativeBridge] Mock getPluginParameters:", trackId, fxIndex, isInputFX);
+    return [
+      { index: 0, name: "Gain", value: 0.5, text: "0.0 dB" },
+      { index: 1, name: "Mix", value: 1.0, text: "100%" },
+    ];
+  }
+
+  async setPluginParameter(trackId: string, fxIndex: number, isInputFX: boolean, paramIndex: number, value: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setPluginParameter)
+      return await window.__JUCE__.backend.setPluginParameter(trackId, fxIndex, isInputFX, paramIndex, value);
+    console.log("[NativeBridge] Mock setPluginParameter:", trackId, fxIndex, isInputFX, paramIndex, value);
+    return true;
+  }
+
+  async getPluginPresets(trackId: string, fxIndex: number, isInputFX: boolean): Promise<string[]> {
+    if (this.isNative && window.__JUCE__?.backend.getPluginPresets)
+      return await window.__JUCE__.backend.getPluginPresets(trackId, fxIndex, isInputFX);
+    return ["Default", "Preset 1", "Preset 2"];
+  }
+
+  async loadPluginPreset(trackId: string, fxIndex: number, isInputFX: boolean, presetName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.loadPluginPreset)
+      return await window.__JUCE__.backend.loadPluginPreset(trackId, fxIndex, isInputFX, presetName);
+    console.log("[NativeBridge] Mock loadPluginPreset:", trackId, fxIndex, isInputFX, presetName);
+    return true;
+  }
+
+  async savePluginPreset(trackId: string, fxIndex: number, isInputFX: boolean, presetName: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.savePluginPreset)
+      return await window.__JUCE__.backend.savePluginPreset(trackId, fxIndex, isInputFX, presetName);
+    console.log("[NativeBridge] Mock savePluginPreset:", trackId, fxIndex, isInputFX, presetName);
+    return true;
+  }
+
+  async startPluginMIDILearn(trackId: string, pluginIndex: number, paramIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.startPluginMIDILearn)
+      return await window.__JUCE__.backend.startPluginMIDILearn(trackId, pluginIndex, paramIndex);
+    console.log("[NativeBridge] Mock startPluginMIDILearn:", trackId, pluginIndex, paramIndex);
+    return true;
+  }
+
+  async cancelPluginMIDILearn(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.cancelPluginMIDILearn)
+      return await window.__JUCE__.backend.cancelPluginMIDILearn();
+    return true;
+  }
+
+  // ==================== Sprint 19: MIDI Import/Export ====================
+
+  async importMIDIFile(filePath: string): Promise<{ success: boolean; tracks: Array<{ name: string; channel: number; events: any[] }>; error?: string }> {
+    if (this.isNative && window.__JUCE__?.backend.importMIDIFile)
+      return await window.__JUCE__.backend.importMIDIFile(filePath);
+    console.log("[NativeBridge] Mock importMIDIFile:", filePath);
+    return { success: true, tracks: [] };
+  }
+
+  async exportMIDIFile(filePath: string, tracksJSON: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.exportMIDIFile)
+      return await window.__JUCE__.backend.exportMIDIFile(filePath, tracksJSON);
+    console.log("[NativeBridge] Mock exportMIDIFile:", filePath);
+    return true;
+  }
+
+  // ==================== Sprint 19: A/B Plugin Comparison ====================
+
+  async storePluginStateA(trackId: string, fxIndex: number, isInputFX: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.storePluginStateA)
+      return await window.__JUCE__.backend.storePluginStateA(trackId, fxIndex, isInputFX);
+    return true;
+  }
+
+  async storePluginStateB(trackId: string, fxIndex: number, isInputFX: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.storePluginStateB)
+      return await window.__JUCE__.backend.storePluginStateB(trackId, fxIndex, isInputFX);
+    return true;
+  }
+
+  async recallPluginStateA(trackId: string, fxIndex: number, isInputFX: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.recallPluginStateA)
+      return await window.__JUCE__.backend.recallPluginStateA(trackId, fxIndex, isInputFX);
+    return true;
+  }
+
+  async recallPluginStateB(trackId: string, fxIndex: number, isInputFX: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.recallPluginStateB)
+      return await window.__JUCE__.backend.recallPluginStateB(trackId, fxIndex, isInputFX);
+    return true;
+  }
+
+  // ==================== Sprint 20: Metering & Analysis ====================
+
+  async getLoudnessData(): Promise<{ integrated: number; shortTerm: number; momentary: number; truePeak: number; range: number }> {
+    if (this.isNative && window.__JUCE__?.backend.getLoudnessData)
+      return await window.__JUCE__.backend.getLoudnessData();
+    return { integrated: -23, shortTerm: -20, momentary: -18, truePeak: -1, range: 8 };
+  }
+
+  async getPhaseCorrelation(): Promise<number> {
+    if (this.isNative && window.__JUCE__?.backend.getPhaseCorrelation)
+      return await window.__JUCE__.backend.getPhaseCorrelation();
+    return 0.85;
+  }
+
+  async getSpectrumData(): Promise<number[]> {
+    if (this.isNative && window.__JUCE__?.backend.getSpectrumData)
+      return await window.__JUCE__.backend.getSpectrumData();
+    // Mock: return empty spectrum
+    return [];
+  }
+
+  // ==================== Channel Strip EQ (Phase 19.18) ====================
+
+  async setChannelStripEQEnabled(trackId: string, enabled: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setChannelStripEQEnabled)
+      return await window.__JUCE__.backend.setChannelStripEQEnabled(trackId, enabled);
+    return true;
+  }
+
+  async setChannelStripEQParam(trackId: string, paramIndex: number, value: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setChannelStripEQParam)
+      return await window.__JUCE__.backend.setChannelStripEQParam(trackId, paramIndex, value);
+    return true;
+  }
+
+  async getChannelStripEQParam(trackId: string, paramIndex: number): Promise<number> {
+    if (this.isNative && window.__JUCE__?.backend.getChannelStripEQParam)
+      return await window.__JUCE__.backend.getChannelStripEQParam(trackId, paramIndex);
+    return 0;
+  }
+
+  // ==================== Sprint 20: File System Helpers ====================
+
+  async browseForFile(title: string, filters?: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.browseForFile)
+      return await window.__JUCE__.backend.browseForFile(title, filters);
+    console.log("[NativeBridge] Mock browseForFile:", title, filters);
+    return "";
+  }
+
+  async browseForFolder(title: string): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.browseForFolder)
+      return await window.__JUCE__.backend.browseForFolder(title);
+    console.log("[NativeBridge] Mock browseForFolder:", title);
+    return "";
+  }
+
+  async fileExists(filePath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.fileExists)
+      return await window.__JUCE__.backend.fileExists(filePath);
+    return true;
+  }
+
+  // ==================== Sprint 20: Session Archive ====================
+
+  async archiveSession(projectDir: string, outputPath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.archiveSession)
+      return await window.__JUCE__.backend.archiveSession(projectDir, outputPath);
+    console.log("[NativeBridge] Mock archiveSession:", projectDir, outputPath);
+    return true;
   }
 }
 

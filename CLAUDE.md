@@ -191,6 +191,13 @@ For **continuous edits** (faders, knobs), use the begin/commit pattern: `beginXE
 - Semantic colors: `daw-record` (red), `daw-mute` (green), `daw-solo` (yellow), `daw-fx` (lime)
 - UI components in `components/ui/` use variant pattern (default, primary, success, danger, etc.)
 
+## When You're Stuck
+
+**If you encounter the same error in a loop (3+ attempts) or need admin/system-level access you don't have (installing software, modifying system PATH, registry, etc.), STOP and immediately ask the user for help.** Do not keep retrying the same failing approach. Clearly explain:
+1. What you're trying to do
+2. What's failing and why
+3. What the user needs to do (step by step)
+
 ## Coding Preferences
 
 - Prefer targeted, minimal fixes over large refactors
