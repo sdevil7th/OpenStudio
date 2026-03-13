@@ -13,6 +13,7 @@ import {
   Box,
   Code,
   Star,
+  FolderOpen,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
@@ -37,7 +38,7 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string; // base64 data URL from C++ snapshot lookup
-  pluginType?: "vst3" | "lv2" | "clap" | "s13fx"; // Plugin format type
+  pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin"; // Plugin format type
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -104,6 +105,7 @@ function getPluginGroupId(plugin: { category: string; isInstrument: boolean }): 
 interface PluginBrowserProps {
   trackId: string;
   targetChain: "input" | "track" | "master" | "instrument";
+  trackType?: "audio" | "midi" | "instrument" | "bus";
   onClose: () => void;
   embedded?: boolean;
 }
@@ -111,6 +113,7 @@ interface PluginBrowserProps {
 export function PluginBrowser({
   trackId,
   targetChain,
+  trackType,
   onClose,
   embedded = false,
 }: PluginBrowserProps) {
@@ -242,10 +245,21 @@ export function PluginBrowser({
     }
   };
 
-  // Filter plugins based on targetChain
-  const basePlugins = targetChain === "instrument"
-    ? plugins.filter((p) => p.isInstrument)
-    : plugins.filter((p) => !p.isInstrument);
+  // Filter plugins based on targetChain and track type
+  const basePlugins = useMemo(() => {
+    if (targetChain === "instrument") {
+      // Only show instrument plugins
+      return plugins.filter((p) => p.isInstrument);
+    }
+    // For FX chains (input/track/master), exclude instrument plugins
+    let filtered = plugins.filter((p) => !p.isInstrument);
+    // For pure MIDI tracks (no instrument loaded), audio FX won't work
+    // — only show S13FX and plugins that explicitly support MIDI
+    if (trackType === "midi") {
+      filtered = filtered.filter((p) => p.pluginType === "s13fx");
+    }
+    return filtered;
+  }, [plugins, targetChain, trackType]);
 
   const categories = [
     "All",
@@ -327,6 +341,14 @@ export function PluginBrowser({
           <Star size={14} fill={showFavoritesOnly ? "currentColor" : "none"} />
         </Button>
         <Button
+          variant="default"
+          size="md"
+          onClick={() => nativeBridge.openUserEffectsFolder()}
+          title="Open user JSFX effects folder — drop .jsfx scripts here, then click Scan"
+        >
+          <FolderOpen size={14} />
+        </Button>
+        <Button
           variant="primary"
           size="md"
           onClick={handleScan}
@@ -401,7 +423,7 @@ export function PluginBrowser({
             const isScript = plugin.pluginType === "s13fx";
             const isFav = favorites.has(plugin.fileOrIdentifier);
             const { Icon, color } = isScript
-              ? { match: "Script", Icon: Code, color: "#84cc16" }
+              ? { Icon: Code, color: "#84cc16" }
               : getCategoryIcon(plugin.category);
             return (
               <div

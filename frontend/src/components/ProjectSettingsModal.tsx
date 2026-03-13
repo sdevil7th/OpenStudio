@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
+import { nativeBridge } from "../services/NativeBridge";
 import {
   Button,
   Input,
@@ -77,6 +78,7 @@ export function ProjectSettingsModal({
   );
   const [localAuthor, setLocalAuthor] = useState(projectAuthor);
   const [newNote, setNewNote] = useState("");
+  const [localPanLaw, setLocalPanLaw] = useState("constant_power");
 
   // Sync local state when modal opens or store changes
   useEffect(() => {
@@ -90,6 +92,9 @@ export function ProjectSettingsModal({
       setLocalTimeSignatureDenom(timeSignature.denominator);
       setLocalAuthor(projectAuthor);
       setNewNote("");
+
+      // Fetch current pan law from backend
+      nativeBridge.getPanLaw().then((law) => setLocalPanLaw(law));
     }
   }, [
     isOpen,
@@ -110,6 +115,7 @@ export function ProjectSettingsModal({
     setTempo(localTempo);
     setTimeSignatureAction(localTimeSignatureNum, localTimeSignatureDenom);
     if (localAuthor !== projectAuthor) setProjectAuthor(localAuthor);
+    nativeBridge.setPanLaw(localPanLaw);
     onClose();
   };
 
@@ -131,6 +137,7 @@ export function ProjectSettingsModal({
     setLocalTimeSignatureDenom(timeSignature.denominator);
     setLocalAuthor(projectAuthor);
     setNewNote("");
+    // Pan law resets on next open via getPanLaw() fetch
     onClose();
   };
 
@@ -205,6 +212,22 @@ export function ProjectSettingsModal({
                 ]}
                 value={localBitDepth}
                 onChange={(val) => setLocalBitDepth(val as 16 | 24 | 32)}
+              />
+
+              {/* Pan Law */}
+              <Select
+                variant="default"
+                size="md"
+                fullWidth
+                label="Pan Law"
+                options={[
+                  { value: "constant_power", label: "Constant Power (-3dB)" },
+                  { value: "minus_4_5db", label: "-4.5dB" },
+                  { value: "minus_6db", label: "-6dB (Linear)" },
+                  { value: "linear", label: "0dB (Unity)" },
+                ]}
+                value={localPanLaw}
+                onChange={(val) => setLocalPanLaw(val as string)}
               />
             </div>
           </div>

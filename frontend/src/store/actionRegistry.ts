@@ -145,7 +145,9 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "edit.deleteWithinSelection", name: "Delete within Time Selection (Ripple)", category: "Edit", execute: () => s().deleteWithinTimeSelection() },
     { id: "edit.insertSilence", name: "Insert Silence", category: "Edit", execute: () => s().insertSilenceAtTimeSelection() },
     { id: "view.bigClock", name: "Toggle Big Clock", category: "View", execute: () => s().toggleBigClock() },
-    { id: "view.keyboardShortcuts", name: "Keyboard Shortcuts", category: "View", shortcut: "F1", execute: () => s().toggleKeyboardShortcuts() },
+    { id: "view.keyboardShortcuts", name: "Keyboard Shortcuts", category: "View", execute: () => s().toggleKeyboardShortcuts() },
+    { id: "help.contextualHelp", name: "Help Reference", category: "Help", shortcut: "F1", execute: () => s().toggleContextualHelp() },
+    { id: "help.gettingStarted", name: "Getting Started Guide", category: "Help", execute: () => s().toggleGettingStarted() },
     { id: "options.preferences", name: "Preferences", category: "Options", shortcut: "Ctrl+,", execute: () => s().togglePreferences() },
     { id: "options.recordNormal", name: "Record Mode: Normal", category: "Options", execute: () => s().setRecordMode("normal") },
     { id: "options.recordOverdub", name: "Record Mode: Overdub", category: "Options", execute: () => s().setRecordMode("overdub") },
@@ -251,6 +253,52 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "view.phaseCorrelation", name: "Toggle Phase Correlation Meter", category: "View", execute: () => s().togglePhaseCorrelation() },
     { id: "file.archiveSession", name: "Archive Session...", category: "File", execute: () => { void s().archiveSession(); } },
     { id: "file.newFromTemplate", name: "New from Template...", category: "File", execute: () => s().toggleProjectTemplates() },
+
+    // ===== Pitch Editor =====
+    { id: "edit.editPitch", name: "Edit Pitch", category: "Edit", shortcut: "P", execute: () => {
+      const state = s();
+      const clipId = state.selectedClipIds[0];
+      if (!clipId) return;
+      const track = state.tracks.find((t: any) => t.clips.some((c: any) => c.id === clipId));
+      if (!track || track.type === "midi") return;
+      if (state.showPitchEditor && state.pitchEditorClipId === clipId) {
+        state.closePitchEditor();
+      } else {
+        state.openPitchEditor(track.id, clipId, -1);
+      }
+    }},
+
+    // ===== Polyphonic Pitch Detection (Phase 6) =====
+    { id: "edit.extractMidi", name: "Extract MIDI from Audio", category: "Edit", execute: () => {
+      const state = s();
+      const clipId = state.selectedClipIds[0];
+      if (!clipId) return;
+      const track = state.tracks.find((t: any) => t.clips.some((c: any) => c.id === clipId));
+      if (!track || track.type === "midi") return;
+      void import("../services/NativeBridge").then(({ nativeBridge }) => {
+        void nativeBridge.extractMidiFromAudio(track.id, clipId).then((result) => {
+          if (result && result.notes && result.notes.length > 0) {
+            const st = s();
+            const sourceClip = track.clips.find((c: any) => c.id === clipId);
+            const newTrackId = crypto.randomUUID();
+            st.addTrack({ id: newTrackId, name: `MIDI from ${sourceClip?.name || "Audio"}`, type: "midi" });
+            const maxEnd = Math.max(...result.notes.map((n: any) => n.endTime));
+            const newClipId = st.addMIDIClip(newTrackId, sourceClip?.startTime || 0, maxEnd);
+            const events: any[] = [];
+            for (const n of result.notes) {
+              events.push({ timestamp: n.startTime, type: "noteOn", note: n.midiPitch, velocity: Math.round(n.velocity * 127) });
+              events.push({ timestamp: n.endTime, type: "noteOff", note: n.midiPitch, velocity: 0 });
+            }
+            events.sort((a: any, b: any) => a.timestamp - b.timestamp);
+            useDAWStore.setState((prev) => ({
+              tracks: prev.tracks.map((t: any) => t.id === newTrackId ? {
+                ...t, midiClips: t.midiClips.map((c: any) => c.id === newClipId ? { ...c, events } : c),
+              } : t),
+            }));
+          }
+        });
+      });
+    }},
 
     // ===== Sprint 21: Timeline Interaction =====
     { id: "view.toggleCrosshair", name: "Toggle Crosshair Cursor", category: "View", execute: () => s().toggleCrosshair() },

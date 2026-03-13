@@ -11,21 +11,15 @@ PluginWindowManager::PluginWindow::PluginWindow(juce::AudioProcessor& proc, cons
 {
     setUsingNativeTitleBar(true);
     setResizable(true, false);
-    
-    // Create and add editor component
-    if (auto* editor = processor.createEditorIfNeeded())
+
+    if (auto* editor = processor.createEditor())
     {
         setContentOwned(editor, true);
-        
-        // Center on screen
-        centreWithSize(editor->getWidth(), editor->getHeight());
+
+        int w = juce::jmax(editor->getWidth(), 200);
+        int h = juce::jmax(editor->getHeight(), 150);
+        centreWithSize(w, h);
         setVisible(true);
-        
-        juce::Logger::writeToLog("PluginWindow: Opened editor for " + processor.getName());
-    }
-    else
-    {
-        juce::Logger::writeToLog("PluginWindow: Failed to create editor for " + processor.getName());
     }
 }
 
@@ -58,25 +52,17 @@ void PluginWindowManager::openEditor(juce::AudioProcessor* processor, const juce
 {
     if (!processor)
         return;
-    
+
     // Close existing window if open
-    closeEditor(processor);
-    
-    // Create new window on the message thread
-    juce::MessageManager::callAsync([this, processor, windowTitle]()
-    {
-        if (processor->hasEditor())
-        {
-            auto window = std::make_unique<PluginWindow>(*processor, windowTitle);
-            activeWindows[processor] = std::move(window);
-            
-            juce::Logger::writeToLog("PluginWindowManager: Opened window for " + processor->getName());
-        }
-        else
-        {
-            juce::Logger::writeToLog("PluginWindowManager: Plugin has no editor: " + processor->getName());
-        }
-    });
+    auto it = activeWindows.find(processor);
+    if (it != activeWindows.end())
+        activeWindows.erase(it);
+
+    if (!processor->hasEditor())
+        return;
+
+    auto window = std::make_unique<PluginWindow>(*processor, windowTitle);
+    activeWindows[processor] = std::move(window);
 }
 
 void PluginWindowManager::closeEditor(juce::AudioProcessor* processor)
@@ -95,6 +81,24 @@ void PluginWindowManager::closeEditor(juce::AudioProcessor* processor)
     }
 }
 
+void PluginWindowManager::closeEditorsForTrack(const std::vector<juce::AudioProcessor*>& processors)
+{
+    // Must be called from the message thread to synchronously destroy windows
+    // before the processors are deleted
+    for (auto* proc : processors)
+    {
+        if (proc)
+        {
+            auto it = activeWindows.find(proc);
+            if (it != activeWindows.end())
+            {
+                juce::Logger::writeToLog("PluginWindowManager: Closing editor for track processor: " + proc->getName());
+                activeWindows.erase(it);
+            }
+        }
+    }
+}
+
 void PluginWindowManager::closeAllEditors()
 {
     juce::MessageManager::callAsync([this]()
@@ -102,6 +106,12 @@ void PluginWindowManager::closeAllEditors()
         activeWindows.clear();
         juce::Logger::writeToLog("PluginWindowManager: Closed all plugin windows");
     });
+}
+
+void PluginWindowManager::closeAllEditorsSync()
+{
+    activeWindows.clear();
+    juce::Logger::writeToLog("PluginWindowManager: Closed all plugin windows (sync)");
 }
 
 bool PluginWindowManager::isEditorOpen(juce::AudioProcessor* processor) const

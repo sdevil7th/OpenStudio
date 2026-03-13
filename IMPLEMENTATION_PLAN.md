@@ -1,1116 +1,429 @@
 # Studio13-v3 Implementation Plan
 
-> **Goal**: Close the gap between Studio13-v3 and professional DAWs like Ardour by implementing missing features end-to-end (C++ backend + bridge + React frontend). UI/UX improvements and optimizations are listed separately and deferred.
->
-> **Architecture reference**: Ardour codebase at `C:\Users\srvds\Documents\Codes\ardour`
+> **Goal**: Close the gap between Studio13-v3 and professional DAWs like Ardour/REAPER by implementing missing features end-to-end (C++ backend + bridge + React frontend).
 
 ---
 
-## Phase 1: Wire Frontend-Only Features to C++ Backend
+## Remaining Work — Honest Audit (March 2026)
 
-These features already have working UI and Zustand state. They need C++ backend implementations and bridge wiring so they actually affect audio processing.
+Everything below was audited against the actual codebase. Features are categorized by what's actually missing.
 
-### 1.1 Automation Playback ✅ COMPLETED
+### Category A: Broken — Code Exists Both Sides But Not Connected
 
-**Current state**: `useDAWStore.ts` has `automationLanes` with per-track automation points for volume/pan/mute. Users can draw/edit points in the UI. But `TrackProcessor::processBlock()` ignores them entirely — volume/pan are static values.
+| # | Feature | Problem | Fix Effort |
+|---|---------|---------|------------|
+| 8 | Clip Gain Envelope | Backend interpolation works. Frontend state+undo works. But `syncClipsWithBackend()` never sends `gainEnvelope` to backend. Also no UI to draw envelope points on clips. | Medium |
+| 13 | Trigger Engine (Clip Launcher) | Backend `TriggerEngine::processBlock()` runs in audio callback. Frontend store has full state. But NO bridge functions sync slot data from frontend to backend. Clips never actually launch. | Medium |
 
-**What to implement**:
+### Category B: Backend Done, No Frontend UI
 
-#### C++ Backend
+| # | Feature | What Exists | What's Missing |
+|---|---------|-------------|----------------|
+| 4 | Channel Strip EQ | S13EQ class (HPF+LPF+4 bands), processes before FX chain in TrackProcessor | No UI controls — no enable toggle, no frequency/gain/Q knobs |
+| 5 | Sidechain Routing | Topological sort, sidechain buffer routing, TrackProcessor expands channels | No UI to select sidechain source per plugin |
+| 6 | Pan Law Options | All 4 algorithms (Constant Power, -4.5dB, -6dB, Linear) in TrackProcessor | No dropdown UI in Project Settings |
+| 7 | DC Offset Removal | 5Hz high-pass filter in TrackProcessor | No toggle UI per track |
+| 10 | Monitoring FX Chain | Post-master chain, correctly excluded from renders | No UI to add/manage monitoring FX |
+| 12 | Timecode Sync | Full MIDI Clock + MTC send/receive in TimecodeSync.h/cpp | No settings panel for sync source/MIDI device/framerate |
 
-- **AutomationList class** (`Source/AutomationList.h/cpp`)
-  - Stores sorted `std::vector<AutomationPoint>` where `AutomationPoint = { double timeSamples; float value; }`
-  - Thread-safe: message thread writes via lock, audio thread reads via `ScopedTryLock` (REAPER pattern already used in codebase)
-  - `float eval(double timeSamples)` — linear interpolation between adjacent points
-  - `float eval(double startSample, double endSample, int numSamples, float* outputBuffer)` — batch evaluation for a process block, writes per-sample interpolated values
-  - Support interpolation modes: `discrete`, `linear` (default), `exponential`
+### Category C: Not Implemented At All
 
-- **Per-track automation storage in AudioEngine**
-  - `std::map<std::string, std::map<std::string, std::unique_ptr<AutomationList>>> trackAutomation` — keyed by trackId → parameterId
-  - Parameter IDs: `"volume"`, `"pan"`, `"mute"`, `"plugin-{index}-param-{paramIndex}"`
-  - Native functions to expose:
-    - `setAutomationPoints(trackId, parameterId, pointsJSON)` — bulk set from frontend state
-    - `setAutomationMode(trackId, parameterId, mode)` — `"off"`, `"read"`, `"write"`, `"touch"`, `"latch"`
-    - `getAutomationMode(trackId, parameterId)` → string
-    - `clearAutomation(trackId, parameterId)`
+| # | Feature | Notes |
+|---|---------|-------|
+| 29 | Crosshair Cursor | Only exists in ParametricGraph (EQ editing), NOT as timeline toggle |
+| 30 | Accessibility | No ARIA labels, no focus indicators, no systematic keyboard navigation |
+| — | Missing Media Resolver | No detection of missing audio files on project load, no relink dialog |
+| — | Tab-to-Transient Navigation | No Tab/Shift+Tab handler for jumping between transients |
+| — | Contextual Help (F1) | helpTexts.ts exists but no F1 key handler or hover help system |
+| — | In-App Getting Started Guide | No tutorial/onboarding component |
+| — | User Manual / API Docs | No manual or doc generation |
+| — | Plugin Crash Isolation | Only blacklist exists, no separate-process sandboxing |
+| — | 32-bit Plugin Bridge | Not implemented |
 
-- **TrackProcessor::processBlock() changes**
-  - Before applying static volume/pan, check if automation mode is `"read"` (or `"touch"`/`"latch"` when not touching)
-  - If yes, call `automationList->eval(blockStartSample, blockEndSample, numSamples, tempBuffer)` to get per-sample automation values
-  - Apply sample-by-sample gain instead of block-level gain
-  - For plugin parameter automation: call `plugin->setParameter(paramIndex, value)` per block boundary (not per-sample — too expensive)
-  - **Smoothing**: Apply 1-pole lowpass (alpha ~0.001) to avoid zipper noise on discrete jumps
+### Category D: Uncertain / Incomplete
 
-- **Automation recording** (write/touch/latch modes)
-  - When mode is `"write"`: every processBlock, record current parameter value as a new point at current playhead position
-  - When mode is `"touch"`: record only while user is actively moving a fader/knob (track touch state via `beginTouchAutomation(trackId, parameterId)` / `endTouchAutomation(...)` bridge calls)
-  - When mode is `"latch"`: like touch, but after release, continue writing the last value until transport stops
-  - Recorded points are sent back to frontend via periodic event emission (10Hz) for UI update
-
-#### NativeBridge.ts
-
-- Add bridge functions:
-  ```
-  setAutomationPoints(trackId: string, parameterId: string, points: { time: number; value: number }[]): Promise<void>
-  setAutomationMode(trackId: string, parameterId: string, mode: 'off'|'read'|'write'|'touch'|'latch'): Promise<void>
-  getAutomationMode(trackId: string, parameterId: string): Promise<string>
-  clearAutomation(trackId: string, parameterId: string): Promise<void>
-  beginTouchAutomation(trackId: string, parameterId: string): Promise<void>
-  endTouchAutomation(trackId: string, parameterId: string): Promise<void>
-  ```
-- Add event listener for `automationPointsRecorded` to receive recorded points during write/touch/latch
-
-#### Frontend Changes
-
-- **useDAWStore.ts**: When automation points change (add/move/delete), call `nativeBridge.setAutomationPoints()` to sync to backend
-- **useDAWStore.ts**: When automation mode changes, call `nativeBridge.setAutomationMode()`
-- **ChannelStrip.tsx**: On fader mousedown → `beginTouchAutomation()`, on mouseup → `endTouchAutomation()`
-- **Timeline.tsx automation lanes**: Listen for `automationPointsRecorded` event and merge recorded points into store
-
-#### Undo/Redo
-
-- All automation point edits already go through CommandManager (frontend). Backend sync is fire-and-forget (backend is always overwritten with full point list).
+| Feature | Status |
+|---------|--------|
+| Lagrange Resampling in Render | Referenced in code comments but implementation not fully visible |
+| Note Expression / MPE | Infrastructure exists (setNoteExpression action, pitchBend/pressure/slide) but Piano Roll UI for MPE editing may be incomplete |
 
 ---
 
-### 1.2 Tempo Map with Variable BPM Playback ✅ COMPLETED
+## Detailed Plans for Remaining Work
 
-**Current state**: `useDAWStore.ts` has `tempoMarkers: TempoMarker[]` with `{ id, position, bpm, timeSignature }`. The metronome and playback engine use a single global BPM from `setTempo()`. Grid snapping uses frontend-only calculations.
+### Plan R1: Fix Clip Gain Envelope (Feature #8)
 
-**What to implement**:
+**Priority**: High — backend code is wasted without the sync
 
-#### C++ Backend
-
-- **TempoMap class** (`Source/TempoMap.h/cpp`)
-  - Stores sorted list of tempo events: `struct TempoEvent { double beatPosition; double bpm; int timeSigNum; int timeSigDenom; }`
-  - Core conversion functions (must be audio-thread safe — no allocations, no locks):
-    - `double beatToSample(double beat, double sampleRate)` — integrate tempo curve from start
-    - `double sampleToBeat(double sample, double sampleRate)` — inverse of above
-    - `BBT sampleToBBT(double sample, double sampleRate)` — bar/beat/tick from sample position
-    - `double bbtToSample(BBT bbt, double sampleRate)` — sample from bar/beat/tick
-    - `double tempoAtSample(double sample, double sampleRate)` — BPM at a given position
-    - `double tempoAtBeat(double beat)` — BPM at a given beat
-  - **Thread safety**: Use atomic pointer swap (RCU pattern from Ardour). Message thread builds a new TempoMap, atomically swaps pointer. Audio thread reads current pointer — no locks.
-  - **Cache**: Pre-compute cumulative sample offsets at each tempo event for O(log n) lookup via binary search
-
-- **Integration points**:
-  - **Metronome.cpp**: Replace fixed BPM with `tempoMap->tempoAtSample(currentPosition)`. Click intervals vary per beat based on local tempo.
-  - **PlaybackEngine.cpp**: `fillTrackBuffer()` does NOT need tempo awareness for audio clips (they're sample-positioned). But MIDI clips need beat-to-sample conversion.
-  - **AudioEngine.cpp**: Expose native functions:
-    - `setTempoMap(tempoEventsJSON)` — bulk set from frontend
-    - `getBeatAtSample(samplePos)` → double
-    - `getSampleAtBeat(beat)` → double
-    - `getBBTAtSample(samplePos)` → `{ bar, beat, tick }`
-    - `getTempoAtSample(samplePos)` → double
-
-- **MIDI clip playback with tempo map**:
-  - `MIDIClip::getNotesInRange()` currently uses beat positions. The audio engine needs to convert beat positions to sample positions using the tempo map when scheduling MIDI note-on/note-off events.
-
-#### NativeBridge.ts
-
-- Add bridge functions:
-  ```
-  setTempoMap(events: { beatPosition: number; bpm: number; timeSigNum: number; timeSigDenom: number }[]): Promise<void>
-  getBeatAtSample(sample: number): Promise<number>
-  getSampleAtBeat(beat: number): Promise<number>
-  getBBTAtSample(sample: number): Promise<{ bar: number; beat: number; tick: number }>
-  getTempoAtSample(sample: number): Promise<number>
-  ```
-
-#### Frontend Changes
-
-- **useDAWStore.ts**: When `tempoMarkers` change, serialize and send full map to backend via `nativeBridge.setTempoMap()`
-- **snapToGrid.ts**: Use backend `getBeatAtSample()` / `getSampleAtBeat()` for accurate snapping with variable tempo (currently assumes fixed BPM)
-- **Timeline.tsx ruler**: Grid lines must be spaced according to tempo map, not fixed intervals
-- **TransportBar.tsx BBT display**: Use backend `getBBTAtSample()` for accurate bar:beat:tick display
-
----
-
-### 1.3 Comping / Takes System (End-to-End) ✅ COMPLETED
-
-**Current state**: `useDAWStore.ts` has per-clip takes (`clip.takes[]`, `clip.activeTakeIndex`), with UI for explode/implode/promote/swap. But the backend only knows about the "active" clip — it has no concept of takes. Switching takes doesn't update what's actually playing.
-
-**What to implement**:
-
-#### C++ Backend
-
-- **No new classes needed** — the backend already manages clips per track via `addPlaybackClip()` / `removePlaybackClip()`. Takes are a frontend organizational concept.
-- **The fix**: When the active take changes in the frontend, the frontend must:
-  1. `removePlaybackClip(trackId, oldClipId)` — remove the old active take from playback
-  2. `addPlaybackClip(trackId, newClipId, filePath, startTime, offset, duration, ...)` — add the new active take
-  3. This makes the backend play the correct take
-
-#### Frontend Changes
-
-- **useDAWStore.ts `setActiveTake()`**: After updating `clip.activeTakeIndex` in state, call bridge to swap playback clips:
+**Step 1: Add gainEnvelope to syncClipsWithBackend()**
+- File: `frontend/src/store/useDAWStore.ts`
+- In `syncClipsWithBackend()` (~line 4278-4350), after syncing basic clip properties, add:
   ```typescript
-  const oldTake = clip.takes[oldIndex];
-  const newTake = clip.takes[newIndex];
-  await nativeBridge.removePlaybackClip(trackId, oldTake.clipId);
-  await nativeBridge.addPlaybackClip(trackId, newTake.clipId, newTake.filePath, clip.startTime, newTake.offset, newTake.duration, ...);
-  ```
-- **Recording integration**: When a new take is recorded (overdub/replace mode), store the new clip as a take alongside existing clip:
-  1. After recording stops, `getLastCompletedClips()` returns the new clip
-  2. Add it as a new take entry in the existing clip's `takes[]` array
-  3. Optionally auto-switch to the new take
-
-- **Comping (multi-take assembly)**:
-  - When user selects time ranges from different takes (using razor-like tool on take lanes):
-    1. Split the active clip at comp boundaries
-    2. For each segment, set the active take to the user-selected take
-    3. Each segment independently calls `removePlaybackClip` / `addPlaybackClip` to play its chosen take
-  - This requires the frontend to manage "comp segments" — essentially multiple clips per original clip position, each pointing to a different take
-
-#### Undo/Redo
-
-- Take switching and comping operations must push undo commands that capture:
-  - Old active take index, new active take index
-  - The bridge calls to swap playback clips (execute/undo both re-sync backend)
-
----
-
-### 1.4 Razor Editing (Wire to Backend) ✅ COMPLETED
-
-**Current state**: Alt+drag creates razor areas in the UI, Delete removes content (frontend clips are split/removed). But the backend playback clips are not updated — removed content may still play.
-
-**What to implement**:
-
-#### Frontend Changes
-
-- **useDAWStore.ts `deleteRazorContent()`**: After removing/splitting clips in the store, sync to backend:
-  1. For each affected clip: `removePlaybackClip(trackId, clipId)` to remove old clip
-  2. For each resulting clip (after split): `addPlaybackClip(trackId, newClipId, ...)` to add new clips
-  3. Clear razor areas after applying
-
-- **Ripple editing integration**: When ripple mode is on and razor content is deleted:
-  1. After deleting razor content, shift subsequent clips earlier
-  2. For each shifted clip: `removePlaybackClip()` then `addPlaybackClip()` with new position
-  3. This is already partially implemented in frontend state — just needs bridge sync
-
----
-
-### 1.5 Track Groups (Wire to Backend) ✅ COMPLETED
-
-**Current state**: `useDAWStore.ts` has `trackGroups` with linked parameters (volume, pan, mute, solo). But when group-linked parameters change, only the frontend state updates — the backend doesn't receive the linked changes.
-
-**What to implement**:
-
-#### Frontend Changes
-
-- **useDAWStore.ts**: When a grouped parameter changes, iterate all tracks in the group and call the appropriate bridge function for each:
-  ```typescript
-  // In setTrackVolume():
-  if (track is in a group with 'volume' linked) {
-    for (const linkedTrackId of group.trackIds) {
-      // Apply relative volume change
-      nativeBridge.setTrackVolume(linkedTrackId, newVolume);
+  // After addPlaybackClip calls, sync gain envelopes
+  for (const track of state.tracks) {
+    for (const clip of track.clips) {
+      if (clip.gainEnvelope && clip.gainEnvelope.length > 0) {
+        await nativeBridge.setClipGainEnvelope(track.id, clip.id, clip.gainEnvelope);
+      }
     }
   }
   ```
-- Same pattern for `setTrackPan()`, `setTrackMute()`, `setTrackSolo()`
+- Also add gainEnvelope to the clip key hash so changes trigger re-sync
+
+**Step 2: Add clip gain drawing UI**
+- File: `frontend/src/components/Timeline.tsx`
+- When a clip is selected and Shift is held, show gain envelope overlay:
+  - Render gain points as small circles on the clip
+  - Click to add point, drag to move, right-click to delete
+  - Points are relative to clip start, value 0.0-2.0 (0 = silence, 1.0 = unity, 2.0 = +6dB)
+- Wire to existing `addClipGainPoint()`, `moveClipGainPoint()`, `removeClipGainPoint()` in store
+
+**Undo**: Already implemented in store (addClipGainPoint etc. use commandManager)
 
 ---
 
-## Phase 2: Complete Incomplete / Stubbed Features
-
-These features have partial implementations (stubs, TODOs) that need to be finished.
-
-### 2.1 MIDI Recording (Save to Clips) ✅ COMPLETED
-
-**Current state**: `MIDIManager.cpp` receives MIDI messages and routes them to instrument plugins for live playback. But there's a TODO at `AudioEngine.cpp:766` — MIDI notes are NOT saved to `MIDIClip` objects during recording.
-
-**What to implement**:
-
-#### C++ Backend
-
-- **MIDIRecorder class** (`Source/MIDIRecorder.h/cpp`) or extend `AudioRecorder`
-  - Thread-safe ring buffer for incoming MIDI events during recording
-  - When transport is recording and track is armed:
-    - On MIDI note-on: push `{ timestamp, noteNumber, velocity, channel }` to ring buffer
-    - On MIDI note-off: push corresponding event
-    - Also capture CC, pitch bend, program change events
-  - On recording stop:
-    - Drain ring buffer into a new `MIDIClip` object
-    - Write to `.mid` (SMF) file on disk for persistence
-    - Notify frontend with clip metadata (like `getLastCompletedClips()` for audio)
-
-- **AudioEngine integration**:
-  - In the MIDI input callback (where instrument plugins already receive events):
-    - If track is armed and recording: also push events to `MIDIRecorder`
-  - On `setTransportRecording(false)`:
-    - Finalize MIDI recording, create clip, emit event
-
-- **New native functions**:
-  - `getLastCompletedMIDIClips()` — returns list of newly recorded MIDI clips with metadata
-  - `getMIDIClipNotes(clipId)` — returns note events for PianoRoll display
-
-#### Frontend Changes
-
-- After recording stops, poll `getLastCompletedMIDIClips()` to get new MIDI clip data
-- Create clip entries in store with `type: 'midi'`
-- PianoRoll can display/edit using existing `MIDIClip` note data
-
----
-
-### 2.2 Time Stretching (Real Implementation) ✅ COMPLETED
-
-**Current state**: `NativeBridge.ts` has `timeStretchClip()` and `pitchShiftClip()` functions. The C++ side has stubs that return empty results.
-
-**What to implement**:
-
-#### C++ Backend — Option A: RubberBand Library Integration
-
-- Add RubberBand library as a CMake dependency (MIT license, well-suited for JUCE)
-- **TimeStretchProcessor class** (`Source/TimeStretchProcessor.h/cpp`)
-  - Offline processing (not real-time — same as Ardour's approach):
-    1. Read source audio file via `AudioFormatReader`
-    2. Create `RubberBandStretcher` with desired time ratio and pitch shift
-    3. Process in blocks (e.g., 4096 samples), writing to a new WAV file
-    4. Return path to new file
-  - Parameters:
-    - `timeRatio`: 0.5 = half speed, 2.0 = double speed (preserves pitch)
-    - `pitchSemitones`: pitch shift in semitones (preserves duration)
-    - `preserveFormants`: boolean (better vocal quality)
-  - Progress callback for UI progress bar
-  - Runs on a background `juce::Thread` to not block the message thread
-
-#### C++ Backend — Option B: FFmpeg Fallback
-
-- If RubberBand is too complex to integrate, use FFmpeg's `rubberband` audio filter:
-  ```
-  ffmpeg -i input.wav -af "rubberband=tempo=1.5:pitch=1.0" output.wav
-  ```
-- Shell out to FFmpeg (already bundled in `tools/`) as a `juce::ChildProcess`
-- Simpler but less control over quality parameters
-
-#### Recommended: Option A (RubberBand) for quality, with Option B as a fallback.
-
-- **Native functions to complete**:
-  - `timeStretchClip(filePath, outputPath, timeRatio, pitchSemitones, preserveFormants, callback)` → returns output path
-  - `pitchShiftClip(filePath, outputPath, semitones, preserveFormants, callback)` → returns output path
-
-#### Frontend Changes
-
-- **useDAWStore.ts**: `stretchClip(clipId, targetDuration)`:
-  1. Calculate `timeRatio = targetDuration / clip.duration`
-  2. Call `nativeBridge.timeStretchClip(clip.filePath, outputPath, timeRatio, 0, true)`
-  3. On completion, update clip to point to new file, regenerate peaks
-  4. Push undo command
-- **Timeline.tsx**: Add stretch handle on clip edges (Alt+drag clip edge to time-stretch instead of trim)
-- **RenderModal.tsx or dedicated dialog**: Allow specifying stretch/pitch parameters
-
----
-
-### 2.3 Pitch Shifting ✅ COMPLETED
-
-**Same as 2.2** — implemented via the same `TimeStretchProcessor` class. Pitch shifting is just time stretching with `timeRatio=1.0` and non-zero `pitchSemitones`.
-
----
-
-### 2.4 Sample Rate Conversion on Render ✅ COMPLETED
-
-**Current state**: `AudioEngine::renderProject()` always renders at the device's current sample rate, ignoring the target sample rate parameter.
-
-**What to implement**:
-
-#### C++ Backend
-
-- In `renderProject()`:
-  1. Render at device sample rate (current behavior)
-  2. If target sample rate differs from device rate:
-     - Use `juce::ResamplingAudioSource` or a dedicated resampler (e.g., `juce::LagrangeInterpolator` or libsamplerate/zita-resampler)
-     - Resample the rendered output file to target rate
-     - OR: Temporarily switch the offline render's "virtual" sample rate and use the existing SR conversion in `PlaybackEngine::fillTrackBuffer()`
-  3. Write final file at target sample rate
-
-- **Better approach**: Render the project at the target sample rate directly:
-  - Set `PlaybackEngine`'s device rate to the target rate for the duration of the render
-  - All SR conversion in `fillTrackBuffer()` will naturally produce output at the target rate
-  - Restore device rate after render
-
----
-
-### 2.5 Dither on Render ✅ COMPLETED
-
-**Current state**: `RenderModal.tsx` shows a dither option but the backend ignores it.
-
-**What to implement**:
-
-#### C++ Backend
-
-- In `renderProject()`, after rendering to float buffer and before writing to file:
-  - If bit depth < 32 (i.e., 16-bit or 24-bit) AND dither is enabled:
-    - Apply TPDF (Triangular Probability Density Function) dither
-    - Implementation: For each sample, add `(random1 + random2 - 1.0) / (2^bitDepth)` where random1/random2 are uniform [0,1]
-    - This is ~20 lines of code, standard practice
-
----
-
-### 2.6 Monitoring FX Chain ✅ COMPLETED
-
-**Current state**: `AudioEngine.cpp:1925` has a TODO — `monitoringFXChain` exists as a member but is not connected to the signal path.
-
-**What to implement**:
-
-#### C++ Backend
-
-- In the audio callback, when input monitoring is enabled for a track:
-  1. Copy input audio to monitoring buffer
-  2. Process through `monitoringFXChain` (same as `trackFXChain` processing)
-  3. Mix into output
-- This allows musicians to hear themselves with effects (e.g., reverb) while recording, without the FX being printed to the recorded file
-
----
-
-## Phase 3: New Features (Not Yet Started)
-
-### 3.1 Punch In/Out Recording ✅ COMPLETED
-
-**What it is**: Automatically start/stop recording at predefined time boundaries while transport rolls. Essential for fixing mistakes in a take without re-recording everything.
-
-#### C++ Backend
-
-- **Punch range state**: `struct PunchRange { bool enabled; double startSample; double endSample; }`
-- **AudioEngine changes**:
-  - Store punch range, updated via bridge
-  - In audio callback when recording is armed:
-    - If `currentPosition < punchRange.startSample`: pass through (play existing audio, don't record)
-    - If `currentPosition >= punchRange.startSample && currentPosition < punchRange.endSample`: record (call `AudioRecorder::writeBlock()`)
-    - If `currentPosition >= punchRange.endSample`: stop recording, finalize clip
-  - Handle block boundaries: if punch point falls mid-block, split the block
-- **Pre-roll option**: Start transport N bars before punch-in so musician can get in rhythm
-
-- **Native functions**:
-  - `setPunchRange(startSample, endSample, enabled)`
-  - `setPunchPreRoll(beats)` — number of beats to play before punch-in
-
-#### Frontend Changes
-
-- **useDAWStore.ts**: Add `punchRange: { enabled: boolean; start: number; end: number }` state
-- **Timeline.tsx**: Render punch range as a highlighted region (like loop range but different color, e.g., red tint)
-- **Timeline.tsx**: Allow dragging punch-in and punch-out markers on the ruler
-- **TransportBar.tsx**: Punch in/out toggle buttons
-- **actionRegistry.ts**: Add `toggle-punch-in`, `toggle-punch-out`, `set-punch-to-selection` actions
-
----
-
-### 3.2 Loop Recording ✅ COMPLETED
-
-**What it is**: Record multiple passes over a loop region, automatically creating takes for each pass. Essential for capturing the best performance.
-
-#### C++ Backend
-
-- When loop is enabled AND recording:
-  - Each time transport loops back to loop start:
-    1. Finalize current recording as a take
-    2. Start a new recording for the next pass
-    3. Increment take counter
-  - After recording stops, all takes are available for comping
-
-- **AudioEngine changes**:
-  - Track loop pass counter
-  - On loop boundary detection (current position wraps from loop end to loop start):
-    - `AudioRecorder::finalize()` current take
-    - `AudioRecorder::beginNewTake()` for next pass
-    - Generate unique filenames: `trackName_take1.wav`, `trackName_take2.wav`, etc.
-
-#### Frontend Changes
-
-- After loop recording stops, `getLastCompletedClips()` returns multiple clips (one per take)
-- Store them as takes on the same clip position
-- Take lanes UI already exists — just populate with loop recording results
-
----
-
-### 3.3 Record-Safe Mode ✅ COMPLETED
-
-**What it is**: Prevents accidental recording on a track. Track cannot be armed until record-safe is disabled.
-
-#### C++ Backend
-
-- Add `bool recordSafe` flag per track in `AudioEngine`
-- `setTrackRecordArm()` checks `recordSafe` — if true, refuse to arm and return error
-- Native function: `setTrackRecordSafe(trackId, bool)`
-
-#### Frontend Changes
-
-- **useDAWStore.ts**: Add `recordSafe` per track
-- **TrackHeader.tsx**: Record-safe toggle button (lock icon on record button)
-- When record-safe is on, visually disable the arm button
-
----
-
-### 3.4 LV2 Plugin Support ✅ COMPLETED
-
-**Current state**: Only VST3 is supported. LV2 is the open standard plugin format, widely used on Linux and increasingly on Windows.
-
-#### C++ Backend
-
-- **Option A**: Use JUCE's built-in LV2 hosting (available in JUCE 7+)
-  - JUCE has `juce::AudioPluginFormatManager` which can host LV2 if the `JUCE_PLUGINHOST_LV2` flag is enabled
-  - Add `target_compile_definitions(Studio13 PRIVATE JUCE_PLUGINHOST_LV2=1)` to CMakeLists.txt
-  - `PluginManager::scanForPlugins()` already uses `AudioPluginFormatManager` — LV2 plugins will appear automatically after enabling the flag
-
-- **Option B**: If JUCE's LV2 hosting is insufficient, use `lilv` library directly (more complex)
-
-- **Recommended**: Option A — minimal code changes, JUCE handles the heavy lifting
-
-#### Frontend Changes
-
-- **PluginBrowser.tsx**: Add LV2 category filter alongside VST3
-- **FXChainPanel.tsx**: LV2 plugins appear in the same list as VST3
-
----
-
-### 3.5 CLAP Plugin Support ✅ COMPLETED
-
-**What it is**: CLAP (CLever Audio Plugin) is a modern, open-source plugin format designed to address limitations of VST3 and AU. Growing ecosystem with Bitwig, Reaper support.
-
-#### C++ Backend
-
-- JUCE does not natively support CLAP hosting. Options:
-  - **clap-juce-extensions**: Open-source library that adds CLAP hosting to JUCE applications
-  - Add as a CMake dependency
-  - Register CLAP format with `AudioPluginFormatManager`
-  - Scanning and loading follows the same pattern as VST3
-
----
-
-### 3.6 Audio Units Support (macOS — Future)
-
-- Only relevant when/if Studio13-v3 goes cross-platform
-- JUCE has built-in AU hosting (`JUCE_PLUGINHOST_AU=1`)
-- Deferred until macOS port
-
----
-
-### 3.7 Full Surround / Spatial Audio
-
-**What it is**: Support for surround sound formats (5.1, 7.1, Atmos-style object-based panning).
-
-#### C++ Backend
-
-- **TrackProcessor channel expansion**:
-  - Currently processes mono/stereo. Extend to N channels.
-  - `processBlock()` must handle arbitrary channel counts
-- **VBAP Panner** (`Source/VBAPPanner.h/cpp`):
-  - Vector Base Amplitude Panning for arbitrary speaker layouts
-  - Input: source position (azimuth, elevation), speaker layout
-  - Output: per-speaker gain coefficients
-  - Implementation: ~200 lines, well-documented algorithm
-- **Speaker layout configuration**:
-  - Preset layouts: stereo, 5.1, 7.1, 7.1.4 (Atmos bed)
-  - Custom layout editor (speaker positions)
-
-#### Frontend Changes
-
-- **Panner UI**: Replace linear pan slider with 2D surround panner (circle/sphere)
-- **Speaker layout preset selector** in project settings
-- **Channel strip**: Show N meters for surround tracks
-
----
-
-### 3.8 Video Integration
-
-**Current state**: `openVideoFile()` and `getVideoFrame()` exist in NativeBridge but return empty/stub results.
-
-#### C++ Backend
-
-- **VideoReader class** (`Source/VideoReader.h/cpp`)
-  - Use FFmpeg libraries (libavformat, libavcodec, libavutil) via `juce::ChildProcess` or direct linking
-  - `openFile(path)` — open video, extract audio to WAV for timeline
-  - `getFrameAtTime(seconds)` → JPEG/PNG image data (for thumbnail strip)
-  - Frame extraction runs on background thread
-  - Timecode extraction from video metadata
-
-- **Video preview window**:
-  - Separate native window showing video frame synced to transport position
-  - Update at display refresh rate (not audio callback rate)
-  - Use `juce::OpenGLContext` or platform video APIs for efficient frame display
-
-- **Native functions to complete**:
-  - `openVideoFile(path)` → `{ duration, width, height, fps, audioPath }`
-  - `getVideoFrame(timeSeconds)` → base64 image data or shared memory handle
-  - `closeVideoFile()`
-
-#### Frontend Changes
-
-- **VideoWindow.tsx**: Render video frame synced to playhead using bridge calls
-- **Timeline.tsx**: Video thumbnail strip on a dedicated video track
-- **Import**: Drag-and-drop video files, auto-extract audio to audio track
-
----
-
-### 3.9 Timecode / Sync
-
-**What it is**: Synchronize with external hardware/software via SMPTE/LTC timecode, MIDI Time Code (MTC), MIDI Machine Control (MMC), and MIDI Clock.
-
-#### C++ Backend — Implement in phases:
-
-**3.9.1 MIDI Clock Output** (simplest)
-- In audio callback: emit MIDI Clock messages (24 ppqn) to selected MIDI output
-- Tempo-aware: clock rate follows current BPM
-- Start/Stop/Continue messages on transport changes
-- ~50 lines in audio callback
-
-**3.9.2 MIDI Clock Input (Sync to External)**
-- Listen for MIDI Clock on selected input
-- Measure interval between clocks to determine external BPM
-- Phase-lock transport to external clock
-- Requires PLL (Phase-Locked Loop) for jitter smoothing
-
-**3.9.3 MTC (MIDI Time Code) Send/Receive**
-- Full-frame messages and quarter-frame messages
-- SMPTE frame rates: 24, 25, 29.97df, 30 fps
-- ~200 lines for encoding/decoding
-
-**3.9.4 LTC (Linear Time Code) Output**
-- Generate LTC audio signal and output on a dedicated audio channel
-- Requires LTC encoder (biphase modulation of SMPTE timecode)
-- Use `libltc` library or implement from spec (~300 lines)
-
-#### Frontend Changes
-
-- **SyncSettingsPanel**: Select sync source (internal/MTC/MIDI Clock/LTC)
-- **TransportBar.tsx**: Show sync status indicator (locked/unlocked)
-- **Time display**: SMPTE timecode format option (HH:MM:SS:FF)
-
----
-
-### 3.10 Control Surface Support
-
-**What it is**: Support for hardware controllers (faders, knobs, buttons) via standard protocols.
-
-#### Architecture (Modular, Plugin-like — inspired by Ardour)
-
-- **ControlSurfaceManager** (`Source/ControlSurfaceManager.h/cpp`)
-  - Manages active control surface connections
-  - Routes parameter changes bidirectionally (hardware ↔ DAW)
-
-- **ControlSurface base class** (`Source/ControlSurface.h`)
-  ```cpp
-  class ControlSurface {
-    virtual std::string name() = 0;
-    virtual bool connect() = 0;
-    virtual void disconnect() = 0;
-    virtual void onTrackSelectionChanged(const std::string& trackId) = 0;
-    virtual void onParameterChanged(const std::string& trackId, const std::string& param, float value) = 0;
-    // Called from audio thread — must be RT-safe
-    virtual void process(int numSamples) {}
-  };
-  ```
-
-#### Implement in order of priority:
-
-**3.10.1 Generic MIDI** (most universal)
-- MIDI CC learn: user moves hardware knob → map to DAW parameter
-- Configurable CC→parameter mappings stored in JSON
-- Bidirectional: CC-in controls DAW, DAW changes send CC-out to update motorized faders
-- ~500 lines
-
-**3.10.2 Mackie Control Universal (MCU)**
-- Industry standard for control surfaces (Behringer X-Touch, Icon Platform, etc.)
-- 8-channel fader banks with bank switching
-- Transport controls, jog wheel, V-Pot encoders
-- LCD scribble strip updates
-- Well-documented protocol — ~1000 lines
-
-**3.10.3 OSC (Open Sound Control)**
-- UDP-based, used by TouchOSC, Lemur, custom controllers
-- Expose DAW state as OSC addresses: `/track/1/volume`, `/transport/play`, etc.
-- Use `juce::OSCSender` / `juce::OSCReceiver` (built into JUCE)
-- ~400 lines
-
-#### Frontend Changes
-
-- **ControlSurfaceSettingsPanel**: Select/configure active control surfaces
-- **MIDI Learn mode**: Click parameter → move hardware control → mapping saved
-
----
-
-### 3.11 Scripting Engine Completion (Lua → End-to-End)
-
-**Current state**: `ScriptEngine.cpp` has a Lua 5.4 runtime with `s13.*` API bindings. Scripts can be run from the frontend script editor. But the API coverage is limited.
-
-**What to implement**:
-
-#### C++ Backend — Expand s13.* Lua API
-
-- **Track operations**: `s13.addTrack()`, `s13.removeTrack()`, `s13.getTrackByName()`, `s13.setTrackProperty()`
-- **Clip operations**: `s13.splitClip()`, `s13.moveClip()`, `s13.getClipsInRange()`, `s13.setClipProperty()`
-- **Transport**: `s13.play()`, `s13.stop()`, `s13.record()`, `s13.getPosition()`, `s13.setPosition()`
-- **Selection**: `s13.getSelectedTracks()`, `s13.getSelectedClips()`, `s13.selectClip()`
-- **Automation**: `s13.addAutomationPoint()`, `s13.getAutomationPoints()`
-- **MIDI**: `s13.addMIDINote()`, `s13.getMIDINotes()`, `s13.transformMIDI()`
-- **Markers**: `s13.addMarker()`, `s13.getMarkers()`, `s13.jumpToMarker()`
-- **Project**: `s13.save()`, `s13.load()`, `s13.getProjectInfo()`
-- **Dialogs**: `s13.alert()`, `s13.confirm()`, `s13.prompt()`, `s13.fileDialog()`
-- **Batch processing**: `s13.processFiles()`, `s13.renderRegion()`
-
-#### Frontend Changes
-
-- **ScriptEditor.tsx**: Improve with syntax highlighting, autocompletion of s13.* API
-- **Script manager**: Save/load/organize user scripts
-- **Script keybindings**: Assign keyboard shortcuts to scripts via action registry
-
----
-
-### 3.12 Strip Silence
-
-**What it is**: Automatically detect and remove silent sections from audio clips, creating multiple smaller clips.
-
-#### C++ Backend
-
-- **Algorithm**:
-  1. Scan audio file for amplitude below threshold (e.g., -48dB)
-  2. Track state: in_sound / in_silence
-  3. Configurable parameters:
-     - Threshold (dB)
-     - Minimum silence duration (ms) — don't split on brief gaps
-     - Minimum sound duration (ms) — don't create tiny clips
-     - Pre-attack (ms) — include audio before transient
-     - Post-release (ms) — include audio after sound ends
-  4. Return list of non-silent regions: `[{ startSample, endSample }, ...]`
-
-- **Native function**: `detectSilentRegions(filePath, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs)` → regions JSON
-
-#### Frontend Changes
-
-- **StripSilenceDialog.tsx**: Preview dialog showing detected regions before applying
-- **useDAWStore.ts**: `stripSilence(clipId, params)`:
-  1. Call backend to detect regions
-  2. Split clip into multiple clips at detected boundaries
-  3. Push undo command
-
----
-
-### 3.13 Offline Bounce / Freeze Track
-
-**What it is**: Render a track's output (with all FX) to a new audio file, replacing the track's clips. Reduces CPU load from plugins.
-
-#### C++ Backend
-
-- Already partially implemented — `renderProject()` can render individual tracks via stem export
-- **New function**: `freezeTrack(trackId)`:
-  1. Render the track's output (including all FX) to a new WAV file
-  2. Replace the track's clips with a single clip pointing to the bounced file
-  3. Bypass all FX on the track (they're baked in)
-  4. Store original state for un-freeze
-
-- **Unfreeze**: `unfreezeTrack(trackId)`:
-  1. Restore original clips and FX state
-  2. Remove bounced file
-
-#### Frontend Changes
-
-- **TrackHeader.tsx**: Freeze/unfreeze button (snowflake icon)
-- **useDAWStore.ts**: Track `isFrozen` state, `frozenClipId`, `originalClips`, `originalFX`
-- Frozen tracks show a visual indicator (e.g., blue tint, snowflake badge)
-
----
-
-### 3.14 AAF/OMF Import/Export (Session Interchange)
-
-**What it is**: Import/export projects from/to other DAWs (Pro Tools, Logic, etc.) via AAF (Advanced Authoring Format) or OMF.
-
-#### C++ Backend
-
-- **Option A**: Use `libaaf` (open source AAF library)
-  - Parse AAF files to extract: tracks, clips, clip positions, fades, volume, pan
-  - Map to Studio13's track/clip model
-  - Export: serialize Studio13 project to AAF format
-
-- **Option B**: REAPER-compatible RPP format (simpler, text-based)
-  - Parse/generate RPP (REAPER Project) files
-  - Many DAWs can import RPP via REAPER as intermediary
-
-- **Recommended**: Start with AAF import (most universal), then add AAF export
-
----
-
-### 3.15 DDP Export (CD Mastering)
-
-**Current state**: `RenderModal.tsx` has DDP export UI, `exportDDP()` exists in NativeBridge but is a stub.
-
-#### C++ Backend
-
-- **DDP format**: Industry standard for CD replication
-  - Write DDP 2.0 files: `DDPID`, `DDPMS`, `IMAGE.DAT`, `SUBCODE.DAT`
-  - Track markers from frontend markers (CD track markers)
-  - Red Book compliant: 44.1kHz, 16-bit, stereo
-  - PQ subcodes for track boundaries, ISRC codes, UPC/EAN
-
-- Libraries: No good open-source DDP libraries. Implement from spec (~500 lines, format is straightforward binary).
-
----
-
-## Phase 4: Advanced Features
-
-### 4.1 Clip Launch / Trigger System
-
-**What it is**: Ableton Live-style clip launcher for live performance. Grid of clips that can be triggered independently, with quantized launch.
-
-#### C++ Backend
-
-- **TriggerEngine class** (`Source/TriggerEngine.h/cpp`)
-  - Grid: N tracks × M slots (like Ableton's session view)
-  - Each slot holds an audio or MIDI clip reference
-  - `triggerSlot(trackIndex, slotIndex)` — queue clip for launch at next quantize boundary
-  - `stopSlot(trackIndex, slotIndex)` — queue stop
-  - Quantize options: none, 1/4, 1/2, 1 bar, 2 bars, 4 bars
-  - Clip modes: one-shot, loop, gate (play while held)
-  - Follow actions: on clip end, trigger next/prev/random/specific slot
-
-- **Audio thread integration**:
-  - At each block, check if any triggered clips should start/stop (based on quantize boundary)
-  - Mix triggered clips into track output alongside arrangement clips
-  - Or: arrangement vs session view mode toggle (like Ableton)
-
-#### Frontend Changes
-
-- **SessionView.tsx**: Grid-based clip launcher view (alternative to arrangement timeline)
-- **ClipSlot.tsx**: Individual slot with play/stop/record buttons, clip name, color
-- **SceneRow.tsx**: Trigger all clips in a row simultaneously (scene launch)
+### Plan R2: Fix Trigger Engine Bridge (Feature #13)
+
+**Priority**: High — complete audio engine wasted without bridge
+
+**Step 1: Add bridge functions in MainComponent.cpp**
+- Register native functions:
+  - `setTriggerSlot(trackIndex, slotIndex, filePath, duration, offset, mode)` → calls `triggerEngine.setSlotClip()`
+  - `triggerSlot(trackIndex, slotIndex)` → calls `triggerEngine.triggerSlot()`
+  - `stopSlot(trackIndex, slotIndex)` → calls `triggerEngine.stopSlot()`
+  - `triggerScene(sceneIndex)` → calls `triggerEngine.triggerScene()`
+  - `stopAllSlots()` → calls `triggerEngine.stopAll()`
+  - `setTriggerQuantize(mode)` → calls `triggerEngine.setQuantizeMode()`
+  - `getTriggerGridState()` → calls `triggerEngine.getGridState()`
+
+**Step 2: Add NativeBridge.ts wrappers**
+- Add corresponding functions with mock fallbacks
+
+**Step 3: Wire frontend store to bridge**
+- In `triggerClipLauncherSlot()`, `stopClipLauncherSlot()`, etc. — add `nativeBridge.triggerSlot()` calls
+- On play, sync all slot assignments to backend via `setTriggerSlot()` for each populated slot
+
+**Step 4: Add Clip Launcher UI**
+- New component `ClipLauncherView.tsx` — grid of slots, each with play/stop/record buttons
 - Toggle between Arrangement view and Session view
+- Scene launch row at bottom
 
 ---
 
-### 4.2 Step Sequencer
+### Plan R3: Channel Strip EQ UI (Feature #4)
 
-**What it is**: Grid-based MIDI pattern editor (like drum machines). Each row = pitch, each column = time step.
+**Priority**: Medium — enhances mixing workflow
 
-#### Frontend
+**Where**: `frontend/src/components/ChannelStrip.tsx`
 
-- **StepSequencer.tsx**: Grid of buttons, click to toggle notes on/off
-- Configure: step count, step size (1/16, 1/8, etc.), velocity per step
-- Output to MIDI clip that feeds instrument plugin
+**Implementation**:
+- Add collapsible "EQ" section in ChannelStrip (below existing Gain Staging section)
+- Enable/disable toggle → calls `nativeBridge.setChannelStripEQEnabled(trackId, bool)`
+- Per-band controls (HPF, LPF, 4 parametric):
+  - Frequency knob/slider
+  - Gain knob/slider (parametric bands only)
+  - Q knob/slider (parametric bands only)
+  - Enable toggle per band
+- Wire each control to `nativeBridge.setChannelStripEQParam(trackId, bandIndex, paramName, value)`
+- Optional: Reuse ParametricGraph component for visual EQ curve
 
-#### C++ Backend
-
-- Step sequencer data stored as MIDI events in `MIDIClip`
-- Playback via existing MIDI clip → instrument plugin pipeline
-
----
-
-### 4.3 Built-in Effects (ACE-style)
-
-**What it is**: Ship basic built-in effects so users have something without installing third-party plugins. Ardour has ACE Compressor, ACE EQ, ACE Delay, ACE Reverb, etc.
-
-#### C++ Backend — Implement as JUCE AudioProcessor subclasses
-
-These can be based on the existing S13FX (JSFX) infrastructure or implemented directly:
-
-**Priority order**:
-1. **S13 EQ** — Parametric EQ (4-band + HPF + LPF), uses `juce::dsp::IIR::Filter`
-2. **S13 Compressor** — Feed-forward compressor with attack/release/threshold/ratio/knee/makeup
-3. **S13 Delay** — Stereo delay with tempo sync, feedback, ping-pong mode
-4. **S13 Reverb** — Algorithmic reverb (Freeverb-based, `juce::dsp::Reverb`)
-5. **S13 Gate** — Noise gate with threshold/attack/hold/release
-6. **S13 Chorus** — Stereo chorus with rate/depth/feedback
-7. **S13 Limiter** — Brickwall limiter (look-ahead based)
-8. **S13 Saturator** — Soft clipping / tape saturation
-
-Each plugin: ~200-400 lines of C++, using JUCE DSP module.
-
-#### Frontend Changes
-
-- Built-in plugins appear in PluginBrowser with a "Built-in" category
-- Custom parameter UIs for each (instead of generic slider layout)
+**Bridge functions needed**: Already exposed (`setChannelStripEQEnabled`, `setChannelStripEQParam`)
 
 ---
 
-### 4.4 Sidechain Support
+### Plan R4: Sidechain Routing UI (Feature #5)
 
-**What it is**: Route audio from one track to a plugin's sidechain input on another track. Essential for sidechain compression (ducking), gating, etc.
+**Priority**: Medium — essential for sidechain compression workflows
 
-#### C++ Backend
+**Where**: `frontend/src/components/FXChainPanel.tsx`
 
-- **TrackProcessor changes**:
-  - Support sidechain input routing: `setSidechainSource(pluginIndex, sourceTrackId)`
-  - Before calling `plugin->processBlock()`, fill sidechain input channels from source track's output buffer
-  - Requires processing order: source track must be processed before destination track
-  - AudioEngine already has processing order via `processOrderedTracks()` — extend with sidechain dependency graph
+**Implementation**:
+- Per plugin slot, add a "Sidechain" dropdown (only for plugins that support sidechain input)
+- Dropdown lists all other tracks as potential sidechain sources
+- On select → `nativeBridge.setSidechainSource(trackId, fxIndex, sourceTrackId)`
+- "None" option → `nativeBridge.clearSidechainSource(trackId, fxIndex)`
+- Visual indicator when sidechain is active (small icon/badge on plugin slot)
 
-#### Frontend Changes
-
-- **FXChainPanel.tsx**: Per-plugin sidechain input selector dropdown
-- **RoutingMatrix.tsx**: Show sidechain connections
+**Bridge functions needed**: Already exposed (`setSidechainSource`, `clearSidechainSource`, `getSidechainSource`)
 
 ---
 
-## Phase 5: Cross-Platform & Distribution
+### Plan R5: Pan Law Options UI (Feature #6)
 
-### 5.1 macOS Port
+**Priority**: Low — rarely changed, but easy to add
 
-- JUCE is cross-platform — C++ code compiles on macOS with minimal changes
-- Replace ASIO/WASAPI with CoreAudio backend (JUCE handles this)
-- Replace WebView2 with WKWebView (JUCE's `WebBrowserComponent` abstracts this)
-- Enable Audio Units hosting (`JUCE_PLUGINHOST_AU=1`)
-- Add code signing and notarization for distribution
-- Build system: CMake already cross-platform, add macOS targets
+**Where**: `frontend/src/components/ProjectSettingsModal.tsx`
 
-### 5.2 Linux Port
+**Implementation**:
+- Add "Pan Law" dropdown in project settings, options:
+  - Constant Power (-3dB) — default
+  - -4.5dB
+  - -6dB (Linear)
+  - 0dB (Unity)
+- On change → `nativeBridge.setPanLaw(value)`
+- Store current pan law in project state for save/load
 
-- JUCE supports Linux (ALSA, JACK backends)
-- Replace WebView2 with WebKitGTK (`WebBrowserComponent` on Linux)
-- Enable LV2 plugin hosting (primary format on Linux)
-- Package as AppImage or Flatpak
-- Test with PipeWire (modern Linux audio)
-
-### 5.3 Installer / Auto-Update
-
-- **Windows**: Create NSIS or WiX installer, include Visual C++ runtime
-- **macOS**: Create .dmg with drag-to-Applications
-- **Auto-update**: Check for updates on startup, download in background, prompt to install
+**Bridge functions needed**: Already exposed (`setPanLaw`)
 
 ---
 
-## Deferred Features & Improvements (ALL REQUIRED — to be addressed after core feature phases)
+### Plan R6: DC Offset Removal UI (Feature #7)
 
-> Every item below is required for a production-quality DAW but is deferred to avoid scope creep during core feature implementation. None are optional — they are sequenced after Phases 1–5.
+**Priority**: Low — niche feature, easy to add
 
-### Visual / Cosmetic
+**Where**: `frontend/src/components/ChannelStrip.tsx` or track context menu
 
-- [x] **Waveform rendering quality**: Anti-aliased waveforms, colored by clip/track, min/max filled rendering
-- [x] **Clip rendering**: Rounded corners, gradient fills, shadow/glow on selected clips, clip name label truncation
-- [x] **Fade curve visualization**: Show actual fade curve shape overlaid on clip waveform (not just handles)
-- [x] **Automation lane styling**: Bezier curve rendering, filled area under curve, color per parameter type, hover tooltips on points
-- [x] **Mixer panel redesign**: More realistic fader graphics, VU-style meters, scribble strips, channel strip spacing
-- [x] **Theme system**: Multiple built-in themes (dark, light, high-contrast, REAPER-gray), user-customizable theme editor with live preview
-- [x] **Track icons**: Custom icons per track (microphone, guitar, drums, keys, bus, master, etc.)
-- [x] **Clip thumbnails**: Show file name, duration, and mini-waveform on very small clips; MIDI clips show note preview
-- [x] **Smooth animations**: Animate clip moves, fader changes, panel open/close, zoom (60fps CSS transitions / Konva tweens)
-- [x] **High-DPI scaling**: Ensure all UI elements (Konva canvas, SVG icons, CSS) are crisp on 4K/5K displays
-- [x] **Color picker improvements**: Better color picker for track/clip colors with presets, recent colors, eyedropper
-- [x] **Meter styling**: Gradient meters (green→yellow→red), peak hold indicators with decay, RMS + peak dual display
-- [x] **Piano roll styling**: Velocity color gradient, note names on keys, beat grid shading, ghost notes from other tracks
-- [x] **Transport bar redesign**: Larger time display, LED-style counters, recording indicator animation
-- [x] **Scrollbar styling**: Custom styled scrollbars matching DAW theme (not browser default)
-- [x] **Loading states**: Skeleton loaders for plugin scanning, project loading, waveform generation
-- [x] **Empty state design**: Helpful prompts when no tracks/clips exist (e.g., "Drag audio here or press Ctrl+T")
+**Implementation**:
+- Add "DC Offset" toggle per track (small checkbox or button)
+- On toggle → `nativeBridge.setTrackDCOffset(trackId, enabled)`
+- Visual indicator when active
 
-### Interaction / Workflow
-
-- [x] **Drag-and-drop from OS file explorer**: Drag audio/MIDI files from Windows Explorer onto timeline (auto-detect track type)
-- [x] **Multi-monitor support**: Detachable panels (mixer, piano roll, video, FX chain) to separate windows
-- [x] **Customizable toolbar**: Let users choose which buttons appear in MainToolbar, rearrange order
-- [x] **Customizable keyboard shortcuts**: Full rebinding UI for all 177+ actions (currently view-only in KeyboardShortcutsModal)
-- [x] **Quick-add instrument**: Typing instrument name in command palette creates track + loads matching VSTi
-- [x] **Smart tool**: Single tool that switches between select/trim/fade based on cursor position on clip (top=move, bottom-edge=trim, corner=fade)
-- [x] **Snap preview**: Show ghost position when dragging near snap points before releasing
-- [x] **Zoom to selection**: Double-click time selection to zoom to fit; Ctrl+0 fits all content
-- [x] **Waveform zoom**: Vertical waveform zoom (amplitude scaling) per track, independent of track height
-- [x] **Spectral view**: Option to show spectrogram instead of waveform (requires FFT in PeakCache or frontend)
-- [x] **Track folders**: Nest tracks inside collapsible folder tracks with summed metering
-- [x] **Mixer sends section**: Visual send levels on each channel strip with destination labels
-- [x] **Undo history persistence**: Save undo history with project file so undo survives reload
-- [x] **Tab-to-transient navigation**: Tab/Shift+Tab to jump between transients in selected clip
-- [x] **Slip editing**: Alt+drag clip contents while keeping position/duration fixed
-- [x] **Marquee zoom**: Ctrl+drag rectangle on timeline to zoom to that region
-- [x] **Contextual help**: F1 while hovering over any control shows relevant help text
-- [x] **Recent files quick-open**: Ctrl+O shows recent projects in command palette style
-- [x] **Project notes**: Editable text notes panel attached to project (for session notes, lyrics, etc.)
-- [x] **Track notes**: Per-track notes field for recording session info (mic position, settings, etc.)
-- [x] **Clip gain line**: Drawable gain envelope directly on clip waveform (separate from track automation)
-- [x] **Time selection improvements**: Shift+click to extend selection, double-click between markers to select region
-- [x] **Ripple editing visual feedback**: Show affected clips shifting in real-time during ripple operations
-- [x] **Auto-scroll during playback**: Timeline follows playhead with smooth scrolling (page/continuous modes)
-- [x] **Crosshair cursor**: Optional crosshair cursor on timeline for precise positioning
-- [x] **Media browser integration**: Search/filter/preview audio files from within the DAW (beyond current file import)
-
-### Performance / Optimization
-
-- [x] **syncClipsWithBackend optimization**: Incremental sync (diff-based) instead of full clear+re-add on every Play press
-- [x] **Waveform rendering virtualization**: Only render visible waveform sections, cull off-screen clips entirely from Konva stage
-- [x] **React rendering optimization**: Profile and eliminate unnecessary re-renders during playback; verify useShallow everywhere
-- [x] **WebView2 GPU acceleration**: Ensure hardware-accelerated rendering is enabled; test Konva WebGL backend
-- [x] **Large project handling**: Test and optimize for 100+ tracks, 1000+ clips; virtual track list rendering
-- [x] **Memory management**: Track and limit memory usage for peak caches, plugin state, undo history; LRU eviction for waveform cache
-- [x] **Startup time**: Profile and optimize cold start (lazy plugin scanning, deferred project loading, splash screen)
-- [x] **Audio engine efficiency**: SIMD optimizations (SSE2/AVX) for mixing, metering, pan law calculations, fade processing
-- [x] **Lazy peak generation**: Generate peaks on-demand instead of upfront for imported files; prioritize visible clips
-- [x] **Bridge call batching**: Batch multiple addPlaybackClip calls into a single bridge call to reduce IPC overhead
-- [x] **Konva layer optimization**: Separate static layers (ruler, grid) from dynamic layers (clips, playhead) to minimize redraws
-- [x] **AudioFormatReader pooling**: Pool and reuse file readers across clips sharing the same source file
-- [x] **Plugin scan caching**: Cache plugin scan results to disk; only re-scan when VST3 directories change
-- [x] **Concurrent peak generation**: Use multiple threads for peak cache generation (currently single-thread ThreadPool)
-- [x] **Offline render speed**: Optimize render loop for maximum throughput (larger blocks, skip metering, batch plugin processing)
-- [x] **State serialization optimization**: Faster project save/load for large projects (streaming JSON, binary format option)
-
-### Audio Quality
-
-- [x] **High-quality resampling**: Replace linear interpolation in PlaybackEngine with sinc/polyphase resampling (libsamplerate or r8brain)
-- [x] **Fade curve accuracy**: Sub-sample accurate fade processing with configurable curve types per fade
-- [x] **Pan law options**: User-selectable pan law (-3dB, -4.5dB, -6dB, linear, equal power) in project settings
-- [x] **Gain staging display**: Show clip gain + track gain + master gain in a stacked meter view
-- [x] **Oversampling for built-in FX**: Optional 2x/4x oversampling for future built-in effects to reduce aliasing
-- [x] **DC offset removal**: Auto-detect and remove DC offset on imported audio
-- [x] **Loudness metering**: LUFS integrated/short-term/momentary meters on master (backend exists, UI needed)
-- [x] **Phase correlation meter**: Stereo phase correlation display on master bus
-- [x] **Spectrum analyzer**: Real-time FFT spectrum display on master bus or per-track
-
-### MIDI Editing (Piano Roll Improvements)
-
-- [x] **Velocity editing**: Click-and-drag velocity bars at bottom of piano roll
-- [x] **CC lane editing**: Draw/edit MIDI CC data (modulation, expression, sustain) below note area
-- [x] **Quantize dialog**: Configurable quantize with strength, swing, humanize parameters
-- [x] **MIDI transform**: Transpose, velocity scale, time stretch, retrograde, inversion operations
-- [x] **Step input**: Enter notes one-by-one via MIDI keyboard at configurable step size
-- [x] **Multi-clip MIDI editing**: Edit notes from multiple MIDI clips simultaneously
-- [x] **MIDI learn for plugin parameters**: Click parameter → play MIDI CC → auto-map
-- [x] **Drum editor view**: Grid-based drum map editor (alternative to piano roll for percussion)
-- [x] **MIDI import/export**: Import/export standard MIDI files (.mid) with track mapping dialog
-- [x] **Note expression**: Per-note pitch bend, pressure, slide for MPE-capable instruments
-- [x] **Scale highlighting**: Highlight scale degrees on piano roll grid (major, minor, modes, etc.)
-
-### Plugin Management
-
-- [x] **Plugin favorites**: Star/favorite plugins for quick access
-- [x] **Plugin categories/tags**: User-definable tags and categories beyond vendor grouping
-- [x] **Plugin presets browser**: Browse/load/save plugin presets from within FX chain panel
-- [x] **Generic plugin editor**: Fallback parameter UI when plugin has no native editor (grid of sliders/knobs)
-- [x] **Plugin latency compensation**: Report and compensate for plugin processing latency (PDC)
-- [x] **Plugin crash isolation**: Sandbox plugins in separate processes to prevent DAW crash on plugin failure
-- [x] **Plugin parameter automation list**: Browseable list of all automatable parameters per plugin
-- [x] **A/B comparison**: Quickly toggle between two plugin states for comparison
-- [x] **Plugin chain presets**: Save/load entire FX chains (not just individual plugin states)
-- [x] **32-bit plugin bridge**: Host 32-bit plugins via out-of-process bridge (jBridge-style)
-
-### Project Management
-
-- [x] **Project templates**: Save/load project templates (track layout, FX chains, routing, settings)
-- [x] **Session archive**: Package project + all media into a single zip/archive for sharing
-- [x] **Missing media resolver**: On project load, detect missing audio files and prompt to locate/relink
-- [x] **Media pool / bin**: Centralized view of all audio files used in the project with usage count
-- [x] **Unused media cleanup**: Detect and optionally delete audio files not referenced by any clip
-- [x] **Auto-save improvements**: Configurable interval, keep N versions, save to separate directory
-- [x] **Project compare**: Diff two project versions to see what changed
-- [x] **Collaborative metadata**: Track who made changes, session timestamps, revision notes
-
-### Mixing / Routing Improvements
-
-- [x] **Routing matrix improvements**: Visual connection matrix with click-to-route, color-coded signal flow
-- [x] **Bus/group creation workflow**: Quick-create bus from selected tracks with auto-routing
-- [x] **Pre/post fader send toggle**: Switch sends between pre-fader and post-fader per send
-- [x] **Channel strip EQ**: Inline parametric EQ on every channel strip (no plugin needed)
-- [x] **Mixer snapshots**: Save/recall mixer states (levels, pans, mutes, solos) as named snapshots
-- [x] **Mixer undo**: Separate undo history for mixer changes (or unified with timeline undo)
-- [x] **VCA faders**: Virtual Control Association for linked level control without summing
-
-### Accessibility
-
-- [x] **Screen reader support**: ARIA labels for all interactive elements, focus management
-- [x] **Keyboard-only navigation**: Full DAW operation without mouse (tab order, arrow key navigation)
-- [x] **High-contrast mode**: System high-contrast theme support for visually impaired users
-- [x] **Tooltip improvements**: Consistent, informative tooltips on all controls with keyboard shortcut hints
-- [x] **Font size scaling**: Configurable UI font size independent of system DPI
-- [x] **Color-blind safe defaults**: Ensure critical state indicators (armed, muted, soloed) don't rely solely on color
-
-### Documentation / Help
-
-- [x] **In-app getting started guide**: Interactive tutorial for first-time users
-- [x] **Contextual tooltips**: Extended help text for every control accessible via hover or F1
-- [x] **Keyboard shortcut cheat sheet**: Printable PDF export of all shortcuts
-- [x] **API documentation**: Generated docs for Lua s13.* scripting API
-- [x] **User manual**: Comprehensive HTML/PDF manual covering all features
+**Bridge functions needed**: Already exposed (`setTrackDCOffset`)
 
 ---
 
-## Implementation Priority & Dependencies
+### Plan R7: Monitoring FX Chain UI (Feature #10)
 
-```
-Phase 1 (Wire Frontend to Backend) — Estimated complexity: Medium
-├── 1.1 Automation Playback ★★★★★ (HIGHEST PRIORITY — foundational)
-│   └── No dependencies
-├── 1.2 Tempo Map ★★★★☆
-│   └── No dependencies (but affects 1.1 if automation uses beat-time)
-├── 1.3 Comping/Takes ★★★☆☆
-│   └── Depends on: recording system (already working)
-├── 1.4 Razor Editing ★★☆☆☆
-│   └── No dependencies (simple bridge sync)
-└── 1.5 Track Groups ★★☆☆☆
-    └── No dependencies (simple bridge sync)
+**Priority**: Medium — important for recording musicians
 
-Phase 2 (Complete Stubs) — Estimated complexity: Medium-High
-├── 2.1 MIDI Recording ★★★★☆
-│   └── Depends on: MIDIClip (exists), AudioRecorder pattern (exists)
-├── 2.2 Time Stretching ★★★★☆
-│   └── Depends on: RubberBand library integration
-├── 2.3 Pitch Shifting ★★★☆☆
-│   └── Depends on: 2.2 (same library)
-├── 2.4 SR Conversion on Render ★★☆☆☆
-│   └── No dependencies
-├── 2.5 Dither ★☆☆☆☆
-│   └── No dependencies (20 lines)
-└── 2.6 Monitoring FX ★★☆☆☆
-    └── No dependencies
+**Where**: New section in `MixerPanel.tsx` or dedicated panel
 
-Phase 3 (New Features) — Estimated complexity: High
-├── 3.1 Punch Recording ★★★☆☆
-│   └── Depends on: AudioRecorder (exists)
-├── 3.2 Loop Recording ★★★☆☆
-│   └── Depends on: 3.1, 1.3 (comping for take management)
-├── 3.3 Record-Safe ★☆☆☆☆
-│   └── No dependencies (trivial)
-├── 3.4 LV2 Plugins ★★★☆☆
-│   └── Depends on: JUCE flag + PluginManager refactor
-├── 3.5 CLAP Plugins ★★★★☆
-│   └── Depends on: clap-juce-extensions library
-├── 3.7 Surround/Spatial ★★★★★
-│   └── Depends on: TrackProcessor channel expansion
-├── 3.8 Video Integration ★★★★☆
-│   └── Depends on: FFmpeg linking
-├── 3.9 Timecode/Sync ★★★★☆
-│   └── Depends on: 1.2 (tempo map)
-├── 3.10 Control Surfaces ★★★★☆
-│   └── Depends on: JUCE MIDI/OSC (exists)
-├── 3.11 Scripting Completion ★★★☆☆
-│   └── Depends on: ScriptEngine (exists)
-├── 3.12 Strip Silence ★★☆☆☆
-│   └── No dependencies
-├── 3.13 Freeze Track ★★★☆☆
-│   └── Depends on: render system (exists)
-├── 3.14 AAF Import/Export ★★★★☆
-│   └── Depends on: libaaf library
-└── 3.15 DDP Export ★★★☆☆
-    └── No dependencies
+**Implementation**:
+- Add "Monitor FX" section after Master channel strip
+- Add/remove plugins → `nativeBridge.addMonitoringFX(pluginId)`, `removeMonitoringFX(index)`
+- Bypass toggle → `nativeBridge.bypassMonitoringFX(index, bypassed)`
+- Open plugin editor → `nativeBridge.openMonitoringFXEditor(index)`
+- Clear visual label: "Monitor Only — not included in renders"
 
-Phase 4 (Advanced) — Estimated complexity: Very High
-├── 4.1 Clip Launch ★★★★★
-│   └── Depends on: significant AudioEngine expansion
-├── 4.2 Step Sequencer ★★★☆☆
-│   └── Depends on: 2.1 (MIDI recording/playback)
-├── 4.3 Built-in Effects ★★★☆☆
-│   └── No dependencies (JUCE DSP)
-└── 4.4 Sidechain ★★★★☆
-    └── Depends on: TrackProcessor routing graph
-
-Phase 5 (Cross-Platform) — Estimated complexity: High
-├── 5.1 macOS Port ★★★★☆
-├── 5.2 Linux Port ★★★★☆
-└── 5.3 Installer/Update ★★★☆☆
-```
+**Bridge functions needed**: Already exposed
 
 ---
 
-## Recommended Implementation Order
+### Plan R8: Timecode Sync Settings UI (Feature #12)
 
-**Sprint 1** ✅: Phase 1.1 (Automation) + Phase 2.5 (Dither) + Phase 1.4 (Razor sync) + Phase 1.5 (Track groups sync) + Phase 1.2 (Tempo Map) + Phase 1.3 (Comping/Takes)
-**Sprint 2** ✅: Phase 2.1 (MIDI Recording) + Phase 2.6 (Monitoring FX)
-**Sprint 3** ✅: Phase 3.1 (Punch Recording) + Phase 3.2 (Loop Recording) + Phase 3.3 (Record-Safe)
-**Sprint 5** ✅: Phase 2.2–2.3 (Time Stretch / Pitch Shift) + Phase 2.4 (SR Conversion)
-**Sprint 6** ✅: Phase 3.4 (LV2) + Phase 3.5 (CLAP)
-**Sprint 7** ✅: Phase 3.10.1 (Generic MIDI Control) + Phase 3.10.3 (OSC)
-**Sprint 8** ✅: Phase 3.12 (Strip Silence) + Phase 3.13 (Freeze Track)
-**Sprint 9** ✅: Phase 3.11 (Scripting) + Phase 3.10.2 (MCU)
-**Sprint 10** ✅: Phase 3.9 (Timecode/Sync)
-**Sprint 11** ✅: Phase 3.8 (Video) + Phase 3.15 (DDP)
-**Sprint 12** ✅: Phase 3.7 (Surround) + Phase 4.4 (Sidechain)
-**Sprint 13** ✅: Phase 4.3 (Built-in Effects)
-**Sprint 14** ✅: Phase 4.1 (Clip Launch) + Phase 4.2 (Step Sequencer)
-**Sprint 15** ✅: Phase 3.14 (AAF Import/Export)
-**Sprint 16** ✅: Performance + Audio Quality Foundation (sinc resampling ✅, PDC ✅, diff-based sync ✅, plugin scan caching ✅, reader pooling ✅, pan law options ✅, DC offset removal ✅, bridge batching ✅, Konva layers ✅, concurrent peaks ✅, waveform virtualization ✅)
-**Sprint 17** ✅: Visual/Cosmetic Polish (waveform quality ✅, clip rendering ✅, fade curves ✅, automation styling ✅, themes ✅, track icons ✅, meters ✅, piano roll styling ✅, transport redesign ✅, scrollbars ✅, loading states ✅, empty states ✅, color picker ✅, animations ✅, High-DPI ✅)
-**Sprint 18** ✅: Interaction/Workflow (custom shortcuts ✅, track folders ✅, slip editing ✅, snap preview ✅, zoom-to-selection ✅, auto-scroll ✅, recent files ✅, project notes ✅, track notes ✅, marquee zoom ✅, crosshair ✅, waveform zoom ✅, time selection ✅, F1 help ✅, OS drag-drop ✅, customizable toolbar ✅, media browser ✅, auto-save ✅)
-**Sprint 19** ✅: MIDI Editing + Plugin Management + Mixing/Routing (velocity editing ✅, CC lanes ✅, quantize dialog ✅, MIDI transform ✅, scale highlighting ✅, drum editor ✅, MIDI import/export ✅, plugin favorites ✅, categories ✅, generic editor ✅, A/B ✅, chain presets ✅, bus workflow ✅, mixer snapshots ✅, mixer undo ✅, pre/post fader ✅, routing matrix ✅)
-**Sprint 20** ✅: Cross-Platform + Project Mgmt + Accessibility + Docs (CMake guards ✅, project templates ✅, session archive ✅, missing media resolver ✅, media pool ✅, unused media cleanup ✅, auto-save ✅, LUFS metering UI ✅, phase correlation meter ✅, spectrum analyzer ✅, oversampling ✅, ARIA labels ✅, keyboard nav ✅, font scaling ✅, color-blind safe ✅, tooltips ✅, contextual help ✅, high-contrast ✅)
+**Priority**: Low — needed for professional studio integration
+
+**Where**: New component `TimecodeSettingsPanel.tsx` or tab in SettingsModal
+
+**Implementation**:
+- Sync Source dropdown: Internal / MIDI Clock / MTC
+- MIDI Output Device selector (for clock/MTC send)
+- MIDI Input Device selector (for external sync)
+- SMPTE Frame Rate: 24 / 25 / 29.97df / 30
+- Sync status indicator (locked/unlocked/seeking)
+- Wire to TimecodeSyncManager via bridge calls:
+  - `setSyncSource(mode)`
+  - `setTimecodeFrameRate(fps)`
+  - `setTimecodeMIDIDevice(deviceId, isInput)`
+
+**Bridge functions needed**: Need to be added to MainComponent.cpp for TimecodeSyncManager
+
+---
+
+### Plan R9: Crosshair Cursor (Feature #29)
+
+**Priority**: Low — visual aid
+
+**Where**: `frontend/src/components/Timeline.tsx`
+
+**Implementation**:
+- Add `showCrosshair: boolean` to store, toggle via View menu
+- On mouse move over timeline stage, render:
+  - Vertical line from top to bottom at mouse X
+  - Horizontal line across full width at mouse Y
+  - Semi-transparent, dashed style
+- Use a dedicated Konva Layer (non-listening) for performance
+- Hide during drag operations
+
+---
+
+### Plan R10: Accessibility (Feature #30)
+
+**Priority**: Medium-High — important for inclusivity, significant effort
+
+**Implementation** (phased):
+
+**Phase A: ARIA labels + focus indicators**
+- Add `aria-label` to all buttons, inputs, sliders across all components
+- Add `tabIndex` to interactive elements
+- Add visible focus rings (already in Tailwind: `focus:ring-2 focus:ring-daw-accent`)
+- Ensure all tooltips include shortcut hints
+
+**Phase B: Keyboard navigation**
+- Track list: Arrow up/down to select tracks, Enter to expand
+- Timeline: Arrow keys to move selection, Shift+Arrow to extend
+- Mixer: Tab between channel strips, arrow keys for faders
+- All modals: Tab trap, Escape to close
+
+**Phase C: Screen reader optimization**
+- Announce state changes (recording started, track armed, etc.)
+- Live regions for transport status, meter readings
+- Landmark roles for main areas (timeline, mixer, transport)
+
+---
+
+### Plan R11: Missing Media Resolver
+
+**Priority**: Medium — prevents broken projects
+
+**Where**: `frontend/src/store/useDAWStore.ts` (in project load) + new dialog component
+
+**Implementation**:
+- On project load, after parsing clips, check if each audio file exists via `nativeBridge.fileExists(path)`
+- If any files are missing, show `MissingMediaDialog.tsx`:
+  - List of missing files with original paths
+  - "Locate" button per file → opens file picker
+  - "Locate Folder" → search a directory for matching filenames
+  - "Skip" → keep clip but mark as offline (dimmed in timeline)
+- Update clip paths after relinking
+
+---
+
+### Plan R12: Tab-to-Transient Navigation
+
+**Priority**: Low — workflow enhancement
+
+**Where**: `frontend/src/components/App.tsx` (keyboard handler) + `Timeline.tsx`
+
+**Implementation**:
+- Tab key: Jump playhead to next transient in selected clip
+- Shift+Tab: Jump to previous transient
+- Requires transient detection: call `nativeBridge.detectTransients(filePath, sensitivity)` (may need C++ implementation if not already present)
+- Cache transient positions per clip
+- Move playhead to nearest transient after current position
+
+---
+
+## Completed Features Reference
+
+<details>
+<summary>Phase 1: Wire Frontend to Backend (ALL COMPLETED)</summary>
+
+- 1.1 Automation Playback — Per-sample volume/pan automation in TrackProcessor, frontend sync, touch/latch modes
+- 1.2 Tempo Map — Binary search tempo lookup, metronome integration, tempo markers
+- 1.3 Comping / Takes — Frontend take management synced to backend via clip swap
+- 1.4 Razor Editing — Backend clip sync after razor content deletion
+- 1.5 Track Groups — Linked parameter changes propagated to backend per-track
+</details>
+
+<details>
+<summary>Phase 2: Complete Stubs (ALL COMPLETED)</summary>
+
+- 2.1 MIDI Recording — MIDIRecorder captures events during recording, saves to .mid
+- 2.2 Time Stretching — RubberBand/FFmpeg integration for offline stretch
+- 2.3 Pitch Shifting — Same engine as time stretching
+- 2.4 Sample Rate Conversion on Render — Device rate conversion in render path
+- 2.5 Dither — TPDF and noise-shaped dither on 16/24-bit export
+- 2.6 Monitoring FX Chain — Backend complete (see Plan R7 for missing UI)
+</details>
+
+<details>
+<summary>Phase 3: New Features (ALL COMPLETED except UI gaps)</summary>
+
+- 3.1 Punch In/Out Recording — Punch range in audio callback
+- 3.2 Loop Recording — Multi-take per loop pass
+- 3.3 Record-Safe Mode — Per-track lock on arming
+- 3.4 LV2 Plugin Support — JUCE built-in + configured search paths
+- 3.5 CLAP Plugin Support — CLAPPluginFormat class
+- 3.6 Audio Units — Deferred (macOS only)
+- 3.7 Surround / Spatial Audio — VBAP panner, speaker layouts
+- 3.8 Video Integration — VideoReader + FFmpeg + VideoWindow UI
+- 3.9 Timecode / Sync — Backend complete (see Plan R8 for missing UI)
+- 3.10 Control Surfaces — Generic MIDI, MCU, OSC implementations
+- 3.11 Scripting Engine — Lua s13.* API expanded
+- 3.12 Strip Silence — Detection + split
+- 3.13 Freeze Track — Render + bypass FX
+- 3.14 Session Import/Export — RPP import/export + EDL export
+- 3.15 DDP Export — Full DDP 2.0 exporter + UI
+</details>
+
+<details>
+<summary>Phase 4: Advanced Features (COMPLETED except bridge gaps)</summary>
+
+- 4.1 Clip Launch / Trigger Engine — Backend complete (see Plan R2 for broken bridge)
+- 4.2 Step Sequencer — Drum Editor implementation
+- 4.3 Built-in Effects — S13 EQ/Comp/Gate/Limiter/Delay/Reverb/Chorus/Saturator
+- 4.4 Sidechain — Backend complete (see Plan R4 for missing UI)
+</details>
+
+<details>
+<summary>Deferred Features — Status</summary>
+
+**Visual / Cosmetic**: All done (waveform rendering, clip rendering, fade curves, automation styling, themes, track icons, meters, piano roll, transport, scrollbars, loading states, animations, High-DPI, color picker)
+
+**Interaction / Workflow**: Mostly done. Missing: crosshair cursor (Plan R9), tab-to-transient (Plan R12), contextual help F1. Done: drag-and-drop, custom shortcuts, smart tool, snap preview, track folders, slip editing, marquee zoom, auto-scroll, media browser, project notes, track notes, waveform zoom, spectral view, time selection, recent files.
+
+**Performance / Optimization**: All done (diff-based sync, waveform virtualization, useShallow everywhere, LRU eviction, concurrent peaks, Konva layers, plugin scan caching, bridge batching, reader pooling).
+
+**Audio Quality**: Done except Lagrange resampling (uncertain). Done: pan law options (backend), DC offset removal (backend), gain staging display, oversampling, LUFS/phase/spectrum metering.
+
+**MIDI Editing**: All done (velocity, CC lanes, quantize, transform, step input, multi-clip, MIDI learn, drum editor, MIDI import/export, scale highlighting). Note expression/MPE infrastructure exists but UI may be incomplete.
+
+**Plugin Management**: Mostly done. Missing: crash isolation (sandboxing), 32-bit bridge. Done: favorites, categories, presets, generic editor, A/B comparison, chain presets, PDC, parameter automation list.
+
+**Project Management**: All done (templates, archive, missing media — actually missing media resolver NOT done, media pool, cleanup, auto-save, compare, metadata).
+
+**Mixing / Routing**: Mostly done. Missing: channel strip EQ UI (Plan R3). Done: routing matrix, bus workflow, pre/post fader sends, mixer snapshots, mixer undo, VCA faders.
+
+**Accessibility**: NOT DONE — see Plan R10.
+
+**Documentation / Help**: Mostly NOT DONE. Missing: in-app guide, F1 help, user manual, API docs. Done: keyboard shortcut cheat sheet (printable).
+</details>
+
+---
+
+## Implementation Priority Order
+
+### Sprint A (Fix Broken Features) — HIGH PRIORITY
+1. **R1: Clip Gain Envelope sync** — Add gainEnvelope to syncClipsWithBackend + clip gain drawing UI
+2. **R2: Trigger Engine bridge** — Add bridge functions + wire frontend store + basic Clip Launcher UI
+
+### Sprint B (Add Missing UI for Backend Features) — MEDIUM PRIORITY
+3. **R3: Channel Strip EQ UI** — Collapsible EQ section in ChannelStrip
+4. **R4: Sidechain Routing UI** — Per-plugin sidechain source dropdown in FXChainPanel
+5. **R5: Pan Law dropdown** — Simple dropdown in ProjectSettingsModal
+6. **R6: DC Offset toggle** — Per-track toggle
+7. **R7: Monitoring FX UI** — Monitor FX section in mixer
+
+### Sprint C (Missing Features) — MEDIUM PRIORITY
+8. **R9: Crosshair Cursor** — Konva layer with vertical+horizontal lines
+9. **R11: Missing Media Resolver** — Detection on project load + relink dialog
+
+### Sprint D (Accessibility) — MEDIUM-HIGH PRIORITY
+10. **R10: Accessibility Phase A** — ARIA labels + focus indicators across all components
+11. **R10: Accessibility Phase B** — Keyboard navigation
+12. **R10: Accessibility Phase C** — Screen reader optimization
+
+### Sprint E (Low Priority Remaining)
+13. **R8: Timecode Sync UI** — Sync settings panel
+14. **R12: Tab-to-Transient** — Transient detection + keyboard navigation
+15. Contextual help (F1) system
+16. In-app getting started guide
+17. User manual / API documentation
+18. Plugin crash isolation (separate process sandboxing)
+19. 32-bit plugin bridge
+20. MPE/Note Expression UI completion
+
+---
+
+## Score Card
+
+| Category | Done | Remaining | Total |
+|----------|------|-----------|-------|
+| Core Audio Features (1-13) | 7 | 6 (UI gaps + 2 broken) | 13 |
+| Frontend Features (14-30) | 15 | 2 | 17 |
+| Backend Features (31-36) | 6 | 0 | 6 |
+| Major Flow Changes | 7 | 1 uncertain | 8 |
+| Deferred: Visual/Cosmetic | 17 | 0 | 17 |
+| Deferred: Interaction/Workflow | 17 | 3 | 20 |
+| Deferred: Performance | 14 | 0 | 14 |
+| Deferred: Audio Quality | 8 | 1 uncertain | 9 |
+| Deferred: MIDI Editing | 11 | 0-1 (MPE) | 11 |
+| Deferred: Plugin Management | 8 | 2 | 10 |
+| Deferred: Project Management | 7 | 1 | 8 |
+| Deferred: Mixing/Routing | 6 | 1 | 7 |
+| Deferred: Accessibility | 0 | 6 | 6 |
+| Deferred: Documentation | 1 | 4 | 5 |
+| **TOTAL** | **~124** | **~27** | **~151** |
+
+**Completion: ~82%** — Most core functionality works. Remaining work is primarily UI wiring, accessibility, and documentation.

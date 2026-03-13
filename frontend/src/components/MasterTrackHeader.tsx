@@ -1,27 +1,53 @@
-import { useState } from "react";
-import { useDAWStore } from "../store/useDAWStore";
+import { useState, useCallback } from "react";
+import { useDAWStore, AUTOMATION_LANE_HEIGHT, AutomationModeType } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Slider } from "./ui";
 import { Volume2, VolumeX, Power } from "lucide-react";
 import { FXChainPanel } from "./FXChainPanel";
+import { getAutomationColor, getAutomationShortLabel, getAutomationParamDef } from "../store/automationParams";
 
 /**
  * MasterTrackHeader - Compact master channel displayed at the bottom of the TCP sidebar
- * Shows master volume fader, mute, FX button with bypass toggle
+ * Shows master volume fader, mute, FX, mono, automation button + automation lane sub-headers
  */
 export function MasterTrackHeader() {
-  const { masterVolume, isMasterMuted, masterFxCount, setMasterVolume, toggleMasterMute } = useDAWStore(useShallow((s) => ({
+  const {
+    masterVolume,
+    isMasterMuted,
+    masterFxCount,
+    masterMono,
+    masterAutomationLanes,
+    showMasterAutomation,
+    setMasterVolume,
+    toggleMasterMute,
+    toggleMasterMono,
+    toggleMasterAutomation,
+    openEnvelopeManager,
+    toggleMasterAutomationLaneVisibility,
+    setMasterAutomationLaneMode,
+    armMasterAutomationLane,
+  } = useDAWStore(useShallow((s) => ({
     masterVolume: s.masterVolume,
     isMasterMuted: s.isMasterMuted,
     masterFxCount: s.masterFxCount,
+    masterMono: s.masterMono,
+    masterAutomationLanes: s.masterAutomationLanes,
+    showMasterAutomation: s.showMasterAutomation,
     setMasterVolume: s.setMasterVolume,
     toggleMasterMute: s.toggleMasterMute,
+    toggleMasterMono: s.toggleMasterMono,
+    toggleMasterAutomation: s.toggleMasterAutomation,
+    openEnvelopeManager: s.openEnvelopeManager,
+    toggleMasterAutomationLaneVisibility: s.toggleMasterAutomationLaneVisibility,
+    setMasterAutomationLaneMode: s.setMasterAutomationLaneMode,
+    armMasterAutomationLane: s.armMasterAutomationLane,
   })));
 
   const [showFXChain, setShowFXChain] = useState(false);
   const [fxBypassed, setFxBypassed] = useState(false);
 
   const hasFx = masterFxCount > 0;
+  const hasVisibleLanes = masterAutomationLanes.some((l) => l.visible);
 
   const masterVolumeDB =
     masterVolume > 0 ? 20 * Math.log10(masterVolume) : -60;
@@ -30,6 +56,16 @@ export function MasterTrackHeader() {
     const linear = db <= -60 ? 0 : Math.pow(10, db / 20);
     void setMasterVolume(linear);
   };
+
+  const handleAutomationClick = useCallback(() => {
+    openEnvelopeManager("master");
+  }, [openEnvelopeManager]);
+
+  const handleAutomationContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    // Toggle showMasterAutomation on right-click
+    toggleMasterAutomation();
+  }, [toggleMasterAutomation]);
 
   return (
     <>
@@ -48,6 +84,18 @@ export function MasterTrackHeader() {
             title={isMasterMuted ? "Unmute Master" : "Mute Master"}
           >
             {isMasterMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+          </Button>
+
+          {/* Mono */}
+          <Button
+            variant="default"
+            size="icon-sm"
+            shape="square"
+            onClick={toggleMasterMono}
+            title={masterMono ? "Disable Mono" : "Enable Mono"}
+            className={masterMono ? "bg-yellow-600! text-white! border-yellow-500!" : ""}
+          >
+            <span className="text-[8px] font-bold">M</span>
           </Button>
 
           {/* FX + Bypass */}
@@ -85,6 +133,19 @@ export function MasterTrackHeader() {
             </Button>
           </div>
 
+          {/* Automation button */}
+          <Button
+            variant="default"
+            size="icon-sm"
+            shape="square"
+            onClick={handleAutomationClick}
+            onContextMenu={handleAutomationContextMenu}
+            title="Master Automation (right-click to toggle lanes)"
+            className={hasVisibleLanes ? "text-daw-accent! border-daw-accent!" : ""}
+          >
+            <span className="text-[9px] font-bold">A</span>
+          </Button>
+
           {/* Volume Fader */}
           <div className="flex-1 min-w-0">
             <Slider
@@ -101,6 +162,59 @@ export function MasterTrackHeader() {
             {masterVolumeDB <= -60 ? "-inf" : `${masterVolumeDB.toFixed(1)}`} dB
           </span>
         </div>
+
+        {/* Automation Lane Sub-Headers */}
+        {showMasterAutomation && masterAutomationLanes.filter((l) => l.visible).map((lane) => {
+          const laneColor = getAutomationColor(lane.param);
+          const laneLabel = getAutomationShortLabel(lane.param);
+          const paramDef = getAutomationParamDef(lane.param);
+          return (
+            <div
+              key={lane.id}
+              className="flex items-center gap-1 px-1 border-t border-neutral-700/50 shrink-0"
+              style={{ height: AUTOMATION_LANE_HEIGHT }}
+            >
+              {/* Color indicator */}
+              <div className="w-0.5 h-full shrink-0 rounded-sm" style={{ backgroundColor: laneColor }} />
+              {/* Param name */}
+              <span className="text-[10px] text-neutral-400 w-7 truncate shrink-0" title={lane.param}>
+                {laneLabel}
+              </span>
+              {/* Value display */}
+              <span className="text-[8px] text-neutral-500 w-12 text-center truncate shrink-0">
+                {paramDef.formatNormalized(paramDef.defaultNormalized)}
+              </span>
+              {/* Mode selector */}
+              <select
+                className="text-[9px] bg-neutral-700 text-neutral-300 rounded px-0.5 h-5 shrink-0 cursor-pointer"
+                value={lane.mode}
+                onChange={(e) => setMasterAutomationLaneMode(lane.id, e.target.value as AutomationModeType)}
+              >
+                <option value="off">Off</option>
+                <option value="read">Read</option>
+                <option value="touch">Touch</option>
+                <option value="latch">Latch</option>
+                <option value="write">Write</option>
+              </select>
+              {/* Arm toggle */}
+              <button
+                className={`text-[9px] w-4 h-4 rounded flex items-center justify-center shrink-0 cursor-pointer ${lane.armed ? "bg-red-600 text-white" : "bg-neutral-700 text-neutral-500 hover:text-neutral-300"}`}
+                onClick={() => armMasterAutomationLane(lane.id, !lane.armed)}
+                title={lane.armed ? "Disarm automation" : "Arm automation"}
+              >
+                R
+              </button>
+              {/* Hide lane button */}
+              <button
+                className="text-[10px] text-neutral-500 hover:text-neutral-300 w-4 h-4 flex items-center justify-center shrink-0 cursor-pointer"
+                onClick={() => toggleMasterAutomationLaneVisibility(lane.id)}
+                title="Hide this lane"
+              >
+                &times;
+              </button>
+            </div>
+          );
+        })}
       </div>
 
       {showFXChain && (

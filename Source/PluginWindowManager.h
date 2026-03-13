@@ -15,11 +15,17 @@ public:
     // Open plugin editor for a specific processor
     void openEditor(juce::AudioProcessor* processor, const juce::String& windowTitle);
     
-    // Close editor for a specific processor
+    // Close editor for a specific processor (async, safe from any thread)
     void closeEditor(juce::AudioProcessor* processor);
-    
-    // Close all plugin windows
+
+    // Close all editors for processors owned by a track (synchronous, must be called from message thread)
+    void closeEditorsForTrack(const std::vector<juce::AudioProcessor*>& processors);
+
+    // Close all plugin windows (async)
     void closeAllEditors();
+
+    // Close all plugin windows synchronously (must be called from message thread)
+    void closeAllEditorsSync();
     
     // Check if editor is open
     bool isEditorOpen(juce::AudioProcessor* processor) const;

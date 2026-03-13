@@ -4,10 +4,12 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <memory>
 
 // Forward declarations — avoid pulling heavy headers into every TU
 struct lua_State;
 class AudioEngine;
+class S13ScriptWindow;
 
 // Lua 5.4 scripting engine for DAW automation (runs on message thread ONLY)
 class ScriptEngine
@@ -50,10 +52,23 @@ public:
     // Callback invoked by s13.print() — caller can route to frontend console
     std::function<void(const juce::String&)> onPrint;
 
+    // GFX window management — used by gfx.* Lua API
+    S13ScriptWindow* getGfxWindow() const { return gfxWindow.get(); }
+    S13ScriptWindow* getOrCreateGfxWindow(const juce::String& title, int w, int h);
+    void closeGfxWindow();
+
+    // Deferred callback support (s13.defer)
+    bool hasDeferredCallback() const;
+    bool runDeferredCallback();
+    void clearDeferredCallback();
+
 private:
     lua_State* L = nullptr;
     juce::String lastError;
     juce::String lastOutput;
+
+    // GFX window for script GUI
+    std::unique_ptr<S13ScriptWindow> gfxWindow;
 
     // Reset output buffer before each execution
     void resetOutput();

@@ -23,8 +23,12 @@ import {
   List,
   Disc3,
   Radio,
+  Link2,
+  Star,
+  ExternalLink,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
+import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { Button, Input, Select } from "./ui";
@@ -49,7 +53,7 @@ interface FXChainPanelProps {
 interface FXSlot {
   index: number;
   name: string;
-  type?: "vst3" | "lv2" | "clap" | "s13fx";
+  type?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin" | "";
   pluginPath?: string;
 }
 
@@ -79,7 +83,7 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string;
-  pluginType?: "vst3" | "lv2" | "clap" | "s13fx";
+  pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin";
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -124,6 +128,8 @@ export function FXChainPanel({
     pluginABStates, togglePluginAB,
     fxChainPresets, saveFXChainPreset, loadFXChainPreset, deleteFXChainPreset,
     addAutomationLane,
+    tracks,
+    openPitchEditor,
   } = useDAWStore(
     useShallow((s) => ({
       updateTrack: s.updateTrack,
@@ -136,6 +142,8 @@ export function FXChainPanel({
       loadFXChainPreset: s.loadFXChainPreset,
       deleteFXChainPreset: s.deleteFXChainPreset,
       addAutomationLane: s.addAutomationLane,
+      tracks: s.tracks,
+      openPitchEditor: s.openPitchEditor,
     }))
   );
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
@@ -146,6 +154,7 @@ export function FXChainPanel({
   const [expandedS13FX, setExpandedS13FX] = useState<number | null>(null);
   const [s13fxSliders, setS13fxSliders] = useState<S13FXSlider[]>([]);
   const [showRawSliders, setShowRawSliders] = useState(false);
+  const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<number | null>(null);
   const [showPresetMenu, setShowPresetMenu] = useState(false);
   const [presetName, setPresetName] = useState("");
 
@@ -196,6 +205,45 @@ export function FXChainPanel({
       }
     };
   }, []);
+
+  // Sidechain routing state: maps fxIndex -> sourceTrackId (empty string = none)
+  const [sidechainSources, setSidechainSources] = useState<Record<number, string>>({});
+
+  // Fetch current sidechain sources when fxSlots change
+  useEffect(() => {
+    if (chainType === "master" || fxSlots.length === 0) return;
+    let cancelled = false;
+    const fetchSidechainSources = async () => {
+      const sources: Record<number, string> = {};
+      for (const fx of fxSlots) {
+        try {
+          const src = await nativeBridge.getSidechainSource(trackId, fx.index);
+          if (!cancelled) sources[fx.index] = src || "";
+        } catch {
+          if (!cancelled) sources[fx.index] = "";
+        }
+      }
+      if (!cancelled) setSidechainSources(sources);
+    };
+    fetchSidechainSources();
+    return () => { cancelled = true; };
+  }, [fxSlots, trackId, chainType]);
+
+  // Other tracks available as sidechain sources (exclude current track)
+  const sidechainTrackOptions = tracks.filter((t) => t.id !== trackId);
+
+  const handleSetSidechainSource = useCallback(async (fxIndex: number, sourceTrackId: string) => {
+    try {
+      if (sourceTrackId === "") {
+        await nativeBridge.clearSidechainSource(trackId, fxIndex);
+      } else {
+        await nativeBridge.setSidechainSource(trackId, fxIndex, sourceTrackId);
+      }
+      setSidechainSources((prev) => ({ ...prev, [fxIndex]: sourceTrackId }));
+    } catch (e) {
+      console.error("[FXChain] Failed to set sidechain source:", e);
+    }
+  }, [trackId]);
 
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -274,7 +322,23 @@ export function FXChainPanel({
         // S13FX not available
       }
 
-      setPlugins([...vst3Plugins, ...s13fxPlugins]);
+      // Load built-in effects
+      let builtInPlugins: Plugin[] = [];
+      try {
+        const builtIns = await nativeBridge.getAvailableBuiltInFX();
+        builtInPlugins = builtIns.map((b: any) => ({
+          name: b.name,
+          manufacturer: "Studio13",
+          category: b.category || "Built-in",
+          fileOrIdentifier: b.name,
+          isInstrument: false,
+          pluginType: "builtin" as const,
+        }));
+      } catch {
+        // Built-in FX not available
+      }
+
+      setPlugins([...builtInPlugins, ...vst3Plugins, ...s13fxPlugins]);
     } catch (e) {
       console.error("[FXChain] Failed to load available plugins:", e);
     } finally {
@@ -299,7 +363,14 @@ export function FXChainPanel({
     try {
       let success = false;
 
-      if (plugin.pluginType === "s13fx") {
+      if (plugin.pluginType === "builtin") {
+        if (chainType === "master") {
+          success = await nativeBridge.addMasterBuiltInFX(plugin.name);
+        } else {
+          const isInputFX = chainType === "input";
+          success = await nativeBridge.addTrackBuiltInFX(trackId, plugin.name, isInputFX);
+        }
+      } else if (plugin.pluginType === "s13fx") {
         if (chainType === "master") {
           success = await nativeBridge.addMasterS13FX(plugin.fileOrIdentifier);
         } else {
@@ -315,6 +386,17 @@ export function FXChainPanel({
       if (success) {
         console.log(`[FXChain] Added ${plugin.name} to ${chainType} chain`);
         await loadPlugins();
+        // Auto-open native editor for built-in plugins after add
+        if (plugin.pluginType === "builtin" && chainType !== "master") {
+          // Get the updated FX list to find the last index
+          const updatedFx = chainType === "input"
+            ? await nativeBridge.getTrackInputFX(trackId)
+            : await nativeBridge.getTrackFX(trackId);
+          if (updatedFx.length > 0) {
+            const lastFx = updatedFx[updatedFx.length - 1];
+            handleOpenEditor(lastFx.index);
+          }
+        }
       }
     } catch (e) {
       console.error("[FXChain] Failed to add plugin:", e);
@@ -556,7 +638,7 @@ export function FXChainPanel({
   });
 
   return createPortal(
-    <div className="fx-chain-overlay" onClick={onClose}>
+    <div className="fx-chain-overlay" onClick={onClose} role="dialog" aria-label={`FX chain for ${trackName}`}>
       <div
         className="fx-chain-panel-two-column"
         onClick={(e) => e.stopPropagation()}
@@ -566,7 +648,7 @@ export function FXChainPanel({
             {chainType === "master" ? "Master FX Chain" : chainType === "input" ? "Input FX Chain" : "Track FX Chain"} -{" "}
             {trackName}
           </h3>
-          <Button variant="ghost" size="icon-sm" onClick={onClose}>
+          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close FX chain panel">
             <X size={16} />
           </Button>
         </div>
@@ -584,6 +666,8 @@ export function FXChainPanel({
                   onClick={() => setShowPresetMenu(!showPresetMenu)}
                   className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors"
                   title="FX Chain Presets"
+                  aria-label="Toggle FX chain presets menu"
+                  aria-expanded={showPresetMenu}
                 >
                   <FolderOpen size={11} />
                   Presets
@@ -679,15 +763,20 @@ export function FXChainPanel({
               ) : (
                 fxSlots.map((fx, index) => {
                   const isS13FX = fx.type === "s13fx";
+                  const isBuiltIn = fx.type === "builtin";
                   return (
                     <div key={fx.index}>
                       <div
-                        className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""}`}
+                        className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
                         draggable
                         onDragStart={() => handleDragStart(index)}
                         onDragOver={handleDragOver}
                         onDrop={(e) => handleDrop(e, index)}
-                        onClick={() => isS13FX ? handleToggleS13FXSliders(fx.index) : handleOpenEditor(fx.index)}
+                        onClick={() => {
+                          if (isS13FX) handleToggleS13FXSliders(fx.index);
+                          else if (isBuiltIn && fx.name === "S13 Pitch Correct") setExpandedPitchCorrector(expandedPitchCorrector === fx.index ? null : fx.index);
+                          else handleOpenEditor(fx.index);
+                        }}
                       >
                         <div className="fx-drag-handle" title="Drag to reorder">
                           <GripVertical size={14} />
@@ -698,6 +787,7 @@ export function FXChainPanel({
                           onChange={(e) => { e.stopPropagation(); handleToggleBypass(fx.index); }}
                           onClick={(e) => e.stopPropagation()}
                           title={bypassedFx.has(fx.index) ? "Enable plugin" : "Bypass plugin"}
+                          aria-label={bypassedFx.has(fx.index) ? `Enable ${fx.name}` : `Bypass ${fx.name}`}
                           className="fx-bypass-checkbox"
                           style={{ accentColor: "#22c55e", width: 14, height: 14, cursor: "pointer", flexShrink: 0 }}
                         />
@@ -713,15 +803,28 @@ export function FXChainPanel({
                           </div>
                         </div>
                         {isS13FX && (
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            onClick={(e) => { e.stopPropagation(); handleReloadS13FX(fx.index); }}
-                            title="Reload script"
-                            className="fx-remove-btn"
-                          >
-                            <RefreshCw size={12} />
-                          </Button>
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={(e) => { e.stopPropagation(); handleOpenEditor(fx.index); }}
+                              title="Open GFX editor window"
+                              aria-label={`Open GFX editor for ${fx.name}`}
+                              className="fx-remove-btn"
+                            >
+                              <ExternalLink size={12} />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={(e) => { e.stopPropagation(); handleReloadS13FX(fx.index); }}
+                              title="Reload script"
+                              aria-label={`Reload script for ${fx.name}`}
+                              className="fx-remove-btn"
+                            >
+                              <RefreshCw size={12} />
+                            </Button>
+                          </>
                         )}
                         {/* A/B Comparison Toggle */}
                         {!isS13FX && (() => {
@@ -740,6 +843,7 @@ export function FXChainPanel({
                                 togglePluginAB(trackId, fx.index, chainType === "input");
                               }}
                               title={`A/B Compare - Active: ${activeSlot.toUpperCase()}. Click to toggle.`}
+                              aria-label={`A/B compare for ${fx.name}, active slot ${activeSlot.toUpperCase()}`}
                             >
                               <ArrowLeftRight size={10} />
                               {activeSlot.toUpperCase()}
@@ -756,6 +860,7 @@ export function FXChainPanel({
                             }`}
                             onClick={(e) => { e.stopPropagation(); handleToggleParams(fx.index); }}
                             title="Browse automatable parameters"
+                            aria-label={`Browse parameters for ${fx.name}`}
                           >
                             <List size={10} />
                           </button>
@@ -770,6 +875,7 @@ export function FXChainPanel({
                             }`}
                             onClick={(e) => { e.stopPropagation(); handleTogglePluginPresets(fx.index); }}
                             title="Plugin presets"
+                            aria-label={`Presets for ${fx.name}`}
                           >
                             <Disc3 size={10} />
                           </button>
@@ -779,11 +885,43 @@ export function FXChainPanel({
                           size="icon-sm"
                           onClick={(e) => { e.stopPropagation(); handleRemove(fx.index); }}
                           title="Remove plugin"
+                          aria-label={`Remove ${fx.name} from FX chain`}
                           className="fx-remove-btn"
                         >
                           <X size={14} />
                         </Button>
                       </div>
+
+                      {/* Sidechain Source Selector */}
+                      {chainType !== "master" && sidechainTrackOptions.length > 0 && (
+                        <div className="flex items-center gap-1.5 px-2 py-1 bg-neutral-900/60 border-x border-neutral-700">
+                          <Link2
+                            size={11}
+                            className={`shrink-0 ${sidechainSources[fx.index] ? "text-amber-400" : "text-neutral-500"}`}
+                          />
+                          <span className="text-[10px] text-neutral-400 shrink-0">SC</span>
+                          <select
+                            value={sidechainSources[fx.index] || ""}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              handleSetSidechainSource(fx.index, e.target.value);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-[10px] text-neutral-300 outline-none focus:border-amber-500 cursor-pointer min-w-0 truncate"
+                            title="Sidechain source track"
+                          >
+                            <option value="">None</option>
+                            {sidechainTrackOptions.map((t) => (
+                              <option key={t.id} value={t.id}>{t.name}</option>
+                            ))}
+                          </select>
+                          {sidechainSources[fx.index] && (
+                            <span className="text-[9px] font-bold text-amber-400 bg-amber-900/30 px-1 py-0.5 rounded shrink-0">
+                              SC
+                            </span>
+                          )}
+                        </div>
+                      )}
 
                       {/* Plugin Parameter Automation List */}
                       {!isS13FX && expandedParamsFx === fx.index && (
@@ -952,6 +1090,25 @@ export function FXChainPanel({
                           </div>
                         );
                       })()}
+
+                      {/* Pitch Corrector inline panel */}
+                      {isBuiltIn && fx.name === "S13 Pitch Correct" && expandedPitchCorrector === fx.index && (
+                        <div className="p-2">
+                          <PitchCorrectorPanel
+                            trackId={trackId}
+                            fxIndex={fx.index}
+                            onClose={() => setExpandedPitchCorrector(null)}
+                            onOpenGraphicalEditor={() => {
+                              // Find the first selected audio clip on this track to analyze
+                              const track = tracks.find(t => t.id === trackId);
+                              const clip = track?.clips?.[0];
+                              if (clip) {
+                                openPitchEditor(trackId, clip.id, fx.index);
+                              }
+                            }}
+                          />
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -975,6 +1132,7 @@ export function FXChainPanel({
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="flex-1"
+                aria-label="Search available plugins"
               />
               <Select
                 variant="default"
@@ -983,12 +1141,14 @@ export function FXChainPanel({
                 onChange={(val) => setCategoryFilter(val as string)}
                 options={categories.map((cat) => ({ value: cat, label: cat }))}
                 className="min-w-[150px]"
+                aria-label="Filter plugins by category"
               />
               <Button
                 variant="primary"
                 size="md"
                 onClick={handleScan}
                 disabled={pluginsLoading}
+                aria-label="Scan for plugins"
               >
                 {pluginsLoading ? "Scanning..." : "Scan"}
               </Button>
@@ -1007,14 +1167,17 @@ export function FXChainPanel({
               ) : (
                 filteredPlugins.map((plugin, idx) => {
                   const isScript = plugin.pluginType === "s13fx";
+                  const isBuiltInPlugin = plugin.pluginType === "builtin";
                   const { Icon, color } = isScript
-                    ? { match: "Script", Icon: Code, color: "#84cc16" }
-                    : getCategoryIcon(plugin.category);
+                    ? { Icon: Code, color: "#84cc16" }
+                    : isBuiltInPlugin
+                      ? { Icon: Star, color: "#3b82f6" }
+                      : getCategoryIcon(plugin.category);
                   return (
                     <div
                       key={idx}
                       className={`flex items-center gap-2 p-2 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
-                        isScript ? "border-lime-700/40" : "border-neutral-700"
+                        isScript ? "border-lime-700/40" : isBuiltInPlugin ? "border-blue-700/40" : "border-neutral-700"
                       }`}
                     >
                       {plugin.snapshot ? (
@@ -1039,12 +1202,17 @@ export function FXChainPanel({
                               S13FX
                             </span>
                           )}
+                          {isBuiltInPlugin && (
+                            <span className="ml-1.5 text-[9px] font-normal text-blue-400 bg-blue-900/30 px-1 py-0.5 rounded">
+                              Built-in
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] text-neutral-400">
                           {plugin.manufacturer}
                         </div>
                         <div className="text-[9px] text-neutral-500">
-                          {isScript ? "JSFX Script" : plugin.category}
+                          {isScript ? "JSFX Script" : isBuiltInPlugin ? "Studio13 Built-in" : plugin.category}
                         </div>
                       </div>
                       <Button

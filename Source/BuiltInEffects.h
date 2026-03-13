@@ -1,14 +1,12 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
+#include <mutex>
 
 //==============================================================================
 /**
  * Base class for all Studio13 built-in effects.
- *
- * Provides AudioProcessor boilerplate shared by S13EQ, S13Compressor, S13Gate,
- * and S13Limiter. Each subclass only needs to implement getName(),
- * prepareToPlay(), processBlock(), and optionally releaseResources().
  */
 class S13BuiltInEffect : public juce::AudioProcessor
 {
@@ -16,12 +14,11 @@ public:
     S13BuiltInEffect();
     ~S13BuiltInEffect() override = default;
 
-    // Identify as built-in (not VST3, not JSFX)
     bool isS13BuiltIn() const { return true; }
 
-    // ---- AudioProcessor boilerplate (same for all built-ins) ----
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    // ---- AudioProcessor boilerplate ----
+    bool hasEditor() const override { return true; }
+    juce::AudioProcessorEditor* createEditor() override;
 
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
@@ -36,14 +33,16 @@ public:
 
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    // Oversampling control (Phase 20.12)
     void setOversamplingEnabled(bool enabled);
     bool isOversamplingEnabled() const { return oversamplingEnabled; }
 
+    // Gain reduction metering (for compressor, gate, limiter)
+    float getGainReductionDB() const { return gainReductionDB.load(); }
+
 protected:
-    // 2x oversampling processor — initialized in derived prepareToPlay()
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     bool oversamplingEnabled = false;
+    std::atomic<float> gainReductionDB { 0.0f };
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13BuiltInEffect)
@@ -51,12 +50,11 @@ private:
 
 //==============================================================================
 /**
- * S13EQ — 4-band parametric EQ with HPF and LPF.
+ * S13EQ -- 8-band parametric EQ with selectable filter types per band.
  *
- * Signal chain: HPF -> Band1 -> Band2 -> Band3 -> Band4 -> LPF
- *
- * Uses juce::dsp::ProcessorDuplicator<IIR::Filter, IIR::Coefficients> for
- * automatic stereo duplication of mono IIR filters.
+ * Each band: Bell, Low Shelf, High Shelf, Low Cut, High Cut, Notch, Band Pass.
+ * Slopes for cut/shelf: 6, 12, 24, 48 dB/oct.
+ * Includes FFT spectrum analyzer data output.
  */
 class S13EQ : public S13BuiltInEffect
 {
@@ -65,6 +63,7 @@ public:
     ~S13EQ() override = default;
 
     const juce::String getName() const override { return "S13 EQ"; }
+    juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -73,43 +72,88 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // ---- Parameters ----
-    // HPF
-    std::atomic<float> hpfFreq { 20.0f };     // 20-500 Hz
+    // Filter types
+    enum class FilterType : int
+    {
+        Bell = 0, LowShelf, HighShelf, LowCut, HighCut, Notch, BandPass
+    };
 
-    // LPF
-    std::atomic<float> lpfFreq { 20000.0f };   // 2000-20000 Hz
+    // Slope options for cut/shelf filters
+    enum class FilterSlope : int
+    {
+        dB6 = 0, dB12, dB24, dB48
+    };
 
-    // 4 parametric bands
+    static constexpr int numBands = 8;
+
     struct BandParams
     {
-        std::atomic<float> freq { 1000.0f };   // Hz
-        std::atomic<float> gain { 0.0f };      // dB (-24 to +24)
-        std::atomic<float> q { 1.0f };         // 0.1 to 10.0
+        std::atomic<float> enabled { 1.0f };    // 0 = bypassed, 1 = active
+        std::atomic<float> type { 0.0f };       // FilterType as float
+        std::atomic<float> freq { 1000.0f };    // Hz (20-20000)
+        std::atomic<float> gain { 0.0f };       // dB (-30 to +30)
+        std::atomic<float> q { 1.0f };          // 0.1 to 30.0
+        std::atomic<float> slope { 1.0f };      // FilterSlope as float (for cut/shelf)
     };
-    BandParams bands[4];
+    std::array<BandParams, numBands> bands;
+
+    std::atomic<float> outputGain { 0.0f };    // dB (-12 to +12)
+    std::atomic<float> autoGain { 0.0f };      // 0 = off, 1 = on
+
+    // Spectrum analyzer data
+    static constexpr int fftOrder = 11;        // 2048-point FFT
+    static constexpr int fftSize = 1 << fftOrder;
+
+    struct SpectrumData
+    {
+        std::array<float, fftSize / 2> preEQ {};
+        std::array<float, fftSize / 2> postEQ {};
+        bool ready = false;
+    };
+    SpectrumData getSpectrumData() const;
+
+    // Get magnitude response at given frequencies (for drawing the EQ curve)
+    std::vector<float> getMagnitudeResponse(const std::vector<float>& frequencies) const;
 
 private:
+    static constexpr int maxStagesPerBand = 4; // for 48 dB/oct cascaded biquads
     using StereoIIR = juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                                       juce::dsp::IIR::Coefficients<float>>;
 
-    StereoIIR hpf;
-    StereoIIR lpf;
-    StereoIIR band1, band2, band3, band4;
+    StereoIIR bandFilters[numBands][maxStagesPerBand];
+    int activeStages[numBands] = {};
 
     double cachedSampleRate = 44100.0;
 
     void updateFilters();
+    void updateBand(int bandIndex);
+    int getNumStagesForSlope(FilterSlope slope) const;
+
+    // FFT for spectrum analyzer
+    juce::dsp::FFT fft { fftOrder };
+    juce::dsp::WindowingFunction<float> window { fftSize, juce::dsp::WindowingFunction<float>::hann };
+
+    std::array<float, fftSize> preEQBuffer {};
+    std::array<float, fftSize> postEQBuffer {};
+    int fftWritePos = 0;
+
+    mutable std::mutex spectrumMutex;
+    SpectrumData spectrumOutput;
+    int fftBlockCounter = 0;
+    static constexpr int fftUpdateInterval = 4;
+
+    void computeSpectrum(const std::array<float, fftSize>& input, std::array<float, fftSize / 2>& output);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13EQ)
 };
 
 //==============================================================================
 /**
- * S13Compressor — Feed-forward compressor with knee and makeup gain.
+ * S13Compressor -- Multi-style feed-forward compressor.
  *
- * Uses juce::dsp::Compressor for the core compression, with additional
- * soft-knee and makeup gain applied manually.
+ * Styles: Clean, Punch, Opto, FET, VCA.
+ * Includes dry/wet for parallel compression, sidechain HPF, lookahead,
+ * and real-time gain reduction output.
  */
 class S13Compressor : public S13BuiltInEffect
 {
@@ -118,6 +162,7 @@ public:
     ~S13Compressor() override = default;
 
     const juce::String getName() const override { return "S13 Compressor"; }
+    juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -126,31 +171,52 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // ---- Parameters ----
+    enum class Style : int { Clean = 0, Punch, Opto, FET, VCA };
+
     std::atomic<float> threshold { 0.0f };     // -60 to 0 dB
     std::atomic<float> ratio { 1.0f };         // 1:1 to 20:1
     std::atomic<float> attack { 10.0f };       // 0.1 to 100 ms
-    std::atomic<float> release { 100.0f };     // 10 to 1000 ms
-    std::atomic<float> knee { 0.0f };          // 0 to 20 dB
-    std::atomic<float> makeupGain { 0.0f };    // 0 to 30 dB
+    std::atomic<float> release { 100.0f };     // 10 to 2000 ms
+    std::atomic<float> knee { 0.0f };          // 0 to 24 dB
+    std::atomic<float> makeupGain { 0.0f };    // 0 to 36 dB
+    std::atomic<float> mix { 1.0f };           // 0-1 (parallel compression)
+    std::atomic<float> style { 0.0f };         // Style as float
+    std::atomic<float> autoMakeup { 0.0f };    // 0 = off, 1 = on
+    std::atomic<float> autoRelease { 0.0f };   // 0 = off, 1 = on
+    std::atomic<float> sidechainHPF { 20.0f }; // 20-500 Hz
+    std::atomic<float> lookaheadMs { 0.0f };   // 0-20 ms
+
+    // Metering
+    float getCurrentGainReduction() const { return gainReductionDB.load(); }
+    float getInputLevel() const { return inputLevelDB.load(); }
+    float getOutputLevel() const { return outputLevelDB.load(); }
 
 private:
-    juce::dsp::Compressor<float> compressor;
+    float envelopeLevel = 0.0f;
+    float currentGainLin = 1.0f;
+
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMakeup;
     double cachedSampleRate = 44100.0;
+
+    juce::dsp::IIR::Filter<float> scHPF_L;
+    juce::dsp::IIR::Filter<float> scHPF_R;
+    float lastSCHPFFreq = 20.0f;
+
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayL { 2048 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayR { 2048 };
+
+    std::atomic<float> inputLevelDB { -100.0f };
+    std::atomic<float> outputLevelDB { -100.0f };
+
+    float computeGain(float inputDB) const;
+    void getStyleBallistics(float& atkMs, float& relMs) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Compressor)
 };
 
 //==============================================================================
 /**
- * S13Gate — Noise gate with hold and range.
- *
- * Custom implementation using an envelope follower with ballistics filtering,
- * since juce::dsp::NoiseGate lacks hold and range parameters.
- *
- * Stereo-linked detection: uses the louder channel's level to control
- * gain reduction on both channels, preserving the stereo image.
+ * S13Gate -- Noise gate with hold, range, hysteresis, sidechain filter.
  */
 class S13Gate : public S13BuiltInEffect
 {
@@ -159,6 +225,7 @@ public:
     ~S13Gate() override = default;
 
     const juce::String getName() const override { return "S13 Gate"; }
+    juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -167,25 +234,33 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // ---- Parameters ----
     std::atomic<float> threshold { -40.0f };   // -80 to 0 dB
     std::atomic<float> attackMs { 1.0f };      // 0.01 to 50 ms
     std::atomic<float> holdMs { 50.0f };       // 0 to 500 ms
-    std::atomic<float> releaseMs { 50.0f };    // 5 to 500 ms
-    std::atomic<float> range { -80.0f };       // -80 to 0 dB (floor gain when gate is closed)
+    std::atomic<float> releaseMs { 50.0f };    // 5 to 2000 ms
+    std::atomic<float> range { -80.0f };       // -80 to 0 dB
+    std::atomic<float> hysteresis { 0.0f };    // 0 to 20 dB
+    std::atomic<float> sidechainHPF { 20.0f }; // 20-2000 Hz
+    std::atomic<float> sidechainLPF { 20000.0f }; // 200-20000 Hz
+    std::atomic<float> mix { 1.0f };           // 0-1
+
+    bool isGateOpen() const { return gateOpen.load(); }
 
 private:
-    // Envelope state (stereo-linked, so one value)
     float envelopeLevel = 0.0f;
     int holdCounter = 0;
-    float currentGain = 0.0f;  // 0 = fully closed, 1 = fully open
+    float currentGain = 0.0f;
+    std::atomic<bool> gateOpen { false };
 
-    // Cached coefficients
     float attackCoeff = 0.0f;
     float releaseCoeff = 0.0f;
     int holdSamples = 0;
     float thresholdLinear = 0.0f;
+    float closeThresholdLinear = 0.0f;
     float rangeGain = 0.0f;
+
+    juce::dsp::IIR::Filter<float> scHPF_L, scHPF_R;
+    juce::dsp::IIR::Filter<float> scLPF_L, scLPF_R;
 
     double cachedSampleRate = 44100.0;
 
@@ -196,10 +271,7 @@ private:
 
 //==============================================================================
 /**
- * S13Limiter — Brickwall limiter with ceiling control.
- *
- * Uses juce::dsp::Limiter for the core limiting with an additional ceiling
- * parameter that scales the output to ensure no sample exceeds the ceiling level.
+ * S13Limiter -- Brickwall limiter with ceiling and lookahead.
  */
 class S13Limiter : public S13BuiltInEffect
 {
@@ -208,6 +280,7 @@ public:
     ~S13Limiter() override = default;
 
     const juce::String getName() const override { return "S13 Limiter"; }
+    juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -216,10 +289,10 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // ---- Parameters ----
     std::atomic<float> threshold { -1.0f };    // -20 to 0 dB
     std::atomic<float> releaseMs { 100.0f };   // 10 to 500 ms
     std::atomic<float> ceiling { 0.0f };       // -3 to 0 dB
+    std::atomic<float> lookaheadMs { 5.0f };   // 0 to 20 ms
 
 private:
     juce::dsp::Limiter<float> limiter;

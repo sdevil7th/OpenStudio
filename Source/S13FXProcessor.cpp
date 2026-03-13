@@ -1,4 +1,5 @@
 #include "S13FXProcessor.h"
+#include "S13FXGfxEditor.h"
 
 S13FXProcessor::S13FXProcessor()
     : AudioProcessor(BusesProperties()
@@ -346,16 +347,33 @@ bool S13FXProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
     return true;
 }
 
+bool S13FXProcessor::hasGfxSection() const
+{
+    return effect != nullptr && ysfx_has_section(effect, ysfx_section_gfx);
+}
+
+bool S13FXProcessor::hasEditor() const
+{
+    return hasGfxSection();
+}
+
+juce::AudioProcessorEditor* S13FXProcessor::createEditor()
+{
+    if (hasGfxSection())
+        return new S13FXGfxEditor(*this);
+    return nullptr;
+}
+
 void S13FXProcessor::updateTimeInfo()
 {
     if (!effect)
         return;
 
-    auto* playHead = getPlayHead();
-    if (!playHead)
+    auto* ph = getPlayHead();
+    if (!ph)
         return;
 
-    auto posInfo = playHead->getPosition();
+    auto posInfo = ph->getPosition();
     if (!posInfo.hasValue())
         return;
 

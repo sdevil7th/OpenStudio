@@ -1,5 +1,6 @@
 #include "ScriptEngine.h"
 #include "AudioEngine.h"
+#include "S13ScriptWindow.h"
 
 // Lua is compiled as C, so we need extern "C" linkage
 extern "C" {
@@ -804,6 +805,309 @@ static int l_fileDialog(lua_State* L)
 }
 
 // ============================================================================
+// GFX API — Lua functions under s13.gfx.*
+// ============================================================================
+
+// s13.gfx.init(title, width, height) — open/resize script GUI window
+static int l_gfx_init(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se) return 0;
+
+    const char* title = luaL_optstring(L, 1, "Script");
+    int w = static_cast<int>(luaL_optinteger(L, 2, 400));
+    int h = static_cast<int>(luaL_optinteger(L, 3, 300));
+
+    se->getOrCreateGfxWindow(title, w, h);
+    return 0;
+}
+
+// s13.gfx.close() — close script GUI window
+static int l_gfx_close(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (se) se->closeGfxWindow();
+    return 0;
+}
+
+// s13.gfx.set(r, g, b [, a]) — set current drawing color (0-1)
+static int l_gfx_set(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    float r = static_cast<float>(luaL_checknumber(L, 1));
+    float g = static_cast<float>(luaL_checknumber(L, 2));
+    float b = static_cast<float>(luaL_checknumber(L, 3));
+    float a = static_cast<float>(luaL_optnumber(L, 4, 1.0));
+    se->getGfxWindow()->setColor(r, g, b, a);
+    return 0;
+}
+
+// s13.gfx.rect(x, y, w, h [, filled])
+static int l_gfx_rect(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int x = static_cast<int>(luaL_checkinteger(L, 1));
+    int y = static_cast<int>(luaL_checkinteger(L, 2));
+    int w = static_cast<int>(luaL_checkinteger(L, 3));
+    int h = static_cast<int>(luaL_checkinteger(L, 4));
+    bool filled = lua_toboolean(L, 5) != 0;
+    if (lua_gettop(L) < 5) filled = true;
+    se->getGfxWindow()->drawRect(x, y, w, h, filled);
+    return 0;
+}
+
+// s13.gfx.line(x1, y1, x2, y2 [, aa])
+static int l_gfx_line(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int x1 = static_cast<int>(luaL_checkinteger(L, 1));
+    int y1 = static_cast<int>(luaL_checkinteger(L, 2));
+    int x2 = static_cast<int>(luaL_checkinteger(L, 3));
+    int y2 = static_cast<int>(luaL_checkinteger(L, 4));
+    bool aa = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : true;
+    se->getGfxWindow()->drawLine(x1, y1, x2, y2, aa);
+    return 0;
+}
+
+// s13.gfx.circle(x, y, r [, fill, aa])
+static int l_gfx_circle(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int x = static_cast<int>(luaL_checkinteger(L, 1));
+    int y = static_cast<int>(luaL_checkinteger(L, 2));
+    int r = static_cast<int>(luaL_checkinteger(L, 3));
+    bool fill = lua_gettop(L) >= 4 ? (lua_toboolean(L, 4) != 0) : true;
+    bool aa = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : true;
+    se->getGfxWindow()->drawCircle(x, y, r, fill, aa);
+    return 0;
+}
+
+// s13.gfx.arc(x, y, r, ang1, ang2 [, aa])
+static int l_gfx_arc(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int x = static_cast<int>(luaL_checkinteger(L, 1));
+    int y = static_cast<int>(luaL_checkinteger(L, 2));
+    int r = static_cast<int>(luaL_checkinteger(L, 3));
+    float a1 = static_cast<float>(luaL_checknumber(L, 4));
+    float a2 = static_cast<float>(luaL_checknumber(L, 5));
+    bool aa = lua_gettop(L) >= 6 ? (lua_toboolean(L, 6) != 0) : true;
+    se->getGfxWindow()->drawArc(x, y, r, a1, a2, aa);
+    return 0;
+}
+
+// s13.gfx.roundrect(x, y, w, h, radius)
+static int l_gfx_roundrect(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int x = static_cast<int>(luaL_checkinteger(L, 1));
+    int y = static_cast<int>(luaL_checkinteger(L, 2));
+    int w = static_cast<int>(luaL_checkinteger(L, 3));
+    int h = static_cast<int>(luaL_checkinteger(L, 4));
+    int rad = static_cast<int>(luaL_checkinteger(L, 5));
+    se->getGfxWindow()->drawRoundedRect(x, y, w, h, rad);
+    return 0;
+}
+
+// s13.gfx.drawstr(text [, flags])
+static int l_gfx_drawstr(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    const char* text = luaL_checkstring(L, 1);
+    int flags = static_cast<int>(luaL_optinteger(L, 2, 0));
+    se->getGfxWindow()->drawString(text, flags);
+    return 0;
+}
+
+// s13.gfx.setfont(size [, face, flags])
+static int l_gfx_setfont(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int size = static_cast<int>(luaL_checkinteger(L, 1));
+    const char* face = luaL_optstring(L, 2, "");
+    int flags = static_cast<int>(luaL_optinteger(L, 3, 0));
+    se->getGfxWindow()->setFont(size, face, flags);
+    return 0;
+}
+
+// s13.gfx.measurestr(text) -> w, h
+static int l_gfx_measurestr(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) { lua_pushinteger(L, 0); lua_pushinteger(L, 0); return 2; }
+
+    const char* text = luaL_checkstring(L, 1);
+    auto [w, h] = se->getGfxWindow()->measureString(text);
+    lua_pushinteger(L, w);
+    lua_pushinteger(L, h);
+    return 2;
+}
+
+// s13.gfx.getchar() -> keycode
+static int l_gfx_getchar(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) { lua_pushinteger(L, 0); return 1; }
+
+    lua_pushinteger(L, se->getGfxWindow()->getChar());
+    return 1;
+}
+
+// s13.gfx.clear([color])
+static int l_gfx_clear(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se || !se->getGfxWindow()) return 0;
+
+    int color = static_cast<int>(luaL_optinteger(L, 1, 0));
+    se->getGfxWindow()->clearBackground(color);
+    return 0;
+}
+
+// s13.defer(callback) — schedule callback for next frame
+static int l_defer(lua_State* L)
+{
+    auto* se = getScriptEngine(L);
+    if (!se) return 0;
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+
+    // Clear any existing deferred callback
+    se->clearDeferredCallback();
+
+    // Store the function in the Lua registry
+    lua_pushvalue(L, 1);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    // Tell ScriptEngine about it (friend-style access via public methods)
+    // We store the ref in the engine's internal state
+    lua_getfield(L, LUA_REGISTRYINDEX, kScriptEngineKey);
+    lua_pop(L, 1);
+
+    // Store ref directly in registry with a known key
+    lua_pushinteger(L, ref);
+    lua_setfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+
+    return 0;
+}
+
+// ============================================================================
+// ScriptEngine gfx window and defer methods
+// ============================================================================
+
+S13ScriptWindow* ScriptEngine::getOrCreateGfxWindow(const juce::String& title, int w, int h)
+{
+    if (!gfxWindow || !gfxWindow->isWindowOpen())
+        gfxWindow = std::make_unique<S13ScriptWindow>(title, w, h);
+    return gfxWindow.get();
+}
+
+void ScriptEngine::closeGfxWindow()
+{
+    gfxWindow.reset();
+}
+
+bool ScriptEngine::hasDeferredCallback() const
+{
+    if (!L) return false;
+    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    bool has = lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0;
+    lua_pop(L, 1);
+    return has;
+}
+
+bool ScriptEngine::runDeferredCallback()
+{
+    if (!L) return false;
+
+    // Get the deferred ref from registry
+    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    if (!lua_isinteger(L, -1))
+    {
+        lua_pop(L, 1);
+        return false;
+    }
+
+    int ref = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    if (ref < 0) return false;
+
+    // Clear the stored ref
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+
+    // Update gfx globals before calling the deferred function
+    if (gfxWindow)
+    {
+        lua_getglobal(L, "gfx");
+        if (lua_istable(L, -1))
+        {
+            lua_pushinteger(L, gfxWindow->mouseX);   lua_setfield(L, -2, "mouse_x");
+            lua_pushinteger(L, gfxWindow->mouseY);   lua_setfield(L, -2, "mouse_y");
+            lua_pushinteger(L, gfxWindow->mouseCap);  lua_setfield(L, -2, "mouse_cap");
+            lua_pushnumber(L, gfxWindow->mouseWheel);  lua_setfield(L, -2, "mouse_wheel");
+            lua_pushinteger(L, gfxWindow->getGfxWidth());  lua_setfield(L, -2, "w");
+            lua_pushinteger(L, gfxWindow->getGfxHeight()); lua_setfield(L, -2, "h");
+            lua_pushinteger(L, gfxWindow->drawX);     lua_setfield(L, -2, "x");
+            lua_pushinteger(L, gfxWindow->drawY);     lua_setfield(L, -2, "y");
+        }
+        lua_pop(L, 1);
+        gfxWindow->mouseWheel = 0; // Consume
+    }
+
+    // Call the deferred function
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+    {
+        const char* err = lua_tostring(L, -1);
+        juce::Logger::writeToLog("ScriptEngine defer error: " + juce::String(err ? err : "unknown"));
+        lua_pop(L, 1);
+        return false;
+    }
+
+    // Check if a new defer was registered
+    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    bool hasNext = lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0;
+    lua_pop(L, 1);
+
+    return hasNext;
+}
+
+void ScriptEngine::clearDeferredCallback()
+{
+    if (!L) return;
+    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    if (lua_isinteger(L, -1))
+    {
+        int ref = static_cast<int>(lua_tointeger(L, -1));
+        if (ref >= 0)
+            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+    }
+    lua_pop(L, 1);
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+}
+
+// ============================================================================
 // ScriptEngine implementation
 // ============================================================================
 
@@ -830,6 +1134,9 @@ ScriptEngine::ScriptEngine()
 
 ScriptEngine::~ScriptEngine()
 {
+    closeGfxWindow();
+    clearDeferredCallback();
+
     if (L != nullptr)
     {
         lua_close(L);
@@ -950,8 +1257,51 @@ void ScriptEngine::registerAPI(AudioEngine& engine)
     reg("getAppVersion",   l_getAppVersion);
     reg("showMessage",     l_showMessage);
 
+    // ------ Defer ------
+    reg("defer",           l_defer);
+
     // Set the table as global "s13"
     lua_setglobal(L, "s13");
+
+    // ---- Create "gfx" global table (REAPER-compatible naming) ----
+    lua_newtable(L);
+
+    auto gfxReg = [&](const char* name, lua_CFunction fn) {
+        lua_pushcfunction(L, fn);
+        lua_setfield(L, -2, name);
+    };
+
+    gfxReg("init",       l_gfx_init);
+    gfxReg("close",      l_gfx_close);
+    gfxReg("set",        l_gfx_set);
+    gfxReg("rect",       l_gfx_rect);
+    gfxReg("line",       l_gfx_line);
+    gfxReg("circle",     l_gfx_circle);
+    gfxReg("arc",        l_gfx_arc);
+    gfxReg("roundrect",  l_gfx_roundrect);
+    gfxReg("drawstr",    l_gfx_drawstr);
+    gfxReg("setfont",    l_gfx_setfont);
+    gfxReg("measurestr", l_gfx_measurestr);
+    gfxReg("getchar",    l_gfx_getchar);
+    gfxReg("clear",      l_gfx_clear);
+
+    // Initialize gfx state variables
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "x");
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "y");
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "w");
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "h");
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "mouse_x");
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "mouse_y");
+    lua_pushinteger(L, 0); lua_setfield(L, -2, "mouse_cap");
+    lua_pushnumber(L, 0);  lua_setfield(L, -2, "mouse_wheel");
+
+    lua_setglobal(L, "gfx");
+
+    // Also expose gfx functions under s13.gfx for namespaced access
+    lua_getglobal(L, "s13");
+    lua_getglobal(L, "gfx");
+    lua_setfield(L, -2, "gfx");
+    lua_pop(L, 1);
 }
 
 bool ScriptEngine::loadAndRun(const juce::String& scriptPath)

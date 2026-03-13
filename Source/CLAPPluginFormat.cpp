@@ -47,6 +47,179 @@ static clap_host_t makeHost()
 // CLAP Plugin Instance — wraps a clap_plugin_t as a juce::AudioProcessor
 //==============================================================================
 
+// Forward declaration for editor
+class CLAPPluginInstance;
+
+//==============================================================================
+// CLAP GUI Editor — wraps the CLAP GUI extension in a JUCE AudioProcessorEditor
+//==============================================================================
+
+class CLAPEditorComponent : public juce::AudioProcessorEditor
+{
+public:
+    CLAPEditorComponent(juce::AudioProcessor& proc, const clap_plugin_t* plugin,
+                         const clap_plugin_gui_t* gui)
+        : AudioProcessorEditor(proc), clapPlugin(plugin), guiExt(gui)
+    {
+        setOpaque(true);
+        setSize(800, 600); // Default; will be adjusted after create
+
+        // Try to create GUI
+        if (guiExt && clapPlugin)
+        {
+#ifdef _WIN32
+            const char* apiStr = CLAP_WINDOW_API_WIN32;
+#elif __APPLE__
+            const char* apiStr = CLAP_WINDOW_API_COCOA;
+#else
+            const char* apiStr = CLAP_WINDOW_API_X11;
+#endif
+            if (guiExt->is_api_supported(clapPlugin, apiStr, false))
+            {
+                guiExt->create(clapPlugin, apiStr, false);
+                guiCreated = true;
+            }
+        }
+    }
+
+    ~CLAPEditorComponent() override
+    {
+        if (guiCreated && guiExt && clapPlugin)
+        {
+            guiExt->set_parent(clapPlugin, nullptr);
+            guiExt->destroy(clapPlugin);
+        }
+    }
+
+    void parentHierarchyChanged() override
+    {
+        if (!guiCreated || !guiExt || !clapPlugin || parentSet)
+            return;
+
+        auto* peer = getPeer();
+        if (!peer)
+            return;
+
+        void* nativeHandle = peer->getNativeHandle();
+        if (!nativeHandle)
+            return;
+
+        clap_window_t window{};
+#ifdef _WIN32
+        window.api = CLAP_WINDOW_API_WIN32;
+        window.win32 = nativeHandle;
+#elif __APPLE__
+        window.api = CLAP_WINDOW_API_COCOA;
+        window.cocoa = nativeHandle;
+#else
+        window.api = CLAP_WINDOW_API_X11;
+        window.x11 = (unsigned long)(uintptr_t)nativeHandle;
+#endif
+        guiExt->set_parent(clapPlugin, &window);
+
+        // Query preferred size
+        uint32_t w = 0, h = 0;
+        if (guiExt->get_size(clapPlugin, &w, &h) && w > 0 && h > 0)
+            setSize(static_cast<int>(w), static_cast<int>(h));
+
+        guiExt->show(clapPlugin);
+        parentSet = true;
+    }
+
+    void resized() override
+    {
+        if (guiCreated && guiExt && clapPlugin)
+        {
+            uint32_t w = static_cast<uint32_t>(getWidth());
+            uint32_t h = static_cast<uint32_t>(getHeight());
+            guiExt->set_size(clapPlugin, w, h);
+        }
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(juce::Colours::black);
+    }
+
+private:
+    const clap_plugin_t* clapPlugin = nullptr;
+    const clap_plugin_gui_t* guiExt = nullptr;
+    bool guiCreated = false;
+    bool parentSet = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CLAPEditorComponent)
+};
+
+//==============================================================================
+// CLAP Parameter — wraps a single CLAP parameter as a juce::AudioProcessorParameter
+//==============================================================================
+
+class CLAPParameter : public juce::AudioPluginInstance::HostedParameter
+{
+public:
+    CLAPParameter(const clap_plugin_t* plugin, const clap_plugin_params_t* paramsExt,
+                   clap_id paramId, const juce::String& paramName,
+                   double minVal, double maxVal, double defaultVal)
+        : clapPlugin(plugin), paramsExtension(paramsExt)
+        , id(paramId), parameterName(paramName)
+        , rangeMin(minVal), rangeMax(maxVal), defaultValue(defaultVal)
+    {
+        currentValue = defaultVal;
+    }
+
+    float getValue() const override
+    {
+        if (rangeMax <= rangeMin) return 0.0f;
+        return static_cast<float>((currentValue - rangeMin) / (rangeMax - rangeMin));
+    }
+
+    void setValue(float newValue) override
+    {
+        currentValue = rangeMin + static_cast<double>(newValue) * (rangeMax - rangeMin);
+    }
+
+    float getDefaultValue() const override
+    {
+        if (rangeMax <= rangeMin) return 0.0f;
+        return static_cast<float>((defaultValue - rangeMin) / (rangeMax - rangeMin));
+    }
+
+    juce::String getName(int maximumStringLength) const override
+    {
+        return parameterName.substring(0, maximumStringLength);
+    }
+
+    juce::String getLabel() const override { return {}; }
+
+    juce::String getParameterID() const override
+    {
+        return juce::String(static_cast<int64_t>(id));
+    }
+
+    float getValueForText(const juce::String& text) const override
+    {
+        double val = text.getDoubleValue();
+        if (rangeMax <= rangeMin) return 0.0f;
+        return juce::jlimit(0.0f, 1.0f, static_cast<float>((val - rangeMin) / (rangeMax - rangeMin)));
+    }
+
+    clap_id getClapId() const { return id; }
+    double getNativeValue() const { return currentValue; }
+    void setNativeValue(double v) { currentValue = v; }
+
+private:
+    const clap_plugin_t* clapPlugin;
+    const clap_plugin_params_t* paramsExtension;
+    clap_id id;
+    juce::String parameterName;
+    double rangeMin, rangeMax, defaultValue;
+    double currentValue;
+};
+
+//==============================================================================
+// CLAP Plugin Instance — wraps a clap_plugin_t as a juce::AudioProcessor
+//==============================================================================
+
 class CLAPPluginInstance : public juce::AudioPluginInstance
 {
 public:
@@ -63,7 +236,32 @@ public:
         , vendor(vendorName)
     {
         if (clapPlugin)
+        {
             clapPlugin->init(clapPlugin);
+
+            // Discover parameters
+            paramsExt = (const clap_plugin_params_t*)clapPlugin->get_extension(clapPlugin, CLAP_EXT_PARAMS);
+            if (paramsExt)
+            {
+                uint32_t paramCount = paramsExt->count(clapPlugin);
+                for (uint32_t i = 0; i < paramCount; ++i)
+                {
+                    clap_param_info_t info{};
+                    if (paramsExt->get_info(clapPlugin, i, &info))
+                    {
+                        auto param = std::make_unique<CLAPParameter>(clapPlugin, paramsExt,
+                                                                      info.id, juce::String(info.name),
+                                                                      info.min_value, info.max_value,
+                                                                      info.default_value);
+                        clapParams.add(param.get());
+                        addHostedParameter(std::move(param));
+                    }
+                }
+            }
+
+            // Check for GUI support
+            guiExt = (const clap_plugin_gui_t*)clapPlugin->get_extension(clapPlugin, CLAP_EXT_GUI);
+        }
     }
 
     ~CLAPPluginInstance() override
@@ -180,8 +378,13 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
 
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
-    bool hasEditor() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override
+    {
+        if (guiExt && clapPlugin)
+            return new CLAPEditorComponent(*this, clapPlugin, guiExt);
+        return nullptr;
+    }
+    bool hasEditor() const override { return guiExt != nullptr; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -234,6 +437,9 @@ public:
 private:
     LibHandle libHandle = nullptr;
     const clap_plugin_t* clapPlugin = nullptr;
+    const clap_plugin_params_t* paramsExt = nullptr;
+    const clap_plugin_gui_t* guiExt = nullptr;
+    juce::Array<CLAPParameter*> clapParams; // Non-owning — AudioProcessor owns them via addParameter
     juce::String name;
     juce::String vendor;
     juce::String pluginFileOrId;

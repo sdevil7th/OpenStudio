@@ -87,13 +87,33 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 // ========== General Tab ==========
 function GeneralTab() {
-  const { snapEnabled, gridSize } = useDAWStore(useShallow((s) => ({
+  const { snapEnabled, gridSize, playheadStopBehavior } = useDAWStore(useShallow((s) => ({
     snapEnabled: s.snapEnabled,
     gridSize: s.gridSize,
+    playheadStopBehavior: s.playheadStopBehavior,
   })));
 
   return (
     <div>
+      <SectionHeader>Transport</SectionHeader>
+      <Row label="Playhead on Stop">
+        <NativeSelect
+          options={["return-to-start", "stop-in-place"]}
+          value={playheadStopBehavior}
+          onChange={(val) => useDAWStore.getState().setPlayheadStopBehavior(val as any)}
+          formatLabel={(v) => {
+            const labels: Record<string, string> = {
+              "return-to-start": "Return to start position",
+              "stop-in-place": "Stop at current position",
+            };
+            return labels[String(v)] || String(v);
+          }}
+        />
+      </Row>
+      <div className="text-[9px] text-daw-text-muted mb-2 ml-1">
+        With "Stop at current position", pressing Stop twice returns to the start position.
+      </div>
+
       <SectionHeader>Snap & Grid</SectionHeader>
       <Row label="Snap to Grid">
         <Checkbox

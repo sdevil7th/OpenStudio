@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "signalsmith-stretch.h"
 #include <memory>
 #include <vector>
 #include <map>
@@ -26,7 +27,9 @@ public:
     // Clip information structure
     struct ClipInfo
     {
-        juce::File audioFile;
+        juce::File audioFile;           // Current audio file (may be pitch-corrected)
+        juce::File originalAudioFile;  // Original file — never changed after addClip, used for re-analysis
+        double originalOffset = 0.0;  // Original offset — never changed after addClip, used for re-reading original file
         double startTime;      // When clip starts on timeline (seconds)
         double duration;       // Clip duration (seconds)
         double offset;         // Offset into audio file (for trimming, seconds)
@@ -54,6 +57,12 @@ public:
     void clearAllClips();
     void clearTrackClips(const juce::String& trackId);
 
+    // Hot-swap a clip's audio file (used after pitch correction writes a new file)
+    void replaceClipAudioFile(const juce::String& clipId, const juce::File& newFile);
+
+    // Clear the persistent pitch correction file for a clip (e.g. when user discards edits)
+    void clearPitchCorrectionFile(const juce::String& clipId);
+
     // Clip gain envelope management
     void setClipGainEnvelope(const juce::String& trackId, const juce::String& clipId,
                              const std::vector<GainEnvelopePoint>& points);
@@ -66,6 +75,26 @@ public:
                         int numSamples,
                         double sampleRate);
     
+    // ---- Real-time pitch preview ----
+
+    // A correction segment: time range (relative to clip start) with a pitch ratio
+    struct PitchCorrectionSegment
+    {
+        double startTime = 0.0;   // seconds, relative to clip start
+        double endTime   = 0.0;
+        float  pitchRatio = 1.0f; // 1.0 = no shift, 2.0 = octave up, etc.
+    };
+
+    // Set a pitch correction map for a clip (enables real-time preview)
+    void setClipPitchPreview (const juce::String& clipId,
+                              const std::vector<PitchCorrectionSegment>& segments);
+
+    // Clear pitch preview for a clip (disables real-time preview)
+    void clearClipPitchPreview (const juce::String& clipId);
+
+    // Check if a clip has an active pitch preview
+    bool hasClipPitchPreview (const juce::String& clipId) const;
+
     // Utility
     int getNumClips() const { return (int)clips.size(); }
     int getNumClipsForTrack(const juce::String& trackId) const;
@@ -117,6 +146,31 @@ private:
 
     // Evict oldest readers when cache exceeds limit
     void evictOldReaders();
+
+    // ---- Real-time pitch preview state ----
+
+    struct ClipPitchPreviewState
+    {
+        std::vector<PitchCorrectionSegment> segments;
+        signalsmith::stretch::SignalsmithStretch<float> stretcher;
+        bool prepared = false;
+        double lastPlaybackTime = -1.0; // For seeking detection
+    };
+
+    // Keyed by clipId — only clips with active pitch preview have entries
+    std::map<juce::String, std::unique_ptr<ClipPitchPreviewState>> clipPitchPreviews;
+
+    // Pre-allocated buffer for pitch-shifted audio (avoids heap alloc on audio thread)
+    juce::AudioBuffer<float> pitchShiftWorkBuffer;
+
+    // Look up pitch ratio from correction segments at a given clip-relative time
+    static float lookupPitchRatio (const std::vector<PitchCorrectionSegment>& segments, double timeInClip);
+
+    // Persistent map of pitch-corrected file paths: clipId → corrected file.
+    // Survives clearAllClips() so that syncClipsWithBackend (which re-adds clips
+    // with the original file path) doesn't destroy corrections.
+    // Cleared explicitly via clearPitchCorrectionFile().
+    std::map<juce::String, juce::File> pitchCorrectedFiles;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PlaybackEngine)
 };

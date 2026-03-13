@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
 import { X } from "lucide-react";
 import { nativeBridge } from "./services/NativeBridge";
-import { useDAWStore } from "./store/useDAWStore";
+import { useDAWStore, getEffectiveTrackHeight } from "./store/useDAWStore";
 import { getRegisteredActions } from "./store/actionRegistry";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
@@ -38,10 +38,20 @@ const CrossfadeEditor = React.lazy(() => import("./components/CrossfadeEditor").
 const ThemeEditor = React.lazy(() => import("./components/ThemeEditor").then(m => ({ default: m.ThemeEditor })));
 const VideoWindow = React.lazy(() => import("./components/VideoWindow").then(m => ({ default: m.VideoWindow })));
 const ScriptEditor = React.lazy(() => import("./components/ScriptEditor").then(m => ({ default: m.ScriptEditor })));
+const PitchEditorLowerZone = React.lazy(() => import("./components/PitchEditorLowerZone").then(m => ({ default: m.PitchEditorLowerZone })));
 const ToolbarEditor = React.lazy(() => import("./components/ToolbarEditor").then(m => ({ default: m.ToolbarEditor })));
 const DDPExportModal = React.lazy(() => import("./components/DDPExportModal").then(m => ({ default: m.DDPExportModal })));
 const ProjectCompareModal = React.lazy(() => import("./components/ProjectCompareModal").then(m => ({ default: m.ProjectCompareModal })));
 const PluginBrowser = React.lazy(() => import("./components/PluginBrowser").then(m => ({ default: m.PluginBrowser })));
+const EnvelopeManagerModal = React.lazy(() => import("./components/EnvelopeManagerModal").then(m => ({ default: m.EnvelopeManagerModal })));
+const ChannelStripEQModal = React.lazy(() => import("./components/ChannelStripEQModal").then(m => ({ default: m.ChannelStripEQModal })));
+const TrackRoutingModal = React.lazy(() => import("./components/TrackRoutingModal").then(m => ({ default: m.TrackRoutingModal })));
+const ClipLauncherView = React.lazy(() => import("./components/ClipLauncherView").then(m => ({ default: m.ClipLauncherView })));
+const MissingMediaResolver = React.lazy(() => import("./components/MissingMediaResolver").then(m => ({ default: m.MissingMediaResolver })));
+const TimecodeSettingsPanel = React.lazy(() => import("./components/TimecodeSettingsPanel").then(m => ({ default: m.TimecodeSettingsPanel })));
+const HelpOverlay = React.lazy(() => import("./components/HelpOverlay").then(m => ({ default: m.HelpOverlay })));
+const GettingStartedGuide = React.lazy(() => import("./components/GettingStartedGuide").then(m => ({ default: m.GettingStartedGuide })));
+const StemSeparationModal = React.lazy(() => import("./components/StemSeparationModal"));
 import {
   DndContext,
   DragOverlay,
@@ -96,16 +106,34 @@ function App() {
     showCrossfadeEditor,
     showThemeEditor,
     showScriptEditor,
+    showPitchEditor,
+    pitchEditorTrackId,
+    pitchEditorClipId,
     showToolbarEditor,
     showDDPExport,
     showProjectCompare,
     showPluginBrowser,
     pluginBrowserTrackId,
+    showEnvelopeManager,
+    envelopeManagerTrackId,
+    showChannelStripEQ,
+    closeChannelStripEQ,
+    showTrackRouting,
+    closeTrackRouting,
     tcpWidth,
     setTcpWidth,
     detachedPanels,
     detachPanel,
     attachPanel,
+    showClipLauncher,
+    showTimecodeSettings,
+    showContextualHelp,
+    showGettingStarted,
+    showMissingMedia,
+    missingMediaFiles,
+    masterAutomationLanes,
+    showMasterAutomation,
+    showStemSeparation,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
@@ -146,16 +174,34 @@ function App() {
       showCrossfadeEditor: state.showCrossfadeEditor,
       showThemeEditor: state.showThemeEditor,
       showScriptEditor: state.showScriptEditor,
+      showPitchEditor: state.showPitchEditor,
+      pitchEditorTrackId: state.pitchEditorTrackId,
+      pitchEditorClipId: state.pitchEditorClipId,
       showToolbarEditor: state.showToolbarEditor,
       showDDPExport: state.showDDPExport,
       showProjectCompare: state.showProjectCompare,
       showPluginBrowser: state.showPluginBrowser,
       pluginBrowserTrackId: state.pluginBrowserTrackId,
+      showEnvelopeManager: state.showEnvelopeManager,
+      envelopeManagerTrackId: state.envelopeManagerTrackId,
+      showChannelStripEQ: state.showChannelStripEQ,
+      closeChannelStripEQ: state.closeChannelStripEQ,
+      showTrackRouting: state.showTrackRouting,
+      closeTrackRouting: state.closeTrackRouting,
       tcpWidth: state.tcpWidth,
       setTcpWidth: state.setTcpWidth,
       detachedPanels: state.detachedPanels,
       detachPanel: state.detachPanel,
       attachPanel: state.attachPanel,
+      showClipLauncher: state.showClipLauncher,
+      showTimecodeSettings: state.showTimecodeSettings,
+      showContextualHelp: state.showContextualHelp,
+      showGettingStarted: state.showGettingStarted,
+      showMissingMedia: state.showMissingMedia,
+      missingMediaFiles: state.missingMediaFiles,
+      masterAutomationLanes: state.masterAutomationLanes,
+      showMasterAutomation: state.showMasterAutomation,
+      showStemSeparation: state.showStemSeparation,
     }))
   );
 
@@ -209,6 +255,7 @@ function App() {
     if (!isPlaying) return;
 
     let lastTime = performance.now();
+    let lastAutoUpdate = 0; // throttle automation value updates to ~30fps
     let frameId: number;
 
     const loop = () => {
@@ -229,6 +276,12 @@ function App() {
         }
 
         currentState.setCurrentTime(newTime);
+
+        // Update automation display values at ~30fps (every ~33ms)
+        if (now - lastAutoUpdate > 33) {
+          lastAutoUpdate = now;
+          currentState.updateAutomatedValues();
+        }
 
         // Auto-scroll during playback (Sprint 18.7)
         const autoScroll = currentState.autoScrollDuringPlayback;
@@ -391,6 +444,9 @@ function App() {
       ) {
         return;
       }
+
+      // Ignore key repeat for all shortcuts (prevents duplicate file dialogs, etc.)
+      if (e.repeat) return;
 
       // --- Custom Shortcut Override Layer ---
       // Convert the KeyboardEvent to a shortcut string and check if any
@@ -602,6 +658,25 @@ function App() {
         }
       }
 
+      // P: Edit Pitch (toggle pitch editor for selected audio clip)
+      if (e.key === "p" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        const state = useDAWStore.getState();
+        const clipId = state.selectedClipIds[0];
+        if (clipId) {
+          const track = state.tracks.find((t: any) => t.clips.some((c: any) => c.id === clipId));
+          if (track) {
+            if (track.type !== "midi") {
+              e.preventDefault();
+              if (state.showPitchEditor && state.pitchEditorClipId === clipId) {
+                state.closePitchEditor();
+              } else {
+                state.openPitchEditor(track.id, clipId, -1);
+              }
+            }
+          }
+        }
+      }
+
       // Ctrl+Shift+P: Command Palette
       if (e.key === "P" && e.ctrlKey && e.shiftKey && !e.altKey) {
         e.preventDefault();
@@ -632,10 +707,10 @@ function App() {
         useDAWStore.getState().togglePreferences();
       }
 
-      // F1: Toggle Keyboard Shortcuts Modal
+      // F1: Toggle Contextual Help Overlay
       if (e.key === "F1" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
         e.preventDefault();
-        useDAWStore.getState().toggleKeyboardShortcuts();
+        useDAWStore.getState().toggleContextualHelp();
       }
 
       // F2: Toggle Clip Properties Panel
@@ -924,7 +999,9 @@ function App() {
       {/* Project Tab Bar (Phase 15C) */}
       <ProjectTabBar />
       {/* Menu Bar */}
-      <MenuBar />
+      <div role="banner">
+        <MenuBar />
+      </div>
       {/* Main Toolbar with Mixer Toggle */}
       <MainToolbar
         onOpenSettings={openSettings}
@@ -945,9 +1022,9 @@ function App() {
           />
         </Suspense>
       )}
-      <div ref={workspaceRef} className="workspace flex-1">
+      <div ref={workspaceRef} className="workspace flex-1" role="main" aria-label="Main workspace">
         {/* Track Control Panel (Left Sidebar) */}
-        <div className="track-control-panel" style={{ width: tcpWidth }} onClick={(e) => {
+        <div className="track-control-panel" role="region" aria-label="Track control panel" style={{ width: tcpWidth }} onClick={(e) => {
           // Click on empty space (not a track header) → deselect all
           if (e.target === e.currentTarget) {
             useDAWStore.getState().deselectAllTracks();
@@ -969,6 +1046,7 @@ function App() {
               size="sm"
               onClick={handleAddTrack}
               className="add-track-btn"
+              aria-label="Add new audio track"
             >
               + Add Track
             </Button>
@@ -1042,7 +1120,7 @@ function App() {
                         <div
                           key={t.id}
                           className="border-b border-neutral-900 bg-neutral-800 flex items-center px-2"
-                          style={{ height: trackHeight }}
+                          style={{ height: getEffectiveTrackHeight(t, trackHeight) }}
                         >
                           <div className="w-2 h-full shrink-0" style={{ background: t.color || '#666' }} />
                           <span className="ml-2 text-xs text-neutral-200 truncate">{t.name}</span>
@@ -1080,6 +1158,9 @@ function App() {
 
         {/* Draggable resize handle between TCP and Timeline */}
         <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize track panel"
           className="w-1.5 shrink-0 self-stretch sticky top-0 cursor-col-resize group/resize z-50"
           onMouseDown={(e) => {
             e.preventDefault();
@@ -1103,12 +1184,27 @@ function App() {
         </div>
 
         {/* Timeline (Canvas-based) */}
-        <Timeline tracks={visibleTracks} />
+        <Timeline
+          tracks={visibleTracks}
+          masterAutomation={showMasterTrackInTCP ? {
+            lanes: masterAutomationLanes,
+            showAutomation: showMasterAutomation,
+          } : undefined}
+        />
       </div>
       </div>{/* Close Media Explorer + Workspace wrapper */}
 
+      {/* Pitch Editor Lower Zone (between workspace and transport) */}
+      {showPitchEditor && pitchEditorTrackId && pitchEditorClipId && (
+        <Suspense fallback={<div className="h-[280px] bg-daw-panel border-t border-daw-border flex items-center justify-center text-neutral-500 text-sm">Loading pitch editor...</div>}>
+          <PitchEditorLowerZone />
+        </Suspense>
+      )}
+
       {/* Transport Bar (above Mixer like Reaper) */}
-      <BottomTransportBar />
+      <div role="contentinfo" aria-label="Transport controls">
+        <BottomTransportBar />
+      </div>
 
       {/* Virtual MIDI Keyboard */}
       {showVirtualKeyboard && (
@@ -1129,6 +1225,7 @@ function App() {
                 size="icon-sm"
                 onClick={closePianoRoll}
                 title="Close (Esc)"
+                aria-label="Close Piano Roll editor"
               >
                 <X size={16} />
               </Button>
@@ -1157,6 +1254,8 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* S13PitchEditor kept for standalone/modal use if needed in future */}
 
       {/* Undo History Panel */}
       {showUndoHistory && (
@@ -1243,7 +1342,17 @@ function App() {
         </Suspense>
       )}
 
+      {/* Clip Launcher / Session View */}
+      {showClipLauncher && (
+        <Suspense fallback={null}>
+          <div className="h-64 border-t border-neutral-700">
+            <ClipLauncherView />
+          </div>
+        </Suspense>
+      )}
+
       {/* Mixer Panel */}
+      <div role="complementary" aria-label="Mixer panel">
       <MixerPanel
         isVisible={showMixer || detachedPanels.includes("mixer")}
         isDetached={detachedPanels.includes("mixer")}
@@ -1251,6 +1360,7 @@ function App() {
         onAttach={() => attachPanel("mixer")}
         onClose={toggleMixer}
       />
+      </div>
 
       {/* Settings Modal */}
       {showSettings && (
@@ -1378,6 +1488,44 @@ function App() {
         </Suspense>
       )}
 
+      {/* Timecode Sync Settings */}
+      {showTimecodeSettings && (
+        <Suspense fallback={null}>
+          <TimecodeSettingsPanel
+            isOpen={showTimecodeSettings}
+            onClose={() => useDAWStore.getState().toggleTimecodeSettings()}
+          />
+        </Suspense>
+      )}
+
+      {/* Envelope Manager Modal */}
+      {showEnvelopeManager && envelopeManagerTrackId && (
+        <Suspense fallback={null}>
+          <EnvelopeManagerModal />
+        </Suspense>
+      )}
+
+      {/* Stem Separation Modal */}
+      {showStemSeparation && (
+        <Suspense fallback={null}>
+          <StemSeparationModal />
+        </Suspense>
+      )}
+
+      {/* Channel Strip EQ Modal */}
+      {showChannelStripEQ && (
+        <Suspense fallback={null}>
+          <ChannelStripEQModal isOpen={showChannelStripEQ} onClose={closeChannelStripEQ} />
+        </Suspense>
+      )}
+
+      {/* Track Routing Modal (IO) */}
+      {showTrackRouting && (
+        <Suspense fallback={null}>
+          <TrackRoutingModal isOpen={showTrackRouting} onClose={closeTrackRouting} />
+        </Suspense>
+      )}
+
       {/* Plugin Browser (from action registry — instrument track creation) */}
       {showPluginBrowser && pluginBrowserTrackId && (
         <Suspense fallback={null}>
@@ -1388,8 +1536,38 @@ function App() {
                 ? "instrument"
                 : "track"
             }
+            trackType={tracks.find((t) => t.id === pluginBrowserTrackId)?.type}
             onClose={() => useDAWStore.getState().closePluginBrowser()}
           />
+        </Suspense>
+      )}
+
+      {/* Missing Media Resolver */}
+      {showMissingMedia && missingMediaFiles.length > 0 && (
+        <Suspense fallback={null}>
+          <MissingMediaResolver
+            isOpen={showMissingMedia}
+            onClose={() => useDAWStore.getState().closeMissingMedia()}
+            missingFiles={missingMediaFiles}
+            onResolve={(originalPath, newPath) =>
+              useDAWStore.getState().resolveMissingMedia(originalPath, newPath)
+            }
+            onResolveAll={() => useDAWStore.getState().closeMissingMedia()}
+          />
+        </Suspense>
+      )}
+
+      {/* Contextual Help Overlay (F1) */}
+      {showContextualHelp && (
+        <Suspense fallback={null}>
+          <HelpOverlay />
+        </Suspense>
+      )}
+
+      {/* Getting Started Guide */}
+      {showGettingStarted && (
+        <Suspense fallback={null}>
+          <GettingStartedGuide />
         </Suspense>
       )}
 

@@ -87,6 +87,11 @@ export function MenuDropdown({
   const renderMenuItem = (item: MenuItemProps, index: number) => (
     <div key={index}>
       <div
+        role="menuitem"
+        aria-disabled={item.disabled || undefined}
+        aria-haspopup={item.submenu ? "menu" : undefined}
+        aria-expanded={item.submenu && activeSubmenu === index ? true : undefined}
+        tabIndex={-1}
         className={`
           flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer
           ${
@@ -179,12 +184,16 @@ export function MenuDropdown({
         active={isOpen}
         onClick={() => setIsOpen(!isOpen)}
         className="px-3 py-1 rounded-none"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={`${label} menu`}
       >
         {label}
       </Button>
 
       {isOpen && (
-        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-9999">
+        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-9999" role="menu" aria-label={`${label} menu`}>
           {items.map((item, index) => (
             <div key={index} className="relative">
               {renderMenuItem(item, index)}

@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <memory>
 #include <map>
+#include <set>
 #include <functional>
 
 /**
@@ -31,8 +32,11 @@ public:
      *
      * Returns an empty array if no cache exists yet (call generateAsync first).
      */
+    /** startSample: first sample of the audio file to include (0 = from beginning).
+     *  This enables viewport-based fetching — only return peaks for the visible window. */
     juce::var getPeaks(const juce::File& audioFile,
                        int samplesPerPixel,
+                       int startSample,
                        int numPixels) const;
 
     /** Check if a valid, up-to-date cache exists for this audio file. */
@@ -109,6 +113,10 @@ private:
     // In-memory cache: audioFilePath -> CacheEntry
     mutable std::map<juce::String, CacheEntry> memoryCache;
     mutable juce::CriticalSection cacheLock;
+
+    // Track files currently being generated to prevent duplicate jobs
+    std::set<juce::String> pendingGenerations;
+    juce::CriticalSection pendingLock;
 
     // Background thread pool for concurrent peak generation
     juce::ThreadPool backgroundPool { juce::jmax(2, juce::SystemStats::getNumCpus() / 2) };

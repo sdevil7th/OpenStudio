@@ -47,6 +47,10 @@ public:
     // Get the stock effects directory (app bundle/effects/)
     static juce::File getStockEffectsDirectory();
 
+    // ARA plugin detection
+    bool isARAPlugin(const juce::PluginDescription& description) const;
+    juce::Array<juce::PluginDescription> getARAPlugins() const;
+
     // Plugin crash isolation: check if a plugin previously crashed
     bool isPluginBlacklisted(const juce::String& pluginId) const;
     void blacklistPlugin(const juce::String& pluginId);

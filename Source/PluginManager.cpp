@@ -400,3 +400,23 @@ juce::StringArray PluginManager::getBlacklistedPlugins() const
 {
     return blacklistedPlugins;
 }
+
+bool PluginManager::isARAPlugin(const juce::PluginDescription& description) const
+{
+    // ARA plugins are VST3 or AU plugins that expose an ARA factory.
+    // We detect this by loading the plugin and checking for ARA support.
+    // For efficiency, we check the description's hasARAExtension flag
+    // (available since JUCE 7 for scanned plugins).
+    return description.hasARAExtension;
+}
+
+juce::Array<juce::PluginDescription> PluginManager::getARAPlugins() const
+{
+    juce::Array<juce::PluginDescription> araPlugins;
+    for (const auto& desc : knownPluginList.getTypes())
+    {
+        if (desc.hasARAExtension)
+            araPlugins.add(desc);
+    }
+    return araPlugins;
+}

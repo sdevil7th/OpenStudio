@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 
 interface PeakMeterProps {
   level: number;
@@ -16,7 +16,8 @@ export function PeakMeter({
   clipping = false,
 }: PeakMeterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [containerHeight, setContainerHeight] = useState(height || 140);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const containerHeightRef = useRef(height || 140);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   // Peak hold with 3 dB/sec decay
@@ -28,25 +29,24 @@ export function PeakMeter({
   // RMS simulation via exponential smoothing of squared peak values
   const rmsSmoothedRef = useRef(0);
 
-  // Observe container size changes
+  // Observe container size changes — store in ref to avoid re-render loop
   const containerCallbackRef = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
     resizeObserverRef.current?.disconnect();
     if (node) {
       const observer = new ResizeObserver((entries) => {
         for (const entry of entries) {
           const h = Math.floor(entry.contentRect.height);
-          if (h > 0) setContainerHeight(h);
+          if (h > 0) containerHeightRef.current = h;
         }
       });
       observer.observe(node);
       resizeObserverRef.current = observer;
       // Initial measurement
       const h = Math.floor(node.getBoundingClientRect().height);
-      if (h > 0) setContainerHeight(h);
+      if (h > 0) containerHeightRef.current = h;
     }
   }, []);
-
-  const canvasHeight = height || containerHeight;
 
   // Refs for latest values (avoid stale closures in animation loop)
   const levelRef = useRef(level);
@@ -57,8 +57,6 @@ export function PeakMeter({
   stereoRef.current = stereo;
   const clippingRef = useRef(clipping);
   clippingRef.current = clipping;
-  const canvasHeightRef = useRef(canvasHeight);
-  canvasHeightRef.current = canvasHeight;
 
   // Create gradient once and cache it
   const gradientCacheRef = useRef<{ gradient: CanvasGradient; height: number; ctxId: CanvasRenderingContext2D } | null>(null);
@@ -87,20 +85,26 @@ export function PeakMeter({
       const ctx = canvas.getContext("2d");
       if (!ctx) { animFrameRef.current = requestAnimationFrame(draw); return; }
 
-      const currentLevel = levelRef.current;
-      const currentPeakHoldProp = peakHoldPropRef.current;
-      const isStereo = stereoRef.current;
-      const isClipping = clippingRef.current;
-      const ch = canvasHeightRef.current;
-      const width = canvas.width;
-      const channelWidth = isStereo ? (width - 1) / 2 : width;
-
       // Throttle to ~30fps to reduce CPU
       if (timestamp - lastDrawTimeRef.current < 33) {
         animFrameRef.current = requestAnimationFrame(draw);
         return;
       }
       lastDrawTimeRef.current = timestamp;
+
+      const currentLevel = levelRef.current;
+      const currentPeakHoldProp = peakHoldPropRef.current;
+      const isStereo = stereoRef.current;
+      const isClipping = clippingRef.current;
+      const ch = height || containerHeightRef.current;
+      if (ch <= 0) { animFrameRef.current = requestAnimationFrame(draw); return; }
+
+      // Sync canvas pixel resolution only when it actually changed
+      if (canvas.height !== ch) {
+        canvas.height = ch;
+      }
+      const width = canvas.width;
+      const channelWidth = isStereo ? (width - 1) / 2 : width;
 
       // Update peak hold with decay
       const NOISE_FLOOR = 0.001;
@@ -222,14 +226,14 @@ export function PeakMeter({
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [getGradient]);
+  }, [getGradient, height]);
 
   return (
     <div ref={containerCallbackRef} className="h-full">
       <canvas
         ref={canvasRef}
         width={stereo ? 16 : 10}
-        height={canvasHeight}
+        height={containerHeightRef.current}
         className="rounded-sm border border-neutral-700 h-full"
       />
     </div>

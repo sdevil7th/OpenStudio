@@ -1,12 +1,13 @@
 import React, { useState, useCallback, useMemo } from "react";
 import classNames from "classnames";
-import { Power, ChevronDown, ChevronRight } from "lucide-react";
+import { Power } from "lucide-react";
 import { PeakMeter } from "./PeakMeter";
 import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { FXChainPanel } from "./FXChainPanel";
 import { Button, Slider } from "./ui";
 import { useContextMenu, MenuItem } from "./ContextMenu";
+import { automationToBackend } from "../store/automationParams";
 
 interface ChannelStripProps {
   track: Track;
@@ -33,14 +34,6 @@ function getDbPosition(db: number): number {
   return ((12 - db) / 72) * 100;
 }
 
-/** Color-code a dB value: green (-18 to -6), yellow (-6 to 0), red (>0), dim otherwise */
-function gainDbColor(db: number): string {
-  if (db > 0) return "text-red-400";
-  if (db > -6) return "text-yellow-400";
-  if (db >= -18) return "text-green-400";
-  return "text-neutral-500";
-}
-
 function formatGainDb(db: number): string {
   if (db <= -60) return "-inf";
   return (db >= 0 ? "+" : "") + db.toFixed(1);
@@ -57,6 +50,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   // This component re-renders at 10Hz for metering; keeping it isolated from
   // the tracks array means Timeline/App never see those re-renders.
   const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
+  const autoValues = useDAWStore((s) => s.automatedParamValues[track.id]);
 
   const {
     toggleTrackMute,
@@ -76,14 +70,13 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     addTrackGroup,
     removeTrackGroup,
     updateTrackGroup,
-    tracks,
-    addTrackSend,
-    removeTrackSend,
-    setTrackSendLevel,
-    setTrackSendEnabled,
-    setTrackSendPreFader,
+    openTrackRouting,
     currentTime,
     masterVolume,
+    openChannelStripEQ,
+    masterMono,
+    toggleMasterMono,
+    openEnvelopeManager,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -103,22 +96,19 @@ export const ChannelStrip = React.memo(function ChannelStrip({
       addTrackGroup: s.addTrackGroup,
       removeTrackGroup: s.removeTrackGroup,
       updateTrackGroup: s.updateTrackGroup,
-      tracks: s.tracks,
-      addTrackSend: s.addTrackSend,
-      removeTrackSend: s.removeTrackSend,
-      setTrackSendLevel: s.setTrackSendLevel,
-      setTrackSendEnabled: s.setTrackSendEnabled,
-      setTrackSendPreFader: s.setTrackSendPreFader,
+      openTrackRouting: s.openTrackRouting,
       currentTime: s.transport.currentTime,
       masterVolume: s.masterVolume,
+      openChannelStripEQ: s.openChannelStripEQ,
+      masterMono: s.masterMono,
+      toggleMasterMono: s.toggleMasterMono,
+      openEnvelopeManager: s.openEnvelopeManager,
     })),
   );
 
   const { showContextMenu, ContextMenuComponent } = useContextMenu();
 
-  const [phaseInverted, setPhaseInverted] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
-  const [showGainStaging, setShowGainStaging] = useState(false);
   const hasFx = track.inputFxCount + track.trackFxCount > 0;
 
   // Find the clip under the playhead for gain staging display
@@ -229,12 +219,14 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     return db.toFixed(1);
   };
 
+  const effectivePan = autoValues?.pan !== undefined ? automationToBackend("pan", autoValues.pan) : track.pan;
+  const effectiveVolumeDB = autoValues?.volume !== undefined ? automationToBackend("volume", autoValues.volume) : track.volumeDB;
   const panDisplay =
-    track.pan === 0
+    effectivePan === 0
       ? "C"
-      : track.pan > 0
-        ? `R${Math.round(Math.abs(track.pan * 100))}`
-        : `L${Math.round(Math.abs(track.pan * 100))}`;
+      : effectivePan > 0
+        ? `R${Math.round(Math.abs(effectivePan * 100))}`
+        : `L${Math.round(Math.abs(effectivePan * 100))}`;
 
   // Use fewer dB marks for track strips to save space
   const dbMarks = isMaster
@@ -244,6 +236,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   return (
   <>
     <div
+      role="group"
+      aria-label={`Channel strip for ${track.name}`}
       className={classNames(
         "flex flex-col shrink-0 h-full border-r border-l border-neutral-800",
         {
@@ -280,91 +274,23 @@ export const ChannelStrip = React.memo(function ChannelStrip({
         {isMaster ? "● MASTER ●" : track.name}
       </div>
 
-      {/* Sends Section */}
+      {/* Pre-fader controls — scrollable when content exceeds available space */}
+      <div className="overflow-y-auto min-h-0">
+      {/* IO Button — opens Track Routing Modal */}
       {!isMaster && (
-        <div className="px-1 pt-0.5 pb-0.5 shrink-0 space-y-0.5">
-          {track.sends?.length > 0 && track.sends.map((send, i) => {
-            const destTrack = tracks.find((t) => t.id === send.destTrackId);
-            return (
-              <div
-                key={i}
-                className={classNames(
-                  "rounded text-[7px] transition-colors",
-                  send.enabled
-                    ? "bg-neutral-900 border border-cyan-600/60"
-                    : "bg-neutral-900 border border-neutral-700 opacity-50",
-                )}
-              >
-                {/* Send header: destination + pre/post + remove */}
-                <div className="flex items-center justify-between px-1 h-3.5">
-                  <span
-                    className={classNames(
-                      "truncate max-w-[32px] cursor-pointer",
-                      send.enabled ? "text-cyan-400" : "text-neutral-500",
-                    )}
-                    onClick={() => setTrackSendEnabled(track.id, i, !send.enabled)}
-                    title={`${send.enabled ? "Disable" : "Enable"} send to ${destTrack?.name || "?"}`}
-                  >
-                    {destTrack?.name || "?"}
-                  </span>
-                  <span className="flex items-center gap-0.5">
-                    <button
-                      className={classNames(
-                        "text-[6px] px-0.5 rounded cursor-pointer transition-colors",
-                        send.preFader
-                          ? "bg-cyan-700/50 text-cyan-300"
-                          : "bg-neutral-700/50 text-neutral-500 hover:text-neutral-300",
-                      )}
-                      onClick={() => setTrackSendPreFader(track.id, i, !send.preFader)}
-                      title={send.preFader ? "Pre-fader (click for post)" : "Post-fader (click for pre)"}
-                    >
-                      {send.preFader ? "PRE" : "PST"}
-                    </button>
-                    <button
-                      className="text-neutral-600 hover:text-red-400 cursor-pointer transition-colors leading-none"
-                      onClick={() => removeTrackSend(track.id, i)}
-                      title="Remove send"
-                    >
-                      &times;
-                    </button>
-                  </span>
-                </div>
-                {/* Send level slider */}
-                <div className="flex items-center gap-0.5 px-1 pb-0.5">
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={Math.round(send.level * 100)}
-                    onChange={(e) => setTrackSendLevel(track.id, i, Number(e.target.value) / 100)}
-                    className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
-                    style={{ minWidth: 0 }}
-                    title={`${Math.round(send.level * 100)}%`}
-                  />
-                  <span className={classNames(
-                    "text-[7px] font-mono w-[20px] text-right",
-                    send.enabled ? "text-cyan-400" : "text-neutral-500",
-                  )}>
-                    {Math.round(send.level * 100)}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-          {/* Add send button */}
-          <div
-            className="h-3.5 bg-neutral-900/60 border border-dashed border-neutral-700 rounded text-[7px] text-neutral-500
-                       flex items-center justify-center cursor-pointer hover:border-cyan-500 hover:text-cyan-400 transition-colors"
-            onClick={() => {
-              const otherTracks = tracks.filter((t) => t.id !== track.id);
-              if (otherTracks.length > 0) {
-                addTrackSend(track.id, otherTracks[0].id);
-              }
-            }}
-            title="Add send to another track"
+        <div className="px-1 pt-0.5 pb-0.5 shrink-0">
+          <button
+            onClick={() => openTrackRouting(track.id)}
+            title="Sends, receives & hardware output routing"
+            className={classNames(
+              "w-full h-4 rounded text-[7px] font-bold cursor-pointer transition-colors border",
+              track.sends?.length > 0
+                ? "border-cyan-600/60 text-cyan-400 bg-neutral-900 hover:bg-neutral-800"
+                : "border-neutral-700 text-neutral-500 bg-neutral-900/60 hover:border-cyan-500 hover:text-cyan-400",
+            )}
           >
-            + Send
-          </div>
+            IO {track.sends?.length > 0 && `(${track.sends.length})`}
+          </button>
         </div>
       )}
 
@@ -379,7 +305,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
         </div>
       )}
 
-      {/* M/S Buttons for Master */}
+      {/* M/S/Mono Buttons for Master */}
       {isMaster && (
         <div className="flex gap-0.5 p-1 shrink-0">
           <Button
@@ -388,6 +314,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             active={track.muted}
             onClick={() => toggleTrackMute(track.id)}
             title="Mute"
+            aria-label={track.muted ? "Unmute master" : "Mute master"}
             className="flex-1"
           >
             M
@@ -398,20 +325,33 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             active={track.soloed}
             onClick={() => toggleTrackSolo(track.id)}
             title="Solo"
+            aria-label={track.soloed ? "Unsolo master" : "Solo master"}
             className="flex-1"
           >
             S
           </Button>
+          <button
+            onClick={toggleMasterMono}
+            className={classNames(
+              "flex-1 h-3.5 rounded text-[7px] font-bold cursor-pointer transition-colors",
+              masterMono ? "bg-yellow-600 text-white" : "bg-neutral-800 text-neutral-500 hover:text-neutral-300"
+            )}
+            title={masterMono ? "Disable Mono" : "Enable Mono"}
+          >
+            MONO
+          </button>
         </div>
       )}
 
-      {/* FX + Bypass + Phase Invert — single row */}
+      {/* FX + Bypass + EQ — single row */}
       <div className={classNames("flex justify-between px-1 shrink-0 pb-1")}>
         <span className="flex">
-          <div
+          <button
+            type="button"
             onClick={() => setShowFXChain(true)}
+            aria-label={`Open FX chain for ${track.name}`}
             className={classNames(
-              "h-4 w-4 rounded rounded-r-none text-[7px] flex items-center justify-center cursor-pointer transition-colors",
+              "h-4 w-4 rounded rounded-r-none text-[7px] flex items-center justify-center cursor-pointer transition-colors p-0",
               hasFx
                 ? track.fxBypassed
                   ? "bg-neutral-800 border border-red-500 text-red-400 shadow-[0_0_6px_rgba(239,68,68,0.4)]"
@@ -420,7 +360,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             )}
           >
             FX
-          </div>
+          </button>
           <button
             onClick={() => {
               if (!hasFx) {
@@ -436,6 +376,13 @@ export const ChannelStrip = React.memo(function ChannelStrip({
                   : "Bypass FX"
                 : "No FX loaded"
             }
+            aria-label={
+              hasFx
+                ? track.fxBypassed
+                  ? `Enable FX on ${track.name}`
+                  : `Bypass FX on ${track.name}`
+                : `Open FX chain for ${track.name}`
+            }
             className={classNames(
               "h-4 w-3 shrink-0 rounded rounded-l-none flex items-center justify-center transition-colors border hover:cursor-pointer",
               !hasFx && "border-neutral-700 text-neutral-600 bg-neutral-800",
@@ -450,18 +397,26 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             <Power size={8} strokeWidth={2.5} />
           </button>
         </span>
-        <button
-          onClick={() => setPhaseInverted(!phaseInverted)}
-          title="Phase Invert"
-          className={classNames(
-            "h-4 w-4 shrink-0 rounded flex items-center justify-center text-[8px] font-bold transition-colors border",
-            phaseInverted
-              ? "border-yellow-500 text-yellow-400 bg-neutral-800"
-              : "border-neutral-600 text-neutral-500 bg-neutral-800 hover:border-yellow-500 hover:text-yellow-500",
-          )}
-        >
-          Ø
-        </button>
+        {!isMaster && (
+          <button
+            onClick={() => openChannelStripEQ(track.id)}
+            title="Channel Strip EQ"
+            aria-label={`Open EQ for ${track.name}`}
+            className="h-4 px-1.5 shrink-0 rounded flex items-center justify-center text-[7px] font-bold transition-colors border border-neutral-600 text-neutral-500 bg-neutral-800 hover:border-daw-accent hover:text-daw-accent cursor-pointer"
+          >
+            EQ
+          </button>
+        )}
+        {isMaster && (
+          <button
+            onClick={() => openEnvelopeManager("master")}
+            title="Master Automation"
+            aria-label="Open master automation envelopes"
+            className="h-4 px-1.5 shrink-0 rounded flex items-center justify-center text-[7px] font-bold transition-colors border border-neutral-600 text-neutral-500 bg-neutral-800 hover:border-daw-accent hover:text-daw-accent cursor-pointer"
+          >
+            A
+          </button>
+        )}
       </div>
 
       {/* FX Chain Panel */}
@@ -474,6 +429,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
         />
       )}
 
+      </div>
+
       {/* Pan Section */}
       <div
         className={classNames("px-1 shrink-0", isMaster ? "pb-1" : "pb-0.5")}
@@ -485,11 +442,12 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             variant="pan"
             min={-100}
             max={100}
-            value={track.pan * 100}
+            value={effectivePan * 100}
             onChange={handlePanChange}
             defaultValue={0}
             className="w-full"
             title={panDisplay}
+            aria-label={`Pan for ${track.name}: ${panDisplay}`}
           />
           <span className="text-[8px] text-neutral-500 font-mono">
             {panDisplay}
@@ -533,17 +491,18 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             min={-60}
             max={12}
             step={0.1}
-            value={track.volumeDB}
+            value={effectiveVolumeDB}
             onChange={handleVolumeChange}
             defaultValue={0}
             height="100%"
             width="18px"
-            title={`${formatVolume(track.volumeDB)} dB`}
+            title={`${formatVolume(effectiveVolumeDB)} dB`}
+            aria-label={`Volume fader for ${track.name}: ${formatVolume(effectiveVolumeDB)} dB`}
           />
         </div>
       </div>
 
-      {/* Volume Display */}
+      {/* Volume Display (with gain staging tooltip for tracks) */}
       <div
         className={classNames(
           "text-[9px] font-mono text-center py-0.5 shrink-0",
@@ -552,61 +511,10 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             "bg-neutral-900 text-neutral-400": !isMaster,
           },
         )}
+        title={!isMaster ? `Clip: ${activeClipGainDB !== null ? formatGainDb(activeClipGainDB) : "--"}\nFader: ${formatGainDb(effectiveVolumeDB)}\nMaster: ${formatGainDb(masterVolumeDB)}\n────────\nSum: ${formatGainDb((activeClipGainDB ?? 0) + effectiveVolumeDB + masterVolumeDB)}` : undefined}
       >
-        {formatVolume(track.volumeDB)} dB
+        {formatVolume(effectiveVolumeDB)} dB
       </div>
-
-      {/* Gain Staging Display */}
-      {!isMaster && (
-        <div className="shrink-0">
-          <button
-            className="w-full text-[7px] text-neutral-500 hover:text-neutral-300 bg-neutral-900/50 border-t border-neutral-700/50 flex items-center justify-center gap-0.5 py-0.5 cursor-pointer transition-colors"
-            onClick={() => setShowGainStaging(!showGainStaging)}
-            title="Gain staging — signal levels at each stage"
-          >
-            {showGainStaging ? <ChevronDown size={8} /> : <ChevronRight size={8} />}
-            GAIN
-          </button>
-          {showGainStaging && (
-            <div className="bg-neutral-950/60 px-1 py-0.5 space-y-px border-t border-neutral-800">
-              {/* Clip Gain */}
-              <div className="flex justify-between text-[7px] font-mono">
-                <span className="text-neutral-500">Clip</span>
-                <span className={activeClipGainDB !== null ? gainDbColor(activeClipGainDB) : "text-neutral-600"}>
-                  {activeClipGainDB !== null ? formatGainDb(activeClipGainDB) : "--"}
-                </span>
-              </div>
-              {/* Track Fader */}
-              <div className="flex justify-between text-[7px] font-mono">
-                <span className="text-neutral-500">Fader</span>
-                <span className={gainDbColor(track.volumeDB)}>
-                  {formatGainDb(track.volumeDB)}
-                </span>
-              </div>
-              {/* Master */}
-              <div className="flex justify-between text-[7px] font-mono">
-                <span className="text-neutral-500">Master</span>
-                <span className={gainDbColor(masterVolumeDB)}>
-                  {formatGainDb(masterVolumeDB)}
-                </span>
-              </div>
-              {/* Sum indicator */}
-              <div className="flex justify-between text-[7px] font-mono border-t border-neutral-700/50 pt-px mt-px">
-                <span className="text-neutral-400">Sum</span>
-                {(() => {
-                  const clipDb = activeClipGainDB ?? 0;
-                  const sum = clipDb + track.volumeDB + masterVolumeDB;
-                  return (
-                    <span className={gainDbColor(sum)}>
-                      {formatGainDb(sum)}
-                    </span>
-                  );
-                })()}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* M/S/R Buttons for tracks */}
       {!isMaster && (
@@ -617,6 +525,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             active={track.muted}
             onClick={() => toggleTrackMute(track.id)}
             title="Mute"
+            aria-label={track.muted ? `Unmute track ${track.name}` : `Mute track ${track.name}`}
             className="flex-1"
           >
             M
@@ -627,6 +536,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             active={track.soloed}
             onClick={() => toggleTrackSolo(track.id)}
             title="Solo"
+            aria-label={track.soloed ? `Unsolo track ${track.name}` : `Solo track ${track.name}`}
             className="flex-1"
           >
             S
@@ -639,6 +549,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             activeStyle={track.armed ? "glow" : "solid"}
             onClick={() => toggleTrackArmed(track.id)}
             title="Record Arm"
+            aria-label={track.armed ? `Disarm recording on track ${track.name}` : `Arm track ${track.name} for recording`}
             className="flex-1"
           >
             R

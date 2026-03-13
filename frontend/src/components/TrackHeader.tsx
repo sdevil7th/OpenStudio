@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import classNames from "classnames";
-import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS } from "../store/useDAWStore";
+import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS, getEffectiveTrackHeight, AUTOMATION_LANE_HEIGHT, AutomationModeType } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { FXChainPanel } from "./FXChainPanel";
 import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
@@ -9,7 +9,8 @@ import { ColorPicker } from "./ColorPicker";
 import { PluginBrowser } from "./PluginBrowser";
 import { PianoIcon, TRACK_ICONS, TRACK_ICON_LABELS } from "./icons";
 import { Power, StickyNote } from "lucide-react";
-import { Button, Input, Select, Knob, Textarea } from "./ui";
+import { Button, Input, Select, Knob, Textarea, Slider } from "./ui";
+import { getAutomationParamDef, getAutomationColor, getAutomationShortLabel, getTrackAutomationParams, automationToBackend } from "../store/automationParams";
 
 interface TrackHeaderProps {
   track: Track;
@@ -20,6 +21,8 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
   // Isolated meter subscription — this component re-renders at 10Hz for the
   // mini activity bar, but that's cheap and doesn't affect Timeline/App.
   const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
+  // Automation display values — updated at ~30fps during playback
+  const autoValues = useDAWStore((s) => s.automatedParamValues[track.id]);
 
   const {
     toggleTrackMute,
@@ -72,6 +75,8 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
   const [showInstrumentBrowser, setShowInstrumentBrowser] = useState(false);
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  const [showAutoMenu, setShowAutoMenu] = useState(false);
+  const autoBtnRef = useRef<HTMLDivElement>(null);
   const [notesValue, setNotesValue] = useState(track.notes || "");
   const [inputType, setInputType] = useState<"stereo" | "mono">(
     track.inputChannelCount === 1 ? "mono" : "stereo",
@@ -169,12 +174,14 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
   return (
     <>
       <div
-        className={`flex border-b border-neutral-900 relative overflow-hidden box-border ${isSelected ? "bg-neutral-700" : "bg-neutral-800"}`}
+        className={`flex flex-col border-b border-neutral-900 relative overflow-hidden box-border ${isSelected ? "bg-neutral-700" : "bg-neutral-800"}`}
         style={{
-          height: trackHeight,
+          height: getEffectiveTrackHeight(track, trackHeight),
           ...(groupColor ? { backgroundColor: isSelected ? undefined : `${groupColor}10` } : {}),
         }}
       >
+      {/* Main track controls area — fixed at trackHeight */}
+      <div className="flex shrink-0 overflow-hidden" style={{ height: trackHeight }}>
         {/* Link group bracket */}
         {groupColor && (
           <div
@@ -302,7 +309,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
               size="sm"
               min={-60}
               max={12}
-              value={track.volumeDB}
+              value={autoValues?.volume !== undefined ? automationToBackend("volume", autoValues.volume) : track.volumeDB}
               defaultValue={0}
               onChange={handleVolumeChange}
               onBeginEdit={() => beginTrackVolumeEdit(track.id)}
@@ -315,7 +322,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
               size="sm"
               min={-1}
               max={1}
-              value={track.pan}
+              value={autoValues?.pan !== undefined ? automationToBackend("pan", autoValues.pan) : track.pan}
               defaultValue={0}
               onChange={handlePanChange}
               onBeginEdit={() => beginTrackPanEdit(track.id)}
@@ -380,19 +387,108 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
               <Power size={10} strokeWidth={2.5} />
             </Button>
           </span>
-          <Button
-            variant="default"
-            size="icon-sm"
-            shape="square"
-            active={track.showAutomation}
-            onClick={() =>
-              useDAWStore.getState().toggleTrackAutomation(track.id)
-            }
-            title="Toggle Automation"
-            className={`${track.showAutomation ? "text-green-400!" : ""} rounded-r`}
-          >
-            A
-          </Button>
+          <div ref={autoBtnRef} className="relative inline-flex">
+            <Button
+              variant="default"
+              size="icon-sm"
+              shape="square"
+              active={track.showAutomation}
+              onClick={() => useDAWStore.getState().openEnvelopeManager(track.id)}
+              onContextMenu={(e: React.MouseEvent) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowAutoMenu(!showAutoMenu);
+              }}
+              title="Envelope Manager (right-click for quick options)"
+              className={`${track.showAutomation ? "text-green-400!" : ""} rounded-r`}
+            >
+              A
+            </Button>
+            {showAutoMenu && autoBtnRef.current && createPortal(
+              <div
+                className="fixed z-50"
+                style={{
+                  left: autoBtnRef.current.getBoundingClientRect().right + 2,
+                  top: autoBtnRef.current.getBoundingClientRect().top,
+                }}
+              >
+                <div
+                  className="bg-neutral-800 border border-neutral-600 rounded shadow-lg py-1 text-[11px] min-w-[180px]"
+                  onMouseLeave={() => setShowAutoMenu(false)}
+                >
+                  {/* Show/hide individual params */}
+                  {getTrackAutomationParams(track.type).map(({ id, label }) => {
+                    const lane = track.automationLanes.find((l) => l.param === id);
+                    return (
+                      <button
+                        key={id}
+                        className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300 flex items-center gap-2"
+                        onClick={() => {
+                          const s = useDAWStore.getState();
+                          if (lane) {
+                            s.toggleAutomationLaneVisibility(track.id, lane.id);
+                          } else {
+                            s.addAutomationLane(track.id, id);
+                          }
+                          if (!track.showAutomation) s.toggleTrackAutomation(track.id);
+                          setShowAutoMenu(false);
+                        }}
+                      >
+                        <span className={`w-2 h-2 rounded-full ${lane?.visible ? "bg-green-400" : "bg-neutral-600"}`} />
+                        {label} Envelope
+                      </button>
+                    );
+                  })}
+                  <div className="border-t border-neutral-700 my-1" />
+                  {/* Bulk operations */}
+                  <button
+                    className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300"
+                    onClick={() => { useDAWStore.getState().showAllActiveEnvelopes(track.id); setShowAutoMenu(false); }}
+                  >
+                    Show All Active Envelopes
+                  </button>
+                  <button
+                    className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300"
+                    onClick={() => { useDAWStore.getState().hideAllEnvelopes(track.id); setShowAutoMenu(false); }}
+                  >
+                    Hide All Envelopes
+                  </button>
+                  <button
+                    className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300"
+                    onClick={() => { useDAWStore.getState().armAllVisibleAutomationLanes(track.id); setShowAutoMenu(false); }}
+                  >
+                    Arm All Visible Envelopes
+                  </button>
+                  <button
+                    className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300"
+                    onClick={() => { useDAWStore.getState().disarmAllAutomationLanes(track.id); setShowAutoMenu(false); }}
+                  >
+                    Disarm All Envelopes
+                  </button>
+                  <div className="border-t border-neutral-700 my-1" />
+                  {/* Set mode for all lanes */}
+                  {(["read", "touch", "latch", "write"] as AutomationModeType[]).map((mode) => (
+                    <button
+                      key={mode}
+                      className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300 capitalize"
+                      onClick={() => {
+                        const s = useDAWStore.getState();
+                        s.setTrackAutomationMode(track.id, mode);
+                        // Auto-show automation lanes when setting a recording mode
+                        if ((mode === "touch" || mode === "latch" || mode === "write") && !track.showAutomation) {
+                          s.toggleTrackAutomation(track.id);
+                        }
+                        setShowAutoMenu(false);
+                      }}
+                    >
+                      Set All: {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>,
+              document.body,
+            )}
+          </div>
           {track.frozen && (
             <span
               className="text-[10px] text-blue-400 px-0.5"
@@ -574,7 +670,121 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
             }}
           />
         </div>
-      </div>
+      </div>{/* end main controls area */}
+
+      {/* Automation Lane Sub-Headers — one per visible lane */}
+      {track.showAutomation && track.automationLanes.filter((l) => l.visible).map((lane) => {
+        const laneColor = getAutomationColor(lane.param);
+        const laneLabel = getAutomationShortLabel(lane.param);
+        const paramDef = getAutomationParamDef(lane.param);
+        const fader = paramDef.inlineFader;
+        return (
+          <div
+            key={lane.id}
+            className="flex items-center gap-1 px-1 border-t border-neutral-700/50 shrink-0"
+            style={{ height: AUTOMATION_LANE_HEIGHT }}
+          >
+            {/* Color indicator */}
+            <div className="w-0.5 h-full shrink-0 rounded-sm" style={{ backgroundColor: laneColor }} />
+            {/* Param name */}
+            <span className="text-[10px] text-neutral-400 w-7 truncate shrink-0" title={lane.param}>
+              {laneLabel}
+            </span>
+            {/* Inline fader / toggle / value display */}
+            {fader && fader.variant === "toggle" ? (
+              <button
+                className={`text-[8px] w-8 h-4 rounded shrink-0 cursor-pointer transition-colors ${
+                  track.muted
+                    ? "bg-green-600 text-white"
+                    : "bg-neutral-700 text-neutral-400 hover:text-neutral-200"
+                }`}
+                onClick={() => toggleTrackMute(track.id)}
+                data-no-drag="true"
+                data-no-select="true"
+                title={track.muted ? "Unmute" : "Mute"}
+              >
+                {track.muted ? "ON" : "OFF"}
+              </button>
+            ) : fader && fader.trackProperty ? (
+              <div
+                className="shrink-0"
+                style={{ width: 64 }}
+                data-no-drag="true"
+                data-no-select="true"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  if (fader.trackProperty === "volumeDB") beginTrackVolumeEdit(track.id);
+                  else if (fader.trackProperty === "pan") beginTrackPanEdit(track.id);
+                  const commitOnce = () => {
+                    if (fader.trackProperty === "volumeDB") commitTrackVolumeEdit(track.id);
+                    else if (fader.trackProperty === "pan") commitTrackPanEdit(track.id);
+                    document.removeEventListener("pointerup", commitOnce);
+                  };
+                  document.addEventListener("pointerup", commitOnce, { once: true });
+                }}
+              >
+                <Slider
+                  variant={fader.variant as "default" | "pan"}
+                  min={fader.min}
+                  max={fader.max}
+                  step={fader.step}
+                  value={autoValues?.[lane.param] !== undefined ? automationToBackend(lane.param, autoValues[lane.param]) : (fader.trackProperty === "volumeDB" ? track.volumeDB : track.pan)}
+                  onChange={(v) => {
+                    if (fader.trackProperty === "volumeDB") setTrackVolume(track.id, v);
+                    else if (fader.trackProperty === "pan") setTrackPan(track.id, v);
+                  }}
+                  defaultValue={fader.defaultValue}
+                  orientation="horizontal"
+                  width="64px"
+                />
+              </div>
+            ) : (
+              <span className="text-[8px] text-neutral-500 w-12 text-center truncate shrink-0">
+                {paramDef.formatNormalized(autoValues?.[lane.param] ?? paramDef.defaultNormalized)}
+              </span>
+            )}
+            {/* Mode selector */}
+            <select
+              className="text-[9px] bg-neutral-700 text-neutral-300 rounded px-0.5 h-5 shrink-0 cursor-pointer"
+              value={lane.mode}
+              onChange={(e) => {
+                useDAWStore.getState().setAutomationLaneMode(
+                  track.id, lane.id, e.target.value as AutomationModeType,
+                );
+              }}
+              data-no-select="true"
+              data-no-drag="true"
+            >
+              <option value="off">Off</option>
+              <option value="read">Read</option>
+              <option value="touch">Touch</option>
+              <option value="latch">Latch</option>
+              <option value="write">Write</option>
+            </select>
+            {/* Arm toggle */}
+            <button
+              className={`text-[9px] w-4 h-4 rounded flex items-center justify-center shrink-0 ${lane.armed ? "bg-red-600 text-white" : "bg-neutral-700 text-neutral-500 hover:text-neutral-300"}`}
+              onClick={() => useDAWStore.getState().armAutomationLane(track.id, lane.id, !lane.armed)}
+              title={lane.armed ? "Disarm automation" : "Arm automation"}
+              data-no-select="true"
+              data-no-drag="true"
+            >
+              R
+            </button>
+            {/* Hide lane button */}
+            <button
+              className="text-[10px] text-neutral-500 hover:text-neutral-300 w-4 h-4 flex items-center justify-center shrink-0"
+              onClick={() => useDAWStore.getState().toggleAutomationLaneVisibility(track.id, lane.id)}
+              title="Hide this lane"
+              data-no-select="true"
+              data-no-drag="true"
+            >
+              &times;
+            </button>
+          </div>
+        );
+      })}
+      </div>{/* end outer container */}
 
       {showFXChain && (
         <FXChainPanel
@@ -589,6 +799,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
         <PluginBrowser
           trackId={track.id}
           targetChain="instrument"
+          trackType={track.type}
           onClose={() => {
             setShowInstrumentBrowser(false);
           }}

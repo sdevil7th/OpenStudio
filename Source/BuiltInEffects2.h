@@ -4,7 +4,7 @@
 #include <atomic>
 
 // ============================================================================
-// S13Delay — Stereo delay with tempo sync, ping-pong mode, and feedback LPF
+// S13Delay -- Stereo delay with tempo sync, ping-pong, feedback processing
 // ============================================================================
 class S13Delay : public juce::AudioProcessor
 {
@@ -12,28 +12,30 @@ public:
     S13Delay();
     ~S13Delay() override = default;
 
-    // Parameters (atomic — set from message thread, read from audio thread)
-    std::atomic<float> delayTimeL { 250.0f };   // 1–2000 ms
-    std::atomic<float> delayTimeR { 250.0f };   // 1–2000 ms
-    std::atomic<float> feedback   { 0.4f };     // 0–0.95
-    std::atomic<float> mix        { 0.5f };     // 0–1
+    // Parameters
+    std::atomic<float> delayTimeL { 250.0f };   // 1-2000 ms
+    std::atomic<float> delayTimeR { 250.0f };   // 1-2000 ms
+    std::atomic<float> feedback   { 0.4f };     // 0-0.95
+    std::atomic<float> crossFeed  { 0.0f };     // 0-0.95 (cross-channel feedback)
+    std::atomic<float> mix        { 0.5f };     // 0-1
     std::atomic<float> pingPong   { 0.0f };     // 0 = off, 1 = on
     std::atomic<float> tempoSync  { 0.0f };     // 0 = off, 1 = on
     std::atomic<float> syncNoteL  { 0.0f };     // index into note table
     std::atomic<float> syncNoteR  { 0.0f };     // index into note table
-    std::atomic<float> lpfFreq    { 20000.0f }; // 200–20000 Hz feedback LPF
+    std::atomic<float> lpfFreq    { 20000.0f }; // 200-20000 Hz feedback LPF
+    std::atomic<float> hpfFreq    { 20.0f };    // 20-2000 Hz feedback HPF
+    std::atomic<float> fbSaturation { 0.0f };   // 0-1 feedback saturation amount
+    std::atomic<float> stereoWidth  { 1.0f };   // 0-2 stereo width
+    std::atomic<float> delayMode    { 0.0f };   // 0=Digital, 1=Tape, 2=Analog
 
-    // Sync note values:
-    //   0 = 1/4, 1 = 1/8, 2 = 1/16,
-    //   3 = 1/4 dotted, 4 = 1/8 dotted, 5 = 1/16 dotted,
-    //   6 = 1/4 triplet, 7 = 1/8 triplet, 8 = 1/16 triplet
-
-    // ---- AudioProcessor overrides ----
+    // AudioProcessor overrides
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
     const juce::String getName() const override { return "S13 Delay"; }
+    bool hasEditor() const override { return true; }
+    juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -45,8 +47,7 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
@@ -55,22 +56,20 @@ public:
     bool isS13BuiltIn() const { return true; }
 
 private:
-    static constexpr int maxDelaySamples = 192001; // ~2 seconds at 96kHz + margin
+    static constexpr int maxDelaySamples = 192001;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLineL { maxDelaySamples };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLineR { maxDelaySamples };
 
-    // Feedback LPF — one per channel
-    juce::dsp::IIR::Filter<float> feedbackLPF_L;
-    juce::dsp::IIR::Filter<float> feedbackLPF_R;
+    juce::dsp::IIR::Filter<float> feedbackLPF_L, feedbackLPF_R;
+    juce::dsp::IIR::Filter<float> feedbackHPF_L, feedbackHPF_R;
 
-    // State for feedback loop
     float feedbackSampleL = 0.0f;
     float feedbackSampleR = 0.0f;
 
     double cachedSampleRate = 44100.0;
     float lastLPFFreq = 20000.0f;
+    float lastHPFFreq = 20.0f;
 
-    // Convert sync note index to milliseconds at given BPM
     static float syncNoteToMs(float noteIndex, double bpm);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Delay)
@@ -78,7 +77,7 @@ private:
 
 
 // ============================================================================
-// S13Reverb — Algorithmic reverb using juce::dsp::Reverb
+// S13Reverb -- Multi-algorithm reverb
 // ============================================================================
 class S13Reverb : public juce::AudioProcessor
 {
@@ -86,20 +85,32 @@ public:
     S13Reverb();
     ~S13Reverb() override = default;
 
-    // Parameters
-    std::atomic<float> roomSize   { 0.5f };   // 0–1
-    std::atomic<float> damping    { 0.5f };   // 0–1
-    std::atomic<float> wetLevel   { 0.33f };  // 0–1
-    std::atomic<float> dryLevel   { 0.7f };   // 0–1
-    std::atomic<float> width      { 1.0f };   // 0–1
-    std::atomic<float> freezeMode { 0.0f };   // 0 = off, 1 = on
+    // Algorithm selector
+    enum class Algorithm : int { Room = 0, Hall, Plate, Chamber, Shimmer };
 
-    // ---- AudioProcessor overrides ----
+    // Parameters
+    std::atomic<float> algorithm  { 0.0f };    // Algorithm as float
+    std::atomic<float> roomSize   { 0.5f };    // 0-1
+    std::atomic<float> damping    { 0.5f };    // 0-1
+    std::atomic<float> wetLevel   { 0.33f };   // 0-1
+    std::atomic<float> dryLevel   { 0.7f };    // 0-1
+    std::atomic<float> width      { 1.0f };    // 0-1
+    std::atomic<float> freezeMode { 0.0f };    // 0 = off, 1 = on
+    std::atomic<float> preDelay   { 0.0f };    // 0-500 ms
+    std::atomic<float> diffusion  { 0.5f };    // 0-1
+    std::atomic<float> lowCut     { 20.0f };   // 20-500 Hz
+    std::atomic<float> highCut    { 20000.0f }; // 1000-20000 Hz
+    std::atomic<float> earlyLevel { 0.5f };    // 0-1 early reflections level
+    std::atomic<float> decayTime  { 2.0f };    // 0.1-20 seconds
+
+    // AudioProcessor overrides
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
     const juce::String getName() const override { return "S13 Reverb"; }
+    bool hasEditor() const override { return true; }
+    juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -111,8 +122,7 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
@@ -123,12 +133,22 @@ public:
 private:
     juce::dsp::Reverb reverb;
 
+    // Pre-delay
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> preDelayLineL { 48000 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> preDelayLineR { 48000 };
+
+    // Tone filters on wet signal
+    juce::dsp::IIR::Filter<float> wetLowCutL, wetLowCutR;
+    juce::dsp::IIR::Filter<float> wetHighCutL, wetHighCutR;
+
+    double cachedSampleRate = 44100.0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Reverb)
 };
 
 
 // ============================================================================
-// S13Chorus — Stereo chorus with LFO-modulated delay lines
+// S13Chorus -- Modulation suite: Chorus / Flanger / Phaser
 // ============================================================================
 class S13Chorus : public juce::AudioProcessor
 {
@@ -136,19 +156,30 @@ public:
     S13Chorus();
     ~S13Chorus() override = default;
 
-    // Parameters
-    std::atomic<float> rate     { 1.0f };   // 0.1–10 Hz LFO rate
-    std::atomic<float> depth    { 0.5f };   // 0–1
-    std::atomic<float> fbAmount { 0.0f };   // -1 to 1 (feedback)
-    std::atomic<float> mix      { 0.5f };   // 0–1
-    std::atomic<float> voices   { 2.0f };   // 1–4
+    enum class Mode : int { Chorus = 0, Flanger, Phaser };
+    enum class LFOShape : int { Sine = 0, Triangle, Square, SampleAndHold };
 
-    // ---- AudioProcessor overrides ----
+    // Parameters
+    std::atomic<float> mode     { 0.0f };    // Mode as float
+    std::atomic<float> rate     { 1.0f };    // 0.01-20 Hz LFO rate
+    std::atomic<float> depth    { 0.5f };    // 0-1
+    std::atomic<float> fbAmount { 0.0f };    // -1 to 1 (feedback)
+    std::atomic<float> mix      { 0.5f };    // 0-1
+    std::atomic<float> voices   { 2.0f };    // 1-6
+    std::atomic<float> lfoShape { 0.0f };    // LFOShape as float
+    std::atomic<float> spread   { 0.5f };    // 0-1 stereo spread
+    std::atomic<float> highCut  { 20000.0f }; // 200-20000 Hz wet signal
+    std::atomic<float> lowCut   { 20.0f };    // 20-2000 Hz wet signal
+    std::atomic<float> tempoSync { 0.0f };   // 0 = off, 1 = on
+
+    // AudioProcessor overrides
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
     const juce::String getName() const override { return "S13 Chorus"; }
+    bool hasEditor() const override { return true; }
+    juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -160,8 +191,7 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
@@ -170,26 +200,28 @@ public:
     bool isS13BuiltIn() const { return true; }
 
 private:
-    static constexpr int maxVoices = 4;
-    static constexpr int maxChorusDelaySamples = 4096; // ~85ms at 48kHz — plenty
+    static constexpr int maxVoices = 6;
+    static constexpr int maxChorusDelaySamples = 8192;
 
-    // One delay line per voice per channel
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLines[2][maxVoices];
-
-    // LFO phase per voice (0–2pi)
     float lfoPhase[maxVoices] = {};
-
-    // Feedback state per channel
     float feedbackState[2] = {};
 
+    // Phaser all-pass filters (up to 12 stages per channel)
+    static constexpr int maxPhaserStages = 12;
+    juce::dsp::IIR::Filter<float> allpassL[maxPhaserStages];
+    juce::dsp::IIR::Filter<float> allpassR[maxPhaserStages];
+
     double cachedSampleRate = 44100.0;
+
+    float getLFOValue(float phase, LFOShape shape) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Chorus)
 };
 
 
 // ============================================================================
-// S13Saturator — Soft clipping / tape saturation
+// S13Saturator -- Multi-type saturation / distortion
 // ============================================================================
 class S13Saturator : public juce::AudioProcessor
 {
@@ -197,18 +229,25 @@ public:
     S13Saturator();
     ~S13Saturator() override = default;
 
-    // Parameters
-    std::atomic<float> drive      { 6.0f };     // 0–30 dB
-    std::atomic<float> mix        { 1.0f };     // 0–1
-    std::atomic<float> toneFreq   { 20000.0f }; // 200–20000 Hz post-saturation LPF
-    std::atomic<float> outputGain { 0.0f };     // -12 to 0 dB
+    enum class SatType : int { Tape = 0, Tube, Transistor, Clip, Crush };
 
-    // ---- AudioProcessor overrides ----
+    // Parameters
+    std::atomic<float> satType    { 0.0f };     // SatType as float
+    std::atomic<float> drive      { 6.0f };     // 0-30 dB
+    std::atomic<float> mix        { 1.0f };     // 0-1
+    std::atomic<float> toneFreq   { 20000.0f }; // 200-20000 Hz post-sat LPF
+    std::atomic<float> outputGain { 0.0f };     // -12 to 0 dB
+    std::atomic<float> asymmetry  { 0.0f };     // -1 to 1 (asymmetric clipping)
+    std::atomic<float> oversampleMode { 1.0f }; // 0=off, 1=2x, 2=4x
+
+    // AudioProcessor overrides
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
     const juce::String getName() const override { return "S13 Saturator"; }
+    bool hasEditor() const override { return true; }
+    juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -220,8 +259,7 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
@@ -229,21 +267,19 @@ public:
 
     bool isS13BuiltIn() const { return true; }
 
-    // Oversampling control (Phase 20.12)
     void setOversamplingEnabled(bool enabled) { oversamplingEnabled = enabled; }
     bool isOversamplingEnabled() const { return oversamplingEnabled; }
 
 private:
-    // Post-saturation tone filter (one per channel)
-    juce::dsp::IIR::Filter<float> toneFilterL;
-    juce::dsp::IIR::Filter<float> toneFilterR;
-
+    juce::dsp::IIR::Filter<float> toneFilterL, toneFilterR;
     double cachedSampleRate = 44100.0;
     float lastToneFreq = 20000.0f;
 
-    // 2x oversampling processor (Phase 20.12)
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     bool oversamplingEnabled = false;
+
+    // Saturation functions per type
+    float processSample(float input, float driveLinear, SatType type, float asym) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Saturator)
 };

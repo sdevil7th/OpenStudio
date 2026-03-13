@@ -28,6 +28,20 @@ node_modules
 # Python
 __pycache__/
 *.pyc
+get-pip.py
+
+# Bundled Python environment (downloaded per-machine, not committed)
+/tools/python/
+
+# Third-party SDKs & runtime binaries (downloaded per-machine)
+/thirdparty/onnxruntime/
+/thirdparty/ARA_SDK/
+
+# ML models (large binary files, downloaded at setup/runtime)
+/resources/models/*.onnx
+/resources/models/*.ckpt
+/resources/models/*.bin
+/resources/models/*.ort
 
 # Logs
 *.log

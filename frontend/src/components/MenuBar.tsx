@@ -356,6 +356,16 @@ export function MenuBar() {
       checked: useDAWStore.getState().showMediaExplorer,
     },
     {
+      label: "Crosshair Cursor",
+      onClick: () => useDAWStore.getState().toggleCrosshair(),
+      checked: useDAWStore.getState().showCrosshair,
+    },
+    {
+      label: "Clip Launcher (Session View)",
+      onClick: () => useDAWStore.getState().toggleClipLauncher(),
+      checked: useDAWStore.getState().showClipLauncher,
+    },
+    {
       label: "Free Item Positioning",
       onClick: () => useDAWStore.getState().toggleFreePositioning(),
       checked: useDAWStore.getState().freePositioning,
@@ -835,6 +845,10 @@ export function MenuBar() {
       dividerAfter: true,
     },
     {
+      label: "Timecode / Sync Settings...",
+      onClick: () => useDAWStore.getState().toggleTimecodeSettings(),
+    },
+    {
       label: "Preferences...",
       shortcut: "Ctrl+,",
       onClick: () => useDAWStore.getState().togglePreferences(),
@@ -844,9 +858,24 @@ export function MenuBar() {
   // Help menu
   const helpMenuItems: MenuItemProps[] = [
     {
-      label: "Keyboard Shortcuts",
+      label: "Getting Started Guide",
+      onClick: () => useDAWStore.getState().toggleGettingStarted(),
+    },
+    {
+      label: "Help Reference",
       shortcut: "F1",
+      onClick: () => useDAWStore.getState().toggleContextualHelp(),
+      dividerAfter: true,
+    },
+    {
+      label: "Keyboard Shortcuts",
       onClick: () => useDAWStore.getState().toggleKeyboardShortcuts(),
+    },
+    {
+      label: "Command Palette",
+      shortcut: "Ctrl+Shift+P",
+      onClick: () => useDAWStore.getState().toggleCommandPalette(),
+      dividerAfter: true,
     },
     {
       label: "About Studio13",
@@ -859,12 +888,6 @@ export function MenuBar() {
           "github.com/studio13"
         );
       },
-      dividerAfter: true,
-    },
-    {
-      label: "Command Palette",
-      shortcut: "Ctrl+Shift+P",
-      onClick: () => useDAWStore.getState().toggleCommandPalette(),
     },
   ];
 
@@ -875,7 +898,7 @@ export function MenuBar() {
       onDoubleClick={handleDoubleClick}
     >
       {/* App icon + Menus (no-drag so clicks work normally) */}
-      <div className="flex items-center shrink-0" data-no-drag>
+      <div className="flex items-center shrink-0" data-no-drag role="menubar" aria-label="Main menu">
         <img src="/icon.svg" alt="Studio13" className="w-4 h-4 mx-2" />
         <MenuDropdown label="File" items={fileMenuItems} />
         <EditMenu />
@@ -889,11 +912,12 @@ export function MenuBar() {
       <div className="flex-1 min-w-0" />
 
       {/* Window controls */}
-      <div className="flex items-center shrink-0 h-full" data-no-drag>
+      <div className="flex items-center shrink-0 h-full" data-no-drag role="group" aria-label="Window controls">
         <button
           onClick={handleMinimize}
           className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
           title="Minimize"
+          aria-label="Minimize window"
         >
           <Minus size={14} />
         </button>
@@ -901,6 +925,7 @@ export function MenuBar() {
           onClick={handleMaximize}
           className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
           title={isMaximized ? "Restore" : "Maximize"}
+          aria-label={isMaximized ? "Restore window" : "Maximize window"}
         >
           {isMaximized ? <Copy size={12} /> : <Square size={12} />}
         </button>
@@ -908,6 +933,7 @@ export function MenuBar() {
           onClick={handleClose}
           className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-red-600 hover:text-white transition-colors"
           title="Close"
+          aria-label="Close window"
         >
           <X size={14} />
         </button>

@@ -9,6 +9,10 @@ import {
   RecordingClip,
   getTrackGroupInfo,
   TRACK_GROUP_COLORS,
+  getEffectiveTrackHeight,
+  getTrackYPositions,
+  getTrackAtY,
+  AUTOMATION_LANE_HEIGHT,
 } from "../store/useDAWStore";
 import { nativeBridge, WaveformPeak } from "../services/NativeBridge";
 import { ContextMenu } from "./ContextMenu";
@@ -22,6 +26,12 @@ import {
   fadeInCurvePoints,
   fadeOutCurvePoints,
 } from "../utils/fadeUtils";
+import {
+  getAutomationColor,
+  getAutomationShortLabel,
+  getAutomationDefault,
+  formatAutomationValue,
+} from "../store/automationParams";
 
 // Constants
 const RULER_HEIGHT = 30;
@@ -30,11 +40,21 @@ const MAX_PIXELS_PER_SECOND = 1000;
 
 // Snap samplesPerPixel to nearest power-of-2 so the waveform cache key
 // stays stable across a wide zoom range (prevents re-fetch on every tick).
+// Minimum is 64 — the finest mipmap stride available in PeakCache (LEVEL_STRIDES[0]).
+// Requesting finer than 64 makes the C++ use ratio=1 (finest mipmap) anyway, but
+// the JS coordinate math breaks if cacheSpp < actual stride.
+const FINEST_MIPMAP_STRIDE = 64;
 const quantizeSpp = (spp: number) =>
-  Math.max(1, Math.pow(2, Math.round(Math.log2(spp))));
+  Math.max(FINEST_MIPMAP_STRIDE, Math.pow(2, Math.round(Math.log2(Math.max(1, spp)))));
+
+interface MasterAutomationProps {
+  lanes: { id: string; param: string; points: { time: number; value: number }[]; visible: boolean; mode: string; armed: boolean }[];
+  showAutomation: boolean;
+}
 
 interface TimelineProps {
   tracks: Track[];
+  masterAutomation?: MasterAutomationProps;
 }
 
 // Cache for waveform data to avoid re-fetching
@@ -52,7 +72,7 @@ type ClipContextMenuState = {
   trackId: string;
 } | null;
 
-export function Timeline({ tracks }: TimelineProps) {
+export function Timeline({ tracks, masterAutomation }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
@@ -319,12 +339,15 @@ export function Timeline({ tracks }: TimelineProps) {
     clearRazorEdits,
     toolMode,
     splitClipAtPosition,
+    splitMIDIClipAtPosition,
     trackGroups,
     showCrosshair,
     setTrackWaveformZoom,
     slipEditClip,
     rippleMode,
     addClipGainPoint,
+    moveClipGainPoint,
+    removeClipGainPoint,
   } = useDAWStore(
     useShallow((state) => ({
       recordingClips: state.recordingClips,
@@ -369,12 +392,15 @@ export function Timeline({ tracks }: TimelineProps) {
       clearRazorEdits: state.clearRazorEdits,
       toolMode: state.toolMode,
       splitClipAtPosition: state.splitClipAtPosition,
+      splitMIDIClipAtPosition: state.splitMIDIClipAtPosition,
       trackGroups: state.trackGroups,
       showCrosshair: state.showCrosshair,
       setTrackWaveformZoom: state.setTrackWaveformZoom,
       slipEditClip: state.slipEditClip,
       rippleMode: state.rippleMode,
       addClipGainPoint: state.addClipGainPoint,
+      moveClipGainPoint: state.moveClipGainPoint,
+      removeClipGainPoint: state.removeClipGainPoint,
     }))
   );
 
@@ -390,8 +416,17 @@ export function Timeline({ tracks }: TimelineProps) {
   // Calculate stage height: fill available viewport space, or grow for content
   const SCROLLBAR_HEIGHT = 16; // h-4 from HorizontalScrollbar
   const availableHeight = dimensions.height - RULER_HEIGHT - SCROLLBAR_HEIGHT;
-  const contentHeight = tracks.length * trackHeight;
-  const stageHeight = Math.max(contentHeight, availableHeight, 200);
+  const { trackYs, totalHeight: contentHeight } = useMemo(
+    () => getTrackYPositions(tracks, trackHeight),
+    [tracks, trackHeight],
+  );
+  // Master automation lanes add height below all tracks
+  const masterVisibleLanes = useMemo(
+    () => (masterAutomation?.showAutomation ? masterAutomation.lanes.filter((l) => l.visible) : []),
+    [masterAutomation],
+  );
+  const masterAutoHeight = masterVisibleLanes.length > 0 ? trackHeight + masterVisibleLanes.length * AUTOMATION_LANE_HEIGHT : 0;
+  const stageHeight = Math.max(contentHeight + masterAutoHeight, availableHeight, 200);
 
   // Refs for ruler drag to avoid stale closures in global listeners
   const projectRangeRef = useRef(projectRange);
@@ -492,6 +527,22 @@ export function Timeline({ tracks }: TimelineProps) {
     });
     return unsub;
   }, []);
+
+  // Sync native vertical scroll (workspace's scrollTop) → store's scrollY
+  // The workspace div has overflow-y: auto and handles vertical scrolling natively.
+  // We need to sync scrollTop to scrollY so viewport culling and hit-testing work.
+  useEffect(() => {
+    const workspace = containerRef.current?.parentElement;
+    if (!workspace) return;
+    const handleScroll = () => {
+      const newScrollY = workspace.scrollTop;
+      if (Math.abs(newScrollY - scrollY) > 0.5) {
+        setScroll(scrollX, newScrollY);
+      }
+    };
+    workspace.addEventListener("scroll", handleScroll, { passive: true });
+    return () => workspace.removeEventListener("scroll", handleScroll);
+  }, [scrollX, scrollY, setScroll]);
 
   // Handle scroll wheel for zoom with native listener to prevent browser zoom
   // Use requestAnimationFrame for smooth scrolling and zooming
@@ -595,6 +646,8 @@ export function Timeline({ tracks }: TimelineProps) {
   pixelsPerSecondRef.current = pixelsPerSecond;
   const trackHeightRef = useRef(trackHeight);
   trackHeightRef.current = trackHeight;
+  const trackYsRef = useRef(trackYs);
+  trackYsRef.current = trackYs;
   const scrollXRef = useRef(scrollX);
   scrollXRef.current = scrollX;
   const scrollYRef = useRef(scrollY);
@@ -617,7 +670,8 @@ export function Timeline({ tracks }: TimelineProps) {
         e.stopPropagation();
         const rect = container.getBoundingClientRect();
         const mouseY = e.clientY - rect.top + scrollYRef.current;
-        const trackIdx = Math.floor(mouseY / trackHeightRef.current);
+        const trackHit = getTrackAtY(mouseY, tracksRef.current, trackYsRef.current, trackHeightRef.current);
+        const trackIdx = trackHit?.trackIndex ?? -1;
         const currentTracks = tracksRef.current;
         if (trackIdx >= 0 && trackIdx < currentTracks.length) {
           const track = currentTracks[trackIdx];
@@ -1004,7 +1058,7 @@ export function Timeline({ tracks }: TimelineProps) {
       const intersectingIds: string[] = [];
       const store = useDAWStore.getState();
       store.tracks.forEach((track, trackIndex) => {
-        const clipTop = trackIndex * trackHeight + 5;
+        const clipTop = trackYsRef.current[trackIndex] + 5;
         const clipBottom = clipTop + trackHeight - 10;
         if (clipBottom < top || clipTop > bottom) return; // skip entire track
         const checkClip = (clip: { id: string; startTime: number; duration: number }) => {
@@ -1258,14 +1312,20 @@ export function Timeline({ tracks }: TimelineProps) {
     return () => unsubscribe();
   }, [isRecording, recordingClips, tempo, timeSignature.numerator, pixelsPerSecond]);
 
-  // Subscribe to peaksReady events from C++ — invalidate waveform cache for the
-  // finished file so renderClip re-fetches on the next render pass.
+  // Subscribe to peaksReady events from C++ — invalidate waveform cache and
+  // in-flight guards for the finished file so renderClip re-fetches fresh peaks.
   useEffect(() => {
     const unsubscribe = nativeBridge.onPeaksReady((filePath: string) => {
       if (!filePath) return;
+      // Clear in-flight guards so the file can be re-fetched
+      for (const key of [...inFlightRef.current]) {
+        if (key.startsWith(filePath)) {
+          inFlightRef.current.delete(key);
+        }
+      }
+      // Clear cached (empty) waveform data to trigger re-fetch on next render
       setWaveformCache((prev) => {
         const next = new Map(prev);
-        // Remove every cached resolution for this file path
         for (const key of next.keys()) {
           if (key.startsWith(filePath)) {
             next.delete(key);
@@ -1273,6 +1333,10 @@ export function Timeline({ tracks }: TimelineProps) {
         }
         return next;
       });
+      // Force a re-render even if no cache entries were cleared (initial fetch
+      // may have returned empty so nothing was stored). This guarantees renderClip
+      // re-runs and retries fetchWaveformData now that peaks are ready.
+      forceRender((n) => n + 1);
     });
     return unsubscribe;
   }, []);
@@ -1439,44 +1503,57 @@ export function Timeline({ tracks }: TimelineProps) {
   //     });
   //   };
 
-  // Fetch waveform data for the entire audio file at current zoom resolution.
-  // Uses quantized samplesPerPixel so the cache key stays stable across a wide
-  // zoom range — prevents re-fetching on every tiny zoom tick.
-  const fetchWaveformData = async (filePath: string, fileSampleRate: number = 44100, clipDuration: number = 0) => {
-    if (!filePath) return;
+  // Viewport-tile size in peaks per tile. Aligning requests to tile boundaries
+  // prevents a new fetch on every scroll pixel while keeping tiles small enough
+  // that we never fetch more than ~2x the viewport's worth of data.
+  // At cacheSpp=32 (extreme zoom 1000px/s): tile = 4096*32 = 131072 samples ≈ 3s ≈ 3000px
+  // At cacheSpp=1024 (zoom 43px/s):        tile = 4096*1024 = 4M samples ≈ 90s ≈ 3900px
+  const TILE_PEAKS = 4096;
 
-    // Skip fetch during active zoom or scroll — use cached data at nearest resolution
+  // Fetch waveform peaks for the VISIBLE PORTION of a clip only.
+  // startSample: file-absolute sample where the visible clip portion begins (tile-aligned).
+  // numPixels: number of peaks to fetch (≈ viewport width, capped for safety).
+  const fetchWaveformData = async (
+    filePath: string,
+    cacheSpp: number,
+    startSample: number,  // tile-aligned start within the source file
+    numPixels: number,    // peaks to fetch (viewport-bounded)
+  ) => {
+    if (!filePath) return;
     if (isZoomingRef.current || isScrollingRef.current) return;
 
-    const rawSpp = Math.max(1, Math.round(fileSampleRate / pixelsPerSecond));
-    const cacheSpp = quantizeSpp(rawSpp);
-    const cacheKey = `${filePath}-${cacheSpp}`;
-
-    // Already in-flight — don't duplicate the request
+    const cacheKey = `${filePath}-${cacheSpp}-${startSample}`;
     if (inFlightRef.current.has(cacheKey)) return;
 
     inFlightRef.current.add(cacheKey);
     try {
-      // Calculate actual peaks needed from clip duration (not 999999)
-      const totalFileSamples = clipDuration > 0
-        ? clipDuration * fileSampleRate
-        : 600 * fileSampleRate; // fallback: 10 min max
-      const numPeaks = Math.min(100000, Math.ceil(totalFileSamples / cacheSpp));
-
-      const peaks = await nativeBridge.getWaveformPeaks(
-        filePath,
-        cacheSpp,
-        numPeaks,
-      );
+      const peaks = await nativeBridge.getWaveformPeaks(filePath, cacheSpp, startSample, numPixels);
 
       if (peaks && peaks.length > 0) {
-        setWaveformCache((prev) => new Map(prev).set(cacheKey, peaks));
+        setWaveformCache((prev) => {
+          const next = new Map(prev);
+          next.set(cacheKey, peaks);
+          // Prune cache if it grows too large (> 200 entries) — keep most recent
+          if (next.size > 200) {
+            const oldest = next.keys().next().value;
+            if (oldest) next.delete(oldest);
+          }
+          return next;
+        });
+        // Always clear inFlight so evicted cache entries can be re-fetched
+        inFlightRef.current.delete(cacheKey);
+        return;
       }
+      // Empty = peaks still generating async; retry after 2s and force a re-render
+      setTimeout(() => {
+        inFlightRef.current.delete(cacheKey);
+        forceRender((n) => n + 1);
+      }, 2000);
+      return;
     } catch (e) {
       console.error("Failed to fetch waveform:", e);
-    } finally {
-      inFlightRef.current.delete(cacheKey);
     }
+    inFlightRef.current.delete(cacheKey);
   };
 
   // Render individual clip with waveform
@@ -1498,7 +1575,7 @@ export function Timeline({ tracks }: TimelineProps) {
       if (dragState.clipId === clip.id) {
         // Anchor clip — offset to pointer's target track
         if (dragState.targetTrackIndex !== trackIndex) {
-          trackY = dragState.targetTrackIndex * trackHeight;
+          trackY = trackYs[dragState.targetTrackIndex] ?? trackY;
         }
       } else if (dragState.multiClipInfo && dragState.multiClipInfo.length > 1) {
         // Other clips in multi-selection — offset by same track delta
@@ -1507,7 +1584,7 @@ export function Timeline({ tracks }: TimelineProps) {
           const trackDelta = dragState.targetTrackIndex - (dragState.trackIndex ?? 0);
           const visualTrackIdx = info.trackIndex + trackDelta;
           if (visualTrackIdx !== trackIndex) {
-            trackY = visualTrackIdx * trackHeight;
+            trackY = trackYs[visualTrackIdx] ?? trackY;
           }
         }
       }
@@ -1523,21 +1600,32 @@ export function Timeline({ tracks }: TimelineProps) {
     // Compact thumbnail view for very narrow clips — skip waveform fetch entirely
     const isNarrowClip = width < 60;
 
-    // Fetch waveform data if we don't have it (quantized cache key for stability)
-    // Skip waveform fetch for narrow clips — not enough room to display it
+    // Fetch waveform peaks for the VISIBLE PORTION only (viewport-tiled).
     const fileSR = clip.sampleRate || 44100;
     const renderSpp = Math.max(1, Math.round(fileSR / pixelsPerSecond));
     const cacheSpp = quantizeSpp(renderSpp);
-    const cacheKey = `${clip.filePath}-${cacheSpp}`;
-    const waveformData = isNarrowClip ? undefined : waveformCache.get(cacheKey);
-    const neededPeaks = Math.ceil(((clip.offset || 0) + clip.duration) * fileSR / cacheSpp);
-    if (!isNarrowClip && clip.filePath && (!waveformData || waveformData.length < neededPeaks)) {
-      fetchWaveformData(clip.filePath, fileSR, (clip.offset || 0) + clip.duration);
-    }
 
-    // Scale factor: maps pixel positions to peak indices when the cached
-    // resolution differs from the current zoom level.
+    // Tile-aligned start sample: snap the visible clip start to TILE_PEAKS boundaries
+    // so small scrolls within a tile reuse the same cache entry.
+    const visibleStartPx = Math.max(0, -x);          // pixels of clip hidden left of viewport
+    const visibleEndPx   = Math.min(width, dimensions.width - x);
+    const clipOffsetSamples = Math.floor((clip.offset || 0) * fileSR);
+    const visibleStartSampleInFile = clipOffsetSamples + Math.floor(visibleStartPx / pixelsPerSecond * fileSR);
+    const tileSamples = TILE_PEAKS * cacheSpp;
+    const alignedStartSample = Math.floor(visibleStartSampleInFile / tileSamples) * tileSamples;
+
+    // How many peaks to fetch: visible clip width + extra to cover tile-alignment gap
     const peakScale = renderSpp / cacheSpp;
+    const alignmentGapPeaks = Math.ceil((visibleStartSampleInFile - alignedStartSample) / cacheSpp);
+    const visiblePeaks = Math.ceil((visibleEndPx - visibleStartPx) / peakScale);
+    const numPeaksToFetch = Math.min(visiblePeaks + alignmentGapPeaks + TILE_PEAKS, 8000);
+
+    const cacheKey = `${clip.filePath}-${cacheSpp}-${alignedStartSample}`;
+    const waveformData = isNarrowClip ? undefined : waveformCache.get(cacheKey);
+
+    if (!isNarrowClip && clip.filePath && !waveformData) {
+      fetchWaveformData(clip.filePath, cacheSpp, alignedStartSample, numPeaksToFetch);
+    }
 
     // Generate waveform points for Line drawing.
     // Only renders the visible portion of the clip within the viewport,
@@ -1556,11 +1644,16 @@ export function Timeline({ tracks }: TimelineProps) {
       // Calculate dynamic waveform height based on current trackHeight
       const waveformHeight = trackHeight - 20;
 
-      // Determine which peaks correspond to the clip's audio portion
-      const clipStartPeak = Math.max(0, Math.floor((clip.offset * fileSR) / cacheSpp));
-      const totalAvailablePeaks = Math.max(0, waveformData.length - clipStartPeak);
-      // How many screen pixels the available peaks can fill
-      const totalClipPeaks = Math.min(Math.ceil(width), Math.ceil(totalAvailablePeaks / peakScale));
+      // waveformData starts at alignedStartSample (not sample 0).
+      // clipStartInData: offset (in peaks) from waveformData[0] to the clip's audio start.
+      // Can be negative when alignedStartSample > clipStartSampleInFile (clip starts before tile).
+      const clipStartSampleInFile = Math.floor((clip.offset || 0) * fileSR);
+      const clipStartInData = Math.floor((clipStartSampleInFile - alignedStartSample) / cacheSpp);
+      const totalAvailablePeaks = Math.max(0, waveformData.length - Math.max(0, clipStartInData));
+      // When clipStartInData < 0, the fetched data starts this many clip-pixels after pixel 0.
+      // totalClipPeaks must account for this offset so visibleEnd is computed correctly.
+      const dataStartInClipPx = clipStartInData < 0 ? Math.ceil(-clipStartInData / peakScale) : 0;
+      const totalClipPeaks = Math.min(Math.ceil(width), dataStartInClipPx + Math.ceil(totalAvailablePeaks / peakScale));
 
       // Clamp to visible viewport: only iterate over pixels that are on screen
       const visibleStart = Math.max(0, Math.floor(-x));
@@ -1577,7 +1670,10 @@ export function Timeline({ tracks }: TimelineProps) {
 
         // Draw top half (max values) — only visible peaks
         for (let i = visibleStart; i < visibleEnd; i++) {
-          const dataIndex = clipStartPeak + Math.floor(i * peakScale);
+          // dataIndex correctly maps pixel i → waveformData entry, accounting for
+          // both clip.offset and the tile-alignment gap (clipStartInData can be negative).
+          const dataIndex = clipStartInData + Math.floor(i * peakScale);
+          if (dataIndex < 0 || dataIndex >= waveformData.length) continue;
           const channelData = waveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
 
@@ -1600,7 +1696,8 @@ export function Timeline({ tracks }: TimelineProps) {
 
         // Draw bottom half (min values, reversed) — only visible peaks
         for (let i = visibleEnd - 1; i >= visibleStart; i--) {
-          const dataIndex = clipStartPeak + Math.floor(i * peakScale);
+          const dataIndex = clipStartInData + Math.floor(i * peakScale);
+          if (dataIndex < 0 || dataIndex >= waveformData.length) continue;
           const channelData = waveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
 
@@ -1724,8 +1821,9 @@ export function Timeline({ tracks }: TimelineProps) {
       }
 
       // Calculate target track based on Y position
-      const targetTrackIdx = Math.floor(pointerPos.y / trackHeight);
-      const targetTY = Math.max(0, targetTrackIdx) * trackHeight;
+      const targetHit = getTrackAtY(pointerPos.y + scrollY, tracks, trackYs, trackHeight);
+      const targetTrackIdx = targetHit?.trackIndex ?? Math.max(0, tracks.length - 1);
+      const targetTY = trackYs[Math.max(0, targetTrackIdx)] ?? 0;
 
       // Update snap ghost preview: show semi-transparent rect at snapped position
       if (snapEnabled && Math.abs(newStartTime - rawStartTime) > 0.001) {
@@ -2269,7 +2367,7 @@ export function Timeline({ tracks }: TimelineProps) {
             />
           );
         })()}
-        {/* Gain envelope dots (when selected) */}
+        {/* Gain envelope dots (when selected) — interactive: drag to move, right-click to delete */}
         {isSelected && clip.gainEnvelope && clip.gainEnvelope.length >= 1 && (() => {
           const clipH = trackHeight - 10;
           const clipTopY = trackY + 5;
@@ -2281,11 +2379,28 @@ export function Timeline({ tracks }: TimelineProps) {
                 key={`gain-pt-${clip.id}-${idx}`}
                 x={px}
                 y={py}
-                radius={3}
+                radius={4}
                 fill="#ffd700"
                 stroke="#fff"
                 strokeWidth={0.5}
-                listening={false}
+                draggable
+                onDragMove={(e) => {
+                  const node = e.target;
+                  const newPx = node.x();
+                  const newPy = node.y();
+                  const newTime = Math.max(0, (newPx - x) / pixelsPerSecond);
+                  const newGain = Math.max(0, Math.min(2, 2 * (1 - (newPy - clipTopY) / clipH)));
+                  moveClipGainPoint(clip.id, idx, newTime, newGain);
+                }}
+                onDragEnd={(e) => {
+                  e.cancelBubble = true;
+                }}
+                onContextMenu={(e) => {
+                  e.evt.preventDefault();
+                  e.cancelBubble = true;
+                  removeClipGainPoint(clip.id, idx);
+                }}
+                hitStrokeWidth={6}
               />
             );
           });
@@ -2750,7 +2865,7 @@ export function Timeline({ tracks }: TimelineProps) {
         const trackDelta = dragState.targetTrackIndex - (dragState.trackIndex ?? 0);
         const visualTrackIdx = info.trackIndex + trackDelta;
         if (visualTrackIdx !== _trackIndex) {
-          trackY = visualTrackIdx * trackHeight;
+          trackY = trackYs[visualTrackIdx] ?? trackY;
         }
       }
     }
@@ -2829,7 +2944,22 @@ export function Timeline({ tracks }: TimelineProps) {
       return lines;
     };
 
+    const handleMIDIClipMouseDown = (e: any) => {
+      if (toolModeRef.current === "split") {
+        e.cancelBubble = true;
+        const stage = e.target.getStage();
+        const pointerPos = stage.getPointerPosition();
+        let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+        if (snapEnabled) {
+          splitTime = snapToGrid(splitTime, tempo, timeSignature, gridSize);
+        }
+        splitMIDIClipAtPosition(clip.id, splitTime);
+        return;
+      }
+    };
+
     const handleMIDIClipClick = (e: any) => {
+      if (toolModeRef.current === "split") return; // handled in mousedown
       const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
       selectClip(clip.id, { ctrl });
     };
@@ -2850,6 +2980,7 @@ export function Timeline({ tracks }: TimelineProps) {
           fill={clip.color || trackColor}
           opacity={0.25}
           cornerRadius={3}
+          onMouseDown={handleMIDIClipMouseDown}
           onClick={handleMIDIClipClick}
           onTap={handleMIDIClipClick}
           onDblClick={handleMIDIClipDoubleClick}
@@ -2965,216 +3096,346 @@ export function Timeline({ tracks }: TimelineProps) {
   };
 
   // Render automation lanes for a track
+  // Catmull-Rom spline interpolation between automation points for smooth curves.
+  const interpolateAutomationCurve = (rawPts: number[], subdivisions: number = 8): number[] => {
+    const n = rawPts.length / 2;
+    if (n < 2) return rawPts;
+    if (n === 2) return rawPts;
+    const result: number[] = [];
+    for (let i = 0; i < n - 1; i++) {
+      const p0x = i > 0 ? rawPts[(i - 1) * 2] : rawPts[0];
+      const p0y = i > 0 ? rawPts[(i - 1) * 2 + 1] : rawPts[1];
+      const p1x = rawPts[i * 2];
+      const p1y = rawPts[i * 2 + 1];
+      const p2x = rawPts[(i + 1) * 2];
+      const p2y = rawPts[(i + 1) * 2 + 1];
+      const p3x = i + 2 < n ? rawPts[(i + 2) * 2] : rawPts[(n - 1) * 2];
+      const p3y = i + 2 < n ? rawPts[(i + 2) * 2 + 1] : rawPts[(n - 1) * 2 + 1];
+      for (let s = 0; s < subdivisions; s++) {
+        const t = s / subdivisions;
+        const t2 = t * t;
+        const t3 = t2 * t;
+        result.push(
+          0.5 * ((2 * p1x) + (-p0x + p2x) * t + (2 * p0x - 5 * p1x + 4 * p2x - p3x) * t2 + (-p0x + 3 * p1x - 3 * p2x + p3x) * t3),
+          0.5 * ((2 * p1y) + (-p0y + p2y) * t + (2 * p0y - 5 * p1y + 4 * p2y - p3y) * t2 + (-p0y + 3 * p1y - 3 * p2y + p3y) * t3),
+        );
+      }
+    }
+    result.push(rawPts[(n - 1) * 2], rawPts[(n - 1) * 2 + 1]);
+    return result;
+  };
+
+  // Format automation value for tooltip display
+  const formatAutoValue = (param: string, value: number): string =>
+    formatAutomationValue(param, value);
+
+  // Colors and labels are now centralized in automationParams.ts
+
+  // Render automation lanes as separate rows BELOW the clip area
   const renderAutomationLanes = (track: Track, trackY: number) => {
     if (!track.showAutomation) return null;
 
-    // Color per parameter type
-    const automationColors: Record<string, string> = {
-      volume: "#4488ff",
-      pan: "#44ff88",
-      mute: "#ff4444",
-    };
-    const defaultAutoColor = "#ffaa44";
+    const visibleLanes = track.automationLanes.filter((l) => l.visible);
+    if (visibleLanes.length === 0) return null;
 
-    // Catmull-Rom spline interpolation between automation points for smooth curves.
-    // Takes flat [x0,y0, x1,y1, ...] array of control points, returns denser flat array.
-    const interpolateAutomationCurve = (rawPts: number[], subdivisions: number = 8): number[] => {
-      const n = rawPts.length / 2; // number of control points
-      if (n < 2) return rawPts;
-      if (n === 2) return rawPts; // just a straight line
+    return visibleLanes.map((lane, laneIdx) => {
+      const color = getAutomationColor(lane.param);
+      const laneTop = trackY + trackHeight + laneIdx * AUTOMATION_LANE_HEIGHT;
+      const laneH = AUTOMATION_LANE_HEIGHT;
+      const laneBottom = laneTop + laneH;
 
-      const result: number[] = [];
-      for (let i = 0; i < n - 1; i++) {
-        // Four control points for Catmull-Rom: p0, p1, p2, p3
-        const p0x = i > 0 ? rawPts[(i - 1) * 2] : rawPts[0];
-        const p0y = i > 0 ? rawPts[(i - 1) * 2 + 1] : rawPts[1];
-        const p1x = rawPts[i * 2];
-        const p1y = rawPts[i * 2 + 1];
-        const p2x = rawPts[(i + 1) * 2];
-        const p2y = rawPts[(i + 1) * 2 + 1];
-        const p3x = i + 2 < n ? rawPts[(i + 2) * 2] : rawPts[(n - 1) * 2];
-        const p3y = i + 2 < n ? rawPts[(i + 2) * 2 + 1] : rawPts[(n - 1) * 2 + 1];
-
-        for (let s = 0; s < subdivisions; s++) {
-          const t = s / subdivisions;
-          const t2 = t * t;
-          const t3 = t2 * t;
-          // Catmull-Rom basis (tension 0.5)
-          const cx = 0.5 * (
-            (2 * p1x) +
-            (-p0x + p2x) * t +
-            (2 * p0x - 5 * p1x + 4 * p2x - p3x) * t2 +
-            (-p0x + 3 * p1x - 3 * p2x + p3x) * t3
-          );
-          const cy = 0.5 * (
-            (2 * p1y) +
-            (-p0y + p2y) * t +
-            (2 * p0y - 5 * p1y + 4 * p2y - p3y) * t2 +
-            (-p0y + 3 * p1y - 3 * p2y + p3y) * t3
-          );
-          result.push(cx, cy);
-        }
+      // Build points in lane-local coordinates
+      const rawPoints: number[] = [];
+      for (const point of lane.points) {
+        const px = point.time * pixelsPerSecond - scrollX;
+        const py = laneTop + laneH * (1 - point.value);
+        rawPoints.push(px, py);
       }
-      // Add the last point
-      result.push(rawPts[(n - 1) * 2], rawPts[(n - 1) * 2 + 1]);
-      return result;
-    };
 
-    // Format automation value for tooltip display
-    const formatAutoValue = (param: string, value: number): string => {
-      switch (param) {
-        case "volume": {
-          // 0-1 normalized -> dB display (-60 to +6)
-          const db = value * 66 - 60;
-          return `${db.toFixed(1)} dB`;
-        }
-        case "pan": {
-          // 0-1 normalized -> -100 to +100
-          const pan = Math.round((value * 2 - 1) * 100);
-          if (pan === 0) return "C";
-          return pan < 0 ? `${pan}L` : `${pan}R`;
-        }
-        case "mute":
-          return value >= 0.5 ? "Muted" : "Active";
-        default:
-          return `${(value * 100).toFixed(0)}%`;
+      const smoothPoints = rawPoints.length >= 4
+        ? interpolateAutomationCurve(rawPoints, 8)
+        : rawPoints;
+
+      // Fill area under curve
+      const fillPoints: number[] = [];
+      if (smoothPoints.length >= 4) {
+        fillPoints.push(smoothPoints[0], laneBottom);
+        for (let fi = 0; fi < smoothPoints.length; fi++) fillPoints.push(smoothPoints[fi]);
+        fillPoints.push(smoothPoints[smoothPoints.length - 2], laneBottom);
       }
-    };
 
-    return track.automationLanes
-      .filter((lane) => lane.visible && lane.points.length > 0)
-      .map((lane) => {
-        const color = automationColors[lane.param] || defaultAutoColor;
-        const rawPoints: number[] = [];
-        const laneBottom = trackY + trackHeight;
+      const laneLabel = getAutomationShortLabel(lane.param);
+      const defaultValue = getAutomationDefault(lane.param);
+      const defaultLineY = laneTop + laneH * (1 - defaultValue);
 
-        for (const point of lane.points) {
-          const px = point.time * pixelsPerSecond - scrollX;
-          const py = trackY + trackHeight * (1 - point.value);
-          rawPoints.push(px, py);
-        }
+      return (
+        <Group key={`auto-${track.id}-${lane.id}`}>
+          {/* Lane separator line */}
+          <Line
+            points={[0, laneTop, dimensions.width, laneTop]}
+            stroke="#333"
+            strokeWidth={0.5}
+            listening={false}
+          />
+          {/* Lane background tint */}
+          <Rect
+            x={0}
+            y={laneTop}
+            width={dimensions.width}
+            height={laneH}
+            fill={color}
+            opacity={0.04}
+            listening={false}
+          />
+          {/* Lane label */}
+          <Text
+            x={4}
+            y={laneTop + 3}
+            text={`${laneLabel} [${lane.mode}]`}
+            fontSize={10}
+            fill={color}
+            opacity={0.6}
+            listening={false}
+          />
+          {/* Default baseline (shown when lane is empty) */}
+          {lane.points.length === 0 && (
+            <Line
+              points={[0, defaultLineY, dimensions.width, defaultLineY]}
+              stroke={color}
+              strokeWidth={1}
+              dash={[4, 4]}
+              opacity={0.3}
+              listening={false}
+            />
+          )}
+          {/* Filled area under curve */}
+          {fillPoints.length >= 6 && (
+            <Line
+              points={fillPoints}
+              fill={color}
+              opacity={0.1}
+              closed
+              listening={false}
+            />
+          )}
+          {/* Smooth curve line */}
+          {smoothPoints.length >= 4 && (
+            <Line
+              points={smoothPoints}
+              stroke={color}
+              strokeWidth={1.5}
+              opacity={0.85}
+              listening={false}
+            />
+          )}
+          {/* Automation points (draggable circles) */}
+          {lane.points.map((point, pi) => {
+            const px = point.time * pixelsPerSecond - scrollX;
+            const py = laneTop + laneH * (1 - point.value);
+            const isHovered = hoveredAutoPoint !== null
+              && hoveredAutoPoint.laneId === lane.id
+              && hoveredAutoPoint.pointIndex === pi;
+            return (
+              <React.Fragment key={`ap-${lane.id}-${pi}`}>
+                <Circle
+                  x={px}
+                  y={py}
+                  radius={isHovered ? 6 : 4}
+                  fill={color}
+                  stroke="#fff"
+                  strokeWidth={isHovered ? 2 : 1}
+                  opacity={0.9}
+                  draggable
+                  onMouseEnter={() => {
+                    setHoveredAutoPoint({
+                      laneId: lane.id,
+                      pointIndex: pi,
+                      param: lane.param,
+                      value: point.value,
+                      time: point.time,
+                      screenX: px,
+                      screenY: py,
+                    });
+                  }}
+                  onMouseLeave={() => setHoveredAutoPoint(null)}
+                  onDragMove={(e: any) => {
+                    const newX = e.target.x();
+                    const newY = e.target.y();
+                    const newTime = (newX + scrollX) / pixelsPerSecond;
+                    const newValue = 1 - (newY - laneTop) / laneH;
+                    useDAWStore.getState().moveAutomationPoint(
+                      track.id, lane.id, pi, newTime, Math.max(0, Math.min(1, newValue)),
+                    );
+                    setHoveredAutoPoint(null);
+                  }}
+                  onDblClick={() => {
+                    useDAWStore.getState().removeAutomationPoint(track.id, lane.id, pi);
+                    setHoveredAutoPoint(null);
+                  }}
+                />
+                {/* Hover tooltip */}
+                {isHovered && (
+                  <Group listening={false}>
+                    <Rect
+                      x={px - 30}
+                      y={py - 28}
+                      width={60}
+                      height={18}
+                      fill="#1a1a1a"
+                      stroke={color}
+                      strokeWidth={1}
+                      cornerRadius={3}
+                      opacity={0.95}
+                    />
+                    <Text
+                      x={px - 30}
+                      y={py - 27}
+                      width={60}
+                      height={18}
+                      text={formatAutoValue(lane.param, point.value)}
+                      fontSize={10}
+                      fontFamily="monospace"
+                      fill="#ffffff"
+                      align="center"
+                      verticalAlign="middle"
+                    />
+                  </Group>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </Group>
+      );
+    });
+  };
 
-        // Smooth curve via Catmull-Rom interpolation
-        const smoothPoints = rawPoints.length >= 4
-          ? interpolateAutomationCurve(rawPoints, 8)
-          : rawPoints;
+  // Render master automation lanes at the bottom of all tracks
+  const renderMasterAutomationLanes = () => {
+    if (masterVisibleLanes.length === 0) return null;
+    const masterY = contentHeight;
 
-        // Build filled area points: curve + bottom edge to close the polygon
-        const fillPoints: number[] = [];
-        if (smoothPoints.length >= 4) {
-          // Start at bottom-left (below first point)
-          fillPoints.push(smoothPoints[0], laneBottom);
-          // Add all smooth curve points
-          for (let i = 0; i < smoothPoints.length; i++) {
-            fillPoints.push(smoothPoints[i]);
+    return (
+      <Group>
+        {/* Master separator line + label */}
+        <Line
+          points={[0, masterY, dimensions.width, masterY]}
+          stroke="#555"
+          strokeWidth={1}
+          listening={false}
+        />
+        <Rect
+          x={0}
+          y={masterY}
+          width={dimensions.width}
+          height={trackHeight}
+          fill="#1a1a2a"
+          opacity={0.3}
+          listening={false}
+        />
+        <Text
+          x={4}
+          y={masterY + 4}
+          text="Master"
+          fontSize={11}
+          fill="#888"
+          fontStyle="bold"
+          listening={false}
+        />
+        {masterVisibleLanes.map((lane, laneIdx) => {
+          const color = getAutomationColor(lane.param);
+          const laneTop = masterY + trackHeight + laneIdx * AUTOMATION_LANE_HEIGHT;
+          const laneH = AUTOMATION_LANE_HEIGHT;
+          const laneBottom = laneTop + laneH;
+
+          const rawPoints: number[] = [];
+          for (const point of lane.points) {
+            const px = point.time * pixelsPerSecond - scrollX;
+            const py = laneTop + laneH * (1 - point.value);
+            rawPoints.push(px, py);
           }
-          // Close at bottom-right (below last point)
-          fillPoints.push(smoothPoints[smoothPoints.length - 2], laneBottom);
-        }
 
-        return (
-          <Group key={`auto-${track.id}-${lane.id}`}>
-            {/* Semi-transparent filled area under the automation curve */}
-            {fillPoints.length >= 6 && (
-              <Line
-                points={fillPoints}
-                fill={color}
-                opacity={0.1}
-                closed
-                listening={false}
-              />
-            )}
-            {/* Smooth automation curve line */}
-            {smoothPoints.length >= 4 && (
-              <Line
-                points={smoothPoints}
-                stroke={color}
-                strokeWidth={1.5}
-                opacity={0.85}
-                listening={false}
-              />
-            )}
-            {/* Automation points (circles) with hover tooltip */}
-            {lane.points.map((point, pi) => {
-              const px = point.time * pixelsPerSecond - scrollX;
-              const py = trackY + trackHeight * (1 - point.value);
-              const isHovered = hoveredAutoPoint !== null
-                && hoveredAutoPoint.laneId === lane.id
-                && hoveredAutoPoint.pointIndex === pi;
-              return (
-                <React.Fragment key={`ap-${lane.id}-${pi}`}>
-                  <Circle
-                    x={px}
-                    y={py}
-                    radius={isHovered ? 6 : 4}
-                    fill={color}
-                    stroke="#fff"
-                    strokeWidth={isHovered ? 2 : 1}
-                    opacity={0.9}
-                    draggable
-                    onMouseEnter={() => {
-                      setHoveredAutoPoint({
-                        laneId: lane.id,
-                        pointIndex: pi,
-                        param: lane.param,
-                        value: point.value,
-                        time: point.time,
-                        screenX: px,
-                        screenY: py,
-                      });
-                    }}
-                    onMouseLeave={() => {
-                      setHoveredAutoPoint(null);
-                    }}
-                    onDragMove={(e: any) => {
-                      const newX = e.target.x();
-                      const newY = e.target.y();
-                      const newTime = (newX + scrollX) / pixelsPerSecond;
-                      const newValue = 1 - (newY - trackY) / trackHeight;
-                      useDAWStore.getState().moveAutomationPoint(
-                        track.id, lane.id, pi, newTime, newValue,
-                      );
-                      setHoveredAutoPoint(null);
-                    }}
-                    onDblClick={() => {
-                      useDAWStore.getState().removeAutomationPoint(track.id, lane.id, pi);
-                      setHoveredAutoPoint(null);
-                    }}
-                  />
-                  {/* Hover tooltip */}
-                  {isHovered && (
-                    <Group listening={false}>
-                      <Rect
-                        x={px - 30}
-                        y={py - 28}
-                        width={60}
-                        height={18}
-                        fill="#1a1a1a"
-                        stroke={color}
-                        strokeWidth={1}
-                        cornerRadius={3}
-                        opacity={0.95}
-                      />
-                      <Text
-                        x={px - 30}
-                        y={py - 27}
-                        width={60}
-                        height={18}
-                        text={formatAutoValue(lane.param, point.value)}
-                        fontSize={10}
-                        fontFamily="monospace"
-                        fill="#ffffff"
-                        align="center"
-                        verticalAlign="middle"
-                      />
-                    </Group>
-                  )}
-                </React.Fragment>
-              );
-            })}
-          </Group>
-        );
-      });
+          const smoothPoints = rawPoints.length >= 4
+            ? interpolateAutomationCurve(rawPoints, 8)
+            : rawPoints;
+
+          const fillPoints: number[] = [];
+          if (smoothPoints.length >= 4) {
+            fillPoints.push(smoothPoints[0], laneBottom);
+            for (let fi = 0; fi < smoothPoints.length; fi++) fillPoints.push(smoothPoints[fi]);
+            fillPoints.push(smoothPoints[smoothPoints.length - 2], laneBottom);
+          }
+
+          const laneLabel = getAutomationShortLabel(lane.param);
+          const defaultValue = getAutomationDefault(lane.param);
+          const defaultLineY = laneTop + laneH * (1 - defaultValue);
+
+          return (
+            <Group key={`master-auto-${lane.id}`}>
+              <Line points={[0, laneTop, dimensions.width, laneTop]} stroke="#333" strokeWidth={0.5} listening={false} />
+              <Rect x={0} y={laneTop} width={dimensions.width} height={laneH} fill={color} opacity={0.04} listening={false} />
+              <Text x={4} y={laneTop + 3} text={`${laneLabel} [${lane.mode}]`} fontSize={10} fill={color} opacity={0.6} listening={false} />
+              {lane.points.length === 0 && (
+                <Line points={[0, defaultLineY, dimensions.width, defaultLineY]} stroke={color} strokeWidth={1} dash={[4, 4]} opacity={0.3} listening={false} />
+              )}
+              {fillPoints.length >= 6 && (
+                <Line points={fillPoints} fill={color} opacity={0.1} closed listening={false} />
+              )}
+              {smoothPoints.length >= 4 && (
+                <Line points={smoothPoints} stroke={color} strokeWidth={1.5} opacity={0.85} listening={false} />
+              )}
+              {lane.points.map((point, pi) => {
+                const px = point.time * pixelsPerSecond - scrollX;
+                const py = laneTop + laneH * (1 - point.value);
+                const isHovered = hoveredAutoPoint !== null
+                  && hoveredAutoPoint.laneId === lane.id
+                  && hoveredAutoPoint.pointIndex === pi;
+                return (
+                  <React.Fragment key={`map-${lane.id}-${pi}`}>
+                    <Circle
+                      x={px}
+                      y={py}
+                      radius={isHovered ? 6 : 4}
+                      fill={color}
+                      stroke="#fff"
+                      strokeWidth={isHovered ? 2 : 1}
+                      opacity={0.9}
+                      draggable
+                      onMouseEnter={() => {
+                        setHoveredAutoPoint({
+                          laneId: lane.id, pointIndex: pi, param: lane.param,
+                          value: point.value, time: point.time, screenX: px, screenY: py,
+                        });
+                      }}
+                      onMouseLeave={() => setHoveredAutoPoint(null)}
+                      onDragMove={(e: any) => {
+                        const newX = e.target.x();
+                        const newY = e.target.y();
+                        const newTime = (newX + scrollX) / pixelsPerSecond;
+                        const newValue = 1 - (newY - laneTop) / laneH;
+                        useDAWStore.getState().moveMasterAutomationPoint(
+                          lane.id, pi, newTime, Math.max(0, Math.min(1, newValue)),
+                        );
+                        setHoveredAutoPoint(null);
+                      }}
+                      onDblClick={() => {
+                        useDAWStore.getState().removeMasterAutomationPoint(lane.id, pi);
+                        setHoveredAutoPoint(null);
+                      }}
+                    />
+                    {isHovered && (
+                      <Group listening={false}>
+                        <Rect x={px - 30} y={py - 28} width={60} height={18} fill="#1a1a1a" stroke={color} strokeWidth={1} cornerRadius={3} opacity={0.95} />
+                        <Text x={px - 30} y={py - 27} width={60} height={18} text={formatAutoValue(lane.param, point.value)} fontSize={10} fontFamily="monospace" fill="#ffffff" align="center" verticalAlign="middle" />
+                      </Group>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </Group>
+          );
+        })}
+      </Group>
+    );
   };
 
   // Render razor edits (per-track highlight areas)
@@ -3187,7 +3448,7 @@ export function Timeline({ tracks }: TimelineProps) {
 
       const startX = razor.start * pixelsPerSecond - scrollX;
       const endX = razor.end * pixelsPerSecond - scrollX;
-      const y = trackIndex * trackHeight - scrollY;
+      const y = (trackYs[trackIndex] ?? 0) - scrollY;
 
       return (
         <Rect
@@ -3312,7 +3573,7 @@ export function Timeline({ tracks }: TimelineProps) {
   const renderGhostTrack = () => {
     if (!showGhostTrack) return null;
 
-    const ghostY = tracks.length * trackHeight;
+    const ghostY = contentHeight;
 
     return (
       <Group>
@@ -3507,7 +3768,8 @@ export function Timeline({ tracks }: TimelineProps) {
               const pointerPos = stage.getPointerPosition();
               if (pointerPos) {
                 const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
-                const trackIndex = Math.floor((pointerPos.y + scrollY) / trackHeight);
+                const trackHitResult = getTrackAtY(pointerPos.y + scrollY, tracks, trackYs, trackHeight);
+                const trackIndex = trackHitResult?.trackIndex ?? -1;
                 if (trackIndex >= 0 && trackIndex < tracks.length) {
                   clearRazorEdits();
                   setRazorDrag({ active: true, trackId: tracks[trackIndex].id, startTime: time });
@@ -3572,17 +3834,29 @@ export function Timeline({ tracks }: TimelineProps) {
           {/* Tracks Background Alternating - rendered BEFORE grid lines so lines show on top */}
           {/* Virtualized: only render backgrounds for tracks within the vertical viewport */}
           {(() => {
-            const firstBg = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
-            const lastBg = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            // Visible track range using prefix-sum Y positions
+            let firstBg = 0;
+            for (let j = 0; j < tracks.length; j++) {
+              const bottom = j + 1 < tracks.length ? trackYs[j + 1] : trackYs[j] + getEffectiveTrackHeight(tracks[j], trackHeight);
+              if (bottom > scrollY) { firstBg = j; break; }
+            }
+            firstBg = Math.max(0, firstBg - 1);
+            let lastBg = tracks.length - 1;
+            for (let j = firstBg; j < tracks.length; j++) {
+              if (trackYs[j] > scrollY + dimensions.height) { lastBg = j; break; }
+            }
+            lastBg = Math.min(tracks.length - 1, lastBg + 1);
+
             const bgs: React.ReactNode[] = [];
             for (let i = firstBg; i <= lastBg; i++) {
+              const effH = getEffectiveTrackHeight(tracks[i], trackHeight);
               bgs.push(
                 <Rect
                   key={`track-bg-${i}`}
                   x={0}
-                  y={i * trackHeight}
+                  y={trackYs[i]}
                   width={dimensions.width}
-                  height={trackHeight}
+                  height={effH}
                   fill={i % 2 === 0 ? "#1a1a1a" : "#171717"}
                   opacity={1}
                 />,
@@ -3593,8 +3867,17 @@ export function Timeline({ tracks }: TimelineProps) {
 
           {/* Track group tint overlays — virtualized to visible tracks only */}
           {(() => {
-            const firstTint = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
-            const lastTint = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            let firstTint = 0;
+            for (let j = 0; j < tracks.length; j++) {
+              const bottom = j + 1 < tracks.length ? trackYs[j + 1] : trackYs[j] + getEffectiveTrackHeight(tracks[j], trackHeight);
+              if (bottom > scrollY) { firstTint = j; break; }
+            }
+            firstTint = Math.max(0, firstTint - 1);
+            let lastTint = tracks.length - 1;
+            for (let j = firstTint; j < tracks.length; j++) {
+              if (trackYs[j] > scrollY + dimensions.height) { lastTint = j; break; }
+            }
+            lastTint = Math.min(tracks.length - 1, lastTint + 1);
             const tints: React.ReactNode[] = [];
             for (let i = firstTint; i <= lastTint; i++) {
               const gInfo = getTrackGroupInfo(tracks[i].id, trackGroups);
@@ -3603,9 +3886,9 @@ export function Timeline({ tracks }: TimelineProps) {
                 <Rect
                   key={`group-tint-${i}`}
                   x={0}
-                  y={i * trackHeight}
+                  y={trackYs[i]}
                   width={dimensions.width}
-                  height={trackHeight}
+                  height={getEffectiveTrackHeight(tracks[i], trackHeight)}
                   fill={TRACK_GROUP_COLORS[gInfo.colorIndex]}
                   opacity={0.06}
                 />,
@@ -3646,36 +3929,53 @@ export function Timeline({ tracks }: TimelineProps) {
           {/* Track hit areas for double-click events (automation point add, MIDI clip create) */}
           {/* Virtualized: only render hit areas for tracks within the vertical viewport */}
           {(() => {
-            const firstHit = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
-            const lastHit = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            // Visible track range using prefix-sum Y positions
+            let firstHit = 0;
+            for (let j = 0; j < tracks.length; j++) {
+              const bottom = j + 1 < tracks.length ? trackYs[j + 1] : trackYs[j] + getEffectiveTrackHeight(tracks[j], trackHeight);
+              if (bottom > scrollY) { firstHit = j; break; }
+            }
+            firstHit = Math.max(0, firstHit - 1);
+            let lastHit = tracks.length - 1;
+            for (let j = firstHit; j < tracks.length; j++) {
+              if (trackYs[j] > scrollY + dimensions.height) { lastHit = j; break; }
+            }
+            lastHit = Math.min(tracks.length - 1, lastHit + 1);
+
             const hitAreas: React.ReactNode[] = [];
             for (let i = firstHit; i <= lastHit; i++) {
               const track = tracks[i];
+              const effH = getEffectiveTrackHeight(track, trackHeight);
               hitAreas.push(
                 <Rect
                   name="timeline-bg"
                   key={`track-hit-${i}`}
                   x={0}
-                  y={i * trackHeight}
+                  y={trackYs[i]}
                   width={dimensions.width}
-                  height={trackHeight}
+                  height={effH}
                   fill="transparent"
                   onDblClick={(e: any) => {
                     const stage = e.target.getStage();
                     const pointerPos = stage.getPointerPosition();
                     const clickTime = (pointerPos.x + scrollX) / pixelsPerSecond;
+                    const absoluteY = pointerPos.y + scrollY;
 
-                    // If automation is visible, add a point on the first visible lane
+                    // Determine if click is in automation lane area
                     if (track.showAutomation) {
-                      const visibleLane = track.automationLanes.find((l) => l.visible);
-                      if (visibleLane) {
-                        const clickY = pointerPos.y;
-                        const trackY = i * trackHeight - scrollY;
-                        const value = 1 - (clickY - trackY) / trackHeight;
-                        useDAWStore.getState().addAutomationPoint(
-                          track.id, visibleLane.id, clickTime, value,
-                        );
-                        return;
+                      const hit = getTrackAtY(absoluteY, tracks, trackYs, trackHeight);
+                      if (hit && !hit.isInClipArea && hit.laneIndex >= 0) {
+                        const visibleLanes = track.automationLanes.filter((l) => l.visible);
+                        const lane = visibleLanes[hit.laneIndex];
+                        if (lane) {
+                          const laneTop = trackYs[i] + trackHeight + hit.laneIndex * AUTOMATION_LANE_HEIGHT;
+                          const localY = absoluteY - laneTop;
+                          const value = 1 - localY / AUTOMATION_LANE_HEIGHT;
+                          useDAWStore.getState().addAutomationPoint(
+                            track.id, lane.id, clickTime, Math.max(0, Math.min(1, value)),
+                          );
+                          return;
+                        }
                       }
                     }
 
@@ -3705,9 +4005,18 @@ export function Timeline({ tracks }: TimelineProps) {
             // Visible time range (horizontal virtualization)
             const visibleStartTime = scrollX / pixelsPerSecond;
             const visibleEndTime = (scrollX + dimensions.width) / pixelsPerSecond;
-            // Visible track range (vertical virtualization)
-            const firstVisibleTrack = Math.max(0, Math.floor(scrollY / trackHeight) - 1);
-            const lastVisibleTrack = Math.min(tracks.length - 1, Math.ceil((scrollY + dimensions.height) / trackHeight) + 1);
+            // Visible track range (vertical virtualization) — prefix-sum
+            let firstVisibleTrack = 0;
+            for (let j = 0; j < tracks.length; j++) {
+              const bottom = j + 1 < tracks.length ? trackYs[j + 1] : trackYs[j] + getEffectiveTrackHeight(tracks[j], trackHeight);
+              if (bottom > scrollY) { firstVisibleTrack = j; break; }
+            }
+            firstVisibleTrack = Math.max(0, firstVisibleTrack - 1);
+            let lastVisibleTrack = tracks.length - 1;
+            for (let j = firstVisibleTrack; j < tracks.length; j++) {
+              if (trackYs[j] > scrollY + dimensions.height) { lastVisibleTrack = j; break; }
+            }
+            lastVisibleTrack = Math.min(tracks.length - 1, lastVisibleTrack + 1);
 
             const isClipVisible = (clip: { startTime: number; duration: number }) =>
               clip.startTime + clip.duration >= visibleStartTime && clip.startTime <= visibleEndTime;
@@ -3716,7 +4025,7 @@ export function Timeline({ tracks }: TimelineProps) {
               // Skip tracks entirely outside vertical viewport
               if (i < firstVisibleTrack || i > lastVisibleTrack) return null;
 
-              const trackY = i * trackHeight;
+              const trackY = trackYs[i];
 
               // Filter clips to only those visible in the horizontal viewport
               const visibleClips = track.clips.filter(isClipVisible);
@@ -3757,6 +4066,9 @@ export function Timeline({ tracks }: TimelineProps) {
               );
             });
           })()}
+
+          {/* Master Automation Lanes */}
+          {renderMasterAutomationLanes()}
 
           {/* Ghost Track */}
           {renderGhostTrack()}
@@ -3840,6 +4152,9 @@ export function Timeline({ tracks }: TimelineProps) {
             </>
           )}
 
+        </Layer>
+        {/* Playhead in its own Layer so it always renders on top, even if other layers error */}
+        <Layer listening={false}>
           <Playhead
             type="main"
             pixelsPerSecond={pixelsPerSecond}
@@ -3931,6 +4246,106 @@ export function Timeline({ tracks }: TimelineProps) {
                 return clip?.reversed ? "Unreverse Clip" : "Reverse Clip";
               })(),
               onClick: () => { void useDAWStore.getState().reverseClip(clipContextMenu.clipId); },
+            },
+            {
+              label: "Edit Pitch...",
+              onClick: () => {
+                const state = useDAWStore.getState();
+                state.openPitchEditor(clipContextMenu.trackId, clipContextMenu.clipId, -1);
+              },
+            },
+            {
+              label: "Extract MIDI from Audio...",
+              onClick: () => {
+                void (async () => {
+                  const { nativeBridge } = await import("../services/NativeBridge");
+                  const result = await nativeBridge.extractMidiFromAudio(clipContextMenu!.trackId, clipContextMenu!.clipId);
+                  if (result && result.notes && result.notes.length > 0) {
+                    const state = useDAWStore.getState();
+                    const sourceTrack = state.tracks.find((t: any) => t.id === clipContextMenu!.trackId);
+                    const sourceClip = sourceTrack?.clips.find((c: any) => c.id === clipContextMenu!.clipId);
+                    const clipStartTime = sourceClip?.startTime || 0;
+                    const trackId = crypto.randomUUID();
+                    state.addTrack({
+                      id: trackId,
+                      name: `MIDI from ${sourceClip?.name || "Audio"}`,
+                      type: "midi",
+                    });
+                    // Calculate total duration from extracted notes
+                    const maxEnd = Math.max(...result.notes.map((n: any) => n.endTime));
+                    const newClipId = state.addMIDIClip(trackId, clipStartTime, maxEnd);
+                    // Convert poly notes to MIDI noteOn/noteOff events
+                    const events: any[] = [];
+                    for (const n of result.notes) {
+                      events.push({ timestamp: n.startTime, type: "noteOn", note: n.midiPitch, velocity: Math.round(n.velocity * 127) });
+                      events.push({ timestamp: n.endTime, type: "noteOff", note: n.midiPitch, velocity: 0 });
+                    }
+                    events.sort((a: any, b: any) => a.timestamp - b.timestamp);
+                    // Update the clip with extracted events
+                    useDAWStore.setState((s) => ({
+                      tracks: s.tracks.map((t: any) => t.id === trackId ? {
+                        ...t,
+                        midiClips: t.midiClips.map((c: any) => c.id === newClipId ? { ...c, events } : c),
+                      } : t),
+                    }));
+                  } else if (result?.error) {
+                    alert(result.error);
+                  }
+                })();
+              },
+            },
+            {
+              label: "Separate Stems...",
+              onClick: () => {
+                const state = useDAWStore.getState();
+                const sourceTrack = state.tracks.find((t: any) => t.id === clipContextMenu!.trackId);
+                const sourceClip = sourceTrack?.clips.find((c: any) => c.id === clipContextMenu!.clipId);
+                if (!sourceClip) return;
+                state.openStemSeparation(
+                  clipContextMenu!.trackId,
+                  clipContextMenu!.clipId,
+                  sourceClip.name || "Audio",
+                  sourceClip.duration
+                );
+              },
+            },
+            {
+              label: (() => {
+                // Will be replaced dynamically, but static label as fallback
+                return "Edit with ARA Plugin...";
+              })(),
+              onClick: () => {
+                void (async () => {
+                  const { nativeBridge } = await import("../services/NativeBridge");
+                  const araPlugins = await nativeBridge.getARAPlugins();
+                  if (araPlugins.length === 0) {
+                    alert("No ARA-compatible plugins found. Install an ARA plugin (e.g., Re-Pitch, Melodyne) and rescan.");
+                    return;
+                  }
+
+                  const trackId = clipContextMenu!.trackId;
+                  const clipId = clipContextMenu!.clipId;
+
+                  // If multiple ARA plugins, let user pick; otherwise use the only one
+                  let selectedPlugin = araPlugins[0];
+                  if (araPlugins.length > 1) {
+                    const choice = prompt(`Multiple ARA plugins found. Enter the number (1-${araPlugins.length}):\n\n${araPlugins.map((p, i) => `${i + 1}. ${p.name} (${p.manufacturer})`).join("\n")}`);
+                    const idx = parseInt(choice || "1", 10) - 1;
+                    if (idx >= 0 && idx < araPlugins.length) selectedPlugin = araPlugins[idx];
+                  }
+
+                  // Initialize ARA and add the clip
+                  const initResult = await nativeBridge.initializeARA(trackId, 0);
+                  if (initResult.success) {
+                    const addResult = await nativeBridge.addARAClip(trackId, clipId);
+                    if (!addResult.success) {
+                      alert(addResult.error || `Failed to add clip to ${selectedPlugin.name}.`);
+                    }
+                  } else {
+                    alert(`Failed to initialize ${selectedPlugin.name}: ${initResult.error || "Unknown error"}`);
+                  }
+                })();
+              },
             },
             {
               label: "Dynamic Split...",

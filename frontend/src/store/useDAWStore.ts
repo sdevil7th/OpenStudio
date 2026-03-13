@@ -3,6 +3,8 @@ import { subscribeWithSelector } from "zustand/middleware";
 import { nativeBridge } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import { calculateGridInterval, type GridSize } from "../utils/snapToGrid";
+import { automationToBackend, interpolateAtTime } from "./automationParams";
+import { usePitchEditorStore } from "./pitchEditorStore";
 
 // Module-level snapshot map for continuous edit undo/redo (volume/pan fader drags).
 // Stores the value at edit start so we can create a single undo command on edit end.
@@ -12,25 +14,24 @@ const _editSnapshots = new Map<string, number>();
 // Converts normalised 0–1 frontend values to backend-native values:
 //   volume: 0–1 → -60 to +6 dB
 //   pan:    0–1 → -1.0 to +1.0
+// Module-level throttle map for automation point recording during fader movement
+const _autoRecordTimers = new Map<string, number>();
+const AUTO_RECORD_INTERVAL_MS = 50;
+
 function syncAutomationLaneToBackend(
   trackId: string,
-  lane: { param: string; points: { time: number; value: number }[] },
+  lane: { param: string; points: { time: number; value: number }[]; mode?: AutomationModeType },
 ) {
-  const parameterId = lane.param; // "volume" | "pan" | "mute"
-  const converted = lane.points.map((p) => {
-    let backendValue = p.value;
-    if (lane.param === "volume") {
-      // 0–1 normalised → -60 to +6 dB (linear mapping)
-      backendValue = p.value * 66 - 60; // 0→-60, 1→+6
-    } else if (lane.param === "pan") {
-      // 0–1 → -1 to +1
-      backendValue = p.value * 2 - 1;
-    }
-    return { time: p.time, value: backendValue };
-  });
+  const parameterId = lane.param;
+  const converted = lane.points.map((p) => ({
+    time: p.time,
+    value: automationToBackend(lane.param, p.value),
+  }));
   nativeBridge.setAutomationPoints(trackId, parameterId, converted).catch(() => {});
-  // Also set mode to "read" if not already set (so automation plays back)
-  nativeBridge.setAutomationMode(trackId, parameterId, "read").catch(() => {});
+  // Sync the lane's actual mode (not hardcoded "read")
+  if (lane.mode) {
+    nativeBridge.setAutomationMode(trackId, parameterId, lane.mode).catch(() => {});
+  }
 }
 
 // Sync all tempo markers to the C++ backend (Phase 1.2)
@@ -144,6 +145,8 @@ export interface MIDIClip {
 
 // Supports built-in params plus plugin params like "plugin_0_3" (fxIndex_paramIndex)
 export type AutomationParam = "volume" | "pan" | "mute" | (string & {});
+export type AutomationModeType = "off" | "read" | "write" | "touch" | "latch";
+export const AUTOMATION_LANE_HEIGHT = 60; // px per visible automation lane
 
 export interface AutomationPoint {
   time: number; // Position in seconds
@@ -155,6 +158,64 @@ export interface AutomationLane {
   param: AutomationParam;
   points: AutomationPoint[];
   visible: boolean;
+  mode: AutomationModeType;
+  armed: boolean;
+}
+
+// ===== Automation Layout Helpers =====
+
+export function getEffectiveTrackHeight(track: Track, baseTrackHeight: number): number {
+  if (!track.showAutomation) return baseTrackHeight;
+  const visibleLaneCount = track.automationLanes.filter((l) => l.visible).length;
+  return baseTrackHeight + visibleLaneCount * AUTOMATION_LANE_HEIGHT;
+}
+
+export function getTrackYPositions(
+  tracks: Track[],
+  baseTrackHeight: number,
+): { trackYs: number[]; totalHeight: number } {
+  const trackYs: number[] = [];
+  let y = 0;
+  for (const track of tracks) {
+    trackYs.push(y);
+    y += getEffectiveTrackHeight(track, baseTrackHeight);
+  }
+  return { trackYs, totalHeight: y };
+}
+
+export function getTrackAtY(
+  y: number,
+  tracks: Track[],
+  trackYs: number[],
+  baseTrackHeight: number,
+): { trackIndex: number; isInClipArea: boolean; laneIndex: number } | null {
+  // Binary search for the track containing y
+  let lo = 0;
+  let hi = tracks.length - 1;
+  let trackIndex = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (trackYs[mid] <= y) {
+      trackIndex = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (trackIndex < 0 || trackIndex >= tracks.length) return null;
+
+  const localY = y - trackYs[trackIndex];
+  if (localY < baseTrackHeight) {
+    return { trackIndex, isInClipArea: true, laneIndex: -1 };
+  }
+  // In automation lane area
+  const laneY = localY - baseTrackHeight;
+  const visibleLanes = tracks[trackIndex].automationLanes.filter((l) => l.visible);
+  const laneIndex = Math.min(
+    Math.floor(laneY / AUTOMATION_LANE_HEIGHT),
+    visibleLanes.length - 1,
+  );
+  return { trackIndex, isInClipArea: false, laneIndex };
 }
 
 export interface AudioClip {
@@ -265,7 +326,18 @@ export interface Track {
     pan: number;
     enabled: boolean;
     preFader: boolean;
+    phaseInvert: boolean;
   }>;
+
+  // Routing (Track IO)
+  phaseInverted: boolean;
+  stereoWidth: number;           // 0-200%, 100% = normal
+  masterSendEnabled: boolean;
+  outputStartChannel: number;
+  outputChannelCount: number;
+  playbackOffsetMs: number;
+  trackChannelCount: number;     // 1-8
+  midiOutputDevice: string;
 
   // Visual
   icon?: string; // Track icon ID (microphone, guitar, drums, keys, bus, master, midi, folder, piano)
@@ -416,16 +488,23 @@ interface DAWState {
   masterLevel: number;
   masterFxCount: number;
   isMasterMuted: boolean;
+  masterMono: boolean;
+  masterAutomationLanes: AutomationLane[];
+  showMasterAutomation: boolean;
 
   // Meter state — stored separately from `tracks` so that 10Hz meter updates
   // never give tracks a new array reference.  Only ChannelStrip / TrackHeader
   // subscribe to these; Timeline and App are completely unaffected.
   meterLevels: Record<string, number>;
   peakLevels: Record<string, number>;
+  // Automation-interpolated display values — trackId → paramId → display-unit value
+  // Updated at ~30fps during playback. Separate from tracks[] to avoid mass re-renders.
+  automatedParamValues: Record<string, Record<string, number>>;
 
   // Record & Edit Modes
   recordMode: "normal" | "overdub" | "replace";
   rippleMode: "off" | "per_track" | "all_tracks";
+  playheadStopBehavior: "return-to-start" | "stop-in-place";
 
   // Auto-Crossfade
   autoCrossfade: boolean;
@@ -451,6 +530,12 @@ interface DAWState {
   showRenderModal: boolean;
   showPluginBrowser: boolean;
   pluginBrowserTrackId: string | null;
+  showEnvelopeManager: boolean;
+  envelopeManagerTrackId: string | null;
+  showChannelStripEQ: boolean;
+  channelStripEQTrackId: string | null;
+  showTrackRouting: boolean;
+  trackRoutingTrackId: string | null;
   showVirtualKeyboard: boolean;
   showUndoHistory: boolean;
   showCommandPalette: boolean;
@@ -460,12 +545,20 @@ interface DAWState {
   bigClockFormat: "time" | "beats";
   showKeyboardShortcuts: boolean;
   showContextualHelp: boolean;
+  showGettingStarted: boolean;
   showPreferences: boolean;
   timecodeMode: "time" | "beats" | "smpte";
   smpteFrameRate: 24 | 25 | 29.97 | 30;
 
   // Accessibility: UI font scaling (0.75 - 1.5, default 1.0)
   uiFontScale: number;
+
+  // Stem Separation Modal
+  showStemSeparation: boolean;
+  stemSepTrackId: string | null;
+  stemSepClipId: string | null;
+  stemSepClipName: string;
+  stemSepClipDuration: number;
 
   // Script Console
   showScriptConsole: boolean;
@@ -622,6 +715,11 @@ interface DAWState {
   videoFilePath: string;
   videoInfo: { width: number; height: number; duration: number; fps: number } | null;
   showScriptEditor: boolean;
+  showPitchEditor: boolean;
+  pitchEditorTrackId: string | null;
+  pitchEditorClipId: string | null;
+  pitchEditorFxIndex: number;
+  lowerZoneHeight: number; // pitch editor lower zone height in px
   scriptConsoleOutput: string[];
   userScripts: Array<{ id: string; name: string; code: string; filePath?: string }>;
   projectTabs: Array<{ id: string; name: string; isActive: boolean }>;
@@ -669,6 +767,10 @@ interface DAWState {
   };
   showClipLauncher: boolean;
 
+  // Missing Media Resolver
+  showMissingMedia: boolean;
+  missingMediaFiles: Array<{ path: string; clipIds: string[] }>;
+
   // Sprint 17: Visual Improvements
   recentColors: string[];
 
@@ -712,6 +814,9 @@ interface DAWState {
   // Collaborative Metadata
   projectAuthor: string;
   projectRevisionNotes: Array<{ timestamp: number; author: string; note: string }>;
+
+  // Timecode Sync Settings
+  showTimecodeSettings: boolean;
 
   // Detachable Panels (multi-monitor support)
   detachedPanels: string[];
@@ -808,6 +913,7 @@ interface DAWActions {
   // Record & Edit Modes
   setRecordMode: (mode: "normal" | "overdub" | "replace") => void;
   setRippleMode: (mode: "off" | "per_track" | "all_tracks") => void;
+  setPlayheadStopBehavior: (mode: "return-to-start" | "stop-in-place") => void;
 
   // Auto-Crossfade
   toggleAutoCrossfade: () => void;
@@ -847,11 +953,26 @@ interface DAWActions {
   setMasterVolume: (volume: number) => Promise<void>;
   setMasterPan: (pan: number) => Promise<void>;
   toggleMasterMute: () => void;
+  toggleMasterMono: () => void;
+  toggleMasterAutomation: () => void;
+  addMasterAutomationLane: (param: string) => string | null;
+  toggleMasterAutomationLaneVisibility: (laneId: string) => void;
+  setMasterAutomationLaneMode: (laneId: string, mode: AutomationModeType) => void;
+  armMasterAutomationLane: (laneId: string, armed: boolean) => void;
+  setMasterTrackAutomationMode: (mode: AutomationModeType) => void;
+  showAllActiveMasterEnvelopes: () => void;
+  hideAllMasterEnvelopes: () => void;
+  armAllVisibleMasterAutomationLanes: () => void;
+  disarmAllMasterAutomationLanes: () => void;
+  addMasterAutomationPoint: (laneId: string, time: number, value: number) => void;
+  removeMasterAutomationPoint: (laneId: string, pointIndex: number) => void;
+  moveMasterAutomationPoint: (laneId: string, pointIndex: number, time: number, value: number) => void;
 
   // Metering
   setTrackMeterLevel: (trackId: string, level: number) => void;
   batchUpdateMeterLevels: (levels: Record<string, number>, masterLevel: number) => void;
   setMasterLevel: (level: number) => void;
+  updateAutomatedValues: () => void;
 
   // Timeline View
   setZoom: (pixelsPerSecond: number) => void;
@@ -879,6 +1000,7 @@ interface DAWActions {
   // Clip Editing
   splitClipAtPlayhead: () => void;
   splitClipAtPosition: (clipId: string, splitTime: number) => void;
+  splitMIDIClipAtPosition: (clipId: string, splitTime: number) => void;
   selectClip: (clipId: string | null, modifiers?: { ctrl?: boolean }) => void;
   moveClipToTrack: (
     clipId: string,
@@ -930,6 +1052,13 @@ interface DAWActions {
   moveAutomationPoint: (trackId: string, laneId: string, pointIndex: number, time: number, value: number) => void;
   toggleAutomationLaneVisibility: (trackId: string, laneId: string) => void;
   clearAutomationLane: (trackId: string, laneId: string) => void;
+  setAutomationLaneMode: (trackId: string, laneId: string, mode: AutomationModeType) => void;
+  setTrackAutomationMode: (trackId: string, mode: AutomationModeType) => void;
+  armAutomationLane: (trackId: string, laneId: string, armed: boolean) => void;
+  armAllVisibleAutomationLanes: (trackId: string) => void;
+  disarmAllAutomationLanes: (trackId: string) => void;
+  showAllActiveEnvelopes: (trackId: string) => void;
+  hideAllEnvelopes: (trackId: string) => void;
 
   // Strip Silence (Phase 3.12)
   stripSilence: (clipId: string, thresholdDb: number, minSilenceMs: number,
@@ -969,6 +1098,12 @@ interface DAWActions {
   closeRenderModal: () => void;
   openPluginBrowser: (trackId: string) => void;
   closePluginBrowser: () => void;
+  openEnvelopeManager: (trackId: string) => void;
+  closeEnvelopeManager: () => void;
+  openChannelStripEQ: (trackId: string) => void;
+  closeChannelStripEQ: () => void;
+  openTrackRouting: (trackId: string) => void;
+  closeTrackRouting: () => void;
   toggleVirtualKeyboard: () => void;
   toggleUndoHistory: () => void;
   toggleCommandPalette: () => void;
@@ -978,8 +1113,14 @@ interface DAWActions {
   toggleBigClockFormat: () => void;
   toggleKeyboardShortcuts: () => void;
   toggleContextualHelp: () => void;
+  toggleGettingStarted: () => void;
   togglePreferences: () => void;
   toggleScriptConsole: () => void;
+  openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
+  closeStemSeparation: () => void;
+  completeStemSeparation: (sourceTrackId: string, sourceClipId: string, clipName: string,
+    stemFiles: Array<{ name: string; filePath: string; duration?: number; sampleRate?: number }>,
+    sourceClipStartTime: number) => void;
   setTimecodeMode: (mode: "time" | "beats" | "smpte") => void;
   setSmpteFrameRate: (rate: 24 | 25 | 29.97 | 30) => void;
   setUIFontScale: (scale: number) => void;
@@ -1071,6 +1212,14 @@ interface DAWActions {
   setTrackSendPan: (sourceTrackId: string, sendIndex: number, pan: number) => Promise<void>;
   setTrackSendEnabled: (sourceTrackId: string, sendIndex: number, enabled: boolean) => Promise<void>;
   setTrackSendPreFader: (sourceTrackId: string, sendIndex: number, preFader: boolean) => Promise<void>;
+  setTrackSendPhaseInvert: (sourceTrackId: string, sendIndex: number, invert: boolean) => Promise<void>;
+  setTrackPhaseInvert: (trackId: string, invert: boolean) => Promise<void>;
+  setTrackStereoWidth: (trackId: string, widthPercent: number) => Promise<void>;
+  setTrackMasterSendEnabled: (trackId: string, enabled: boolean) => Promise<void>;
+  setTrackOutputChannels: (trackId: string, startChannel: number, numChannels: number) => Promise<void>;
+  setTrackPlaybackOffset: (trackId: string, offsetMs: number) => Promise<void>;
+  setTrackChannelCount: (trackId: string, numChannels: number) => Promise<void>;
+  setTrackMIDIOutput: (trackId: string, deviceName: string) => Promise<void>;
 
   // Phase 11B: Routing Matrix
   toggleRoutingMatrix: () => void;
@@ -1131,6 +1280,9 @@ interface DAWActions {
   openVideoFile: (filePath: string) => Promise<void>;
   closeVideoFile: () => void;
   toggleScriptEditor: () => void;
+  openPitchEditor: (trackId: string, clipId: string, fxIndex: number) => void;
+  closePitchEditor: () => void;
+  setLowerZoneHeight: (h: number) => void;
   executeScript: (code: string) => Promise<void>;
   addUserScript: (name: string, code: string) => void;
   removeUserScript: (scriptId: string) => void;
@@ -1176,6 +1328,13 @@ interface DAWActions {
   clearSlot: (trackIndex: number, slotIndex: number) => void;
   setClipLauncherQuantize: (quantize: string) => void;
   toggleClipLauncher: () => void;
+
+  // Timecode Sync Settings
+  toggleTimecodeSettings: () => void;
+
+  // Missing Media Resolver
+  resolveMissingMedia: (originalPath: string, newPath: string) => void;
+  closeMissingMedia: () => void;
 
   // Sprint 17: Visual Improvements
   addRecentColor: (color: string) => void;
@@ -1312,14 +1471,22 @@ const createDefaultTrack = (
   peakLevel: 0,
   clipping: false,
   automationLanes: [
-    { id: "vol", param: "volume", points: [], visible: true },
-    { id: "pan", param: "pan", points: [], visible: false },
+    { id: "vol", param: "volume", points: [], visible: true, mode: "read", armed: false },
+    { id: "pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
   ],
   showAutomation: false,
   frozen: false,
   takes: [],
   activeTakeIndex: 0,
   sends: [],
+  phaseInverted: false,
+  stereoWidth: 100,
+  masterSendEnabled: true,
+  outputStartChannel: 0,
+  outputChannelCount: 2,
+  playbackOffsetMs: 0,
+  trackChannelCount: 2,
+  midiOutputDevice: "",
 });
 
 const initialTransport: TransportState = {
@@ -1377,10 +1544,11 @@ function getMinTrackHeight(tcpWidth: number): number {
  * UI interaction state, drag state, and ephemeral display flags.
  */
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
-  // Metering — updated at high frequency, meaningless after reload
+  // Metering / automation display — updated at high frequency, meaningless after reload
   "meterLevels",
   "peakLevels",
   "masterLevel",
+  "automatedParamValues",
 
   // Transport runtime (position is reset on load; tempo/loop are saved explicitly)
   "recordingClips",
@@ -1412,6 +1580,7 @@ const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "showBigClock",
   "showKeyboardShortcuts",
   "showContextualHelp",
+  "showGettingStarted",
   "showPreferences",
   "showScriptConsole",
   "showPianoRoll",
@@ -1430,6 +1599,7 @@ const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "showDDPExport",
   "showStepSequencer",
   "showClipLauncher",
+  "showTimecodeSettings",
   "showQuantizeDialog",
   "showDrumEditor",
   "showMediaPool",
@@ -1542,8 +1712,15 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     masterLevel: 0,
     masterFxCount: 0,
     isMasterMuted: false,
+    masterMono: false,
+    masterAutomationLanes: [
+      { id: "master-vol", param: "volume", points: [], visible: false, mode: "read", armed: false },
+      { id: "master-pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
+    ],
+    showMasterAutomation: false,
     meterLevels: {},
     peakLevels: {},
+    automatedParamValues: {},
     pixelsPerSecond: 50,
     scrollX: 0,
     scrollY: 0,
@@ -1551,6 +1728,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     tcpWidth: 310,
     recordMode: "normal",
     rippleMode: "off",
+    playheadStopBehavior: "return-to-start",
     autoCrossfade: true,
     defaultCrossfadeLength: 0.05,
     razorEdits: [],
@@ -1563,6 +1741,12 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showRenderModal: false,
     showPluginBrowser: false,
     pluginBrowserTrackId: null,
+    showEnvelopeManager: false,
+    envelopeManagerTrackId: null,
+    showChannelStripEQ: false,
+    channelStripEQTrackId: null,
+    showTrackRouting: false,
+    trackRoutingTrackId: null,
     showVirtualKeyboard: false,
     showUndoHistory: false,
     showClipProperties: false,
@@ -1570,6 +1754,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     bigClockFormat: "time",
     showKeyboardShortcuts: false,
     showContextualHelp: false,
+    showGettingStarted: false,
     showPreferences: false,
     timecodeMode: "time",
     smpteFrameRate: 24,
@@ -1577,6 +1762,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showCommandPalette: false,
     showRegionMarkerManager: false,
     showScriptConsole: false,
+    showStemSeparation: false,
+    stemSepTrackId: null,
+    stemSepClipId: null,
+    stemSepClipName: "",
+    stemSepClipDuration: 0,
     showPianoRoll: false,
     pianoRollTrackId: null,
     pianoRollClipId: null,
@@ -1719,6 +1909,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     videoFilePath: "",
     videoInfo: null,
     showScriptEditor: false,
+    showPitchEditor: false,
+    pitchEditorTrackId: null,
+    pitchEditorClipId: null,
+    pitchEditorFxIndex: 0,
+    lowerZoneHeight: 280,
     scriptConsoleOutput: [],
     userScripts: [],
     projectTabs: [{ id: "default", name: "Untitled Project", isActive: true }],
@@ -1758,6 +1953,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       quantize: "1bar",
     },
     showClipLauncher: false,
+    showMissingMedia: false,
+    missingMediaFiles: [],
 
     // Sprint 17: Visual Improvements
     recentColors: [],
@@ -1805,6 +2002,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     })(),
     projectRevisionNotes: [],
 
+    // Timecode Sync Settings
+    showTimecodeSettings: false,
+
     // Detachable Panels (multi-monitor support)
     detachedPanels: [],
 
@@ -1817,7 +2017,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // ========== Project Management (F2) ==========
     newProject: async () => {
       // Stop playback
-      get().stop();
+      await get().stop();
+
+      // Close all open plugin editor windows before removing tracks
+      // to prevent dangling pointers / use-after-free crashes
+      await nativeBridge.closeAllPluginWindows();
 
       // Reset sync cache (Sprint 16.3)
       resetSyncCache();
@@ -2208,6 +2412,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                     clip.volumeDB || 0,
                     clip.fadeIn || 0,
                     clip.fadeOut || 0,
+                    clip.id,
                   );
                 }
               }
@@ -2297,7 +2502,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             clips: (t.clips || []).map((c: any) => ({ ...c, offset: c.offset ?? 0 })),
             midiClips: t.midiClips ?? [],
             sends: t.sends ?? [],
-            automationLanes: t.automationLanes ?? defaults.automationLanes,
+            automationLanes: (t.automationLanes ?? defaults.automationLanes).map((l: any) => ({
+              ...l,
+              mode: l.mode ?? "read",
+              armed: l.armed ?? false,
+            })),
             takes: t.takes ?? [],
             meterLevel: 0,
             peakLevel: 0,
@@ -2363,6 +2572,32 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           "recentProjects",
           JSON.stringify(get().recentProjects),
         );
+
+        // Check for missing media files
+        set({ projectLoadingMessage: "Checking media files..." });
+        await new Promise((r) => setTimeout(r, 0));
+        const missingFiles: Array<{ path: string; clipIds: string[] }> = [];
+        const checkedPaths = new Map<string, boolean>();
+        for (const track of get().tracks) {
+          for (const clip of track.clips) {
+            if (!clip.filePath) continue;
+            if (!checkedPaths.has(clip.filePath)) {
+              const exists = await nativeBridge.fileExists(clip.filePath).catch(() => true);
+              checkedPaths.set(clip.filePath, exists);
+            }
+            if (!checkedPaths.get(clip.filePath)) {
+              const existing = missingFiles.find((f) => f.path === clip.filePath);
+              if (existing) {
+                existing.clipIds.push(clip.id);
+              } else {
+                missingFiles.push({ path: clip.filePath, clipIds: [clip.id] });
+              }
+            }
+          }
+        }
+        if (missingFiles.length > 0) {
+          set({ showMissingMedia: true, missingMediaFiles: missingFiles });
+        }
 
         set({ isProjectLoading: false, projectLoadingMessage: "" });
         return true;
@@ -2600,9 +2835,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         description: `Add track "${trackData.name}"`,
         timestamp: Date.now(),
         execute: () => {
-          set((state) => ({
-            tracks: [...state.tracks, fullTrack],
-          }));
+          set((state) => {
+            const insertAfter = (trackData as any).insertAfterTrackId as string | undefined;
+            if (insertAfter) {
+              const idx = state.tracks.findIndex((t) => t.id === insertAfter);
+              if (idx >= 0) {
+                const newTracks = [...state.tracks];
+                newTracks.splice(idx + 1, 0, fullTrack);
+                return { tracks: newTracks };
+              }
+            }
+            return { tracks: [...state.tracks, fullTrack] };
+          });
           nativeBridge.addTrack(trackData.id).catch((e) =>
             console.error("[DAW] Failed to sync addTrack with backend:", e),
           );
@@ -2665,6 +2909,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               await nativeBridge.addPlaybackClip(
                 id, clip.filePath, clip.startTime, clip.duration,
                 clip.offset || 0, clip.volumeDB || 0, clip.fadeIn || 0, clip.fadeOut || 0,
+                clip.id,
               ).catch(() => {});
             }
           }
@@ -2922,6 +3167,22 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         nativeBridge.setTrackVolume(tid, volumeDB);
       }
       for (const tid of linkedIds) _linkingInProgress.delete("vol_" + tid);
+
+      // Auto-record automation: write points when playing + lane armed + mode is write/touch/latch
+      if (get().transport.isPlaying) {
+        const freshTrack = get().tracks.find((t) => t.id === id);
+        const volLane = freshTrack?.automationLanes.find((l) => l.param === "volume");
+        if (volLane && volLane.armed && (volLane.mode === "write" || volLane.mode === "touch" || volLane.mode === "latch")) {
+          const now = Date.now();
+          const key = `${id}_volume`;
+          const lastRecorded = _autoRecordTimers.get(key) ?? 0;
+          if (now - lastRecorded >= AUTO_RECORD_INTERVAL_MS) {
+            _autoRecordTimers.set(key, now);
+            const normalizedValue = Math.max(0, Math.min(1, (volumeDB + 60) / 66));
+            get().addAutomationPoint(id, volLane.id, get().transport.currentTime, normalizedValue);
+          }
+        }
+      }
     },
 
     setTrackPan: async (id, pan) => {
@@ -2940,6 +3201,22 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         nativeBridge.setTrackPan(tid, pan);
       }
       for (const tid of linkedIds) _linkingInProgress.delete("pan_" + tid);
+
+      // Auto-record automation: write points when playing + lane armed + mode is write/touch/latch
+      if (get().transport.isPlaying) {
+        const freshTrack = get().tracks.find((t) => t.id === id);
+        const panLane = freshTrack?.automationLanes.find((l) => l.param === "pan");
+        if (panLane && panLane.armed && (panLane.mode === "write" || panLane.mode === "touch" || panLane.mode === "latch")) {
+          const now = Date.now();
+          const key = `${id}_pan`;
+          const lastRecorded = _autoRecordTimers.get(key) ?? 0;
+          if (now - lastRecorded >= AUTO_RECORD_INTERVAL_MS) {
+            _autoRecordTimers.set(key, now);
+            const normalizedValue = Math.max(0, Math.min(1, (pan + 1) / 2));
+            get().addAutomationPoint(id, panLane.id, get().transport.currentTime, normalizedValue);
+          }
+        }
+      }
     },
 
     toggleTrackMute: async (id) => {
@@ -3115,6 +3392,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       for (const tid of linkedIds) {
         const t = state.tracks.find((tr) => tr.id === tid);
         if (t) _editSnapshots.set("vol_" + tid, t.volumeDB);
+        // Signal touch begin to backend for touch/latch automation
+        const volLane = t?.automationLanes.find((l) => l.param === "volume");
+        if (volLane && volLane.armed && (volLane.mode === "touch" || volLane.mode === "latch")) {
+          nativeBridge.beginTouchAutomation(tid, "volume");
+        }
       }
     },
     commitTrackVolumeEdit: (id) => {
@@ -3159,6 +3441,16 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       };
       commandManager.execute(command);
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+
+      // Signal touch end to backend + clear throttle timers for touch/latch automation
+      for (const c of changes) {
+        const t = get().tracks.find((tr) => tr.id === c.tid);
+        const volLane = t?.automationLanes.find((l) => l.param === "volume");
+        if (volLane && volLane.armed && (volLane.mode === "touch" || volLane.mode === "latch")) {
+          nativeBridge.endTouchAutomation(c.tid, "volume");
+          _autoRecordTimers.delete(`${c.tid}_volume`);
+        }
+      }
     },
     beginTrackPanEdit: (id) => {
       const state = get();
@@ -3166,6 +3458,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       for (const tid of linkedIds) {
         const t = state.tracks.find((tr) => tr.id === tid);
         if (t) _editSnapshots.set("pan_" + tid, t.pan);
+        // Signal touch begin to backend for touch/latch automation
+        const panLane = t?.automationLanes.find((l) => l.param === "pan");
+        if (panLane && panLane.armed && (panLane.mode === "touch" || panLane.mode === "latch")) {
+          nativeBridge.beginTouchAutomation(tid, "pan");
+        }
       }
     },
     commitTrackPanEdit: (id) => {
@@ -3209,6 +3506,16 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       };
       commandManager.execute(command);
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+
+      // Signal touch end to backend + clear throttle timers for touch/latch automation
+      for (const c of changes) {
+        const t = get().tracks.find((tr) => tr.id === c.tid);
+        const panLane = t?.automationLanes.find((l) => l.param === "pan");
+        if (panLane && panLane.armed && (panLane.mode === "touch" || panLane.mode === "latch")) {
+          nativeBridge.endTouchAutomation(c.tid, "pan");
+          _autoRecordTimers.delete(`${c.tid}_pan`);
+        }
+      }
     },
     beginClipVolumeEdit: (clipId) => {
       for (const track of get().tracks) {
@@ -3491,9 +3798,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     stop: async () => {
-      const { playStartPosition, transport, addClip } = get();
+      const { playStartPosition, transport, addClip, playheadStopBehavior } = get();
       const wasRecording = transport.isRecording;
+      const wasPlaying = transport.isPlaying || transport.isPaused;
       console.log("[useDAWStore] STOP called. Was recording:", wasRecording);
+
+      // Determine where to place playhead after stop
+      // "stop-in-place": keep at current position (first stop press)
+      // "return-to-start": go back to where play started (always)
+      // Double-stop convention: if already stopped, go to start position
+      let stopTime: number;
+      if (!wasPlaying) {
+        // Already stopped — return to play start position (double-stop)
+        stopTime = playStartPosition;
+      } else if (playheadStopBehavior === "stop-in-place") {
+        stopTime = transport.currentTime;
+      } else {
+        stopTime = playStartPosition;
+      }
 
       set((state) => ({
         transport: {
@@ -3501,15 +3823,16 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           isPlaying: false,
           isPaused: false,
           isRecording: false,
-          currentTime: playStartPosition, // Return to start position
+          currentTime: stopTime,
         },
         recordingClips: [], // Clear recording clips
-        // Reset scroll to bring playhead into view (scroll to start position)
-        scrollX: Math.max(0, playStartPosition * state.pixelsPerSecond - 100), // Keep 100px margin
-        // Reset all meter levels to zero immediately on stop
+        // Reset scroll to bring playhead into view
+        scrollX: Math.max(0, stopTime * state.pixelsPerSecond - 100), // Keep 100px margin
+        // Reset all meter levels and automation display values to zero on stop
         masterLevel: 0,
         meterLevels: {},
         peakLevels: {},
+        automatedParamValues: {},
       }));
       console.log(
         "[useDAWStore] STOP State updated. Transport stopped, recordingClips cleared.",
@@ -3612,6 +3935,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               activeClip.volumeDB || 0,
               activeClip.fadeIn || 0,
               activeClip.fadeOut || 0,
+              activeClip.id,
             ).catch((e) => console.warn("[useDAWStore] addPlaybackClip after record failed:", e));
           }
         }
@@ -3662,8 +3986,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }
       }
 
-      // Reset backend position to start position
-      await nativeBridge.setTransportPosition(playStartPosition);
+      // Reset backend position to match frontend stop position
+      const finalStopTime = get().transport.currentTime;
+      await nativeBridge.setTransportPosition(finalStopTime);
     },
 
     togglePlayPause: async () => {
@@ -3930,6 +4255,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         projectRange.start,
         duration,
         0, 0, 0, 0,
+        clip.id,
       );
 
       set({ metronomeTrackId: trackId, isModified: true });
@@ -4030,6 +4356,131 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       // When muted, send 0 to backend; when unmuted, restore volume
       nativeBridge.setMasterVolume(!current ? 0 : get().masterVolume);
     },
+    toggleMasterMono: () => {
+      const next = !get().masterMono;
+      set({ masterMono: next });
+      nativeBridge.setMasterMono(next).catch(() => {});
+    },
+    toggleMasterAutomation: () => set((s) => ({ showMasterAutomation: !s.showMasterAutomation })),
+    addMasterAutomationLane: (param) => {
+      const existing = get().masterAutomationLanes.find((l) => l.param === param);
+      if (existing) {
+        set((s) => ({
+          showMasterAutomation: true,
+          masterAutomationLanes: s.masterAutomationLanes.map((l) =>
+            l.param === param ? { ...l, visible: true } : l,
+          ),
+        }));
+        return existing.id;
+      }
+      const newId = `master-${param}`;
+      set((s) => ({
+        showMasterAutomation: true,
+        masterAutomationLanes: [
+          ...s.masterAutomationLanes,
+          { id: newId, param, points: [], visible: true, mode: "read" as AutomationModeType, armed: false },
+        ],
+      }));
+      return newId;
+    },
+    toggleMasterAutomationLaneVisibility: (laneId) => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) =>
+          l.id === laneId ? { ...l, visible: !l.visible } : l,
+        ),
+      }));
+    },
+    setMasterAutomationLaneMode: (laneId, mode) => {
+      const lane = get().masterAutomationLanes.find((l) => l.id === laneId);
+      if (lane) {
+        nativeBridge.setAutomationMode("master", lane.param, mode).catch(() => {});
+      }
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) =>
+          l.id === laneId ? { ...l, mode } : l,
+        ),
+      }));
+    },
+    armMasterAutomationLane: (laneId, armed) => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) =>
+          l.id === laneId ? { ...l, armed } : l,
+        ),
+      }));
+    },
+    setMasterTrackAutomationMode: (mode) => {
+      const lanes = get().masterAutomationLanes;
+      for (const lane of lanes) {
+        nativeBridge.setAutomationMode("master", lane.param, mode).catch(() => {});
+      }
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) => ({ ...l, mode })),
+      }));
+    },
+    showAllActiveMasterEnvelopes: () => {
+      set((s) => ({
+        showMasterAutomation: true,
+        masterAutomationLanes: s.masterAutomationLanes.map((l) =>
+          l.points.length > 0 ? { ...l, visible: true } : l,
+        ),
+      }));
+    },
+    hideAllMasterEnvelopes: () => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) => ({ ...l, visible: false })),
+      }));
+    },
+    armAllVisibleMasterAutomationLanes: () => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) =>
+          l.visible ? { ...l, armed: true } : l,
+        ),
+      }));
+    },
+    disarmAllMasterAutomationLanes: () => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((l) => ({ ...l, armed: false })),
+      }));
+    },
+    addMasterAutomationPoint: (laneId, time, value) => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((lane) => {
+          if (lane.id !== laneId) return lane;
+          const newPoints = [...lane.points, { time, value: Math.max(0, Math.min(1, value)) }];
+          newPoints.sort((a, b) => a.time - b.time);
+          return { ...lane, points: newPoints };
+        }),
+        isModified: true,
+      }));
+      const lane = get().masterAutomationLanes.find((l) => l.id === laneId);
+      if (lane) syncAutomationLaneToBackend("master", lane);
+    },
+    removeMasterAutomationPoint: (laneId, pointIndex) => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((lane) => {
+          if (lane.id !== laneId) return lane;
+          return { ...lane, points: lane.points.filter((_, i) => i !== pointIndex) };
+        }),
+        isModified: true,
+      }));
+      const lane = get().masterAutomationLanes.find((l) => l.id === laneId);
+      if (lane) syncAutomationLaneToBackend("master", lane);
+    },
+    moveMasterAutomationPoint: (laneId, pointIndex, time, value) => {
+      set((s) => ({
+        masterAutomationLanes: s.masterAutomationLanes.map((lane) => {
+          if (lane.id !== laneId) return lane;
+          const newPoints = lane.points.map((p, i) =>
+            i === pointIndex ? { time: Math.max(0, time), value: Math.max(0, Math.min(1, value)) } : p,
+          );
+          newPoints.sort((a, b) => a.time - b.time);
+          return { ...lane, points: newPoints };
+        }),
+        isModified: true,
+      }));
+      const lane = get().masterAutomationLanes.find((l) => l.id === laneId);
+      if (lane) syncAutomationLaneToBackend("master", lane);
+    },
 
     // ========== Metering ==========
     // Both actions write ONLY to meterLevels/peakLevels — never to `tracks`.
@@ -4083,6 +4534,28 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     setMasterLevel: (level) => set({ masterLevel: level }),
 
+    updateAutomatedValues: () => {
+      const state = get();
+      const time = state.transport.currentTime;
+      const prev = state.automatedParamValues;
+      const next: Record<string, Record<string, number>> = {};
+      let changed = false;
+
+      for (const track of state.tracks) {
+        for (const lane of track.automationLanes) {
+          if (lane.mode === "off" || lane.points.length === 0) continue;
+          // Store normalized 0-1 values — consumers convert to display units as needed
+          const normalized = interpolateAtTime(lane.points, time);
+          const rounded = Math.round(normalized * 10000) / 10000;
+          if (prev[track.id]?.[lane.param] !== rounded) changed = true;
+          if (!next[track.id]) next[track.id] = {};
+          next[track.id][lane.param] = rounded;
+        }
+      }
+
+      if (changed) set({ automatedParamValues: next });
+    },
+
     // ========== Timeline View ==========
     setZoom: (pixelsPerSecond) => {
       set({ pixelsPerSecond: Math.max(1, Math.min(1000, pixelsPerSecond)) });
@@ -4129,10 +4602,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     syncClipsWithBackend: async () => {
+      const syncStart = performance.now();
       const { tracks } = get();
 
       // Build current clip set with keys
-      const currentClips = new Map<string, { trackId: string; filePath: string; startTime: number; duration: number; offset: number; volumeDB: number; fadeIn: number; fadeOut: number }>();
+      const currentClips = new Map<string, { trackId: string; filePath: string; startTime: number; duration: number; offset: number; volumeDB: number; fadeIn: number; fadeOut: number; clipId: string }>();
       for (const track of tracks) {
         for (const clip of track.clips) {
           if (clip.filePath && !clip.muted) {
@@ -4141,7 +4615,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             const fadeIn = clip.fadeIn || 0;
             const fadeOut = clip.fadeOut || 0;
             const key = makeClipKey(track.id, clip.filePath, clip.startTime, clip.duration, offset, volumeDB, fadeIn, fadeOut);
-            currentClips.set(key, { trackId: track.id, filePath: clip.filePath, startTime: clip.startTime, duration: clip.duration, offset, volumeDB, fadeIn, fadeOut });
+            currentClips.set(key, { trackId: track.id, filePath: clip.filePath, startTime: clip.startTime, duration: clip.duration, offset, volumeDB, fadeIn, fadeOut, clipId: clip.id });
           }
         }
       }
@@ -4161,6 +4635,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       }
 
       // If more than 60% changed, just do a full clear+rebuild (cheaper than many removes)
+      const t1 = performance.now();
       const totalOld = _lastSyncedClipKeys.size;
       if (totalOld === 0 || toRemove.length > totalOld * 0.6) {
         // Full rebuild — clear first, then batch-add all clips in parallel
@@ -4184,21 +4659,57 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           await nativeBridge.addPlaybackClipsBatch(clipsToAdd);
         }
       }
+      const t2 = performance.now();
 
       // Update cache
       _lastSyncedClipKeys = currentKeys;
 
-      // Also sync automation lanes to backend
+      // Collect all fire-and-forget sync promises to run in parallel
+      const syncPromises: Promise<any>[] = [];
+
+      // Sync gain envelopes to backend for all clips that have them
+      for (const track of tracks) {
+        for (const clip of track.clips) {
+          if (clip.gainEnvelope && clip.gainEnvelope.length > 0) {
+            syncPromises.push(nativeBridge.setClipGainEnvelope(track.id, clip.id, clip.gainEnvelope).catch(() => {}));
+          }
+        }
+      }
+
+      // Sync automation lanes to backend (all lanes, even empty ones, to sync modes)
       for (const track of tracks) {
         for (const lane of track.automationLanes) {
-          if (lane.points.length > 0) {
-            syncAutomationLaneToBackend(track.id, lane);
+          const parameterId = lane.param;
+          const converted = lane.points.map((p) => ({
+            time: p.time,
+            value: automationToBackend(lane.param, p.value),
+          }));
+          syncPromises.push(nativeBridge.setAutomationPoints(track.id, parameterId, converted).catch(() => {}));
+          if (lane.mode) {
+            syncPromises.push(nativeBridge.setAutomationMode(track.id, parameterId, lane.mode).catch(() => {}));
           }
+        }
+      }
+      // Sync master automation lanes
+      for (const lane of get().masterAutomationLanes) {
+        const parameterId = lane.param;
+        const converted = lane.points.map((p) => ({
+          time: p.time,
+          value: automationToBackend(lane.param, p.value),
+        }));
+        syncPromises.push(nativeBridge.setAutomationPoints("master", parameterId, converted).catch(() => {}));
+        if (lane.mode) {
+          syncPromises.push(nativeBridge.setAutomationMode("master", parameterId, lane.mode).catch(() => {}));
         }
       }
       // Also sync tempo markers to backend
       syncTempoMarkersToBackend(get().tempoMarkers);
-      console.log("[DAW] Synced clips with backend (added: " + toAdd.length + ", removed: " + toRemove.length + ")");
+
+      // Wait for all auxiliary syncs in parallel (not sequentially)
+      await Promise.all(syncPromises);
+      const t3 = performance.now();
+
+      console.log(`[DAW] syncClipsWithBackend: clips=${(t2 - t1).toFixed(0)}ms, aux=${(t3 - t2).toFixed(0)}ms, total=${(t3 - syncStart).toFixed(0)}ms (added: ${toAdd.length}, removed: ${toRemove.length}, auxCalls: ${syncPromises.length})`);
     },
 
     importMedia: async (filePath, trackId, startTime) => {
@@ -4241,6 +4752,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           newClip.volumeDB || 0,
           newClip.fadeIn || 0,
           newClip.fadeOut || 0,
+          newClip.id,
         );
 
         console.log(
@@ -4453,6 +4965,83 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         canRedo: commandManager.canRedo(),
         isModified: true,
       });
+    },
+
+    splitMIDIClipAtPosition: (clipId, splitTime) => {
+      const state = get();
+      let foundClip: MIDIClip | null = null;
+      let foundTrackId: string | null = null;
+      for (const track of state.tracks) {
+        const clip = track.midiClips.find((c) => c.id === clipId);
+        if (clip) { foundClip = clip; foundTrackId = track.id; break; }
+      }
+      if (!foundClip || !foundTrackId) return;
+      const clip = foundClip;
+      const trackId = foundTrackId;
+      const clipEnd = clip.startTime + clip.duration;
+      if (splitTime <= clip.startTime || splitTime >= clipEnd) return;
+
+      const splitOffset = splitTime - clip.startTime; // seconds into clip
+      const leftId = crypto.randomUUID();
+      const rightId = crypto.randomUUID();
+
+      const leftClip: MIDIClip = {
+        ...clip,
+        id: leftId,
+        duration: splitOffset,
+        events: clip.events.filter((e) => e.timestamp < splitOffset),
+        ccEvents: clip.ccEvents?.filter((e) => e.timestamp < splitOffset),
+      };
+      const rightClip: MIDIClip = {
+        ...clip,
+        id: rightId,
+        startTime: splitTime,
+        duration: clip.duration - splitOffset,
+        // Shift event timestamps relative to new clip start
+        events: clip.events
+          .filter((e) => e.timestamp >= splitOffset)
+          .map((e) => ({ ...e, timestamp: e.timestamp - splitOffset })),
+        ccEvents: clip.ccEvents
+          ?.filter((e) => e.timestamp >= splitOffset)
+          .map((e) => ({ ...e, timestamp: e.timestamp - splitOffset })),
+      };
+
+      const newTracks = state.tracks.map((track) => {
+        if (track.id !== trackId) return track;
+        return {
+          ...track,
+          midiClips: [
+            ...track.midiClips.filter((c) => c.id !== clip.id),
+            leftClip,
+            rightClip,
+          ],
+        };
+      });
+
+      commandManager.push({
+        type: "SPLIT_MIDI_CLIP",
+        description: "Split MIDI clip",
+        timestamp: Date.now(),
+        execute: () => {
+          set({ tracks: newTracks, selectedClipIds: [rightId], selectedClipId: rightId, isModified: true });
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((t) => {
+              if (t.id !== trackId) return t;
+              return {
+                ...t,
+                midiClips: [...t.midiClips.filter((c) => c.id !== leftId && c.id !== rightId), clip],
+              };
+            }),
+            selectedClipIds: [clip.id],
+            selectedClipId: clip.id,
+            isModified: true,
+          }));
+        },
+      });
+      set({ tracks: newTracks, selectedClipIds: [rightId], selectedClipId: rightId,
+        canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo(), isModified: true });
     },
 
     selectClip: (clipId, modifiers) => {
@@ -5317,6 +5906,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 foundClip.volumeDB || 0,
                 foundClip.fadeIn || 0,
                 foundClip.fadeOut || 0,
+                foundClip.id,
               );
               console.log(`[DAW] Clip restored to backend: ${clipFilePath}`);
             } catch (error) {
@@ -5722,7 +6312,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const existing = track.automationLanes.find((l) => l.param === param);
       if (existing) return existing.id;
       const laneId = `lane_${param}_${Date.now()}`;
-      const newLane: AutomationLane = { id: laneId, param, points: [], visible: true };
+      const newLane: AutomationLane = { id: laneId, param, points: [], visible: true, mode: "read", armed: false };
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -5834,6 +6424,109 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         const parameterId = lane.param === "mute" ? "mute" : lane.param;
         nativeBridge.clearAutomation(trackId, parameterId).catch(() => {});
       }
+    },
+
+    setAutomationLaneMode: (trackId, laneId, mode) => {
+      // Auto-arm when setting to write/touch/latch, auto-disarm for read/off
+      const shouldArm = mode === "write" || mode === "touch" || mode === "latch";
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            automationLanes: t.automationLanes.map((lane) =>
+              lane.id === laneId ? { ...lane, mode, armed: shouldArm } : lane,
+            ),
+          };
+        }),
+      }));
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.id === laneId);
+      if (lane) nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
+    },
+
+    setTrackAutomationMode: (trackId, mode) => {
+      // Auto-arm when setting to write/touch/latch, auto-disarm for read/off
+      const shouldArm = mode === "write" || mode === "touch" || mode === "latch";
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            automationLanes: t.automationLanes.map((lane) => ({ ...lane, mode, armed: shouldArm })),
+          };
+        }),
+      }));
+      const track = get().tracks.find((t) => t.id === trackId);
+      if (track) {
+        for (const lane of track.automationLanes) {
+          nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
+        }
+      }
+    },
+
+    armAutomationLane: (trackId, laneId, armed) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            automationLanes: t.automationLanes.map((lane) =>
+              lane.id === laneId ? { ...lane, armed } : lane,
+            ),
+          };
+        }),
+      }));
+    },
+
+    armAllVisibleAutomationLanes: (trackId) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            automationLanes: t.automationLanes.map((lane) =>
+              lane.visible ? { ...lane, armed: true } : lane,
+            ),
+          };
+        }),
+      }));
+    },
+
+    disarmAllAutomationLanes: (trackId) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            automationLanes: t.automationLanes.map((lane) => ({ ...lane, armed: false })),
+          };
+        }),
+      }));
+    },
+
+    showAllActiveEnvelopes: (trackId) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            showAutomation: true,
+            automationLanes: t.automationLanes.map((lane) =>
+              lane.points.length > 0 ? { ...lane, visible: true } : lane,
+            ),
+          };
+        }),
+      }));
+    },
+
+    hideAllEnvelopes: (trackId) => {
+      set((s) => ({
+        tracks: s.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          return { ...t, showAutomation: false };
+        }),
+      }));
     },
 
     // ========== Strip Silence (Phase 3.12) ==========
@@ -6192,6 +6885,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set({ showPluginBrowser: true, pluginBrowserTrackId: trackId }),
     closePluginBrowser: () =>
       set({ showPluginBrowser: false, pluginBrowserTrackId: null }),
+    openEnvelopeManager: (trackId) =>
+      set({ showEnvelopeManager: true, envelopeManagerTrackId: trackId }),
+    closeEnvelopeManager: () =>
+      set({ showEnvelopeManager: false, envelopeManagerTrackId: null }),
+    openChannelStripEQ: (trackId) =>
+      set({ showChannelStripEQ: true, channelStripEQTrackId: trackId }),
+    closeChannelStripEQ: () =>
+      set({ showChannelStripEQ: false, channelStripEQTrackId: null }),
+    openTrackRouting: (trackId) =>
+      set({ showTrackRouting: true, trackRoutingTrackId: trackId }),
+    closeTrackRouting: () =>
+      set({ showTrackRouting: false, trackRoutingTrackId: null }),
     toggleVirtualKeyboard: () =>
       set((state) => ({ showVirtualKeyboard: !state.showVirtualKeyboard })),
     toggleUndoHistory: () =>
@@ -6210,10 +6915,118 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set((state) => ({ showKeyboardShortcuts: !state.showKeyboardShortcuts })),
     toggleContextualHelp: () =>
       set((state) => ({ showContextualHelp: !state.showContextualHelp })),
+    toggleGettingStarted: () =>
+      set((state) => ({ showGettingStarted: !state.showGettingStarted })),
     togglePreferences: () =>
       set((state) => ({ showPreferences: !state.showPreferences })),
     toggleScriptConsole: () =>
       set((state) => ({ showScriptConsole: !state.showScriptConsole })),
+    openStemSeparation: (trackId, clipId, name, duration) =>
+      set({ showStemSeparation: true, stemSepTrackId: trackId, stemSepClipId: clipId, stemSepClipName: name, stemSepClipDuration: duration }),
+    closeStemSeparation: () =>
+      set({ showStemSeparation: false, stemSepTrackId: null, stemSepClipId: null, stemSepClipName: "", stemSepClipDuration: 0 }),
+    completeStemSeparation: (sourceTrackId, _sourceClipId, clipName, stemFiles, sourceClipStartTime) => {
+      const STEM_COLORS: Record<string, string> = {
+        Vocals: "#ec4899", Drums: "#f97316", Bass: "#3b82f6",
+        Guitar: "#a855f7", Piano: "#06b6d4", Other: "#22c55e",
+      };
+
+      // Pre-generate IDs and build all data upfront
+      const stemTrackIds: string[] = [];
+      const stemTracks: Track[] = [];
+      const clipMap = new Map<string, AudioClip>();
+      let insertAfterId = sourceTrackId;
+
+      for (const stem of stemFiles) {
+        if (!stem.filePath) continue;
+        const trackId = crypto.randomUUID();
+        const clipId = crypto.randomUUID();
+        stemTrackIds.push(trackId);
+
+        const newTrack = createDefaultTrack(trackId, `${stem.name} - ${clipName}`, STEM_COLORS[stem.name] || "#666666");
+        stemTracks.push({ ...newTrack, insertAfterTrackId: insertAfterId } as Track);
+
+        clipMap.set(trackId, {
+          id: clipId,
+          name: stem.name,
+          filePath: stem.filePath,
+          startTime: sourceClipStartTime,
+          duration: stem.duration || 0,
+          offset: 0,
+          color: STEM_COLORS[stem.name] || "#666666",
+          volumeDB: 0,
+          fadeIn: 0,
+          fadeOut: 0,
+          sampleRate: stem.sampleRate || 44100,
+        });
+        insertAfterId = trackId;
+      }
+
+      const groupName = `Stems: ${clipName}`;
+      const wasSourceMuted = get().tracks.find((t) => t.id === sourceTrackId)?.muted ?? false;
+
+      const command: Command = {
+        type: "STEM_SEPARATION",
+        description: `Separate stems: ${clipName}`,
+        timestamp: Date.now(),
+        execute: () => {
+          // Single batched state update: insert all tracks with clips + mute source + add group
+          set((state) => {
+            let newTracks = [...state.tracks];
+            for (const stemTrack of stemTracks) {
+              const clip = clipMap.get(stemTrack.id)!;
+              const trackWithClip = { ...stemTrack, clips: [clip] };
+              const idx = newTracks.findIndex((t) => t.id === (stemTrack as any).insertAfterTrackId);
+              if (idx >= 0) {
+                newTracks.splice(idx + 1, 0, trackWithClip);
+              } else {
+                newTracks.push(trackWithClip);
+              }
+            }
+            // Mute source track
+            if (!wasSourceMuted) {
+              newTracks = newTracks.map((t) => t.id === sourceTrackId ? { ...t, muted: true } : t);
+            }
+            const newGroups = stemTrackIds.length > 1
+              ? [...state.trackGroups, {
+                  id: crypto.randomUUID(), name: groupName,
+                  leadTrackId: stemTrackIds[0], memberTrackIds: stemTrackIds,
+                  linkedParams: ["volume", "mute", "solo"],
+                }]
+              : state.trackGroups;
+            return { tracks: newTracks, trackGroups: newGroups };
+          });
+          // Register all new tracks in C++ backend and mute source
+          Promise.all(stemTrackIds.map((tid) => nativeBridge.addTrack(tid))).catch(() => {});
+          if (!wasSourceMuted) {
+            nativeBridge.setTrackMute(sourceTrackId, true).catch(() => {});
+          }
+        },
+        undo: () => {
+          // Remove stem tracks + ungroup in single update
+          set((s) => {
+            let newTracks = s.tracks.filter((t) => !stemTrackIds.includes(t.id));
+            if (!wasSourceMuted) {
+              newTracks = newTracks.map((t) => t.id === sourceTrackId ? { ...t, muted: false } : t);
+            }
+            return {
+              tracks: newTracks,
+              trackGroups: s.trackGroups.filter((g) => g.name !== groupName),
+            };
+          });
+          // Remove from C++ backend
+          for (const tid of stemTrackIds) {
+            nativeBridge.removeTrack(tid).catch(() => {});
+          }
+          if (!wasSourceMuted) {
+            nativeBridge.setTrackMute(sourceTrackId, false).catch(() => {});
+          }
+        },
+      };
+
+      commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
     setTimecodeMode: (mode) => set({ timecodeMode: mode }),
     setSmpteFrameRate: (rate) => set({ smpteFrameRate: rate }),
     setUIFontScale: (scale) => set({ uiFontScale: Math.max(0.75, Math.min(1.5, scale)) }),
@@ -6485,6 +7298,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // ========== Record & Edit Modes ==========
     setRecordMode: (mode) => set({ recordMode: mode }),
     setRippleMode: (mode) => set({ rippleMode: mode }),
+    setPlayheadStopBehavior: (mode) => set({ playheadStopBehavior: mode }),
 
     // ========== Auto-Crossfade ==========
     toggleAutoCrossfade: () => set((s) => ({ autoCrossfade: !s.autoCrossfade })),
@@ -7120,7 +7934,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set((s) => ({
         tracks: s.tracks.map((t) =>
           t.id === sourceTrackId
-            ? { ...t, sends: [...t.sends, { destTrackId, level: 0.5, pan: 0, enabled: true, preFader: false }] }
+            ? { ...t, sends: [...t.sends, { destTrackId, level: 0.5, pan: 0, enabled: true, preFader: false, phaseInvert: false }] }
             : t
         ),
       }));
@@ -7173,6 +7987,58 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             ? { ...t, sends: t.sends.map((sd, i) => i === sendIndex ? { ...sd, preFader } : sd) }
             : t
         ),
+      }));
+    },
+    setTrackSendPhaseInvert: async (sourceTrackId, sendIndex, invert) => {
+      await nativeBridge.setTrackSendPhaseInvert(sourceTrackId, sendIndex, invert);
+      set((s) => ({
+        tracks: s.tracks.map((t) =>
+          t.id === sourceTrackId
+            ? { ...t, sends: t.sends.map((sd, i) => i === sendIndex ? { ...sd, phaseInvert: invert } : sd) }
+            : t
+        ),
+      }));
+    },
+    setTrackPhaseInvert: async (trackId, invert) => {
+      await nativeBridge.setTrackPhaseInvert(trackId, invert);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, phaseInverted: invert } : t),
+      }));
+    },
+    setTrackStereoWidth: async (trackId, widthPercent) => {
+      await nativeBridge.setTrackStereoWidth(trackId, widthPercent);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, stereoWidth: widthPercent } : t),
+      }));
+    },
+    setTrackMasterSendEnabled: async (trackId, enabled) => {
+      await nativeBridge.setTrackMasterSendEnabled(trackId, enabled);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, masterSendEnabled: enabled } : t),
+      }));
+    },
+    setTrackOutputChannels: async (trackId, startChannel, numChannels) => {
+      await nativeBridge.setTrackOutputChannels(trackId, startChannel, numChannels);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, outputStartChannel: startChannel, outputChannelCount: numChannels } : t),
+      }));
+    },
+    setTrackPlaybackOffset: async (trackId, offsetMs) => {
+      await nativeBridge.setTrackPlaybackOffset(trackId, offsetMs);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, playbackOffsetMs: offsetMs } : t),
+      }));
+    },
+    setTrackChannelCount: async (trackId, numChannels) => {
+      await nativeBridge.setTrackChannelCount(trackId, numChannels);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, trackChannelCount: numChannels } : t),
+      }));
+    },
+    setTrackMIDIOutput: async (trackId, deviceName) => {
+      await nativeBridge.setTrackMIDIOutput(trackId, deviceName);
+      set((s) => ({
+        tracks: s.tracks.map((t) => t.id === trackId ? { ...t, midiOutputDevice: deviceName } : t),
       }));
     },
 
@@ -7802,6 +8668,15 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     toggleScriptEditor: () =>
       set((s) => ({ showScriptEditor: !s.showScriptEditor })),
+    openPitchEditor: (trackId, clipId, fxIndex) => {
+      set({ showPitchEditor: true, pitchEditorTrackId: trackId, pitchEditorClipId: clipId, pitchEditorFxIndex: fxIndex });
+      usePitchEditorStore.getState().open(trackId, clipId, fxIndex);
+    },
+    closePitchEditor: () => {
+      set({ showPitchEditor: false, pitchEditorTrackId: null, pitchEditorClipId: null });
+      usePitchEditorStore.getState().close();
+    },
+    setLowerZoneHeight: (h) => set({ lowerZoneHeight: Math.max(150, Math.min(600, h)) }),
     executeScript: async (code) => {
       try {
         const result = await nativeBridge.executeScript(code);
@@ -8253,6 +9128,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     toggleClipLauncher: () =>
       set((s) => ({ showClipLauncher: !s.showClipLauncher })),
+
+    toggleTimecodeSettings: () =>
+      set((s) => ({ showTimecodeSettings: !s.showTimecodeSettings })),
+
+    // Missing Media Resolver
+    resolveMissingMedia: (originalPath: string, newPath: string) => {
+      // Update all clips that reference the original path
+      set((s) => ({
+        tracks: s.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.map((clip) =>
+            clip.filePath === originalPath ? { ...clip, filePath: newPath } : clip,
+          ),
+        })),
+        isModified: true,
+      }));
+    },
+    closeMissingMedia: () => set({ showMissingMedia: false, missingMediaFiles: [] }),
 
     // Sprint 17: Visual Improvements
     addRecentColor: (color) => {

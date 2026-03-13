@@ -216,6 +216,9 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     // Prepare channel strip EQ
     channelStripEQ.prepareToPlay(sampleRate, samplesPerBlock);
+
+    // Pre-allocate pre-fader buffer for send routing (2-channel stereo)
+    preFaderBuffer.setSize(2, samplesPerBlock);
 }
 
 void TrackProcessor::releaseResources()
@@ -476,6 +479,42 @@ void TrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
             dcPrevInputR = prevIn;
             dcFilterStateR = prevOut;
         }
+    }
+
+    // ===== PHASE INVERT (polarity flip) =====
+    if (phaseInverted.load(std::memory_order_relaxed))
+    {
+        for (int ch = 0; ch < bufferChannels; ++ch)
+            juce::FloatVectorOperations::negate(
+                buffer.getWritePointer(ch),
+                buffer.getReadPointer(ch),
+                buffer.getNumSamples());
+    }
+
+    // ===== STEREO WIDTH (M/S processing) =====
+    float widthVal = stereoWidth.load(std::memory_order_relaxed);
+    if (bufferChannels >= 2 && std::abs(widthVal - 100.0f) > 0.01f)
+    {
+        float w = widthVal / 100.0f;  // 0.0 = mono, 1.0 = normal, 2.0 = extra wide
+        float* L = buffer.getWritePointer(0);
+        float* R = buffer.getWritePointer(1);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            float mid  = (L[i] + R[i]) * 0.5f;
+            float side = (L[i] - R[i]) * 0.5f;
+            L[i] = mid + side * w;
+            R[i] = mid - side * w;
+        }
+    }
+
+    // ===== CAPTURE PRE-FADER BUFFER (for pre-fader sends) =====
+    if (!sends.empty())
+    {
+        int pfSamples = buffer.getNumSamples();
+        if (preFaderBuffer.getNumSamples() < pfSamples)
+            preFaderBuffer.setSize(2, pfSamples, false, false, true);
+        for (int ch = 0; ch < juce::jmin(2, bufferChannels); ++ch)
+            preFaderBuffer.copyFrom(ch, 0, buffer, ch, 0, pfSamples);
     }
 
     // ===== AUTOMATION-AWARE GAIN APPLICATION =====
@@ -889,12 +928,13 @@ void TrackProcessor::fillSendBuffer(int sendIndex, const juce::AudioBuffer<float
     const int srcChannels = srcBuf.getNumChannels();
     const int destChannels = destBuffer.getNumChannels();
 
-    // Apply send level and pan, mix into dest
+    // Apply send level, pan, and optional phase invert, mix into dest
     const float level = send.level;
+    const float phaseMultiplier = send.phaseInvert ? -1.0f : 1.0f;
     const float pi = juce::MathConstants<float>::pi;
     float panAngle = (send.pan + 1.0f) * pi / 4.0f;
-    float leftGain = std::cos(panAngle) * level;
-    float rightGain = std::sin(panAngle) * level;
+    float leftGain = std::cos(panAngle) * level * phaseMultiplier;
+    float rightGain = std::sin(panAngle) * level * phaseMultiplier;
 
     if (destChannels >= 2 && srcChannels >= 2)
     {
@@ -970,4 +1010,127 @@ float TrackProcessor::getChannelStripEQParam(int paramIndex) const
             return p->convertFrom0to1(p->getValue());
     }
     return 0.0f;
+}
+
+//==============================================================================
+// Send Phase Invert
+
+void TrackProcessor::setSendPhaseInvert(int sendIndex, bool invert)
+{
+    if (sendIndex >= 0 && sendIndex < (int)sends.size())
+        sends[sendIndex].phaseInvert = invert;
+}
+
+bool TrackProcessor::getSendPhaseInvert(int sendIndex) const
+{
+    if (sendIndex >= 0 && sendIndex < (int)sends.size())
+        return sends[sendIndex].phaseInvert;
+    return false;
+}
+
+//==============================================================================
+// Output Channel Routing
+
+void TrackProcessor::setOutputChannels(int startChannel, int numChannels)
+{
+    outputStartChannel = juce::jmax(0, startChannel);
+    outputChannelCount = juce::jlimit(1, 8, numChannels);
+}
+
+//==============================================================================
+// Per-track MIDI Output
+
+void TrackProcessor::setMIDIOutputDevice(const juce::String& deviceName)
+{
+    if (deviceName == midiOutputDeviceName)
+        return;
+
+    midiOutputDeviceName = deviceName;
+    midiOutputDevice.reset();
+
+    if (deviceName.isNotEmpty())
+    {
+        for (const auto& d : juce::MidiOutput::getAvailableDevices())
+        {
+            if (d.name == deviceName)
+            {
+                midiOutputDevice = juce::MidiOutput::openDevice(d.identifier);
+                if (midiOutputDevice)
+                    juce::Logger::writeToLog("TrackProcessor: MIDI output connected: " + deviceName);
+                break;
+            }
+        }
+    }
+}
+
+void TrackProcessor::sendMIDIToOutput(const juce::MidiBuffer& buffer)
+{
+    if (midiOutputDevice == nullptr || buffer.isEmpty())
+        return;
+
+    for (const auto metadata : buffer)
+        midiOutputDevice->sendMessageNow(metadata.getMessage());
+}
+
+// =============================================================================
+// ARA Plugin Hosting (Phase 9)
+// =============================================================================
+
+bool TrackProcessor::initializeARA(int fxIndex, double sampleRate, int araBlockSize)
+{
+#if S13_HAS_ARA
+    // Get the plugin at the specified FX index
+    if (fxIndex < 0 || fxIndex >= static_cast<int>(trackFXPlugins.size()))
+        return false;
+
+    auto* plugin = dynamic_cast<juce::AudioPluginInstance*>(trackFXPlugins[static_cast<size_t>(fxIndex)].get());
+    if (!plugin)
+    {
+        juce::Logger::writeToLog("TrackProcessor::initializeARA: Plugin at index "
+            + juce::String(fxIndex) + " is not an AudioPluginInstance.");
+        return false;
+    }
+
+    // Shutdown any existing ARA session
+    shutdownARA();
+
+    araController = std::make_unique<ARAHostController>();
+
+    // ARA initialization is async — createARAFactoryAsync callback will complete it.
+    // We start it and return true optimistically; the callback will set araActive.
+    araFXIndex = fxIndex;
+    araController->initializeForPlugin(plugin, sampleRate, araBlockSize,
+        [this, fxIndex] (bool success) {
+            if (success)
+            {
+                juce::Logger::writeToLog("TrackProcessor::initializeARA: ARA initialized at FX index "
+                    + juce::String(fxIndex));
+            }
+            else
+            {
+                juce::Logger::writeToLog("TrackProcessor::initializeARA: ARA initialization failed for FX index "
+                    + juce::String(fxIndex));
+                araController.reset();
+                araFXIndex = -1;
+            }
+        });
+
+    return true;  // Async — actual result reported via callback
+#else
+    juce::ignoreUnused(fxIndex, sampleRate, araBlockSize);
+    juce::Logger::writeToLog("TrackProcessor::initializeARA: ARA support not compiled in.");
+    return false;
+#endif
+}
+
+void TrackProcessor::shutdownARA()
+{
+#if S13_HAS_ARA
+    if (araController)
+    {
+        araController->shutdown();
+        araController.reset();
+        araFXIndex = -1;
+    }
+#endif
 }

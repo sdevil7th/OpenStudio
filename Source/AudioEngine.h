@@ -18,13 +18,17 @@
 #include "DDPExporter.h"
 #include "TriggerEngine.h"
 #include "SessionInterchange.h"
+#include "PolyPitchDetector.h"
+#include "PolyResynthesizer.h"
+#include "StemSeparator.h"
 #include <vector>
 #include <memory>
 // ... (skip lines) ...
 
 class AudioEngine  : public juce::AudioIODeviceCallback,
                      public juce::AudioPlayHead,
-                     public ControlSurfaceCallback
+                     public ControlSurfaceCallback,
+                     public juce::Timer
 {
 public:
     AudioEngine();
@@ -114,9 +118,15 @@ public:
     // Set by MainComponent to emit a JS "peaksReady" event.
     std::function<void(const juce::String& filePath)> onPeaksReady;
     
+    // Access to PlaybackEngine (for pitch preview, etc.)
+    PlaybackEngine& getPlaybackEngine() { return playbackEngine; }
+
     // Playback clip management - ID-based
     void addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration,
-                         double offset = 0.0, double volumeDB = 0.0, double fadeIn = 0.0, double fadeOut = 0.0);
+                         double offset = 0.0, double volumeDB = 0.0, double fadeIn = 0.0, double fadeOut = 0.0,
+                         const juce::String& clipId = juce::String());
+    /** Batch-add multiple clips from a JSON array. Each element: {trackId, filePath, startTime, duration, offset, volumeDB, fadeIn, fadeOut, clipId}. */
+    void addPlaybackClipsBatch(const juce::String& clipsJSON);
     void removePlaybackClip(const juce::String& trackId, const juce::String& filePath);
     void clearPlaybackClips();
     void clearTrackPlaybackClips(const juce::String& trackId);
@@ -140,10 +150,19 @@ public:
     bool reloadS13FX(const juce::String& trackId, int fxIndex, bool isInputFX);
     juce::var getAvailableS13FX();
     
+    // Built-in FX Preset System
+    juce::var getBuiltInFXPresets(const juce::String& pluginName);
+    bool saveBuiltInFXPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
+                             const juce::String& presetName, bool isFactory = false);
+    bool loadBuiltInFXPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
+                             const juce::String& presetName);
+    bool deleteBuiltInFXPreset(const juce::String& pluginName, const juce::String& presetName);
+
     // Plugin Editor Windows (Phase 3) - ID-based
     void openPluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
     void openInstrumentEditor(const juce::String& trackId);
     void closePluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
+    void closeAllPluginWindows();
     
     // MIDI Device Management (Phase 2)
     juce::var getMIDIInputDevices();
@@ -159,6 +178,7 @@ public:
     // Get loaded plugins info - ID-based
     juce::var getTrackInputFX(const juce::String& trackId);
     juce::var getTrackFX(const juce::String& trackId);
+    juce::var getPluginParameters(const juce::String& trackId, int fxIndex, bool isInputFX);
     void removeTrackInputFX(const juce::String& trackId, int fxIndex);
     void removeTrackFX(const juce::String& trackId, int fxIndex);
     void bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed);
@@ -180,7 +200,9 @@ public:
     float getMasterVolume() const { return masterVolume; }
     void setMasterPan(float pan);
     float getMasterPan() const { return masterPan; }
-    
+    void setMasterMono(bool mono) { masterMono.store(mono); }
+    bool getMasterMono() const { return masterMono.load(); }
+
     // Metering (Phase 4)
     juce::var getMeterLevels(); // Returns array of track RMS levels
     float getMasterLevel() const; // Returns master output level
@@ -192,7 +214,7 @@ public:
     bool setMasterPluginState(int fxIndex, const juce::String& base64State);
     
     // Waveform Visualization
-    juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int numPixels);
+    juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels);
     juce::var getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels);
 
     // Offline Render/Export
@@ -230,13 +252,33 @@ public:
     void setTrackSendPan(const juce::String& sourceTrackId, int sendIndex, float pan);
     void setTrackSendEnabled(const juce::String& sourceTrackId, int sendIndex, bool enabled);
     void setTrackSendPreFader(const juce::String& sourceTrackId, int sendIndex, bool preFader);
+    void setTrackSendPhaseInvert(const juce::String& sourceTrackId, int sendIndex, bool invert);
     juce::var getTrackSends(const juce::String& trackId);
+
+    // Track Routing Features
+    void setTrackPhaseInvert(const juce::String& trackId, bool invert);
+    bool getTrackPhaseInvert(const juce::String& trackId) const;
+    void setTrackStereoWidth(const juce::String& trackId, float widthPercent);
+    float getTrackStereoWidth(const juce::String& trackId) const;
+    void setTrackMasterSendEnabled(const juce::String& trackId, bool enabled);
+    bool getTrackMasterSendEnabled(const juce::String& trackId) const;
+    void setTrackOutputChannels(const juce::String& trackId, int startChannel, int numChannels);
+    void setTrackPlaybackOffset(const juce::String& trackId, double offsetMs);
+    double getTrackPlaybackOffset(const juce::String& trackId) const;
+    void setTrackChannelCount(const juce::String& trackId, int numChannels);
+    int getTrackChannelCount(const juce::String& trackId) const;
+    void setTrackMIDIOutput(const juce::String& trackId, const juce::String& deviceName);
+    juce::String getTrackMIDIOutput(const juce::String& trackId) const;
+    juce::var getTrackRoutingInfo(const juce::String& trackId);
 
     // Lua Scripting (S13Script)
     juce::var runScript(const juce::String& scriptPath);
     juce::var runScriptCode(const juce::String& luaCode);
     juce::String getScriptDirectory();
     juce::var listScripts();
+
+    // Timer callback for deferred Lua script execution
+    void timerCallback() override;
 
     // Automation (Phase 1.1)
     // Set all automation points for a track parameter (bulk sync from frontend)
@@ -344,6 +386,40 @@ public:
     void setChannelStripEQEnabled(const juce::String& trackId, bool enabled);
     void setChannelStripEQParam(const juce::String& trackId, int paramIndex, float value);
     float getChannelStripEQParam(const juce::String& trackId, int paramIndex);
+
+    // Pitch Corrector bridge methods (auto mode)
+    juce::var getPitchCorrectorData(const juce::String& trackId, int fxIndex);
+    void setPitchCorrectorParam(const juce::String& trackId, int fxIndex, const juce::String& param, float value);
+    juce::var getPitchHistory(const juce::String& trackId, int fxIndex, int numFrames);
+
+    // Pitch Corrector bridge methods (graphical mode)
+    juce::var analyzePitchContour(const juce::String& trackId, const juce::String& clipId);
+    juce::var analyzePitchContourDirect(const juce::String& filePath, double offset, double duration, const juce::String& clipId);
+    juce::var applyPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& notesJson, const juce::var& framesJson = juce::var());
+    juce::var previewPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& notesJson);
+
+    // Polyphonic pitch detection (Phase 6)
+    juce::var analyzePolyphonic(const juce::String& trackId, const juce::String& clipId);
+    juce::var extractMidiFromAudio(const juce::String& trackId, const juce::String& clipId);
+    bool isPolyphonicDetectionAvailable() const;
+
+    // Polyphonic pitch editing (Phase 7)
+    juce::var applyPolyPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& editedNotesJson);
+    juce::var soloPolyNote(const juce::String& trackId, const juce::String& clipId, const juce::String& noteId);
+
+    // Source separation (Phase 8 + Phase 10)
+    juce::var separateStems(const juce::String& trackId, const juce::String& clipId);
+    bool isStemSeparationAvailable() const;
+    juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
+    juce::var getStemSeparationProgress();
+    void cancelStemSeparation();
+
+    // ARA Plugin Hosting (Phase 9)
+    juce::var initializeARAForTrack(const juce::String& trackId, int fxIndex);
+    juce::var addARAClip(const juce::String& trackId, const juce::String& clipId);
+    juce::var removeARAClip(const juce::String& trackId, const juce::String& clipId);
+    juce::var getARAPlugins();
+    juce::var shutdownARAForTrack(const juce::String& trackId);
 
     // ControlSurfaceCallback overrides
     void onControlSurfaceTrackVolume(const juce::String& trackId, float value01) override;
@@ -458,6 +534,13 @@ private:
     std::atomic<float> cachedMasterPanL { 0.707107f };  // cos(pi/4)
     std::atomic<float> cachedMasterPanR { 0.707107f };  // sin(pi/4)
 
+    // Master automation (volume/pan curves)
+    AutomationList masterVolumeAutomation;
+    AutomationList masterPanAutomation;
+
+    // Master mono downmix
+    std::atomic<bool> masterMono { false };
+
     // Lua Scripting
     ScriptEngine scriptEngine;
 
@@ -491,6 +574,10 @@ private:
     // can use them as sidechain input.  Key = trackId.  Buffers are pre-allocated
     // in audioDeviceAboutToStart and reused every callback.
     std::map<juce::String, juce::AudioBuffer<float>> sidechainOutputBuffers;
+
+    // Send accumulation buffers — each track has a buffer where incoming sends are mixed.
+    // Pre-allocated in audioDeviceAboutToStart and reused every callback.
+    std::map<juce::String, juce::AudioBuffer<float>> sendAccumBuffers;
 
     // Current pan law (applied to all tracks)
     PanLaw currentPanLaw { PanLaw::ConstantPower };
@@ -531,6 +618,21 @@ private:
     int spectrumWritePos { 0 };
     bool spectrumReady { false };
     juce::CriticalSection spectrumLock;
+
+    // Polyphonic Pitch Detection (Phase 6) — lazy-loaded
+    PolyPitchDetector polyPitchDetector;
+    bool polyModelLoadAttempted = false;
+
+    // Polyphonic Pitch Editing (Phase 7)
+    PolyResynthesizer polyResynthesizer;
+    // Cache last analysis result per clip for reuse in editing
+    std::map<juce::String, PolyPitchDetector::PolyAnalysisResult> polyAnalysisCache;
+
+    // Source Separation (Phase 8 + Phase 10) — Python subprocess
+    StemSeparator stemSeparator;
+
+    // Stem file cache: hash(filePath+offset+duration) -> stem files (name -> path)
+    std::map<juce::String, juce::StringPairArray> stemFileCache;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
 };

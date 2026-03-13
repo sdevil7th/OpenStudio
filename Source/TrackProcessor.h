@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "AutomationList.h"
 #include "BuiltInEffects.h"
+#include "ARAHostController.h"
 #include <map>
 
 // Track type enumeration
@@ -109,10 +110,16 @@ public:
     bool getSendEnabled(int sendIndex) const;
     bool getSendPreFader(int sendIndex) const;
 
+    void setSendPhaseInvert(int sendIndex, bool invert);
+    bool getSendPhaseInvert(int sendIndex) const;
+
     /** Fill destBuffer with this track's send contribution (called by AudioEngine) */
     void fillSendBuffer(int sendIndex, const juce::AudioBuffer<float>& preFaderBuf,
                         const juce::AudioBuffer<float>& postFaderBuf,
                         juce::AudioBuffer<float>& destBuffer, int numSamples) const;
+
+    /** Pre-fader buffer (captured during processBlock, before volume/pan) */
+    const juce::AudioBuffer<float>& getPreFaderBuffer() const { return preFaderBuffer; }
     
     // Volume & Pan
     void setVolume(float newVolume);
@@ -163,6 +170,36 @@ public:
     void setChannelStripEQParam(int paramIndex, float value);
     float getChannelStripEQParam(int paramIndex) const;
 
+    // Phase Invert (polarity flip)
+    void setPhaseInvert(bool invert) { phaseInverted.store(invert); }
+    bool getPhaseInvert() const { return phaseInverted.load(); }
+
+    // Stereo Width (M/S processing, 0-200%, 100% = normal)
+    void setStereoWidth(float widthPercent) { stereoWidth.store(juce::jlimit(0.0f, 200.0f, widthPercent)); }
+    float getStereoWidth() const { return stereoWidth.load(); }
+
+    // Master Send Enable (whether this track routes to master bus)
+    void setMasterSendEnabled(bool enabled) { masterSendEnabled.store(enabled); }
+    bool getMasterSendEnabled() const { return masterSendEnabled.load(); }
+
+    // Output Channel Routing (which hardware output channels this track targets)
+    void setOutputChannels(int startChannel, int numChannels);
+    int getOutputStartChannel() const { return outputStartChannel; }
+    int getOutputChannelCount() const { return outputChannelCount; }
+
+    // Media Playback Offset (milliseconds, positive = delay)
+    void setPlaybackOffset(double offsetMs) { playbackOffsetMs.store(offsetMs); }
+    double getPlaybackOffset() const { return playbackOffsetMs.load(); }
+
+    // Track Channel Count (internal processing channels, informational for now)
+    void setTrackChannelCount(int numChannels) { trackChannelCount = juce::jlimit(1, 8, numChannels); }
+    int getTrackChannelCount() const { return trackChannelCount; }
+
+    // Per-track MIDI Output
+    void setMIDIOutputDevice(const juce::String& deviceName);
+    juce::String getMIDIOutputDeviceName() const { return midiOutputDeviceName; }
+    void sendMIDIToOutput(const juce::MidiBuffer& buffer);
+
     // Automation (Phase 1.1)
     // Each track has automation for volume and pan. Plugin param automation
     // uses the paramId "plugin-{index}-param-{paramIndex}" key in AudioEngine's
@@ -179,6 +216,16 @@ public:
         blockStartSample = samplePosition;
         blockSampleRate = sRate;
     }
+
+    // ARA Plugin Hosting (Phase 9)
+    // Initialize ARA hosting for an FX plugin at the given index
+    bool initializeARA(int fxIndex, double sampleRate, int blockSize);
+    // Check if this track has an active ARA session
+    bool hasActiveARA() const { return araController != nullptr && araController->isActive(); }
+    // Get the ARA controller (for adding sources, etc.)
+    ARAHostController* getARAController() { return araController.get(); }
+    // Shutdown ARA (when plugin is removed or track deleted)
+    void shutdownARA();
 
 private:
     // Current peak level (was named currentRMS but now holds peak — kept as-is
@@ -218,6 +265,7 @@ private:
         float pan = 0.0f;
         bool enabled = true;
         bool preFader = false;
+        bool phaseInvert = false;
     };
     std::vector<SendConfig> sends;
     
@@ -276,6 +324,36 @@ private:
     // Channel Strip EQ
     S13EQ channelStripEQ;
     bool channelStripEQEnabled { false };
+
+    // Phase Invert
+    std::atomic<bool> phaseInverted { false };
+
+    // Stereo Width (0-200%, 100% = normal stereo)
+    std::atomic<float> stereoWidth { 100.0f };
+
+    // Master Send Enable
+    std::atomic<bool> masterSendEnabled { true };
+
+    // Output Channel Routing
+    int outputStartChannel { 0 };
+    int outputChannelCount { 2 };
+
+    // Media Playback Offset (ms)
+    std::atomic<double> playbackOffsetMs { 0.0 };
+
+    // Track Channel Count (informational)
+    int trackChannelCount { 2 };
+
+    // Pre-fader buffer (captured during processBlock for pre-fader sends)
+    juce::AudioBuffer<float> preFaderBuffer;
+
+    // Per-track MIDI Output
+    juce::String midiOutputDeviceName;
+    std::unique_ptr<juce::MidiOutput> midiOutputDevice;
+
+    // ARA Plugin Hosting (Phase 9)
+    std::unique_ptr<ARAHostController> araController;
+    int araFXIndex = -1;  // Which FX slot has ARA active (-1 = none)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackProcessor)
 };

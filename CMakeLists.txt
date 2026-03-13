@@ -51,6 +51,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(clap)
 
+
 # Build Lua as a static library (it ships as raw C sources)
 file(GLOB LUA_CORE_SOURCES "${lua_SOURCE_DIR}/src/*.c")
 # Remove lua.c and luac.c (standalone interpreter/compiler, not needed)
@@ -63,6 +64,34 @@ if(MSVC)
     target_compile_options(lua_static PRIVATE /W0)
 else()
     target_compile_options(lua_static PRIVATE -w)
+endif()
+
+# ==============================================================================
+# ONNX Runtime — pre-built binary for neural network inference (optional)
+# Download CPU-only: https://github.com/microsoft/onnxruntime/releases
+# Extract to thirdparty/onnxruntime/ with include/ and lib/ subdirectories
+# ==============================================================================
+set(ONNXRUNTIME_ROOT "${CMAKE_SOURCE_DIR}/thirdparty/onnxruntime")
+if(EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h")
+    set(HAS_ONNXRUNTIME ON)
+    message(STATUS "ONNX Runtime found at ${ONNXRUNTIME_ROOT}")
+else()
+    set(HAS_ONNXRUNTIME OFF)
+    message(STATUS "ONNX Runtime not found — polyphonic pitch detection disabled")
+endif()
+
+# ==============================================================================
+# ARA SDK — Optional ARA 2 plugin hosting (for Melodyne, SpectraLayers, etc.)
+# Clone from: git clone --recursive --branch releases/2.2.0 https://github.com/Celemony/ARA_SDK
+# Place at: thirdparty/ARA_SDK/
+# ==============================================================================
+set(ARA_SDK_ROOT "${CMAKE_SOURCE_DIR}/thirdparty/ARA_SDK")
+if(EXISTS "${ARA_SDK_ROOT}/ARA_API/ARAInterface.h")
+    set(HAS_ARA ON)
+    message(STATUS "ARA SDK found at ${ARA_SDK_ROOT}")
+else()
+    set(HAS_ARA OFF)
+    message(STATUS "ARA SDK not found — ARA plugin hosting disabled")
 endif()
 
 # Define the JUCE application
@@ -90,6 +119,8 @@ target_sources(Studio13_v2 PRIVATE
     Source/Metronome.cpp
     Source/AudioAnalyzer.cpp
     Source/S13FXProcessor.cpp
+    Source/S13FXGfxEditor.cpp
+    Source/S13ScriptWindow.cpp
     Source/ScriptEngine.cpp
     Source/AutomationList.cpp
     Source/MIDIRecorder.cpp
@@ -101,8 +132,20 @@ target_sources(Studio13_v2 PRIVATE
     Source/VBAPPanner.cpp
     Source/BuiltInEffects.cpp
     Source/BuiltInEffects2.cpp
+    Source/S13PluginEditors.cpp
+    Source/PitchDetector.cpp
+    Source/PitchMapper.cpp
+    Source/S13PitchCorrector.cpp
+    Source/PitchAnalyzer.cpp
+    Source/PitchResynthesizer.cpp
+    Source/SignalsmithShifter.cpp
     Source/TriggerEngine.cpp
     Source/SessionInterchange.cpp
+    Source/PolyPitchDetector.cpp
+    Source/StemSeparator.cpp
+    Source/ARAHostController.cpp
+    Source/PartialTracker.cpp
+    Source/SinusoidalModel.cpp
 )
 
 # Include directories — common to all platforms
@@ -112,7 +155,23 @@ target_include_directories(Studio13_v2 PRIVATE
     "${ysfx_SOURCE_DIR}/include"
     # CLAP SDK headers
     "${clap_SOURCE_DIR}/include"
+    # Signalsmith Stretch — header-only pitch shifting (MIT)
+    "${CMAKE_SOURCE_DIR}/thirdparty/signalsmith"
 )
+
+# ONNX Runtime include (optional)
+if(HAS_ONNXRUNTIME)
+    target_include_directories(Studio13_v2 PRIVATE "${ONNXRUNTIME_ROOT}/include")
+endif()
+
+# ARA SDK include (optional)
+if(HAS_ARA)
+    target_include_directories(Studio13_v2 PRIVATE
+        "${ARA_SDK_ROOT}"
+        "${ARA_SDK_ROOT}/ARA_Library"
+    )
+    target_compile_definitions(Studio13_v2 PRIVATE JUCE_PLUGINHOST_ARA=1)
+endif()
 
 # Platform-specific include directories
 if(WIN32)
@@ -143,6 +202,13 @@ target_link_libraries(Studio13_v2 PRIVATE
     lua_static
 )
 
+# ONNX Runtime link (optional)
+if(HAS_ONNXRUNTIME)
+    target_link_directories(Studio13_v2 PRIVATE "${ONNXRUNTIME_ROOT}/lib")
+    target_link_libraries(Studio13_v2 PRIVATE onnxruntime)
+    target_compile_definitions(Studio13_v2 PRIVATE S13_HAS_ONNXRUNTIME=1)
+endif()
+
 # ==============================================================================
 # Platform-specific compile definitions
 # ==============================================================================
@@ -153,6 +219,8 @@ target_compile_definitions(Studio13_v2 PRIVATE
     JUCE_PLUGINHOST_VST3=1
     JUCE_PLUGINHOST_LV2=1
     JUCE_PLUGINHOST_VST=0
+    # Required for JSFX gfx_showmenu() synchronous popup menus
+    JUCE_MODAL_LOOPS_PERMITTED=1
 )
 
 if(WIN32)
@@ -309,6 +377,38 @@ if(EXISTS "${SCRIPTS_DIR}")
             "${SCRIPTS_DIR}"
             "$<TARGET_FILE_DIR:Studio13_v2>/scripts"
         COMMENT "Copying stock Lua scripts to output directory"
+    )
+endif()
+
+# Copy ONNX Runtime DLL + models to output directory
+if(HAS_ONNXRUNTIME AND WIN32)
+    add_custom_command(TARGET Studio13_v2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll"
+            "$<TARGET_FILE_DIR:Studio13_v2>/onnxruntime.dll"
+        COMMENT "Copying ONNX Runtime DLL to output directory"
+    )
+endif()
+
+# Copy ML models (Basic-Pitch ONNX) to output directory
+set(MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources/models")
+if(EXISTS "${MODELS_DIR}")
+    add_custom_command(TARGET Studio13_v2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${MODELS_DIR}"
+            "$<TARGET_FILE_DIR:Studio13_v2>/models"
+        COMMENT "Copying ML models to output directory"
+    )
+endif()
+
+# Copy stem separator Python script to output directory
+set(STEM_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stem_separator.py")
+if(EXISTS "${STEM_SCRIPT}")
+    add_custom_command(TARGET Studio13_v2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${STEM_SCRIPT}"
+            "$<TARGET_FILE_DIR:Studio13_v2>/scripts/stem_separator.py"
+        COMMENT "Copying stem separator script to output directory"
     )
 endif()
 
