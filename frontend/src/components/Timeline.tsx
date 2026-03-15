@@ -1241,6 +1241,70 @@ export function Timeline({ tracks, masterAutomation }: TimelineProps) {
   // Note: Removed auto-scroll when stopped - users should be able to freely scroll
   // the timeline when not playing. Auto-scroll only happens during playback.
 
+  // Pre-fetch waveform tiles ahead of the playhead during playback.
+  // This prevents visual gaps when auto-scroll reveals a new tile that hasn't been fetched yet.
+  // Runs on a 1s interval, fetching tiles for clips near the playhead + 2 viewport widths ahead.
+  const prefetchIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (!isPlaying) {
+      if (prefetchIntervalRef.current) {
+        clearInterval(prefetchIntervalRef.current);
+        prefetchIntervalRef.current = null;
+      }
+      return;
+    }
+
+    const prefetch = () => {
+      const daw = useDAWStore.getState();
+      const pps = daw.pixelsPerSecond;
+      const curTime = daw.transport.currentTime;
+      const viewWidth = dimensions.width;
+      // Look ahead 2 viewport widths
+      const lookAheadSec = (viewWidth * 2) / pps;
+      const aheadTime = curTime + lookAheadSec;
+
+      for (const track of daw.tracks) {
+        for (const clip of track.clips) {
+          // Skip clips not in the look-ahead range
+          if (clip.startTime > aheadTime || clip.startTime + clip.duration < curTime) continue;
+          if (!clip.filePath) continue;
+
+          const fileSR = clip.sampleRate || 44100;
+          const renderSpp = Math.max(1, Math.round(fileSR / pps));
+          const cacheSpp = quantizeSpp(renderSpp);
+          const tileSamples = 4096 * cacheSpp; // TILE_PEAKS = 4096
+
+          // Compute which tiles cover the look-ahead range within this clip
+          const clipOffset = clip.offset || 0;
+          const rangeStartInClip = Math.max(0, curTime - clip.startTime);
+          const rangeEndInClip = Math.min(clip.duration, aheadTime - clip.startTime);
+          const startSampleInFile = Math.floor((clipOffset + rangeStartInClip) * fileSR);
+          const endSampleInFile = Math.floor((clipOffset + rangeEndInClip) * fileSR);
+
+          for (let tileSample = Math.floor(startSampleInFile / tileSamples) * tileSamples;
+               tileSample < endSampleInFile;
+               tileSample += tileSamples) {
+            const cacheKey = `${clip.filePath}-${cacheSpp}-${tileSample}`;
+            if (!waveformCache.has(cacheKey) && !inFlightRef.current.has(cacheKey)) {
+              const numPeaks = Math.min(8000, Math.ceil((endSampleInFile - tileSample) / cacheSpp) + 4096);
+              fetchWaveformDataRef.current(clip.filePath, cacheSpp, tileSample, numPeaks);
+            }
+          }
+        }
+      }
+    };
+
+    // Run immediately, then every 1s
+    prefetch();
+    prefetchIntervalRef.current = setInterval(prefetch, 1000);
+
+    return () => {
+      if (prefetchIntervalRef.current) {
+        clearInterval(prefetchIntervalRef.current);
+        prefetchIntervalRef.current = null;
+      }
+    };
+  }, [isPlaying, dimensions.width, waveformCache]);
 
   // Track the last bar we fetched recording peaks for
   const lastFetchedBarRef = useRef<number>(-1);
@@ -1555,6 +1619,9 @@ export function Timeline({ tracks, masterAutomation }: TimelineProps) {
     }
     inFlightRef.current.delete(cacheKey);
   };
+  // Keep a ref so the pre-fetch interval always calls the latest version
+  const fetchWaveformDataRef = useRef(fetchWaveformData);
+  fetchWaveformDataRef.current = fetchWaveformData;
 
   // Render individual clip with waveform
   const renderClip = (

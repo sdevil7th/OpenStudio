@@ -50,7 +50,19 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
     // At 44100 Hz: blockSamples ≈ 5292, intervalSamples ≈ 1323 (~30ms per block)
     // -------------------------------------------------------------------------
     signalsmith::stretch::SignalsmithStretch<float> stretcher;
-    stretcher.presetDefault (numChannels, static_cast<float> (sampleRate));
+
+    // Offline quality preset: 120ms analysis window (same as presetDefault), 10ms hop.
+    // presetDefault uses 30ms intervals — at large shifts this means the 40ms pre-roll
+    // transition is only 1-2 staircase steps, which sounds coarse.
+    // Finer interval (10ms) gives 4-6 steps per transition → much smoother blending.
+    // Keeping the 120ms block (not 200ms) avoids inter-note smearing: a 200ms window
+    // straddles both notes when two differently-corrected notes are close together,
+    // which garbles the output for multiple nearby note edits.
+    {
+        int blockSamples    = static_cast<int> (sampleRate * 0.12); // 120 ms (same as presetDefault)
+        int intervalSamples = static_cast<int> (sampleRate * 0.01); // 10 ms hop (3× finer)
+        stretcher.configure (numChannels, blockSamples, intervalSamples);
+    }
 
     const int blockSize    = stretcher.intervalSamples(); // process this many samples per block
     const int outputLatency = stretcher.outputLatency();

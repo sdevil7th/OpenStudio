@@ -613,3 +613,37 @@ export function renderPitchEditor(
 
   ctx.restore();
 }
+
+/**
+ * Lightweight playhead-only render for the RAF loop during playback.
+ * Blits a pre-rendered static canvas (grid, notes, contour) and draws
+ * only the playhead line on top — avoids redrawing the entire canvas at 60fps.
+ */
+export function renderPlayheadOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  staticCanvas: HTMLCanvasElement | OffscreenCanvas,
+  currentTime: number,
+  viewport: PitchEditorViewport,
+) {
+  const dpr = globalThis.window?.devicePixelRatio || 1;
+  ctx.clearRect(0, 0, width * dpr, height * dpr);
+  ctx.drawImage(staticCanvas as any, 0, 0);
+
+  // Draw playhead
+  if (currentTime >= 0) {
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    const px = projectTimeToX(currentTime, viewport);
+    if (px >= PIANO_WIDTH && px <= width) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, height);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}

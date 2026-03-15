@@ -87,16 +87,17 @@ export function S13PitchEditor({ onClose }: S13PitchEditorProps) {
     return () => ro.disconnect();
   }, []);
 
-  // Auto-analyze on mount (first 30s)
-  useEffect(() => {
-    if (trackId && clipId && !contour && !isAnalyzing) {
-      analyze(); // No args = analyze first 30s
-    }
-  }, [trackId, clipId, contour, isAnalyzing, analyze]);
-
   // Re-analyze when user scrolls into unanalyzed territory (debounced)
   const analyzeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const analyzedRangesRef = useRef<Array<[number, number]>>([]);
+
+  // Auto-analyze on mount (first 30s)
+  useEffect(() => {
+    if (trackId && clipId && !contour && !isAnalyzing) {
+      analyzedRangesRef.current = [[0, 30]];
+      analyze(); // No args = analyze first 30s
+    }
+  }, [trackId, clipId, contour, isAnalyzing, analyze]);
 
   useEffect(() => {
     if (!trackId || !clipId || isAnalyzing || !contour) return;

@@ -57,6 +57,17 @@ interface PitchEditorState {
   fxIndex: number;
   clipStartTime: number;  // clip's start time in project (seconds) — set once in open()
   clipDuration: number;   // clip's duration (seconds) — set once in open()
+  /** Path to the original (pre-correction) audio file, captured once when the editor opens.
+   *  Analysis MUST always use this path so that pitch frames match the original audio that
+   *  applyPitchCorrection() processes.  After applyPitchCorrection(), clip.filePath in the
+   *  DAW store is updated to the corrected _pcN.wav file — but using that for analysis would
+   *  give corrected-audio pitch values as detectedPitch, causing wrong ratios on subsequent
+   *  edits (E4 frames applied to C4 audio = garbage output). */
+  originalClipFilePath: string | null;
+  /** The clip's file offset (seconds) at editor-open time. After correction clip.offset is
+   *  reset to 0 (corrected file always starts at 0), but the original file still needs the
+   *  original offset to seek to the right position for analysis. */
+  originalClipOffset: number;
   contour: PitchContourData | null;
   notes: PitchNoteData[];
   isAnalyzing: boolean;
@@ -311,6 +322,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   fxIndex: 0,
   clipStartTime: 0,
   clipDuration: 0,
+  originalClipFilePath: null,
+  originalClipOffset: 0,
   contour: null,
   notes: [],
   isAnalyzing: false,
@@ -355,6 +368,11 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       fxIndex,
       clipStartTime: resolvedStart,
       clipDuration: resolvedDuration,
+      // Capture the original file path and offset NOW, before any corrections update
+      // clip.filePath / clip.offset.  All analysis calls must use these so pitch frames
+      // stay in sync with the original audio that applyPitchCorrection() always processes.
+      originalClipFilePath: clip?.filePath ?? null,
+      originalClipOffset: clip?.offset ?? 0,
       contour: null,
       notes: [],
       selectedNoteIds: [],
@@ -399,17 +417,25 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   // Analyzes a chunk (max ~30s) around the given time range.
   // Merges results with existing notes to build up the full picture as user scrolls.
   analyze: async (viewStartTime?: number, viewEndTime?: number) => {
-    const { trackId, clipId, isAnalyzing } = get();
+    const { trackId, clipId, isAnalyzing, originalClipFilePath, originalClipOffset } = get();
     if (!trackId || !clipId || isAnalyzing) return;
 
     const dawState = useDAWStore.getState();
     const track = dawState.tracks.find((t) => t.id === trackId);
     const clip = track?.clips.find((c) => c.id === clipId);
-    if (!clip?.filePath) return;
+    if (!clip) return;
+
+    // Always analyze from the original (pre-correction) file path and offset.
+    // clip.filePath is updated to _pcN.wav after each correction; using that would
+    // produce frames that reflect corrected pitch, breaking subsequent edit ratios.
+    const analysisFilePath = originalClipFilePath ?? clip.filePath;
+    if (!analysisFilePath) return;
 
     // Determine analysis window: max 30s chunk centered on viewport
     const MAX_CHUNK = 30; // seconds
-    const clipOffset = clip.offset || 0;
+    // Use original offset — after correction clip.offset is reset to 0 (corrected file
+    // starts at 0), but the original file needs its original seek position.
+    const clipOffset = originalClipOffset;
     const clipDuration = clip.duration;
 
     let analyzeStart: number;
@@ -489,11 +515,63 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
             console.log("[PitchEditor] Applied: " + offsetNotes.length + " new notes, " + mergedNotes.length + " total");
 
+            // Merge contour frames with existing (accumulate across analysis windows).
+            // Each analysis returns frames for its window only — merge by time so
+            // scrolling back to a previously analyzed region still shows the pitch line.
+            const existingContour = get().contour;
+            let mergedContour: PitchContourData;
+            if (existingContour && existingContour.frames.times.length > 0 && fullResult.frames) {
+              const rangeStart = analyzeStart;
+              const rangeEnd = analyzeStart + analyzeDuration;
+              // Keep existing frames outside the new range, replace within
+              const keep: number[] = [];
+              for (let i = 0; i < existingContour.frames.times.length; i++) {
+                const t = existingContour.frames.times[i];
+                if (t < rangeStart - 0.01 || t > rangeEnd + 0.01) keep.push(i);
+              }
+              // Build merged arrays
+              const mTimes: number[] = [];
+              const mMidi: number[] = [];
+              const mConf: number[] = [];
+              const mRms: number[] = [];
+              const mVoiced: boolean[] = [];
+              for (const i of keep) {
+                mTimes.push(existingContour.frames.times[i]);
+                mMidi.push(existingContour.frames.midi[i]);
+                mConf.push(existingContour.frames.confidence[i]);
+                mRms.push(existingContour.frames.rms[i]);
+                mVoiced.push(existingContour.frames.voiced[i]);
+              }
+              // Append new frames
+              for (let i = 0; i < fullResult.frames.times.length; i++) {
+                mTimes.push(fullResult.frames.times[i]);
+                mMidi.push(fullResult.frames.midi[i]);
+                mConf.push(fullResult.frames.confidence[i]);
+                mRms.push(fullResult.frames.rms[i]);
+                mVoiced.push(fullResult.frames.voiced[i]);
+              }
+              // Sort by time
+              const indices = mTimes.map((_, i) => i);
+              indices.sort((a, b) => mTimes[a] - mTimes[b]);
+              mergedContour = {
+                ...fullResult,
+                frames: {
+                  times: indices.map(i => mTimes[i]),
+                  midi: indices.map(i => mMidi[i]),
+                  confidence: indices.map(i => mConf[i]),
+                  rms: indices.map(i => mRms[i]),
+                  voiced: indices.map(i => mVoiced[i]),
+                },
+              };
+            } else {
+              mergedContour = fullResult;
+            }
+
             set({
               isAnalyzing: false,
               progressPercent: 100,
               progressLabel: "",
-              contour: fullResult,
+              contour: mergedContour,
               notes: mergedNotes,
               selectedNoteIds: [],
               undoStack: [],
@@ -530,7 +608,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       // Analyze only the requested window (offset into source file + window start)
       const fileOffset = clipOffset + analyzeStart;
       const response = await nativeBridge.analyzePitchContourDirect(
-        clip.filePath, fileOffset, analyzeDuration, clipId
+        analysisFilePath, fileOffset, analyzeDuration, clipId
       );
       const started = !!(response as any)?.started;
       if (!started) {

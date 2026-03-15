@@ -5649,14 +5649,20 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
         }
     }
 
-    // If no notes were actually edited, skip WORLD processing entirely.
+    // If no notes were actually edited, restore the original audio file
+    // (in case a previous correction was applied and the user moved notes back).
     if (!anyEdited)
     {
-        juce::Logger::writeToLog("applyPitchCorrection: no notes actually edited, skipping WORLD");
+        juce::Logger::writeToLog("applyPitchCorrection: no notes actually edited, restoring original");
+        if (foundClip->originalAudioFile.existsAsFile()
+            && foundClip->audioFile != foundClip->originalAudioFile)
+        {
+            playbackEngine.replaceClipAudioFile(clipId, foundClip->originalAudioFile);
+        }
         juce::DynamicObject::Ptr resultObj = new juce::DynamicObject();
-        resultObj->setProperty("outputFile", "");
+        resultObj->setProperty("outputFile", foundClip->originalAudioFile.getFullPathName());
         resultObj->setProperty("success", true);
-        resultObj->setProperty("skipped", true);
+        resultObj->setProperty("restored", true);
         return juce::var(resultObj.get());
     }
 

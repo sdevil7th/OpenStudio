@@ -7,6 +7,7 @@ import { NoteInspector } from "./NoteInspector";
 import { CorrectPitchModal } from "./CorrectPitchModal";
 import {
   renderPitchEditor,
+  renderPlayheadOverlay,
   hitTestNote,
   xToTime,
   yToMidi,
@@ -66,6 +67,12 @@ export function PitchEditorLowerZone() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
+  // Offscreen canvas caches the static content (grid, notes, contour) so the
+  // playback RAF loop only needs to blit + draw playhead, not redraw everything.
+  const staticCanvasRef = useRef<OffscreenCanvas | null>(null);
+  // Track the scrollX that the static cache was rendered at, so we can invalidate
+  // when auto-scroll during playback changes the viewport.
+  const staticCacheScrollXRef = useRef<number>(-1);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 300 });
 
   // DAW store
@@ -178,18 +185,20 @@ export function PitchEditorLowerZone() {
     screenX: number; screenY: number; noteId: string; splitTime: number;
   } | null>(null);
 
-  // Auto-analyze on mount
-  useEffect(() => {
-    if (pitchEditorTrackId && pitchEditorClipId && !contour && !isAnalyzing) {
-      analyze();
-    }
-  }, [pitchEditorTrackId, pitchEditorClipId, contour, isAnalyzing, analyze]);
-
   // Clear analyzed range tracking when clip changes
   const analyzedRangesRef = useRef<Array<[number, number]>>([]);
   useEffect(() => {
     analyzedRangesRef.current = [];
   }, [pitchEditorClipId]);
+
+  // Auto-analyze on mount
+  useEffect(() => {
+    if (pitchEditorTrackId && pitchEditorClipId && !contour && !isAnalyzing) {
+      // Record initial range so scroll-based re-analyze won't duplicate it
+      analyzedRangesRef.current = [[0, 30]];
+      analyze();
+    }
+  }, [pitchEditorTrackId, pitchEditorClipId, contour, isAnalyzing, analyze]);
 
   // Re-analyze when scrolling into unanalyzed territory (debounced)
   const analyzeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -270,9 +279,10 @@ export function PitchEditorLowerZone() {
     salienceSampleRate: st.polyAnalysisResult?.sampleRate ?? 22050,
   }), []);
 
-  // Static render (paused state) — skip during playback to avoid fighting the RAF loop
+  // Static render — draws grid, notes, contour to both the visible canvas AND an
+  // offscreen cache.  During playback the RAF loop blits the cache + draws playhead
+  // only, avoiding a full redraw at 60fps.
   useEffect(() => {
-    if (isPlaying) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -297,30 +307,84 @@ export function PitchEditorLowerZone() {
       salienceSampleRate: polyAnalysisResult?.sampleRate ?? 22050,
     };
     renderPitchEditor(ctx, canvasSize.width, canvasSize.height, viewport, renderState);
-  }, [isPlaying, canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, bpm, timeSignature, scaleNotes, scaleKey, polyMode, polyNotes, showPitchSalience, polyAnalysisResult]);
 
-  // Playhead RAF — owns the canvas during playback
+    // Cache to offscreen canvas for playback RAF overlay
+    const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
+    const offCtx = offscreen.getContext("2d");
+    if (offCtx) {
+      offCtx.drawImage(canvas, 0, 0);
+    }
+    staticCanvasRef.current = offscreen;
+  }, [canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, polyMode, polyNotes, showPitchSalience, polyAnalysisResult]);
+
+  // Playhead RAF — during playback, blit cached static canvas + draw playhead only.
+  // This avoids a full renderPitchEditor() (grid, notes, contour) at 60fps.
+  // The static cache is re-rendered by the effect above when state changes (scroll, zoom, edits).
   useEffect(() => {
     if (!isPlaying) return;
     const clipStart = clipInfo?.startTime ?? 0;
     const clipDur = clipInfo?.duration ?? 0;
 
-    const animate = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
+    // Render static content once at playback start so the cache is fresh
+    const canvas = canvasRef.current;
+    if (canvas) {
       const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const st = usePitchEditorStore.getState();
+        const daw = useDAWStore.getState();
+        const vp: PitchEditorViewport = {
+          scrollX: daw.scrollX / daw.pixelsPerSecond,
+          scrollY: st.scrollY,
+          pixelsPerSecond: daw.pixelsPerSecond,
+          pixelsPerSemitone: st.zoomY,
+          clipStartTime: clipStart,
+          clipDuration: clipDur,
+        };
+        renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+        // Update cache
+        const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
+        const offCtx = offscreen.getContext("2d");
+        if (offCtx) offCtx.drawImage(canvas, 0, 0);
+        staticCanvasRef.current = offscreen;
+        staticCacheScrollXRef.current = daw.scrollX;
+      }
+    }
+
+    const animate = () => {
+      const cvs = canvasRef.current;
+      if (!cvs) return;
+      const ctx = cvs.getContext("2d");
       if (!ctx) return;
-      const st = usePitchEditorStore.getState();
+
       const daw = useDAWStore.getState();
+      const st = usePitchEditorStore.getState();
+      const currentScrollX = daw.scrollX;
       const vp: PitchEditorViewport = {
-        scrollX: daw.scrollX / daw.pixelsPerSecond,
+        scrollX: currentScrollX / daw.pixelsPerSecond,
         scrollY: st.scrollY,
         pixelsPerSecond: daw.pixelsPerSecond,
         pixelsPerSemitone: st.zoomY,
         clipStartTime: clipStart,
         clipDuration: clipDur,
       };
-      renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+
+      // If viewport scrolled (auto-scroll during playback), invalidate static cache
+      if (Math.abs(currentScrollX - staticCacheScrollXRef.current) > 0.5) {
+        renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+        const offscreen = new OffscreenCanvas(cvs.width, cvs.height);
+        const offCtx = offscreen.getContext("2d");
+        if (offCtx) offCtx.drawImage(cvs, 0, 0);
+        staticCanvasRef.current = offscreen;
+        staticCacheScrollXRef.current = currentScrollX;
+      } else if (staticCanvasRef.current) {
+        // Fast path: blit cached content + playhead only
+        renderPlayheadOverlay(ctx, canvasSize.width, canvasSize.height,
+          staticCanvasRef.current, daw.transport.currentTime, vp);
+      } else {
+        // Fallback: full render
+        renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+      }
+
       rafRef.current = requestAnimationFrame(animate);
     };
 

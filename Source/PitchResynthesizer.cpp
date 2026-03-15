@@ -445,6 +445,14 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
 
     if (frames.empty() || notes.empty()) return ratios;
 
+    // Accumulators for smooth overlap blending between adjacent notes' pre/post-roll regions.
+    // Each note contributes: shiftContrib = (correctedMidi - framePitch) * blend
+    // Final: ratio = midiToHz(framePitch + shiftAccum/blendAccum) / midiToHz(framePitch)
+    std::vector<float> shiftAccum(static_cast<size_t>(numSamples), 0.0f);
+    std::vector<float> blendAccum(static_cast<size_t>(numSamples), 0.0f);
+    // Per-sample detected pitch (needed for final ratio computation)
+    // Pre-fill from smoothed contour after it's computed below.
+
     // Pre-compute a smoothed pitch contour from the analysis frames.
     // This removes YIN per-frame jitter BEFORE ratio computation (not after).
     // The smoothed contour preserves the singer's natural pitch movement
@@ -480,10 +488,11 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
         float driftCorrection = note.driftCorrectionAmount;
         float noteCenter = note.detectedPitch; // the note's average detected pitch
 
-        // Automatic transition at note boundaries (30ms default if user hasn't set explicit transitions)
-        float autoTransMs = 30.0f;
-        float effectiveTransIn = (note.transitionIn > 0.0f) ? note.transitionIn : autoTransMs;
-        float effectiveTransOut = (note.transitionOut > 0.0f) ? note.transitionOut : autoTransMs;
+        // Anticipation + release: ramp runs BEFORE note start and AFTER note end (RePitch-style).
+        // Default 40ms pre-roll: correction arrives at the note boundary fully applied.
+        // Default 60ms post-roll: correction eases back naturally after the note ends.
+        float effectiveTransIn  = (note.transitionIn  > 0.0f) ? note.transitionIn  : 40.0f;
+        float effectiveTransOut = (note.transitionOut > 0.0f) ? note.transitionOut : 60.0f;
 
         // --- Inter-note portamento ---
         // Find adjacent edited notes for smooth pitch glides at boundaries.
@@ -519,7 +528,51 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
             }
         }
 
-        for (int s = startSample; s <= endSample; ++s)
+        // Anticipation + release: loop extends BEFORE note start (pre-roll) and AFTER note end
+        // (post-roll). The ramp runs in these extended regions so the note body is always fully
+        // corrected — no sudden onset or sudden cut at the note boundaries (RePitch-style).
+        int transInSamplesInt  = static_cast<int>(effectiveTransIn  * 0.001f * static_cast<float>(sampleRate));
+        int transOutSamplesInt = static_cast<int>(effectiveTransOut * 0.001f * static_cast<float>(sampleRate));
+        int loopStart = std::max(0, startSample - transInSamplesInt);
+        int loopEnd   = std::min(numSamples - 1, endSample + transOutSamplesInt);
+
+        // Pre-compute drift/vibrato decomposition over note body (unchanged from before)
+        // IIR filters only make sense over the note's voiced region, not the pre/post roll.
+        std::vector<float> driftVec, vibratoVec;
+        bool hasDecomp = false;
+        if (driftCorrection > 0.01f || std::abs(note.vibratoDepth - 1.0f) > 0.01f)
+        {
+            int noteStartFrame = startSample / hopSize;
+            int noteEndFrame   = endSample   / hopSize;
+            noteStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteStartFrame);
+            noteEndFrame   = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteEndFrame);
+            int noteFrameCount = noteEndFrame - noteStartFrame + 1;
+
+            if (noteFrameCount >= 4)
+            {
+                std::vector<float> notePitches(static_cast<size_t>(noteFrameCount));
+                for (int fi = 0; fi < noteFrameCount; ++fi)
+                {
+                    int globalFi = noteStartFrame + fi;
+                    notePitches[static_cast<size_t>(fi)] =
+                        (globalFi < static_cast<int>(smoothedContour.size()))
+                            ? smoothedContour[static_cast<size_t>(globalFi)] : noteCenter;
+                }
+                float hopRateHz = static_cast<float>(sampleRate) / static_cast<float>(hopSize);
+                auto decomp = decomposePitch(notePitches, hopRateHz);
+                driftVec   = std::move(decomp.drift);
+                vibratoVec = std::move(decomp.vibrato);
+                hasDecomp  = true;
+            }
+        }
+        // noteBodyStartFrame/End computed below for per-sample indexing
+        int noteBodyStartFrame = startSample / hopSize;
+        noteBodyStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteBodyStartFrame);
+        int noteBodyEndFrame = endSample / hopSize;
+        noteBodyEndFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteBodyEndFrame);
+        int noteFrameCount = noteBodyEndFrame - noteBodyStartFrame + 1;
+
+        for (int s = loopStart; s <= loopEnd; ++s)
         {
             int frameIdx = s / hopSize;
             if (frameIdx < 0 || frameIdx >= static_cast<int>(frames.size())) continue;
@@ -527,19 +580,26 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
             const auto& frame = frames[static_cast<size_t>(frameIdx)];
 
             // Skip silent frames
-            if (frame.rmsDB < -60.0f) continue;
+            // Post-roll frames (after note end) bypass the silent/unvoiced guards:
+            // the smoothstep there fades *toward* ratio=1.0, so writing transitioning
+            // ratios to consonants/silence is harmless and prevents a hard jump back
+            // to uncorrected pitch the moment the voiced region ends.
+            bool inPostRoll = (s > endSample);
+
+            if (!inPostRoll && frame.rmsDB < -60.0f) continue;
 
             // --- Voiced/unvoiced classification ---
-            // Unvoiced content (consonants, sibilants, breaths) passes through unmodified.
-            bool isUnvoiced = !frame.voiced || frame.midiNote <= 0.0f;
-
-            // Exception: short unvoiced gap within a voiced note = brief consonant ("t","d","k")
-            // Bridge these to maintain a continuous correction curve
-            if (isUnvoiced && isShortUnvoicedGap(frameIdx, frames, 6))
-                isUnvoiced = false;
-
-            if (isUnvoiced)
-                continue; // ratio stays 1.0 — complete passthrough
+            // Unvoiced content (consonants, sibilants, breaths) passes through unmodified
+            // within the note body and pre-roll only.
+            if (!inPostRoll)
+            {
+                bool isUnvoiced = !frame.voiced || frame.midiNote <= 0.0f;
+                // Exception: short unvoiced gap within a voiced note = brief consonant ("t","d","k")
+                if (isUnvoiced && isShortUnvoicedGap(frameIdx, frames, 6))
+                    isUnvoiced = false;
+                if (isUnvoiced)
+                    continue; // ratio stays 1.0 — complete passthrough
+            }
 
             // --- CONTOUR-PRESERVING PITCH CORRECTION ---
             float framePitch = (frameIdx < static_cast<int>(smoothedContour.size()))
@@ -551,105 +611,105 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
 
             float correctedMidi = framePitch + shiftAmount;
 
-            // Three-component pitch correction using IIR-decomposed contour:
-            //   drift:   slow wandering <2Hz (intonation error)
-            //   vibrato: periodic 3-8Hz oscillation (musical expression)
+            // Apply drift/vibrato correction (only within note body, not pre/post roll)
+            if (hasDecomp && s >= startSample && s <= endSample && noteFrameCount >= 4)
+            {
+                int localFrame = juce::jlimit(0, noteFrameCount - 1, frameIdx - noteBodyStartFrame);
+                float driftVal   = driftVec[static_cast<size_t>(localFrame)];
+                float vibratoVal = vibratoVec[static_cast<size_t>(localFrame)];
+                correctedMidi -= driftVal * driftCorrection;
+                correctedMidi += vibratoVal * (note.vibratoDepth - 1.0f);
+            }
+            else if (!hasDecomp && (driftCorrection > 0.01f || std::abs(note.vibratoDepth - 1.0f) > 0.01f)
+                     && s >= startSample && s <= endSample)
+            {
+                // Fallback for very short notes: simple deviation-based correction
+                float deviation = framePitch - noteCenter;
+                correctedMidi -= deviation * driftCorrection;
+                correctedMidi += deviation * (note.vibratoDepth - 1.0f);
+            }
+
+            // --- Anticipation + release blend ---
+            // distFromStart < 0 → pre-roll (before note start)
+            // distFromStart >= 0 and distFromEnd <= 0 → note body (full correction)
+            // distFromEnd > 0 → post-roll (after note end)
+            float distFromStart   = static_cast<float>(s - startSample);
+            float distFromEnd     = static_cast<float>(s - endSample);
+            float transitionBlend = 1.0f; // used by write guard below
+
+            if (distFromStart < 0.0f)
+            {
+                // --- Pre-roll ---
+                // Blend from 0 → 1 as we approach note start.
+                // Source anchor: previous note's corrected pitch (or original if none).
+                // Target: this note's full correction.
+                float t = 1.0f + distFromStart / static_cast<float>(transInSamplesInt);
+                t = juce::jlimit(0.0f, 1.0f, t);
+                transitionBlend = t * t * (3.0f - 2.0f * t); // smoothstep 0→1
+
+                float sourceAnchor = hasPrevNote ? (framePitch + prevNoteShift) : framePitch;
+                correctedMidi = sourceAnchor + (correctedMidi - sourceAnchor) * transitionBlend;
+            }
+            else if (distFromEnd > 0.0f)
+            {
+                // --- Post-roll ---
+                // Blend from 1 → 0 as we move away from note end.
+                //
+                // KEY: anchor the release at noteCenter+shiftAmount (the note's stable
+                // corrected pitch), NOT at framePitch+shiftAmount.  If the original audio
+                // pitch falls steeply after the note (common before a breath or rest), using
+                // framePitch would cause a "double drop": falling detected pitch AND fading
+                // correction — producing an unnatural sharp exit (visible in image 3 graphs).
+                // Using noteCenter as the anchor ensures the pitch releases from a steady
+                // value and blends smoothly toward wherever the original audio goes.
+                float t = 1.0f - distFromEnd / static_cast<float>(transOutSamplesInt);
+                t = juce::jlimit(0.0f, 1.0f, t);
+                transitionBlend = t * t * (3.0f - 2.0f * t); // smoothstep 1→0
+
+                float noteEndCorrected = noteCenter + shiftAmount; // stable anchor
+                float postTarget       = hasNextNote ? (framePitch + nextNoteShift) : framePitch;
+                correctedMidi = postTarget + (noteEndCorrected - postTarget) * transitionBlend;
+            }
+
+            // Accumulate weighted shift (in semitones) so overlapping pre/post-roll regions
+            // from adjacent notes blend smoothly instead of hard-switching at blend=0.5.
             //
-            // driftCorrection (0-1): 0 = keep original drift, 1 = straighten completely
-            // vibratoDepth (0-2):    0 = remove vibrato, 1 = keep original, 2 = double vibrato
-            if (driftCorrection > 0.01f || std::abs(note.vibratoDepth - 1.0f) > 0.01f)
-            {
-                // Collect pitch values for this note's frame range
-                int noteStartFrame = startSample / hopSize;
-                int noteEndFrame = endSample / hopSize;
-                noteStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteStartFrame);
-                noteEndFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteEndFrame);
-                int noteFrameCount = noteEndFrame - noteStartFrame + 1;
-
-                if (noteFrameCount >= 4)
-                {
-                    std::vector<float> notePitches(static_cast<size_t>(noteFrameCount));
-                    for (int fi = 0; fi < noteFrameCount; ++fi)
-                    {
-                        int globalFi = noteStartFrame + fi;
-                        notePitches[static_cast<size_t>(fi)] =
-                            (globalFi < static_cast<int>(smoothedContour.size()))
-                                ? smoothedContour[static_cast<size_t>(globalFi)] : noteCenter;
-                    }
-
-                    float hopRateHz = static_cast<float>(sampleRate) / static_cast<float>(hopSize);
-                    auto decomp = decomposePitch(notePitches, hopRateHz);
-
-                    int localFrame = frameIdx - noteStartFrame;
-                    localFrame = juce::jlimit(0, noteFrameCount - 1, localFrame);
-
-                    float driftVal = decomp.drift[static_cast<size_t>(localFrame)];
-                    float vibratoVal = decomp.vibrato[static_cast<size_t>(localFrame)];
-
-                    // Remove drift proportionally (straighten intonation)
-                    correctedMidi -= driftVal * driftCorrection;
-
-                    // Scale vibrato (0 = remove, 1 = keep, 2 = double)
-                    float vibratoAdjust = vibratoVal * (note.vibratoDepth - 1.0f);
-                    correctedMidi += vibratoAdjust;
-                }
-                else
-                {
-                    // Fallback for very short notes: simple deviation-based correction
-                    float deviation = framePitch - noteCenter;
-                    correctedMidi -= deviation * driftCorrection;
-                    float vibratoScale = note.vibratoDepth - 1.0f;
-                    correctedMidi += deviation * vibratoScale;
-                }
-            }
-
-            // --- Transition smoothing with inter-note portamento ---
-            float transitionBlend = 1.0f;
-
-            float transInSamples = effectiveTransIn * 0.001f * static_cast<float>(sampleRate);
-            float transOutSamples = effectiveTransOut * 0.001f * static_cast<float>(sampleRate);
-
-            float distFromStart = static_cast<float>(s - startSample);
-            float distFromEnd = static_cast<float>(endSample - s);
-
-            if (distFromStart < transInSamples)
-            {
-                float t = distFromStart / transInSamples;
-                transitionBlend = t * t * (3.0f - 2.0f * t); // smoothstep
-            }
-
-            if (distFromEnd < transOutSamples)
-            {
-                float t = distFromEnd / transOutSamples;
-                float outBlend = t * t * (3.0f - 2.0f * t);
-                transitionBlend = std::min(transitionBlend, outBlend);
-            }
-
-            // Portamento: blend toward adjacent note's pitch instead of original pitch.
-            // At the start boundary: blend between previous note's correction and this note's.
-            // At the end boundary: blend between this note's correction and next note's.
-            if (transitionBlend < 1.0f)
-            {
-                float targetShiftAtEdge = 0.0f; // default: blend toward no shift (original pitch)
-
-                if (distFromStart < transInSamples && hasPrevNote)
-                    targetShiftAtEdge = prevNoteShift;
-                else if (distFromEnd < transOutSamples && hasNextNote)
-                    targetShiftAtEdge = nextNoteShift;
-
-                float edgeCorrectedMidi = framePitch + targetShiftAtEdge;
-                correctedMidi = edgeCorrectedMidi + (correctedMidi - edgeCorrectedMidi) * transitionBlend;
-            }
-
-            // Compute ratio: corrected / original (both follow the contour)
-            float detectedHz = midiToHz(framePitch);
-            float correctedHz = midiToHz(correctedMidi);
-            if (detectedHz > 0.0f)
-            {
-                float ratio = correctedHz / detectedHz;
-                ratios[static_cast<size_t>(s)] = juce::jlimit(0.25f, 4.0f, ratio);
-            }
+            // Each note contributes: shiftContrib = (correctedMidi - framePitch) * blend
+            // Final: correctedMidi_final = framePitch + shiftAccum[s] / blendAccum[s]
+            // This handles the overlap zone naturally — no hard crossing artifact.
+            float shiftContrib = (correctedMidi - framePitch) * transitionBlend;
+            size_t idx = static_cast<size_t>(s);
+            shiftAccum[idx] += shiftContrib;
+            blendAccum[idx] += transitionBlend;
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Final pass: convert accumulated weighted shifts → per-sample ratios.
+    // Samples touched by no note keep ratios[s] = 1.0 (passthrough).
+    // -------------------------------------------------------------------------
+    for (int s = 0; s < numSamples; ++s)
+    {
+        float totalBlend = blendAccum[static_cast<size_t>(s)];
+        if (totalBlend <= 0.0f)
+            continue; // no correction applied here
+
+        int frameIdx = s / hopSize;
+        if (frameIdx < 0 || frameIdx >= static_cast<int>(frames.size()))
+            continue;
+
+        float framePitch = (frameIdx < static_cast<int>(smoothedContour.size()))
+            ? smoothedContour[static_cast<size_t>(frameIdx)]
+            : 0.0f;
+        if (framePitch <= 0.0f)
+            continue;
+
+        float avgShift      = shiftAccum[static_cast<size_t>(s)] / totalBlend;
+        float correctedMidi = framePitch + avgShift;
+        float detectedHz    = midiToHz(framePitch);
+        float correctedHz   = midiToHz(correctedMidi);
+        if (detectedHz > 0.0f)
+            ratios[static_cast<size_t>(s)] = juce::jlimit(0.25f, 4.0f, correctedHz / detectedHz);
     }
 
     return ratios;

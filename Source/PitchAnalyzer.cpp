@@ -7,14 +7,15 @@ PitchAnalyzer::PitchAnalyzer() = default;
 
 static float hzToMidi(float hz)
 {
-    if (hz <= 0.0f) return 0.0f;
+    if (hz <= 0.0f)
+        return 0.0f;
     return 69.0f + 12.0f * std::log2(hz / 440.0f);
 }
 
 // midiToHz used by PitchResynthesizer, not needed here
 
-float PitchAnalyzer::analyzeFrame(const float* frame, int frameSize, double sr,
-                                   float& outConfidence)
+float PitchAnalyzer::analyzeFrame(const float *frame, int frameSize, double sr,
+                                  float &outConfidence)
 {
     const int halfSize = frameSize / 2;
     const int tauMin = static_cast<int>(sr / maxFreq);
@@ -42,8 +43,8 @@ float PitchAnalyzer::analyzeFrame(const float* frame, int frameSize, double sr,
         }
         runningSum += sum;
         yinBuffer[static_cast<size_t>(tau)] = (runningSum > 0.0f)
-            ? sum * static_cast<float>(tau) / runningSum
-            : 0.0f;
+                                                  ? sum * static_cast<float>(tau) / runningSum
+                                                  : 0.0f;
     }
 
     // Step 3: Find first dip below threshold
@@ -101,7 +102,7 @@ float PitchAnalyzer::analyzeFrame(const float* frame, int frameSize, double sr,
 }
 
 PitchAnalyzer::AnalysisResult PitchAnalyzer::analyzeClip(
-    const float* audioData, int numSamples, double sampleRate, const juce::String& clipId)
+    const float *audioData, int numSamples, double sampleRate, const juce::String &clipId)
 {
     AnalysisResult result;
     result.clipId = clipId;
@@ -113,20 +114,21 @@ PitchAnalyzer::AnalysisResult PitchAnalyzer::analyzeClip(
     // Medium clips (30-120s): hop=512 (~11.6ms)
     // Long clips (>120s): hop=1024 (~23ms) — still good enough for graphical editing
     const double durationSec = static_cast<double>(numSamples) / sampleRate;
-    const int hopSize = (durationSec > 120.0) ? 1024
-                      : (durationSec > 30.0)  ? 512
-                      :                          256;
+    const int hopSize = (durationSec > 120.0)  ? 1024
+                        : (durationSec > 30.0) ? 512
+                                               : 256;
     result.hopSize = hopSize;
 
     const int numFrames = (numSamples - frameSize) / hopSize + 1;
-    if (numFrames <= 0) return result;
+    if (numFrames <= 0)
+        return result;
 
     result.frames.reserve(static_cast<size_t>(numFrames));
 
     for (int i = 0; i < numFrames; ++i)
     {
         int offset = i * hopSize;
-        const float* frameData = audioData + offset;
+        const float *frameData = audioData + offset;
 
         // RMS
         float sumSq = 0.0f;
@@ -167,30 +169,40 @@ PitchAnalyzer::AnalysisResult PitchAnalyzer::analyzeClip(
 }
 
 std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
-    const std::vector<PitchFrame>& frames, int /*hopSize*/, double /*sampleRate*/)
+    const std::vector<PitchFrame> &frames, int /*hopSize*/, double /*sampleRate*/)
 {
     std::vector<PitchNote> notes;
-    if (frames.empty()) return notes;
+    if (frames.empty())
+        return notes;
 
-    const float minNoteDuration = 0.05f; // 50ms minimum note
-    const float pitchJumpThreshold = 1.0f; // 1 semitone = note boundary
-    const float confidenceThreshold = 0.5f;
-    const float silenceThreshold = -55.0f; // dB
+    const float minNoteDuration = 0.05f;     // 50 ms minimum note
+    const float pitchJumpThreshold = 2.3f;   // 2.3 semitones — tolerates vibrato (±1-2 sem),
+                                             // only splits on genuine melodic note changes
+    const float confidenceThreshold = 0.35f; // relaxed from 0.5 — avoids ending a note on a
+                                             // momentarily low-confidence frame mid-vibrato
+    const float silenceThreshold = -60.0f;   // dB
+    const int stableFrames = 3;              // pitch deviation must be sustained this many
+                                             // consecutive frames before triggering a split
+                                             // (prevents vibrato peaks from splitting notes)
 
     int noteStartIdx = -1;
     float noteSum = 0.0f;
     int noteCount = 0;
     int noteId = 0;
+    int deviationRun = 0; // consecutive frames exceeding pitchJumpThreshold
 
-    auto finalizeNote = [&](int endIdx) {
-        if (noteStartIdx < 0 || noteCount == 0) return;
+    auto finalizeNote = [&](int endIdx)
+    {
+        if (noteStartIdx < 0 || noteCount == 0)
+            return;
 
         float avgMidi = noteSum / static_cast<float>(noteCount);
         float startTime = frames[static_cast<size_t>(noteStartIdx)].time;
         float endTime = frames[static_cast<size_t>(endIdx)].time;
         float duration = endTime - startTime;
 
-        if (duration < minNoteDuration) return;
+        if (duration < minNoteDuration)
+            return;
 
         PitchNote note;
         note.id = "note_" + juce::String(noteId++);
@@ -218,7 +230,7 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
 
     for (int i = 0; i < static_cast<int>(frames.size()); ++i)
     {
-        const auto& f = frames[static_cast<size_t>(i)];
+        const auto &f = frames[static_cast<size_t>(i)];
         bool isVoiced = f.midiNote > 0.0f && f.confidence >= confidenceThreshold && f.rmsDB > silenceThreshold;
 
         if (!isVoiced)
@@ -230,6 +242,7 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
                 noteStartIdx = -1;
                 noteSum = 0.0f;
                 noteCount = 0;
+                deviationRun = 0;
             }
             continue;
         }
@@ -240,6 +253,7 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
             noteStartIdx = i;
             noteSum = f.midiNote;
             noteCount = 1;
+            deviationRun = 0;
         }
         else
         {
@@ -248,14 +262,27 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
 
             if (deviation > pitchJumpThreshold)
             {
-                // Pitch jump — finalize current note, start new
-                finalizeNote(i - 1);
-                noteStartIdx = i;
-                noteSum = f.midiNote;
-                noteCount = 1;
+                ++deviationRun;
+                if (deviationRun >= stableFrames)
+                {
+                    // Sustained pitch jump → genuine note change
+                    finalizeNote(i - stableFrames);
+                    noteStartIdx = i - stableFrames + 1;
+                    // Recompute sum for the new note's initial frames
+                    noteSum = 0.0f;
+                    noteCount = 0;
+                    for (int k = noteStartIdx; k <= i; ++k)
+                    {
+                        noteSum += frames[static_cast<size_t>(k)].midiNote;
+                        ++noteCount;
+                    }
+                    deviationRun = 0;
+                }
+                // else: don't split yet — might be a vibrato transient
             }
             else
             {
+                deviationRun = 0;
                 noteSum += f.midiNote;
                 ++noteCount;
             }
@@ -266,6 +293,51 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
     if (noteStartIdx >= 0)
         finalizeNote(static_cast<int>(frames.size()) - 1);
 
+    // -------------------------------------------------------------------------
+    // Merge pass: collapse adjacent notes that are close in time and pitch.
+    // Brief unvoiced gaps (consonants, breath noise) within a phrase often split
+    // what should be a single note into two. Re-join them if:
+    //   • gap < 150 ms (brief consonant or detection gap, not a real pause)
+    //   • pitch centers within 1.5 semitones (same note or tight step)
+    // -------------------------------------------------------------------------
+    const float mergeGapSec = 0.15f;  // 150 ms
+    const float mergePitchSem = 1.5f; // semitones
+
+    bool merged = true;
+    while (merged)
+    {
+        merged = false;
+        for (int i = 0; i + 1 < static_cast<int>(notes.size()); ++i)
+        {
+            auto &a = notes[static_cast<size_t>(i)];
+            auto &b = notes[static_cast<size_t>(i + 1)];
+            float gap = b.startTime - a.endTime;
+            float pitchDiff = std::abs(a.detectedPitch - b.detectedPitch);
+
+            if (gap >= 0.0f && gap < mergeGapSec && pitchDiff < mergePitchSem)
+            {
+                // Weighted average pitch (by duration as proxy for frame count)
+                float aDur = a.endTime - a.startTime;
+                float bDur = b.endTime - b.startTime;
+                float totalDur = aDur + bDur;
+                float newPitch = (totalDur > 0.0f)
+                                     ? (a.detectedPitch * aDur + b.detectedPitch * bDur) / totalDur
+                                     : a.detectedPitch;
+
+                a.endTime = b.endTime;
+                a.detectedPitch = newPitch;
+                a.correctedPitch = newPitch;
+
+                // Append drift frames from b
+                a.pitchDrift.insert(a.pitchDrift.end(), b.pitchDrift.begin(), b.pitchDrift.end());
+
+                notes.erase(notes.begin() + i + 1);
+                merged = true;
+                break; // restart scan after any merge
+            }
+        }
+    }
+
     return notes;
 }
 
@@ -273,7 +345,7 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
 // JSON serialization
 // ============================================================================
 
-juce::var PitchAnalyzer::resultToJSON(const AnalysisResult& result)
+juce::var PitchAnalyzer::resultToJSON(const AnalysisResult &result)
 {
     juce::DynamicObject::Ptr root = new juce::DynamicObject();
     root->setProperty("clipId", result.clipId);
@@ -288,7 +360,7 @@ juce::var PitchAnalyzer::resultToJSON(const AnalysisResult& result)
     frameRms.ensureStorageAllocated(static_cast<int>(result.frames.size()));
     frameVoiced.ensureStorageAllocated(static_cast<int>(result.frames.size()));
 
-    for (const auto& f : result.frames)
+    for (const auto &f : result.frames)
     {
         frameTimes.add(static_cast<double>(f.time));
         frameMidi.add(static_cast<double>(f.midiNote));
@@ -307,7 +379,7 @@ juce::var PitchAnalyzer::resultToJSON(const AnalysisResult& result)
 
     // Notes
     juce::Array<juce::var> notesList;
-    for (const auto& n : result.notes)
+    for (const auto &n : result.notes)
     {
         juce::DynamicObject::Ptr noteObj = new juce::DynamicObject();
         noteObj->setProperty("id", n.id);
@@ -330,7 +402,8 @@ juce::var PitchAnalyzer::resultToJSON(const AnalysisResult& result)
         const int driftSize = static_cast<int>(n.pitchDrift.size());
         if (driftSize <= maxDriftPoints)
         {
-            for (float d : n.pitchDrift) drift.add(static_cast<double>(d));
+            for (float d : n.pitchDrift)
+                drift.add(static_cast<double>(d));
         }
         else
         {
@@ -350,15 +423,15 @@ juce::var PitchAnalyzer::resultToJSON(const AnalysisResult& result)
     return juce::var(root.get());
 }
 
-std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::notesFromJSON(const juce::var& json)
+std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::notesFromJSON(const juce::var &json)
 {
     std::vector<PitchNote> notes;
 
-    if (auto* arr = json.getArray())
+    if (auto *arr = json.getArray())
     {
-        for (const auto& item : *arr)
+        for (const auto &item : *arr)
         {
-            if (auto* obj = item.getDynamicObject())
+            if (auto *obj = item.getDynamicObject())
             {
                 PitchNote n;
                 n.id = obj->getProperty("id").toString();
@@ -375,9 +448,9 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::notesFromJSON(const juce::v
                 n.gain = static_cast<float>(static_cast<double>(obj->getProperty("gain")));
                 n.voiced = obj->hasProperty("voiced") ? static_cast<bool>(obj->getProperty("voiced")) : true;
 
-                if (auto* driftArr = obj->getProperty("pitchDrift").getArray())
+                if (auto *driftArr = obj->getProperty("pitchDrift").getArray())
                 {
-                    for (const auto& d : *driftArr)
+                    for (const auto &d : *driftArr)
                         n.pitchDrift.push_back(static_cast<float>(static_cast<double>(d)));
                 }
 
@@ -389,17 +462,17 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::notesFromJSON(const juce::v
     return notes;
 }
 
-std::vector<PitchAnalyzer::PitchFrame> PitchAnalyzer::framesFromJSON(const juce::var& json)
+std::vector<PitchAnalyzer::PitchFrame> PitchAnalyzer::framesFromJSON(const juce::var &json)
 {
     std::vector<PitchFrame> frames;
 
-    if (auto* obj = json.getDynamicObject())
+    if (auto *obj = json.getDynamicObject())
     {
-        auto* times  = obj->getProperty("times").getArray();
-        auto* midi   = obj->getProperty("midi").getArray();
-        auto* conf   = obj->getProperty("confidence").getArray();
-        auto* rms    = obj->getProperty("rms").getArray();
-        auto* voiced = obj->getProperty("voiced").getArray();
+        auto *times = obj->getProperty("times").getArray();
+        auto *midi = obj->getProperty("midi").getArray();
+        auto *conf = obj->getProperty("confidence").getArray();
+        auto *rms = obj->getProperty("rms").getArray();
+        auto *voiced = obj->getProperty("voiced").getArray();
 
         if (times == nullptr || midi == nullptr)
             return frames;
@@ -410,15 +483,18 @@ std::vector<PitchAnalyzer::PitchFrame> PitchAnalyzer::framesFromJSON(const juce:
         for (int i = 0; i < count; ++i)
         {
             PitchFrame f;
-            f.time       = static_cast<float>(static_cast<double>((*times)[i]));
-            f.midiNote   = static_cast<float>(static_cast<double>((*midi)[i]));
-            f.frequency  = (f.midiNote > 0.0f) ? 440.0f * std::pow(2.0f, (f.midiNote - 69.0f) / 12.0f) : 0.0f;
+            f.time = static_cast<float>(static_cast<double>((*times)[i]));
+            f.midiNote = static_cast<float>(static_cast<double>((*midi)[i]));
+            f.frequency = (f.midiNote > 0.0f) ? 440.0f * std::pow(2.0f, (f.midiNote - 69.0f) / 12.0f) : 0.0f;
             f.confidence = (conf != nullptr && i < conf->size())
-                         ? static_cast<float>(static_cast<double>((*conf)[i])) : 0.5f;
-            f.rmsDB      = (rms != nullptr && i < rms->size())
-                         ? static_cast<float>(static_cast<double>((*rms)[i])) : -60.0f;
-            f.voiced     = (voiced != nullptr && i < voiced->size())
-                         ? static_cast<bool>((*voiced)[i]) : true;
+                               ? static_cast<float>(static_cast<double>((*conf)[i]))
+                               : 0.5f;
+            f.rmsDB = (rms != nullptr && i < rms->size())
+                          ? static_cast<float>(static_cast<double>((*rms)[i]))
+                          : -60.0f;
+            f.voiced = (voiced != nullptr && i < voiced->size())
+                           ? static_cast<bool>((*voiced)[i])
+                           : true;
             frames.push_back(f);
         }
     }
