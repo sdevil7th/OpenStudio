@@ -6,6 +6,13 @@ project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
 option(OPENSTUDIO_BUNDLE_STEM_RUNTIME "Bundle the optional stem-separation runtime into app outputs" OFF)
 
+# Some third-party dependencies still expect CMAKE_BUILD_TYPE to exist even
+# under multi-config generators like Visual Studio. Seed a harmless default
+# cache entry so imported subprojects can configure cleanly.
+if(CMAKE_CONFIGURATION_TYPES AND NOT DEFINED CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type placeholder for multi-config generators" FORCE)
+endif()
+
 # ==============================================================================
 # Phase 20.1: Cross-platform CMake guards
 # ==============================================================================
