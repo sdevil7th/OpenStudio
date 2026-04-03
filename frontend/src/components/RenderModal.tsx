@@ -161,28 +161,48 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     return { start: 0, end: 0 };
   };
 
-  // Update time bounds when time selection changes
-  useEffect(() => {
-    if (timeSelection && options.bounds === "time_selection") {
-      setOptions((prev) => ({
-        ...prev,
-        startTime: timeSelection.start,
-        endTime: timeSelection.end,
-      }));
-    }
-  }, [timeSelection, options.bounds]);
-
-  // Sync with project range when bounds is "entire"
-  useEffect(() => {
-    if (options.bounds === "entire") {
+  const resolveBoundsRange = (bounds: RenderBounds, fallbackStart: number, fallbackEnd: number) => {
+    if (bounds === "entire") {
       const extent = getProjectExtent();
-      setOptions((prev) => ({
-        ...prev,
-        startTime: extent.start,
-        endTime: extent.end,
-      }));
+      return { startTime: extent.start, endTime: extent.end };
     }
-  }, [projectRange, tracks, options.bounds]);
+    if (bounds === "time_selection") {
+      if (timeSelection) {
+        return { startTime: timeSelection.start, endTime: timeSelection.end };
+      }
+      return { startTime: fallbackStart, endTime: fallbackEnd };
+    }
+    if (bounds === "project_regions") {
+      if (regions.length > 0) {
+        return {
+          startTime: Math.min(...regions.map((region) => region.startTime)),
+          endTime: Math.max(...regions.map((region) => region.endTime)),
+        };
+      }
+      return { startTime: fallbackStart, endTime: fallbackEnd };
+    }
+    if (bounds === "selected_regions") {
+      const selectedRegions = regions.filter((region) => selectedRegionIds.includes(region.id));
+      if (selectedRegions.length > 0) {
+        return {
+          startTime: Math.min(...selectedRegions.map((region) => region.startTime)),
+          endTime: Math.max(...selectedRegions.map((region) => region.endTime)),
+        };
+      }
+    }
+    return { startTime: fallbackStart, endTime: fallbackEnd };
+  };
+
+  useEffect(() => {
+    if (options.bounds === "custom") return;
+    setOptions((prev) => {
+      const resolved = resolveBoundsRange(prev.bounds, prev.startTime, prev.endTime);
+      if (resolved.startTime === prev.startTime && resolved.endTime === prev.endTime) {
+        return prev;
+      }
+      return { ...prev, ...resolved };
+    });
+  }, [options.bounds, projectRange, tracks, timeSelection, regions, selectedRegionIds]);
 
   // Set default directory from project path
   useEffect(() => {
@@ -285,7 +305,21 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     if (!secondaryOutputEnabled) return;
     const ext = secondaryOutputFormat;
     const secPath = primaryPath.replace(/\.[^.]+$/, `.${ext}`);
-    await doRender({ filePath: secPath });
+    const secondaryParams = {
+      ...buildRenderParams({ filePath: secPath }),
+      format: secondaryOutputFormat,
+      bitDepth: isLossyFormat(secondaryOutputFormat as AudioFormat)
+        ? secondaryOutputFormat === "mp3"
+          ? options.mp3Bitrate
+          : options.oggQuality
+        : secondaryOutputBitDepth,
+    };
+    if (options.dither && !isLossyFormat(secondaryOutputFormat as AudioFormat)) {
+      const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
+      await nativeBridge.renderProjectWithDither({ ...secondaryParams, ditherType });
+      return;
+    }
+    await nativeBridge.renderProject(secondaryParams);
   };
 
   /** Add rendered file(s) to project after render */
@@ -464,12 +498,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   };
 
   const handleCancel = () => {
-    if (isRendering) {
-      // TODO: Implement render cancellation
-      setIsRendering(false);
-      setRenderProgress(0);
-      setRenderStatus("");
-    }
+    if (isRendering) return;
     onClose();
   };
 
@@ -526,24 +555,12 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
               value={options.bounds}
               onChange={(val) => {
                 const newBounds = val as RenderBounds;
-                let newStart = options.startTime;
-                let newEnd = options.endTime;
-                if (newBounds === "entire") {
-                  const extent = getProjectExtent();
-                  newStart = extent.start;
-                  newEnd = extent.end;
-                } else if (
-                  newBounds === "time_selection" &&
-                  timeSelection
-                ) {
-                  newStart = timeSelection.start;
-                  newEnd = timeSelection.end;
-                }
+                const resolved = resolveBoundsRange(newBounds, options.startTime, options.endTime);
                 setOptions({
                   ...options,
                   bounds: newBounds,
-                  startTime: newStart,
-                  endTime: newEnd,
+                  startTime: resolved.startTime,
+                  endTime: resolved.endTime,
                 });
               }}
               disabled={isRendering}
@@ -781,7 +798,6 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                   { value: "flac", label: "FLAC (Lossless)" },
                   { value: "mp3", label: "MP3" },
                   { value: "ogg", label: "OGG Vorbis" },
-                  { value: "raw", label: "RAW PCM (headerless)" },
                 ]}
                 value={options.format}
                 onChange={(val) => {
@@ -928,7 +944,9 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                 value={useDAWStore.getState().resampleQuality}
                 onChange={(v) => useDAWStore.getState().setResampleQuality(v as "fast" | "good" | "best")}
                 size="xs"
+                disabled
               />
+              <span className="text-[10px] text-daw-text-dim">Backend support pending</span>
             </div>
           </div>
 
@@ -975,9 +993,9 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           </div>
 
           {/* Metadata */}
-          <details className="bg-daw-darker border border-daw-border rounded">
+          <details className="bg-daw-darker border border-daw-border rounded opacity-60">
             <summary className="text-sm font-medium text-daw-text p-3 cursor-pointer select-none">
-              Metadata
+              Metadata (coming soon)
             </summary>
             <div className="px-3 pb-3 space-y-1.5">
               {(["title", "artist", "album", "genre", "year", "description", "isrc"] as const).map((field) => (
@@ -990,7 +1008,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                     value={renderMetadata[field]}
                     onChange={(e) => useDAWStore.getState().setRenderMetadata({ [field]: e.target.value })}
                     className="flex-1"
-                    disabled={isRendering}
+                    disabled
                   />
                 </div>
               ))}
@@ -1000,10 +1018,10 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           {/* Post-render options */}
           <div className="flex gap-4 text-sm">
             <Checkbox
-              label="Online render (1x speed)"
+              label="Online render (unsupported)"
               checked={onlineRender}
               onChange={(e) => useDAWStore.getState().setOnlineRender(e.target.checked)}
-              disabled={isRendering}
+              disabled
             />
             <Checkbox
               label="Add to project after render"

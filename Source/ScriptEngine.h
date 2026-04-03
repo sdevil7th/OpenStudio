@@ -33,10 +33,10 @@ public:
     // Accumulated print() output from the last execution
     juce::String getLastOutput() const { return lastOutput; }
 
-    // Get the user scripts directory (Documents/Studio13/Scripts/)
+    // Get the user scripts directory (Documents/OpenStudio/Scripts/, with Studio13 fallback)
     static juce::File getUserScriptsDirectory();
 
-    // Get the stock scripts directory (<exe>/scripts/)
+    // Get the stock scripts directory (<exe>/scripts/ or app bundle Resources/scripts/)
     static juce::File getStockScriptsDirectory();
 
     // Enumerate available scripts from both stock and user directories

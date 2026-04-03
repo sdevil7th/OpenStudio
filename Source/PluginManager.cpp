@@ -2,6 +2,21 @@
 #include "S13FXProcessor.h"
 #include "CLAPPluginFormat.h"
 
+namespace
+{
+juce::File getOpenStudioDocumentsDirectory()
+{
+    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return documentsDir.getChildFile("OpenStudio");
+}
+
+juce::File getLegacyStudio13DocumentsDirectory()
+{
+    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return documentsDir.getChildFile("Studio13");
+}
+}
+
 PluginManager::PluginManager()
 {
     // Add default formats (VST3, LV2, AU, etc.)
@@ -20,13 +35,16 @@ PluginManager::PluginManager()
         juce::Logger::writeToLog("PluginManager: Format " + juce::String(i) + ": " + format->getName());
     }
 
-    // Get plugin list file location (Documents/Studio13/PluginList.xml)
-    pluginListFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("PluginList.xml");
+    pluginListFile = getOpenStudioDocumentsDirectory().getChildFile("PluginList.xml");
+    auto legacyPluginListFile = getLegacyStudio13DocumentsDirectory().getChildFile("PluginList.xml");
+    if (!pluginListFile.existsAsFile() && legacyPluginListFile.existsAsFile())
+        pluginListFile = legacyPluginListFile;
 
-    // Plugin crash blacklist file
-    blacklistFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("PluginBlacklist.txt");
+    blacklistFile = getOpenStudioDocumentsDirectory().getChildFile("PluginBlacklist.txt");
+    auto legacyBlacklistFile = getLegacyStudio13DocumentsDirectory().getChildFile("PluginBlacklist.txt");
+    if (!blacklistFile.existsAsFile() && legacyBlacklistFile.existsAsFile())
+        blacklistFile = legacyBlacklistFile;
+
     if (blacklistFile.existsAsFile())
         blacklistFile.readLines(blacklistedPlugins);
 
@@ -45,8 +63,8 @@ PluginManager::~PluginManager()
 void PluginManager::scanForPlugins()
 {
     // Create debug log file
-    juce::File debugLog = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("plugin_scan_debug.txt");
+    juce::File debugLog = getOpenStudioDocumentsDirectory().getChildFile("plugin_scan_debug.txt");
+    debugLog.getParentDirectory().createDirectory();
     debugLog.deleteFile();
     debugLog.create();
     
@@ -302,14 +320,27 @@ void PluginManager::loadPluginList()
 
 juce::File PluginManager::getUserEffectsDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("Effects");
+    auto openStudioDir = getOpenStudioDocumentsDirectory().getChildFile("Effects");
+    auto legacyDir = getLegacyStudio13DocumentsDirectory().getChildFile("Effects");
+
+    if (!openStudioDir.isDirectory() && legacyDir.isDirectory())
+        return legacyDir;
+
+    return openStudioDir;
 }
 
 juce::File PluginManager::getStockEffectsDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentExecutableFile)
-        .getParentDirectory().getChildFile("effects");
+    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+        .getParentDirectory();
+
+   #if JUCE_MAC
+    auto bundleResources = exeDir.getParentDirectory().getChildFile("Resources").getChildFile("effects");
+    if (bundleResources.isDirectory())
+        return bundleResources;
+   #endif
+
+    return exeDir.getChildFile("effects");
 }
 
 void PluginManager::scanForS13FX()

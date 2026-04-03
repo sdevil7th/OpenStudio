@@ -161,7 +161,6 @@ export function ProjectSettingsModal({
 
           {/* Project Notes */}
           <Textarea
-            variant="default"
             size="md"
             fullWidth
             label="Project Notes"

@@ -23,19 +23,19 @@ def kill_process_tree(pid):
         except (ProcessLookupError, PermissionError):
             pass
 
-def kill_orphaned_studio13():
-    """Kill any leftover Studio13.exe and its WebView2 child processes from previous runs"""
+def kill_orphaned_openstudio():
+    """Kill any leftover OpenStudio.exe and its WebView2 child processes from previous runs"""
     if platform.system() == "Windows":
         result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq Studio13.exe", "/FO", "CSV", "/NH"],
+            ["tasklist", "/FI", "IMAGENAME eq OpenStudio.exe", "/FO", "CSV", "/NH"],
             capture_output=True, text=True
         )
         for line in result.stdout.strip().splitlines():
-            if "Studio13.exe" in line:
+            if "OpenStudio.exe" in line:
                 parts = line.split(",")
                 if len(parts) >= 2:
                     pid = parts[1].strip('"')
-                    print(f"  Killing orphaned Studio13.exe (PID {pid}) and its child processes...")
+                    print(f"  Killing orphaned OpenStudio.exe (PID {pid}) and its child processes...")
                     kill_process_tree(int(pid))
                     time.sleep(0.5)
 
@@ -118,7 +118,7 @@ def start_vite_server():
 def run_cpp_app():
     """Run the C++ executable"""
     global cpp_process
-    exe_path = os.path.join("build", "Studio13_v2_artefacts", "Debug", "Studio13.exe")
+    exe_path = os.path.join("build", "OpenStudio_artefacts", "Debug", "OpenStudio.exe")
     if not os.path.exists(exe_path):
         print(f"ERROR: Executable not found at {exe_path}")
         print("Run 'python build.py dev' first to build the app.")
@@ -134,7 +134,7 @@ def run_cpp_app():
         print("\nShutting down...")
 
 def main():
-    parser = argparse.ArgumentParser(description="Studio13 Builder Tool")
+    parser = argparse.ArgumentParser(description="OpenStudio Builder Tool")
     parser.add_argument("mode", choices=["dev", "prod"], help="Build mode: dev or prod")
     parser.add_argument("--run", action="store_true", help="Auto-start Vite and C++ app (dev mode only)")
     args = parser.parse_args()
@@ -147,10 +147,10 @@ def main():
             print("\n" + "="*50)
             print("SINGLE COMMAND DEV MODE")
             print("="*50)
-            # Kill any orphaned Studio13 processes (and their WebView2 children)
+            # Kill any orphaned OpenStudio processes (and their WebView2 children)
             # from previous runs that weren't cleaned up properly
             print("Checking for orphaned processes...")
-            kill_orphaned_studio13()
+            kill_orphaned_openstudio()
             start_vite_server()
             run_cpp_app()
         else:
@@ -162,7 +162,7 @@ def main():
         build_frontend("prod")
         build_backend("release")
         print("\nProduction Build Complete.")
-        print("Run: build/Studio13_v2_artefacts/Release/Studio13.exe")
+        print("Run: build/OpenStudio_artefacts/Release/OpenStudio.exe")
 
 if __name__ == "__main__":
     main()

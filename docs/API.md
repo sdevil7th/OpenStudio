@@ -1,6 +1,6 @@
-# Studio13 Lua Scripting API Reference
+# OpenStudio Lua Scripting API Reference
 
-Studio13 provides a Lua scripting engine accessible via `s13.*` functions. Scripts can be edited and run from the Script Editor (View > Script Editor).
+OpenStudio currently provides a Lua scripting engine through the legacy `s13.*` namespace for compatibility. Scripts can be edited and run from the Script Editor (View > Script Editor).
 
 ## Track Operations
 
@@ -42,8 +42,8 @@ Studio13 provides a Lua scripting engine accessible via `s13.*` functions. Scrip
 | `s13.addTrackFX(trackId, pluginId)` | `trackId: string, pluginId: string` | `boolean` | Add FX plugin to track |
 | `s13.removeTrackFX(trackId, index)` | `trackId: string, index: number` | `boolean` | Remove FX at index |
 | `s13.bypassTrackFX(trackId, index, bypassed)` | `trackId: string, index: number, bypassed: boolean` | none | Toggle FX bypass |
-| `s13.addTrackS13FX(trackId, effectName)` | `trackId: string, name: string` | `boolean` | Add built-in S13 effect |
-| `s13.getAvailableS13FX()` | none | `table` | List available built-in effects |
+| `s13.addTrackS13FX(trackId, effectName)` | `trackId: string, name: string` | `boolean` | Add a built-in OpenStudio effect (legacy `S13` names still work) |
+| `s13.getAvailableS13FX()` | none | `table` | List available built-in OpenStudio effects |
 
 ## Master Bus
 
@@ -127,7 +127,7 @@ Studio13 provides a Lua scripting engine accessible via `s13.*` functions. Scrip
 | Function | Arguments | Returns | Description |
 |----------|-----------|---------|-------------|
 | `s13.print(...)` | any values | none | Print to script console |
-| `s13.getAppVersion()` | none | `string` | Get Studio13 version string |
+| `s13.getAppVersion()` | none | `string` | Get OpenStudio version string |
 | `s13.showMessage(title, message)` | `title, message: string` | none | Show a message dialog |
 | `s13.fileDialog(title, filters)` | `title, filters: string` | `string` | Open file picker dialog |
 
@@ -158,6 +158,6 @@ s13.print("True Peak: " .. stats.truePeak .. " dBTP")
 ```lua
 for i = 1, s13.getTrackCount() do
     -- Add built-in EQ to every track
-    s13.addTrackS13FX(tostring(i), "S13 EQ")
+    s13.addTrackS13FX(tostring(i), "OpenStudio EQ")
 end
 ```

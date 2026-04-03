@@ -1,6 +1,8 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <atomic>
+#include <memory>
 #include <vector>
 #include <functional>
 
@@ -41,13 +43,23 @@ private:
         std::unique_ptr<juce::MidiInput> input;
         bool isOpen;
     };
-    
+
+    struct DeviceRoute
+    {
+        juce::MidiInput* input = nullptr;
+        juce::String name;
+    };
+
     std::vector<DeviceInfo> devices;
-    MIDIMessageCallback messageCallback;
+    std::shared_ptr<MIDIMessageCallback> messageCallback;
+    std::shared_ptr<const std::vector<DeviceRoute>> deviceRoutes {
+        std::make_shared<const std::vector<DeviceRoute>>()
+    };
     juce::CriticalSection lock;
-    
+
     // Find device by name
     DeviceInfo* findDevice(const juce::String& name);
-    
+    void rebuildDeviceRoutes();
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MIDIManager)
 };

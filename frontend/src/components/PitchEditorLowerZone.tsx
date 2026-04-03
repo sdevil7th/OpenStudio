@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback, useState, useMemo } from "react"
 import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
 import { usePitchEditorStore, PitchEditorTool, PitchSnapMode } from "../store/pitchEditorStore";
-import { GripHorizontal, X, Scissors, MousePointer, Music, Activity, Waves, ChevronRight, Pencil } from "lucide-react";
+import { GripHorizontal, X, Scissors, MousePointer, Activity, Waves, ChevronRight, Pencil } from "lucide-react";
 import { NoteInspector } from "./NoteInspector";
 import { CorrectPitchModal } from "./CorrectPitchModal";
 import {
@@ -22,11 +22,11 @@ const ZOOM_SENSITIVITY = 0.0015;
 
 const TOOL_DEFS: { id: PitchEditorTool; label: string; key: string; icon: React.ReactNode; title: string }[] = [
   { id: "select", label: "Select", key: "1", icon: <MousePointer size={11} />, title: "Select & move notes (1)" },
-  { id: "pitch", label: "Pitch", key: "2", icon: <Music size={11} />, title: "Adjust pitch (2)" },
-  { id: "drift", label: "Drift", key: "3", icon: <Activity size={11} />, title: "Edit pitch drift (3)" },
-  { id: "vibrato", label: "Vibrato", key: "4", icon: <Waves size={11} />, title: "Edit vibrato (4)" },
-  { id: "transition", label: "Trans", key: "5", icon: <ChevronRight size={11} />, title: "Edit transitions (5)" },
-  { id: "draw", label: "Draw", key: "6", icon: <Pencil size={11} />, title: "Draw pitch curve (6)" },
+  { id: "drift", label: "Drift", key: "2", icon: <Activity size={11} />, title: "Edit pitch drift (2)" },
+  { id: "vibrato", label: "Vibrato", key: "3", icon: <Waves size={11} />, title: "Edit vibrato (3)" },
+  { id: "transition", label: "Trans", key: "4", icon: <ChevronRight size={11} />, title: "Edit transitions (4)" },
+  { id: "draw", label: "Draw", key: "5", icon: <Pencil size={11} />, title: "Draw pitch curve on note (5)" },
+  { id: "split", label: "Split", key: "6", icon: <Scissors size={11} />, title: "Split note at click (6)" },
 ];
 
 const SNAP_MODES: { id: PitchSnapMode; label: string }[] = [
@@ -122,6 +122,7 @@ export function PitchEditorLowerZone() {
 
   const {
     contour, notes, isAnalyzing, selectedNoteIds, tool, snapMode, progressPercent, progressLabel,
+    applyState, applyMessage,
     scrollY, zoomY,
     clipStartTime: pitchClipStartTime, clipDuration: pitchClipDuration,
     analyze, setTool, setSnapMode,
@@ -140,9 +141,12 @@ export function PitchEditorLowerZone() {
     mergeNotes, toggleCorrectPitchModal,
     abCompareMode, toggleABCompare,
     drawPitchOnNote, beginDrawPitch, commitDrawPitch,
+    globalFormantCents, setGlobalFormantCents,
+    renderCoverage,
   } = usePitchEditorStore(
     useShallow((s) => ({
       contour: s.contour, notes: s.notes, isAnalyzing: s.isAnalyzing, progressPercent: s.progressPercent, progressLabel: s.progressLabel,
+      applyState: s.applyState, applyMessage: s.applyMessage,
       selectedNoteIds: s.selectedNoteIds, tool: s.tool, snapMode: s.snapMode,
       scrollY: s.scrollY, zoomY: s.zoomY,
       clipStartTime: s.clipStartTime, clipDuration: s.clipDuration,
@@ -168,8 +172,27 @@ export function PitchEditorLowerZone() {
       mergeNotes: s.mergeNotes, toggleCorrectPitchModal: s.toggleCorrectPitchModal,
       abCompareMode: s.abCompareMode, toggleABCompare: s.toggleABCompare,
       drawPitchOnNote: s.drawPitchOnNote, beginDrawPitch: s.beginDrawPitch, commitDrawPitch: s.commitDrawPitch,
+      globalFormantCents: s.globalFormantCents, setGlobalFormantCents: s.setGlobalFormantCents,
+      renderCoverage: s.renderCoverage,
     }))
   );
+
+  const applyStateClassName =
+    applyState === "error" ? "text-red-400 bg-red-500/10 border-red-500/30"
+      : applyState === "done" ? "text-emerald-300 bg-emerald-500/10 border-emerald-500/30"
+      : applyState === "preview_ready" ? "text-sky-300 bg-sky-500/10 border-sky-500/30"
+      : applyState === "queued" || applyState === "processing" || applyState === "preview_processing" || applyState === "final_processing"
+        ? "text-daw-accent bg-daw-accent/10 border-daw-accent/30"
+      : "text-neutral-500 bg-neutral-800/80 border-neutral-700";
+  const formantStatusHint = globalFormantCents !== 0
+    ? (
+        applyState === "preview_processing"
+          ? "Rendering preview near playhead..."
+          : applyState === "preview_ready" || applyState === "final_processing" || applyState === "done"
+            ? "Previewing rendered formant"
+            : "Rendered formant preview"
+      )
+    : "Clip-wide timbre shift";
 
   const [hoveredNoteId, setHoveredNoteId] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{
@@ -181,10 +204,6 @@ export function PitchEditorLowerZone() {
     origEnd: number;
     origValue: number; // original vibratoDepth/formantShift/gain for smart controls
   } | null>(null);
-  const [contextMenu, setContextMenu] = useState<{
-    screenX: number; screenY: number; noteId: string; splitTime: number;
-  } | null>(null);
-
   // Clear analyzed range tracking when clip changes
   const analyzedRangesRef = useRef<Array<[number, number]>>([]);
   useEffect(() => {
@@ -277,6 +296,7 @@ export function PitchEditorLowerZone() {
     salienceDownsampleFactor: st.polyAnalysisResult?.salienceDownsampleFactor ?? 1,
     salienceHopSize: st.polyAnalysisResult?.hopSize ?? 256,
     salienceSampleRate: st.polyAnalysisResult?.sampleRate ?? 22050,
+    renderCoverage: st.renderCoverage,
   }), []);
 
   // Static render — draws grid, notes, contour to both the visible canvas AND an
@@ -305,6 +325,7 @@ export function PitchEditorLowerZone() {
       salienceDownsampleFactor: polyAnalysisResult?.salienceDownsampleFactor ?? 1,
       salienceHopSize: polyAnalysisResult?.hopSize ?? 256,
       salienceSampleRate: polyAnalysisResult?.sampleRate ?? 22050,
+      renderCoverage,
     };
     renderPitchEditor(ctx, canvasSize.width, canvasSize.height, viewport, renderState);
 
@@ -315,7 +336,7 @@ export function PitchEditorLowerZone() {
       offCtx.drawImage(canvas, 0, 0);
     }
     staticCanvasRef.current = offscreen;
-  }, [canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, polyMode, polyNotes, showPitchSalience, polyAnalysisResult]);
+  }, [canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, polyMode, polyNotes, showPitchSalience, polyAnalysisResult, renderCoverage]);
 
   // Playhead RAF — during playback, blit cached static canvas + draw playhead only.
   // This avoids a full renderPitchEditor() (grid, notes, contour) at 60fps.
@@ -535,6 +556,10 @@ export function PitchEditorLowerZone() {
             origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
             origValue: (note.transitionIn + note.transitionOut) / 2,
           });
+        } else if (currentTool === "split") {
+          const t = xToTime(x, freshViewport);
+          splitNote(hit.noteId, t);
+          return;
         } else if (currentTool === "draw") {
           beginDrawPitch();
           const clipTime = xToTime(x, freshViewport);
@@ -614,9 +639,10 @@ export function PitchEditorLowerZone() {
         const newDepth = Math.max(0, Math.min(2, dragState.origValue - deltaY / 100));
         updateNote(dragState.noteId, { vibratoDepth: newDepth });
       } else if (dragState.type === "formant") {
-        // Drag up = shift formants higher, drag down = lower
-        const newFormant = Math.max(-12, Math.min(12, dragState.origValue + deltaY / 20));
-        updateNote(dragState.noteId, { formantShift: Math.round(newFormant * 2) / 2 });
+        // Drag up = shift formants higher (cents). 1px ≈ 2 cents.
+        const deltaCents = -deltaY * 2;
+        const newCents = Math.max(-386, Math.min(386, Math.round(dragState.origValue * 100 + deltaCents)));
+        updateNote(dragState.noteId, { formantShift: newCents / 100 });
       } else if (dragState.type === "gain") {
         // Drag up = louder, drag down = softer
         const newGain = Math.max(-24, Math.min(24, dragState.origValue + deltaY / 5));
@@ -661,12 +687,13 @@ export function PitchEditorLowerZone() {
       } else if (hit) {
         const currentTool = usePitchEditorStore.getState().tool;
         canvas.style.cursor = currentTool === "draw" ? "crosshair"
+          : currentTool === "split" ? "crosshair"
           : currentTool === "pitch" ? "ns-resize"
           : currentTool === "transition" ? "col-resize"
           : "grab";
       } else {
         const currentTool = usePitchEditorStore.getState().tool;
-        canvas.style.cursor = currentTool === "draw" ? "crosshair" : "default";
+        canvas.style.cursor = currentTool === "draw" ? "not-allowed" : "default";
       }
     }
   }, [dragState, canvasSize.height, snapMode, updateNote, drawPitchOnNote]);
@@ -682,41 +709,12 @@ export function PitchEditorLowerZone() {
     setDragState(null);
   }, [dragState, commitNoteEdit, commitDrawPitch]);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const dawState = useDAWStore.getState();
-    const pitchState = usePitchEditorStore.getState();
-    const freshViewport: PitchEditorViewport = {
-      scrollX: dawState.scrollX / dawState.pixelsPerSecond,
-      scrollY: pitchState.scrollY,
-      pixelsPerSecond: dawState.pixelsPerSecond,
-      pixelsPerSemitone: pitchState.zoomY,
-      clipStartTime: pitchState.clipStartTime,
-      clipDuration: pitchState.clipDuration,
-    };
-
-    const hit = hitTestNote(x, y, pitchState.notes, freshViewport, canvasSize.height);
-    if (hit) {
-      setContextMenu({
-        screenX: e.clientX,
-        screenY: e.clientY,
-        noteId: hit.noteId,
-        splitTime: xToTime(x, freshViewport),
-      });
-    }
-  }, [canvasSize.height]);
-
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!pitchEditorTrackId) return;
-      if (e.ctrlKey && e.key === "z") { e.preventDefault(); undo(); return; }
-      if (e.ctrlKey && e.key === "y") { e.preventDefault(); redo(); return; }
+      if (e.ctrlKey && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
+      if (e.ctrlKey && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
       if (e.ctrlKey && e.key === "a") { e.preventDefault(); selectAll(); return; }
       if (e.key === "Escape") { closePitchEditor(); return; }
       if (e.key === "ArrowUp" && !e.ctrlKey) {
@@ -837,7 +835,7 @@ export function PitchEditorLowerZone() {
                 ))}
               </div>
               <p className="mt-1 text-[9px] text-neutral-600 leading-tight">
-                Double-click a note to split it. Right-click for more options.
+                Double-click or use Split tool to split notes. Draw modifies pitch on existing notes.
               </p>
             </div>
 
@@ -910,7 +908,7 @@ export function PitchEditorLowerZone() {
                 <button
                   onClick={toggleCorrectPitchModal}
                   className="w-full px-2 py-1 text-[10px] rounded bg-neutral-800 text-neutral-300 hover:bg-neutral-700 transition-colors text-left"
-                  title="Open Correct Pitch macro (Ctrl+Shift+P)"
+                  title="Open Correct Pitch macro"
                 >
                   Correct Pitch...
                 </button>
@@ -937,6 +935,35 @@ export function PitchEditorLowerZone() {
                   >
                     Merge notes
                   </button>
+                )}
+              </div>
+            </div>
+
+            {/* Global Formant */}
+            <div className="px-2 py-1.5 border-b border-neutral-800/60 shrink-0">
+              <div className="text-[9px] text-neutral-600 uppercase tracking-wider mb-1">Formant</div>
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] text-neutral-500 shrink-0">Global</span>
+                <input
+                  type="range"
+                  min={-386}
+                  max={386}
+                  step={1}
+                  value={globalFormantCents}
+                  onChange={(e) => setGlobalFormantCents(Number(e.target.value))}
+                  className="flex-1 h-1 accent-daw-accent cursor-pointer"
+                />
+                <span className="w-12 text-right text-[10px] font-mono text-neutral-300 shrink-0">
+                  {globalFormantCents > 0 ? "+" : ""}
+                  {globalFormantCents}c
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <span className="text-[8px] text-neutral-600">{formantStatusHint}</span>
+                {applyState !== "idle" && applyMessage && (
+                  <span className={`px-1.5 py-0.5 rounded border text-[8px] uppercase tracking-wider ${applyStateClassName}`}>
+                    {applyMessage}
+                  </span>
                 )}
               </div>
             </div>
@@ -1095,6 +1122,11 @@ export function PitchEditorLowerZone() {
             {(isAnalyzing || progressLabel) && (
               <div className="text-[9px] text-daw-accent animate-pulse">{progressLabel || "Analyzing…"}</div>
             )}
+            {!isAnalyzing && applyMessage && (
+              <div className={`text-[9px] ${applyState === "error" ? "text-red-400" : applyState === "done" ? "text-emerald-300" : applyState === "preview_ready" ? "text-sky-300" : "text-daw-accent"} ${applyState === "queued" || applyState === "processing" || applyState === "preview_processing" || applyState === "final_processing" ? "animate-pulse" : ""}`}>
+                {applyMessage}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1123,46 +1155,10 @@ export function PitchEditorLowerZone() {
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
-            onContextMenu={handleContextMenu}
+            onContextMenu={(e) => e.preventDefault()}
           />
         </div>
       </div>
-
-      {/* Right-click context menu */}
-      {contextMenu && (
-        <div
-          role="menu"
-          tabIndex={-1}
-          className="fixed z-50 bg-neutral-800 border border-neutral-700 rounded shadow-xl py-0.5 min-w-36"
-          style={{ left: contextMenu.screenX, top: contextMenu.screenY }}
-          onMouseLeave={() => setContextMenu(null)}
-        >
-          <button
-            className="w-full text-left px-3 py-1.5 text-[11px] text-neutral-200 hover:bg-neutral-700 flex items-center gap-2"
-            onClick={() => {
-              // Re-validate split time against current note bounds in case re-analysis
-              // ran between right-click and menu click, changing the note's time range.
-              const currentNote = usePitchEditorStore.getState().notes.find(n => n.id === contextMenu.noteId);
-              if (currentNote) {
-                const safeTime = Math.max(
-                  currentNote.startTime + 0.001,
-                  Math.min(contextMenu.splitTime, currentNote.endTime - 0.001)
-                );
-                splitNote(contextMenu.noteId, safeTime);
-              }
-              setContextMenu(null);
-            }}
-          >
-            <Scissors size={10} /> Split note here
-          </button>
-          <button
-            className="w-full text-left px-3 py-1.5 text-[11px] text-neutral-200 hover:bg-neutral-700 flex items-center gap-2"
-            onClick={() => { selectNote(contextMenu.noteId); setContextMenu(null); }}
-          >
-            Select note
-          </button>
-        </div>
-      )}
 
       {/* Correct Pitch macro modal */}
       <CorrectPitchModal />

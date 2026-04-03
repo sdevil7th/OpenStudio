@@ -27,7 +27,24 @@
       "Bash(export PATH=\"$PATH:/c/Program Files/NASM\")",
       "Bash(cmake -B build -DCMAKE_BUILD_TYPE=Debug)",
       "WebSearch",
-      "Bash(gh release:*)"
+      "Bash(gh release:*)",
+      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3/resources -type f -name *model* -o -name *.onnx -o -name *.ckpt)",
+      "Bash(find Source -type f \\\\\\( -name \"*.cpp\" -o -name \"*.h\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find \"c:/Users/srvds/Documents/Codes/Studio13-v3/frontend/src\" -type f \\\\\\( -name \"*.tsx\" -o -name \"*.ts\" -o -name \"*.css\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3/Source -type f \\\\\\( -name \"*.cpp\" -o -name \"*.h\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3/frontend/src -type f \\\\\\( -name \"*.ts\" -o -name \"*.tsx\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3 -type f \\\\\\(-name *test* -o -name *spec* -o -name .github -o -name .gitlab-ci* -o -name azure-pipelines* \\\\\\))",
+      "Bash(du -sh /c/Users/srvds/Documents/Codes/Studio13-v3/*)",
+      "Bash(xargs grep:*)",
+      "Bash(for file:*)",
+      "Bash(do echo:*)",
+      "Read(//c/Users/srvds/Documents/Codes/Studio13-v3/**)",
+      "Bash(done)",
+      "Bash(wc -l Source/*.cpp Source/*.h)",
+      "Bash(grep -o \"include.*signalsmith\\\\|include.*ysfx\\\\|include.*lua\\\\|include.*onnx\\\\|include.*clap\" Source/*.h)",
+      "Bash(grep -r \"^[[:space:]]*\\\\/\\\\/\" Source/*.cpp)",
+      "Bash(grep -h \"^[[:space:]]*\\\\/\\\\*\" Source/*.cpp)",
+      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3 -type d -iname *test* -o -type d -iname *spec*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\srvds\\OneDrive\\Documents\\Studio13"

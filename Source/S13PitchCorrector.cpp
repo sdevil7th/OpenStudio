@@ -83,7 +83,8 @@ void S13PitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
     // Apply pitch shift via Signalsmith Stretch (real-time, native stereo)
     stretcher.setTransposeFactor (ratio);
-    stretcher.setFormantFactor (1.0f / ratio); // preserve formants
+    stretcher.setFormantBase (detectedHz > 0.0f ? detectedHz : 0.0f); // help formant estimation
+    stretcher.setFormantFactor (1.0f, true); // preserve formants via library's exact freq map
 
     {
         std::vector<const float*> inPtrs  (static_cast<size_t> (numChannels));

@@ -18,6 +18,7 @@
 #include "DDPExporter.h"
 #include "TriggerEngine.h"
 #include "SessionInterchange.h"
+#include <optional>
 #include "PolyPitchDetector.h"
 #include "PolyResynthesizer.h"
 #include "StemSeparator.h"
@@ -30,6 +31,9 @@ class AudioEngine  : public juce::AudioIODeviceCallback,
                      public ControlSurfaceCallback,
                      public juce::Timer
 {
+    struct RealtimeTrackEntry;
+    struct ActiveFXStage;
+
 public:
     AudioEngine();
     ~AudioEngine() override;
@@ -43,6 +47,22 @@ public:
 
     void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
+
+    // Audio callback helpers (extracted for readability and testability)
+    void updateMasterMetering (const float* const* outputChannelData, int numOutputChannels, int numSamples);
+    void updatePhaseCorrelation (const float* const* outputChannelData, int numOutputChannels, int numSamples);
+    void updateSpectrumAnalyzer (const float* const* outputChannelData, int numOutputChannels, int numSamples);
+    static void buildSidechainProcessingOrder (const std::vector<RealtimeTrackEntry>& rtTracks,
+                                               int processedOrder[], int& orderCount, int maxTracks);
+    void processMasterFXChain (const std::shared_ptr<const ActiveFXStage>& rtMasterFX,
+                               float* const* outputChannelData, int numOutputChannels,
+                               int numSamples, bool useHybrid64Summing);
+    void processMonitoringFXChain (const std::shared_ptr<const ActiveFXStage>& rtMonitoringFX,
+                                   float* const* outputChannelData, int numOutputChannels,
+                                   int numSamples, bool hybrid64PostChainActive);
+    void applyMasterGainPanMono (float* const* outputChannelData, int numOutputChannels,
+                                 int numSamples, double currentSamplePosition,
+                                 bool hybrid64PostChainActive);
 
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
 
@@ -78,7 +98,8 @@ public:
     void setLoopMode(bool loop) { isLooping = loop; }
     bool getLoopMode() const { return isLooping; }
     double getTransportPosition() const { return currentSamplePosition / currentSampleRate; }
-    void setTransportPosition(double seconds) { currentSamplePosition = seconds * currentSampleRate; }
+    void setTransportPosition(double seconds);
+    bool hasAnyActiveARA() const;
     void setTempo(double bpm);
     double getTempo() const { return tempo; }
 
@@ -113,6 +134,7 @@ public:
 
     // Get MIDI clips that were completed in the last recording session
     std::vector<MIDIRecorder::CompletedMIDIRecording> getLastCompletedMIDIClips();
+    juce::var getActiveRecordingMIDIPreviews(const juce::var& requests);
 
     // Called on the message thread when a peak cache file finishes generating.
     // Set by MainComponent to emit a JS "peaksReady" event.
@@ -124,8 +146,10 @@ public:
     // Playback clip management - ID-based
     void addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration,
                          double offset = 0.0, double volumeDB = 0.0, double fadeIn = 0.0, double fadeOut = 0.0,
-                         const juce::String& clipId = juce::String());
-    /** Batch-add multiple clips from a JSON array. Each element: {trackId, filePath, startTime, duration, offset, volumeDB, fadeIn, fadeOut, clipId}. */
+                         const juce::String& clipId = juce::String(),
+                         const juce::String& pitchCorrectionSourceFilePath = juce::String(),
+                         double pitchCorrectionSourceOffset = -1.0);
+    /** Batch-add multiple clips from a JSON array. Each element: {trackId, filePath, startTime, duration, offset, volumeDB, fadeIn, fadeOut, clipId, pitchCorrectionSourceFilePath?, pitchCorrectionSourceOffset?}. */
     void addPlaybackClipsBatch(const juce::String& clipsJSON);
     void removePlaybackClip(const juce::String& trackId, const juce::String& filePath);
     void clearPlaybackClips();
@@ -163,9 +187,12 @@ public:
     void openInstrumentEditor(const juce::String& trackId);
     void closePluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
     void closeAllPluginWindows();
+    void setPluginWindowOwnerComponent(juce::Component* component);
+    void setPluginWindowShortcutForwardCallback(PluginWindowManager::ShortcutForwardCallback callback);
     
     // MIDI Device Management (Phase 2)
     juce::var getMIDIInputDevices();
+    juce::var getMIDIOutputDevices();
     bool openMIDIDevice(const juce::String& deviceName);
     void closeMIDIDevice(const juce::String& deviceName);
     juce::var getOpenMIDIDevices();
@@ -173,7 +200,17 @@ public:
     // Track Type Management (Phase 2) - ID-based
     void setTrackType(const juce::String& trackId, const juce::String& type); // 'audio', 'midi', 'instrument'
     void setTrackMIDIInput(const juce::String& trackId, const juce::String& deviceName, int channel);
+    void setTrackMIDIClips(const juce::String& trackId, const juce::String& clipsJSON);
+    bool sendMidiNote(const juce::String& trackId, int note, int velocity, bool isNoteOn);
     bool loadInstrument(const juce::String& trackId, const juce::String& vstPath);
+    void setProcessingPrecision(const juce::String& precisionMode);
+    juce::String getProcessingPrecision() const;
+    bool setTrackPluginPrecisionOverride(const juce::String& trackId, int fxIndex, bool isInputFX, const juce::String& mode);
+    bool setInstrumentPrecisionOverride(const juce::String& trackId, const juce::String& mode);
+    bool setMasterFXPrecisionOverride(int fxIndex, const juce::String& mode);
+    bool setMonitoringFXPrecisionOverride(int fxIndex, const juce::String& mode);
+    juce::var runReleaseGuardrails();
+    juce::var runAutomatedRegressionSuite();
     
     // Get loaded plugins info - ID-based
     juce::var getTrackInputFX(const juce::String& trackId);
@@ -191,6 +228,7 @@ public:
     juce::var getMasterFX();
     void removeMasterFX(int fxIndex);
     void openMasterFXEditor(int fxIndex);
+    void bypassMasterFX(int fxIndex, bool bypassed);
     bool addMonitoringFX(const juce::String& pluginPath);
     juce::var getMonitoringFX();
     void removeMonitoringFX(int fxIndex);
@@ -205,7 +243,11 @@ public:
 
     // Metering (Phase 4)
     juce::var getMeterLevels(); // Returns array of track RMS levels
+    juce::var getMeterClipStates();
     float getMasterLevel() const; // Returns master output level
+    bool getMasterClipLatched() const;
+    void resetMeterClip(const juce::String& trackId);
+    juce::var getAudioDebugSnapshot() const;
     
     // Plugin State Serialization (F2 - Project Save/Load)
     juce::String getPluginState(const juce::String& trackId, int fxIndex, bool isInputFX);
@@ -379,6 +421,12 @@ public:
     // Spectrum Analyzer (Phase 20.11)
     juce::var getSpectrumData();
 
+    // MIDI diagnostics / plugin capabilities
+    juce::var getMidiDiagnostics() const;
+    juce::var getPluginCapabilities(const juce::String& pluginPath);
+    juce::var getPluginCompatibilityMatrix();
+    juce::var runEngineBenchmarks();
+
     // Built-in FX Oversampling (Phase 20.12)
     bool setBuiltInFXOversampling(const juce::String& trackId, int fxIndex, bool isInputFX, bool enabled);
 
@@ -395,7 +443,13 @@ public:
     // Pitch Corrector bridge methods (graphical mode)
     juce::var analyzePitchContour(const juce::String& trackId, const juce::String& clipId);
     juce::var analyzePitchContourDirect(const juce::String& filePath, double offset, double duration, const juce::String& clipId);
-    juce::var applyPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& notesJson, const juce::var& framesJson = juce::var());
+    juce::var applyPitchCorrection(const juce::String& trackId, const juce::String& clipId,
+                                   const juce::var& notesJson, const juce::var& framesJson = juce::var(),
+                                   float globalFormantSemitones = 0.0f,
+                                   std::optional<double> windowStartSec = std::nullopt,
+                                   std::optional<double> windowEndSec = std::nullopt,
+                                   const juce::String& renderMode = "single",
+                                   std::function<bool()> shouldCancel = {});
     juce::var previewPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& notesJson);
 
     // Polyphonic pitch detection (Phase 6)
@@ -410,16 +464,20 @@ public:
     // Source separation (Phase 8 + Phase 10)
     juce::var separateStems(const juce::String& trackId, const juce::String& clipId);
     bool isStemSeparationAvailable() const;
+    juce::var getAiToolsStatus();
+    juce::var installAiTools();
     juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
     juce::var getStemSeparationProgress();
     void cancelStemSeparation();
+    void cancelAiToolsInstall();
 
     // ARA Plugin Hosting (Phase 9)
     juce::var initializeARAForTrack(const juce::String& trackId, int fxIndex);
     juce::var addARAClip(const juce::String& trackId, const juce::String& clipId);
     juce::var removeARAClip(const juce::String& trackId, const juce::String& clipId);
-    juce::var getARAPlugins();
+    juce::var getARAStatusForTrack(const juce::String& trackId) const;
     juce::var shutdownARAForTrack(const juce::String& trackId);
+    bool isARAActiveForTrack(const juce::String& trackId) const;
 
     // ControlSurfaceCallback overrides
     void onControlSurfaceTrackVolume(const juce::String& trackId, float value01) override;
@@ -441,6 +499,86 @@ public:
     juce::Optional<juce::AudioPlayHead::PositionInfo> getPosition() const override;
 
 private:
+    struct RealtimeTrackEntry
+    {
+        juce::String id;
+        juce::AudioProcessorGraph::Node::Ptr node;
+        std::shared_ptr<juce::AudioBuffer<float>> sidechainOutputBuffer;
+        std::shared_ptr<juce::AudioBuffer<float>> sendAccumBuffer;
+        std::vector<juce::String> sidechainSourceIds;
+        std::vector<TrackProcessor::RealtimeSendInfo> sends;
+    };
+
+    struct DesiredFXStageSlot
+    {
+        int slotId = 0;
+        juce::String name;
+        juce::String type;
+        juce::String pluginPath;
+        juce::String pluginFormat;
+        juce::String serializedState;
+        bool bypassed = false;
+        bool forceFloat = false;
+    };
+
+    struct DesiredFXStageSpec
+    {
+        std::vector<DesiredFXStageSlot> slots;
+    };
+
+    struct ActiveFXStageSlot
+    {
+        int slotId = 0;
+        juce::String name;
+        juce::String type;
+        juce::String pluginPath;
+        juce::String pluginFormat;
+        bool bypassed = false;
+        bool forceFloat = false;
+        bool supportsDouble = false;
+        std::shared_ptr<juce::AudioProcessor> processor;
+    };
+
+    struct ActiveFXStage
+    {
+        uint64 generation = 0;
+        double sampleRate = 0.0;
+        int preparedBlockSize = 0;
+        ProcessingPrecisionMode precisionMode = ProcessingPrecisionMode::Float32;
+        std::vector<ActiveFXStageSlot> slots;
+    };
+
+    using RealtimeTrackSnapshot = std::vector<RealtimeTrackEntry>;
+
+    juce::MidiBuffer buildTrackMidiBlock(const juce::String& trackId, double blockStartTimeSeconds,
+                                         int numSamples, double sampleRate, bool playing);
+    void queueAllNotesOffForTrack(TrackProcessor& track);
+    void queueAllNotesOffForAllTracks();
+    void applyProcessingPrecisionToTrack(TrackProcessor& track);
+    void rebuildRealtimeProcessingSnapshots();
+    std::unique_ptr<juce::AudioProcessor> createProcessorForStageSlot(const DesiredFXStageSlot& slot,
+                                                                      double sampleRate,
+                                                                      int preparedBlockSize,
+                                                                      ProcessingPrecisionMode precisionMode,
+                                                                      juce::String& errorMessage);
+    std::shared_ptr<ActiveFXStage> buildActiveFXStage(const DesiredFXStageSpec& spec,
+                                                      double sampleRate,
+                                                      int preparedBlockSize,
+                                                      ProcessingPrecisionMode precisionMode,
+                                                      bool monitoringStage,
+                                                      juce::String& errorMessage);
+    bool publishMasterStageSpec(const DesiredFXStageSpec& spec);
+    bool publishMonitoringStageSpec(const DesiredFXStageSpec& spec);
+    void syncStageSpecStateFromActive(DesiredFXStageSpec& spec, const std::shared_ptr<const ActiveFXStage>& activeStage);
+    void rebindStageEditors(const std::shared_ptr<const ActiveFXStage>& oldStage,
+                            const std::shared_ptr<const ActiveFXStage>& newStage,
+                            bool monitoringStage);
+    juce::String serialiseProcessorStateToBase64(juce::AudioProcessor* processor) const;
+    bool applyBase64StateToProcessor(juce::AudioProcessor* processor, const juce::String& base64State) const;
+    ActiveFXStageSlot* findActiveStageSlot(std::shared_ptr<ActiveFXStage>& stage, int slotId);
+    const ActiveFXStageSlot* findActiveStageSlot(const std::shared_ptr<const ActiveFXStage>& stage, int slotId) const;
+    const DesiredFXStageSlot* findDesiredStageSlot(const DesiredFXStageSpec& spec, int index) const;
+    DesiredFXStageSlot* findDesiredStageSlot(DesiredFXStageSpec& spec, int index);
     // Set this AudioEngine as the AudioPlayHead on all plugins in a track
     void propagatePlayHead(TrackProcessor* track);
     // FFmpeg helpers for lossy encoding and sample rate conversion
@@ -463,7 +601,9 @@ private:
     
     // Track storage - ID-based system
     std::map<juce::String, TrackProcessor*> trackMap;  // ID -> Track
+    std::map<juce::String, juce::AudioProcessorGraph::Node::Ptr> trackNodeMap;  // ID -> graph node
     std::vector<juce::String> trackOrder;  // Ordered list of track IDs for display/processing
+    std::shared_ptr<const RealtimeTrackSnapshot> realtimeTrackSnapshot;
     
     // Audio Recorder (Phase 2)
     AudioRecorder audioRecorder;
@@ -479,6 +619,10 @@ private:
     double currentSampleRate = 44100.0;
     int currentBlockSize = 512;  // Device buffer size for re-preparing plugins after render
     int inputLatencySamples = 0;  // Device input latency for recording compensation
+    std::atomic<double> lastAudioBlockWallTimeMs { 0.0 };
+    std::atomic<double> lastAudioBlockDurationMs { 0.0 };
+    std::atomic<uint64> audioCallbackCounter { 0 };
+    std::atomic<bool> firstCallbackAfterTransportStartPending { false };
     std::atomic<bool> pendingRecordStartCapture { false };  // Audio thread captures start time
     double tempo = 120.0;  // BPM (global default / fallback)
     int timeSigNumerator = 4;
@@ -512,15 +656,37 @@ private:
     
     // MIDI Management (Phase 2)
     std::unique_ptr<MIDIManager> midiManager;
+    std::atomic<int> midiLateEventCount { 0 };
+    std::atomic<int> midiMaxEventsPerBlock { 0 };
+    std::atomic<int> midiLastComputedSampleOffset { 0 };
+    ProcessingPrecisionMode processingPrecisionMode { ProcessingPrecisionMode::Float32 };
     
     // Master FX (Phase 5)
-    std::unique_ptr<juce::AudioProcessorGraph> masterFXChain;
-    std::unique_ptr<juce::AudioProcessorGraph> monitoringFXChain;  // Output-only, not in bounce
-    std::vector<juce::AudioProcessorGraph::Node::Ptr> masterFXNodes;
-    std::vector<juce::AudioProcessorGraph::Node::Ptr> monitoringFXNodes;
+    DesiredFXStageSpec desiredMasterStageSpec;
+    DesiredFXStageSpec desiredMonitoringStageSpec;
+    std::shared_ptr<const ActiveFXStage> realtimeMasterFXSnapshot;
+    std::shared_ptr<const ActiveFXStage> realtimeMonitoringFXSnapshot;
+    int nextMasterStageSlotId = 1;
+    int nextMonitoringStageSlotId = 1;
+    std::atomic<uint64> masterStageGeneration { 0 };
+    std::atomic<uint64> monitoringStageGeneration { 0 };
+    std::atomic<int> masterStageBuildFailureCount { 0 };
+    std::atomic<int> monitoringStageBuildFailureCount { 0 };
+    std::atomic<double> masterStageLastBuildMs { 0.0 };
+    std::atomic<double> monitoringStageLastBuildMs { 0.0 };
     float masterVolume = 1.0f;
     float masterPan = 0.0f;
     std::atomic<float> masterOutputLevel { 0.0f }; // Peak level of master output
+    std::atomic<float> lastPostTrackPlaybackPeak { 0.0f };
+    std::atomic<float> lastPostMonitoringInputPeak { 0.0f };
+    std::atomic<float> lastPostMasterFXPeak { 0.0f };
+    std::atomic<float> lastPostMonitoringFXPeak { 0.0f };
+    std::atomic<float> lastFinalOutputPeak { 0.0f };
+    std::atomic<int> lastActiveOutputChannels { 0 };
+    std::atomic<int> lastCallbackInputChannels { 0 };
+    std::atomic<int> lastCallbackOutputChannels { 0 };
+    std::atomic<int> lastReturnedRecordingClipCount { 0 };
+    std::atomic<uint64> lastAudioCallbackCounter { 0 };
 
     // REAPER-style master peak meter decimation — matches the 10Hz metering timer.
     // At 32-sample ASIO blocks (1378 callbacks/sec), updating every 4096 samples
@@ -528,11 +694,12 @@ private:
     static constexpr int MASTER_METER_UPDATE_SAMPLES = 4096;
     int   masterMeterSampleCount { 0 };
     float masterMeterPeakAccum   { 0.0f };
+    std::atomic<bool> masterClipLatched { false };
 
     // Cached master pan gains — recalculated only when pan changes (avoids
     // cos/sin every audio callback, ~94 trig calls/sec at 48kHz/512)
-    std::atomic<float> cachedMasterPanL { 0.707107f };  // cos(pi/4)
-    std::atomic<float> cachedMasterPanR { 0.707107f };  // sin(pi/4)
+    std::atomic<float> cachedMasterPanL { 1.0f };
+    std::atomic<float> cachedMasterPanR { 1.0f };
 
     // Master automation (volume/pan curves)
     AutomationList masterVolumeAutomation;
@@ -568,19 +735,26 @@ private:
     // Pre-allocated buffers — avoids heap allocs on the audio thread
     juce::AudioBuffer<float> reusableTrackBuffer;
     juce::AudioBuffer<float> reusableMasterBuffer;
+    juce::AudioBuffer<double> reusableMasterBufferDouble;
+    juce::AudioBuffer<float> masterFXFallbackBuffer;
+    juce::AudioBuffer<float> monitoringFXFallbackBuffer;
+    std::atomic<int> masterFXFallbackReuseCount { 0 };
+    std::atomic<int> monitoringFXFallbackReuseCount { 0 };
+    std::atomic<int> masterFXBusySkipCount { 0 };
+    std::atomic<int> monitoringFXBusySkipCount { 0 };
 
     // Sidechain routing (Phase 4.4)
     // Stores per-track output buffers after processing, so downstream tracks
     // can use them as sidechain input.  Key = trackId.  Buffers are pre-allocated
     // in audioDeviceAboutToStart and reused every callback.
-    std::map<juce::String, juce::AudioBuffer<float>> sidechainOutputBuffers;
+    std::map<juce::String, std::shared_ptr<juce::AudioBuffer<float>>> sidechainOutputBuffers;
 
     // Send accumulation buffers — each track has a buffer where incoming sends are mixed.
     // Pre-allocated in audioDeviceAboutToStart and reused every callback.
-    std::map<juce::String, juce::AudioBuffer<float>> sendAccumBuffers;
+    std::map<juce::String, std::shared_ptr<juce::AudioBuffer<float>>> sendAccumBuffers;
 
     // Current pan law (applied to all tracks)
-    PanLaw currentPanLaw { PanLaw::ConstantPower };
+    PanLaw currentPanLaw { PanLaw::Linear };
 
     // Cached solo state — avoids scanning all tracks every callback
     std::atomic<bool> cachedAnySoloed { false };

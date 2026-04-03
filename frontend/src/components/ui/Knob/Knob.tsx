@@ -150,6 +150,19 @@ export function Knob({
     [isDragging, onCommitEdit],
   );
 
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (disabled) return;
+      if (defaultValue === undefined) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onBeginEdit?.();
+      onChange(defaultValue);
+      onCommitEdit?.();
+    },
+    [defaultValue, disabled, onBeginEdit, onChange, onCommitEdit],
+  );
+
   // Indicator endpoints
   const indicatorInner = angleToPoint(currentAngle, indicatorInnerR, cx, cy);
   const indicatorOuter = angleToPoint(currentAngle, indicatorOuterR, cx, cy);
@@ -172,6 +185,7 @@ export function Knob({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onDoubleClick={handleDoubleClick}
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => {
         if (!isDragging) setIsHovered(false);

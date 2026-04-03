@@ -68,7 +68,9 @@ export function VirtualPianoKeyboard() {
   const getMidiTrack = useCallback(() => {
     if (selectedTrackIds.length === 0) return null;
     const track = tracks.find(
-      (t) => selectedTrackIds.includes(t.id) && t.type === "midi"
+      (t) =>
+        selectedTrackIds.includes(t.id) &&
+        (t.type === "midi" || t.type === "instrument")
     );
     return track || null;
   }, [tracks, selectedTrackIds]);
@@ -77,7 +79,7 @@ export function VirtualPianoKeyboard() {
     async (note: number) => {
       const track = getMidiTrack();
       if (!track) {
-        console.warn("No MIDI track selected for virtual keyboard");
+        console.warn("No MIDI or instrument track selected for virtual keyboard");
         return;
       }
 

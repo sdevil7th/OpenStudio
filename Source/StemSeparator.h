@@ -20,8 +20,32 @@ public:
     StemSeparator();
     ~StemSeparator();
 
+    struct AiToolsStatus
+    {
+        juce::String state { "idle" };
+        float progress = 0.0f;
+        bool available = false;
+        bool pythonDetected = false;
+        bool scriptAvailable = false;
+        bool runtimeInstalled = false;
+        bool modelInstalled = false;
+        bool installInProgress = false;
+        juce::String message;
+        juce::String error;
+        juce::String helpUrl;
+    };
+
     /** Check if Python environment and audio-separator are available. */
     bool isAvailable() const;
+
+    /** Return a detailed AI tools status object for the UI. */
+    juce::var getAiToolsStatus();
+
+    /** Start installing the optional AI tools into the user's app-data directory. */
+    juce::var installAiTools();
+
+    /** Cancel a running AI tools installation. */
+    void cancelAiToolsInstall();
 
     /** All supported stem names. */
     static juce::StringArray getAllStemNames()
@@ -68,21 +92,57 @@ public:
                                    const juce::String& errorMsg = {});
 
 private:
+    /** Get the OpenStudio app-data root directory. */
+    juce::File getUserDataRoot() const;
+
+    /** Get the preferred stem-runtime root directory under user app-data. */
+    juce::File getUserRuntimeRoot() const;
+
+    /** Get the preferred models directory under user app-data. */
+    juce::File getUserModelsDir() const;
+
     /** Find the Python executable (bundled or system). */
     juce::File findPython() const;
+
+    /** Find a user-managed Python interpreter suitable for bootstrapping installs. */
+    juce::File findSystemPython() const;
 
     /** Find the stem_separator.py script. */
     juce::File findScript() const;
 
+    /** Find the AI tools installer helper script. */
+    juce::File findInstallerScript() const;
+
     /** Find the models directory. */
     juce::File findModelsDir() const;
+
+    /** Return true if the given Python can import audio_separator. */
+    bool canImportAudioSeparator (const juce::File& python) const;
+
+    /** Return true if the preferred stem model is available. */
+    bool hasRequiredModel (const juce::File& modelsDir) const;
+
+    /** Poll a running AI tools install and refresh the cached status. */
+    void pollInstallProgress();
+
+    /** Build the current AI tools status object. */
+    AiToolsStatus buildAiToolsStatus() const;
 
     /** Parse a JSON line from the child process stdout. */
     SeparationProgress parseJsonLine (const juce::String& line) const;
 
+    /** Parse a JSON line from the installer child process stdout. */
+    AiToolsStatus parseInstallJsonLine (const juce::String& line) const;
+
+    /** Serialize AI tools status to juce::var for the native bridge. */
+    static juce::var aiToolsStatusToVar (const AiToolsStatus& status);
+
     std::unique_ptr<juce::ChildProcess> childProcess;
+    std::unique_ptr<juce::ChildProcess> installProcess;
     juce::String outputBuffer;  // Accumulated stdout from child
+    juce::String installOutputBuffer;
     SeparationProgress lastProgress;
+    mutable AiToolsStatus lastAiToolsStatus;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StemSeparator)
 };

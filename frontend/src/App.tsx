@@ -1,11 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState, Suspense } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
 import { X } from "lucide-react";
-import { nativeBridge } from "./services/NativeBridge";
-import { useDAWStore, getEffectiveTrackHeight } from "./store/useDAWStore";
-import { getRegisteredActions } from "./store/actionRegistry";
+import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
+import { getGlobalShortcutConflicts } from "./store/actionRegistry";
+import {
+  useDAWStore,
+  getEffectiveTrackHeight,
+  BOTTOM_INTERACTION_BUFFER,
+  DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT,
+  getMasterTrackHeaderHeight,
+} from "./store/useDAWStore";
+import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
+import {
+  publishCurrentMixerUISnapshot,
+  startMixerUISync,
+} from "./utils/mixerWindowSync";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
+import { TimelineRuler } from "./components/TimelineRuler";
 import { MixerPanel } from "./components/MixerPanel";
 import { MainToolbar } from "./components/MainToolbar";
 import { TransportBar as BottomTransportBar } from "./components/TransportBar";
@@ -14,6 +26,14 @@ import { MasterTrackHeader } from "./components/MasterTrackHeader";
 import { ProjectTabBar } from "./components/ProjectTabBar";
 import { CustomToolbarStrip } from "./components/ToolbarEditor";
 import { SortableTrackHeader } from "./components/SortableTrackHeader";
+import { AddMultipleTracksModal } from "./components/AddMultipleTracksModal";
+import { ContextMenu, type MenuItem } from "./components/ContextMenu";
+import { EssentialControlsCard } from "./components/EssentialControlsCard";
+import {
+  createMultipleTracks,
+  createTrackOfType,
+  type InsertableTrackType,
+} from "./utils/trackCreation";
 
 const SettingsModal = React.lazy(() => import("./components/SettingsModal").then(m => ({ default: m.SettingsModal })));
 const ProjectSettingsModal = React.lazy(() => import("./components/ProjectSettingsModal").then(m => ({ default: m.ProjectSettingsModal })));
@@ -72,6 +92,7 @@ function App() {
     addTrack,
     showMixer,
     showMasterTrackInTCP,
+    toggleMasterTrackInTCP,
     toggleMixer,
     showSettings,
     showProjectSettings,
@@ -123,8 +144,6 @@ function App() {
     tcpWidth,
     setTcpWidth,
     detachedPanels,
-    detachPanel,
-    attachPanel,
     showClipLauncher,
     showTimecodeSettings,
     showContextualHelp,
@@ -140,6 +159,7 @@ function App() {
       addTrack: state.addTrack,
       showMixer: state.showMixer,
       showMasterTrackInTCP: state.showMasterTrackInTCP,
+      toggleMasterTrackInTCP: state.toggleMasterTrackInTCP,
       toggleMixer: state.toggleMixer,
       showSettings: state.showSettings,
       showProjectSettings: state.showProjectSettings,
@@ -191,8 +211,6 @@ function App() {
       tcpWidth: state.tcpWidth,
       setTcpWidth: state.setTcpWidth,
       detachedPanels: state.detachedPanels,
-      detachPanel: state.detachPanel,
-      attachPanel: state.attachPanel,
       showClipLauncher: state.showClipLauncher,
       showTimecodeSettings: state.showTimecodeSettings,
       showContextualHelp: state.showContextualHelp,
@@ -230,6 +248,8 @@ function App() {
   // OS file drag-drop visual indicator
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const dragCounterRef = useRef(0);
+  const hideMixerOnCloseRef = useRef(false);
+  const isMixerDetached = detachedPanels.includes("mixer");
 
   // Project loading state (separate selector to avoid unnecessary re-renders)
   const isProjectLoading = useDAWStore((state) => state.isProjectLoading);
@@ -242,6 +262,84 @@ function App() {
 
   // Subscribe only to isPlaying to avoid re-rendering App on every time update
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
+
+  useEffect(() => startMixerUISync(), []);
+
+  useEffect(() => {
+    const unsubscribe = nativeBridge.subscribe("mixerWindowClosed", (data) => {
+      const bounds = data?.bounds;
+      const shouldHideMixer = hideMixerOnCloseRef.current;
+      hideMixerOnCloseRef.current = false;
+
+      useDAWStore.setState((state) => ({
+        showMixer: shouldHideMixer ? false : true,
+        detachedPanels: state.detachedPanels.filter((id) => id !== "mixer"),
+        panelPositions: {
+          ...state.panelPositions,
+          mixer: bounds
+            ? {
+                ...state.panelPositions.mixer,
+                x: typeof bounds.x === "number" ? bounds.x : state.panelPositions.mixer.x,
+                y: typeof bounds.y === "number" ? bounds.y : state.panelPositions.mixer.y,
+                width:
+                  typeof bounds.width === "number"
+                    ? bounds.width
+                    : state.panelPositions.mixer.width,
+                height:
+                  typeof bounds.height === "number"
+                    ? bounds.height
+                    : state.panelPositions.mixer.height,
+                visible: !shouldHideMixer,
+              }
+            : state.panelPositions.mixer,
+        },
+      }));
+    });
+
+    return unsubscribe;
+  }, []);
+
+  const handleDetachMixer = useCallback(async () => {
+    const state = useDAWStore.getState();
+    const mixerBounds = state.panelPositions.mixer;
+
+    await publishCurrentMixerUISnapshot();
+    const opened = await nativeBridge.openMixerWindow({
+      x: mixerBounds.x,
+      y: mixerBounds.y,
+      width: mixerBounds.width,
+      height: mixerBounds.height,
+    });
+
+    if (!opened) {
+      state.showToast("Unable to open the detached mixer window.", "error");
+      return;
+    }
+
+    useDAWStore.setState((current) => ({
+      showMixer: true,
+      detachedPanels: current.detachedPanels.includes("mixer")
+        ? current.detachedPanels
+        : [...current.detachedPanels, "mixer"],
+      panelPositions: {
+        ...current.panelPositions,
+        mixer: {
+          ...current.panelPositions.mixer,
+          visible: true,
+        },
+      },
+    }));
+  }, []);
+
+  const handleToggleMixerVisibility = useCallback(async () => {
+    if (isMixerDetached) {
+      hideMixerOnCloseRef.current = true;
+      await nativeBridge.closeMixerWindow();
+      return;
+    }
+
+    toggleMixer();
+  }, [isMixerDetached, toggleMixer]);
 
   // Accessibility: UI font scale — apply to root element
   const uiFontScale = useDAWStore((state) => state.uiFontScale);
@@ -270,6 +368,12 @@ function App() {
         // Loop: wrap back to loopStart when reaching loopEnd
         const { loopEnabled, loopStart, loopEnd } = currentState.transport;
         if (loopEnabled && loopEnd > loopStart && newTime >= loopEnd) {
+          console.log("[App] Playback loop wrap", {
+            currentTime: currentState.transport.currentTime,
+            newTime,
+            loopStart,
+            loopEnd,
+          });
           newTime = loopStart + (newTime - loopEnd);
           // Sync backend position on loop wrap
           nativeBridge.setTransportPosition(newTime);
@@ -283,18 +387,10 @@ function App() {
           currentState.updateAutomatedValues();
         }
 
-        // Auto-scroll during playback (Sprint 18.7)
-        const autoScroll = currentState.autoScrollDuringPlayback;
-        if (autoScroll) {
-          const { pixelsPerSecond, scrollX, scrollY } = currentState;
-          const viewportWidth = workspaceRef.current?.clientWidth ?? 800;
-          const playheadX = newTime * pixelsPerSecond - scrollX;
-          // When playhead passes 80% of viewport, snap scroll so playhead is at 30%
-          if (playheadX > viewportWidth * 0.8) {
-            const newScrollX = newTime * pixelsPerSecond - viewportWidth * 0.3;
-            currentState.setScroll(Math.max(0, newScrollX), scrollY);
-          }
-        }
+        // Auto-scroll is handled by Timeline.tsx's subscription-based scroll
+        // (scheduleScroll + RAF batching). Do NOT also scroll here — dual
+        // auto-scroll causes conflicting setScroll calls every frame, which
+        // is the primary source of playback jank.
       }
 
       frameId = requestAnimationFrame(loop);
@@ -312,11 +408,26 @@ function App() {
   useEffect(() => {
     const unsub = nativeBridge.onTransportUpdate((data) => {
       const state = useDAWStore.getState();
-      if (!state.transport.isPlaying) return;
-
       const backendPos = data.position;
       const frontendPos = state.transport.currentTime;
       const drift = Math.abs(backendPos - frontendPos);
+      const backendPlaying = !!data.isPlaying;
+      const frontendPlaying = state.transport.isPlaying;
+
+      if (backendPlaying !== frontendPlaying) {
+        useDAWStore.setState((current) => ({
+          transport: {
+            ...current.transport,
+            isPlaying: backendPlaying,
+            isPaused: false,
+            isRecording: backendPlaying ? current.transport.isRecording : false,
+            currentTime: backendPos,
+          },
+        }));
+        return;
+      }
+
+      if (!frontendPlaying) return;
 
       // Only correct if drift exceeds 30ms — avoids jitter from minor timing differences
       if (drift > 0.03) {
@@ -387,421 +498,87 @@ function App() {
     return () => clearInterval(timerId);
   }, [autoSaveEnabled, autoSaveIntervalMinutes]);
 
-  const syncedRef = useRef(false);
-
-  // Sync frontend state to backend when tracks are loaded.
-  // Uses the correct track ID so C++ trackMap and Zustand stay in sync.
-  // Tracks are not persisted to localStorage so this only fires when the store
-  // first becomes non-empty (e.g. loadProject restores tracks from a file).
-  useEffect(() => {
-    if (syncedRef.current) return;
-    if (tracks.length === 0) return; // Wait for tracks
-
-    syncedRef.current = true;
-
-    const syncBackend = async () => {
-      console.log("[App] Syncing", tracks.length, "track(s) to C++ backend");
-      for (const track of tracks) {
-        try {
-          // Pass the explicit track ID so C++ trackMap uses the same UUID as Zustand.
-          // Without the ID, C++ generates a fresh UUID → arm/record calls are silently ignored.
-          await nativeBridge.addTrack(track.id);
-          if (track.armed)   await nativeBridge.setTrackRecordArm(track.id, true);
-          if (track.muted)   await nativeBridge.setTrackMute(track.id, true);
-          if (track.soloed)  await nativeBridge.setTrackSolo(track.id, true);
-        } catch (e) {
-          console.error("[App] Failed to sync track to backend:", e);
-        }
-      }
-    };
-
-    setTimeout(syncBackend, 500);
-  }, [tracks]); // Run when tracks available
-
   // Event-based metering — single batched store update for all tracks + master
   useEffect(() => {
     nativeBridge.onMeterUpdate((data) => {
       const trackLevels: Record<string, number> = data.trackLevels && typeof data.trackLevels === "object" && !Array.isArray(data.trackLevels)
         ? data.trackLevels
         : {};
+      const trackClipping: Record<string, boolean> = data.trackClipping && typeof data.trackClipping === "object" && !Array.isArray(data.trackClipping)
+        ? data.trackClipping
+        : {};
       const masterLevel = typeof data.masterLevel === "number" ? data.masterLevel : 0;
-      batchUpdateMeterLevels(trackLevels, masterLevel);
+      const masterClipping = data.masterClipping === true;
+      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping);
     });
   }, [batchUpdateMeterLevels]);
 
+  useEffect(() => {
+    const conflicts = getGlobalShortcutConflicts();
+    if (conflicts.length > 0) {
+      console.warn("[shortcuts] conflicting global shortcuts detected", conflicts);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const openLaunchProject = async () => {
+      const pendingProjectPath = await nativeBridge.consumePendingLaunchProjectPath();
+      if (!pendingProjectPath || cancelled) return;
+
+      const lowerPath = pendingProjectPath.toLowerCase();
+      if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) return;
+
+      try {
+        const success = await useDAWStore.getState().loadProject(pendingProjectPath);
+        if (!success) {
+          console.error("[App] Failed to open launch project:", pendingProjectPath);
+        }
+      } catch (error) {
+        console.error("[App] Failed to consume launch project path:", error);
+      }
+    };
+
+    void openLaunchProject();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Global keyboard shortcuts
   useEffect(() => {
-    const handleKeyUp = (_e: KeyboardEvent) => {
-      // Spacebar moved to handleKeyDown to prevent native scroll-down
-    };
-
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target.isContentEditable
-      ) {
-        return;
-      }
-
-      // Ignore key repeat for all shortcuts (prevents duplicate file dialogs, etc.)
-      if (e.repeat) return;
-
-      // --- Custom Shortcut Override Layer ---
-      // Convert the KeyboardEvent to a shortcut string and check if any
-      // custom shortcut binding matches. If so, execute the action from
-      // the registry and return, bypassing all hardcoded shortcuts below.
-      {
-        const parts: string[] = [];
-        if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
-        if (e.shiftKey) parts.push("Shift");
-        if (e.altKey) parts.push("Alt");
-        let key = e.key;
-        if (!["Control", "Shift", "Alt", "Meta"].includes(key)) {
-          if (key === " ") key = "Space";
-          else if (key === "ArrowLeft") key = "Left";
-          else if (key === "ArrowRight") key = "Right";
-          else if (key === "ArrowUp") key = "Up";
-          else if (key === "ArrowDown") key = "Down";
-          else if (key === "Escape") key = "Esc";
-          else if (key.length === 1) key = key.toUpperCase();
-          parts.push(key);
-          const pressed = parts.join("+");
-          const customShortcuts = useDAWStore.getState().customShortcuts;
-          // Find an action whose custom shortcut matches the pressed combo
-          for (const [actionId, shortcut] of Object.entries(customShortcuts)) {
-            if (shortcut === pressed) {
-              const actions = getRegisteredActions();
-              const action = actions.find((a) => a.id === actionId);
-              if (action) {
-                e.preventDefault();
-                action.execute();
-                return;
-              }
-            }
-          }
-        }
-      }
-
-      // Spacebar: Toggle play/stop (must be in keydown to prevent native page scroll)
-      if (e.key === " " || e.code === "Space") {
-        e.preventDefault();
-        const state = useDAWStore.getState();
-        if (state.transport.isRecording) {
-          state.stop();
-        } else if (state.transport.isPlaying) {
-          state.stop();
-        } else {
-          state.play();
-        }
-        return;
-      }
-
-      // Ctrl+R: Record toggle
-      if (e.key === "r" && e.ctrlKey) {
-        e.preventDefault();
-        const state = useDAWStore.getState();
-        if (state.transport.isRecording) {
-          state.stop();
-        } else if (state.tracks.some(t => t.armed)) {
-          state.record();
-        }
-      }
-
-      // Delete: Delete selected tracks first, then clips
-      if (e.key === "Delete") {
-        const state = useDAWStore.getState();
-        if (state.selectedTrackIds.length > 0) {
-          // Delete selected tracks
-          state.deleteSelectedTracks();
-        } else if (state.selectedClipIds.length > 0) {
-          state.selectedClipIds.forEach((id) => state.deleteClip(id));
-        }
-      }
-
-      // Arrow Left/Right: Nudge selected clips (Ctrl = fine nudge)
-      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.shiftKey && !e.altKey) {
-        const state = useDAWStore.getState();
-        if (state.selectedClipIds.length > 0) {
-          e.preventDefault();
-          state.nudgeClips(e.key === "ArrowRight" ? "right" : "left", e.ctrlKey);
-        }
-      }
-
-      // Ctrl+Shift+A: Select all clips
-      if (e.key === "a" && e.ctrlKey && e.shiftKey) {
-        e.preventDefault();
-        useDAWStore.getState().selectAllClips();
-        return; // Don't fall through to Ctrl+A
-      }
-
-      // Ctrl+A: Select all tracks
-      if (e.key === "a" && e.ctrlKey) {
-        e.preventDefault();
-        const state = useDAWStore.getState();
-        state.selectAllTracks();
-      }
-
-      // Ctrl+C: Copy selected clips
-      if (e.key === "c" && e.ctrlKey) {
-        const state = useDAWStore.getState();
-        if (state.selectedClipIds.length > 0) {
-          e.preventDefault();
-          state.copySelectedClips();
-        }
-      }
-
-      // Ctrl+X: Cut selected clips
-      if (e.key === "x" && e.ctrlKey) {
-        const state = useDAWStore.getState();
-        if (state.selectedClipIds.length > 0) {
-          e.preventDefault();
-          state.cutSelectedClips();
-        }
-      }
-
-      // Ctrl+D: Duplicate selected clips
-      if (e.key === "d" && e.ctrlKey) {
-        const state = useDAWStore.getState();
-        if (state.selectedClipIds.length > 0) {
-          e.preventDefault();
-          state.selectedClipIds.forEach((id) => state.duplicateClip(id));
-        }
-      }
-
-      // Ctrl+Z: Undo
-      if (e.key === "z" && e.ctrlKey && !e.shiftKey) {
-        e.preventDefault();
-        useDAWStore.getState().undo();
-      }
-
-      // Ctrl+Shift+Z: Redo
-      if (e.key === "z" && e.ctrlKey && e.shiftKey) {
-        e.preventDefault();
-        useDAWStore.getState().redo();
-      }
-
-      // U: Toggle mute on selected clips
-      if (e.key === "u" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        const state = useDAWStore.getState();
-        if (state.selectedClipIds.length > 0) {
-          state.selectedClipIds.forEach((id) => state.toggleClipMute(id));
-        }
-      }
-
-      // Ctrl+Shift+S: Save As
-      if (e.key === "S" && e.ctrlKey && e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().saveProject(true);
-        return;
-      }
-
-      // Ctrl+S: Save Project
-      if (e.key === "s" && e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().saveProject();
-        return;
-      }
-
-      // S: Split clips at cursor
-      if (e.key === "s" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().splitClipAtPlayhead();
-      }
-
-      // T: Tap Tempo
-      if (e.key === "t" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().tapTempo();
-      }
-
-      // M: Add Marker at Playhead
-      if (e.key === "m" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        const { addMarker, transport } = useDAWStore.getState();
-        addMarker(transport.currentTime);
-      }
-
-      // Shift+M: Add Marker with name
-      if (e.key === "M" && e.shiftKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        const { addMarker, transport } = useDAWStore.getState();
-        const name = prompt("Enter marker name:");
-        if (name !== null) {
-          addMarker(transport.currentTime, name);
-        }
-      }
-
-      // Shift+R: Create Region from selection
-      if (e.key === "R" && e.shiftKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        const { addRegion, timeSelection } = useDAWStore.getState();
-        if (timeSelection) {
-          addRegion(timeSelection.start, timeSelection.end);
-        }
-      }
-
-      // L: Toggle Loop
-      if (e.key === "l" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().toggleLoop();
-      }
-
-      // Ctrl+L: Set Loop to Selection
-      if (e.key === "l" && e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        const { setLoopToSelection, timeSelection } = useDAWStore.getState();
-        if (timeSelection) {
-          setLoopToSelection();
-        }
-      }
-
-      // P: Edit Pitch (toggle pitch editor for selected audio clip)
-      if (e.key === "p" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        const state = useDAWStore.getState();
-        const clipId = state.selectedClipIds[0];
-        if (clipId) {
-          const track = state.tracks.find((t: any) => t.clips.some((c: any) => c.id === clipId));
-          if (track) {
-            if (track.type !== "midi") {
-              e.preventDefault();
-              if (state.showPitchEditor && state.pitchEditorClipId === clipId) {
-                state.closePitchEditor();
-              } else {
-                state.openPitchEditor(track.id, clipId, -1);
-              }
-            }
-          }
-        }
-      }
-
-      // Ctrl+Shift+P: Command Palette
-      if (e.key === "P" && e.ctrlKey && e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().toggleCommandPalette();
-      }
-
-      // Ctrl+Alt+Z: Toggle Undo History Panel
-      if (e.key === "z" && e.ctrlKey && e.altKey && !e.shiftKey) {
-        e.preventDefault();
-        useDAWStore.getState().toggleUndoHistory();
-      }
-
-      // Alt+Enter: Open Project Settings
-      if (e.key === "Enter" && e.altKey && !e.ctrlKey && !e.shiftKey) {
-        e.preventDefault();
-        useDAWStore.getState().openProjectSettings();
-      }
-
-      // Alt+B: Toggle Virtual MIDI Keyboard
-      if (e.key === "b" && e.altKey && !e.ctrlKey && !e.shiftKey) {
-        e.preventDefault();
-        useDAWStore.getState().toggleVirtualKeyboard();
-      }
-
-      // Ctrl+,: Open Preferences
-      if (e.key === "," && e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().togglePreferences();
-      }
-
-      // F1: Toggle Contextual Help Overlay
-      if (e.key === "F1" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().toggleContextualHelp();
-      }
-
-      // F2: Toggle Clip Properties Panel
-      if (e.key === "F2" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        useDAWStore.getState().toggleClipProperties();
-      }
-
-      // Ctrl+O: Open Project
-      if (e.key === "o" && e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        void useDAWStore.getState().loadProject();
-        return;
-      }
-
-      // Ctrl+Shift+O: Open Project (Safe Mode)
-      if (e.key === "O" && e.ctrlKey && e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        void useDAWStore.getState().loadProject(undefined, { bypassFX: true });
-      }
-
-      // Ctrl+N: New Project
-      if (e.key === "n" && e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        void useDAWStore.getState().newProject();
-        return;
-      }
-
-      // Ctrl+Shift+1-3: Save Screensets
-      if (e.ctrlKey && e.shiftKey && !e.altKey && ["1", "2", "3"].includes(e.key)) {
-        e.preventDefault();
-        useDAWStore.getState().saveScreenset(Number.parseInt(e.key, 10) - 1);
-      }
-
-      // Ctrl+1-3: Load Screensets (without Shift)
-      if (e.ctrlKey && !e.shiftKey && !e.altKey && ["1", "2", "3"].includes(e.key)) {
-        e.preventDefault();
-        useDAWStore.getState().loadScreenset(Number.parseInt(e.key, 10) - 1);
-      }
-
-      // Escape: Close Piano Roll (and other modals)
-      if (e.key === "Escape") {
-        const state = useDAWStore.getState();
-        if (state.showPianoRoll) {
-          e.preventDefault();
-          state.closePianoRoll();
-        }
-      }
-
-      // Insert: Import Media File
-      if (e.key === "Insert" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        (async () => {
-          const { selectedTrackIds, tracks, transport, importMedia } =
-            useDAWStore.getState();
-
-          // Show file open dialog
-          const filePath = await nativeBridge.showOpenDialog(
-            "Import Audio/Video File",
-          );
-          if (!filePath) return; // User cancelled
-
-          // Find the target track (first selected, or first audio track)
-          let targetTrackId = selectedTrackIds[0];
-          if (!targetTrackId) {
-            const firstAudioTrack = tracks.find((t) => t.type === "audio");
-            if (!firstAudioTrack) {
-              alert(
-                "No audio track available. Please create an audio track first.",
-              );
-              return;
-            }
-            targetTrackId = firstAudioTrack.id;
-          }
-
-          // Import at current playhead position
-          try {
-            await importMedia(filePath, targetTrackId, transport.currentTime);
-            console.log(`Media imported successfully: ${filePath}`);
-          } catch (error) {
-            alert(`Failed to import media: ${error}`);
-          }
-        })();
-      }
+      const target = e.target as HTMLElement | null;
+      void dispatchGlobalShortcut({
+        key: e.key,
+        code: e.code,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+        repeat: e.repeat,
+        source: "browser",
+        targetIsEditable:
+          !!target &&
+          (target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            target.isContentEditable),
+        preventDefault: () => e.preventDefault(),
+      });
     };
 
-    window.addEventListener("keyup", handleKeyUp);
     window.addEventListener("keydown", handleKeyDown);
+    const unsubscribeNativeShortcuts = nativeBridge.onNativeGlobalShortcut(
+      (event: NativeGlobalShortcutEvent) => {
+        void dispatchGlobalShortcut({ ...event, source: "pluginWindow" });
+      },
+    );
+
     return () => {
-      window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("keydown", handleKeyDown);
+      unsubscribeNativeShortcuts();
     };
   }, []);
 
@@ -931,6 +708,24 @@ function App() {
     };
   }, [addTrack]);
 
+  // Track workspace bounds so the fixed-position tcp-master-overlay stays pinned
+  // to the bottom of the visible TCP area regardless of scroll position.
+  const [tcpOverlayBottom, setTcpOverlayBottom] = useState(0);
+  const [tcpOverlayLeft, setTcpOverlayLeft] = useState(0);
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const updateOverlayPos = () => {
+      const rect = workspace.getBoundingClientRect();
+      setTcpOverlayBottom(window.innerHeight - rect.bottom);
+      setTcpOverlayLeft(rect.left);
+    };
+    updateOverlayPos();
+    const ro = new ResizeObserver(updateOverlayPos);
+    ro.observe(workspace);
+    return () => ro.disconnect();
+  }, []);
+
   // Workspace wheel handler — only prevents browser default zoom (Ctrl+scroll).
   // Actual zoom logic is handled by Timeline's RAF-batched handler.
   useEffect(() => {
@@ -948,20 +743,89 @@ function App() {
     return () => workspace.removeEventListener("wheel", handleWheel, { capture: true });
   }, []);
 
-  const handleAddTrack = async () => {
-    try {
-      const result = await nativeBridge.addTrack();
-      // If result is string (UUID) or boolean true (native mock)
-      const id = typeof result === "string" ? result : `${Date.now()}`;
+  const [showAddMultipleTracksModal, setShowAddMultipleTracksModal] =
+    useState(false);
+  const [addMultipleTracksType, setAddMultipleTracksType] =
+    useState<InsertableTrackType>("audio");
+  const [tcpContextMenu, setTcpContextMenu] = useState<{
+    x: number;
+    y: number;
+    items: MenuItem[];
+  } | null>(null);
 
-      addTrack({
-        id,
-        name: `Track ${tracks.length + 1}`,
-        color: `hsl(${(tracks.length * 60) % 360}, 60%, 50%)`,
-      });
-    } catch (e) {
-      console.error("Failed to add track:", e);
-    }
+  const visibleMasterLaneCount = useMemo(
+    () =>
+      showMasterAutomation
+        ? masterAutomationLanes.filter((lane) => lane.visible).length
+        : 0,
+    [masterAutomationLanes, showMasterAutomation],
+  );
+  const masterFooterHeight = showMasterTrackInTCP
+    ? getMasterTrackHeaderHeight(visibleMasterLaneCount)
+    : DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT;
+  const tcpBottomSpacerHeight =
+    masterFooterHeight + BOTTOM_INTERACTION_BUFFER;
+
+  const handleAddTrack = async () => {
+    await createTrackOfType("audio");
+  };
+
+  const openAddMultipleTracksModal = (type: InsertableTrackType = "audio") => {
+    setAddMultipleTracksType(type);
+    setShowAddMultipleTracksModal(true);
+  };
+
+  const handleAddMultipleTracks = async (config: {
+    count: number;
+    trackType: InsertableTrackType;
+    namingPrefix: string;
+  }) => {
+    await createMultipleTracks(
+      config.count,
+      config.trackType,
+      config.namingPrefix,
+    );
+  };
+
+  const openTcpContextMenu = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setTcpContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        {
+          label: "Add Track",
+          onClick: () => {
+            void createTrackOfType("audio");
+          },
+        },
+        {
+          label: "Add Multiple Tracks...",
+          onClick: () => openAddMultipleTracksModal("audio"),
+        },
+        { divider: true, label: "" },
+        {
+          label: "Add Instrument Track",
+          onClick: () => {
+            void createTrackOfType("instrument");
+          },
+        },
+        {
+          label: "Add MIDI Track",
+          onClick: () => {
+            void createTrackOfType("midi");
+          },
+        },
+        { divider: true, label: "" },
+        {
+          label: showMasterTrackInTCP
+            ? "Hide Master Track in TCP"
+            : "Show Master Track in TCP",
+          onClick: () => toggleMasterTrackInTCP(),
+        },
+      ],
+    });
   };
 
   // Drag and Drop Sensors
@@ -1005,8 +869,8 @@ function App() {
       {/* Main Toolbar with Mixer Toggle */}
       <MainToolbar
         onOpenSettings={openSettings}
-        onToggleMixer={toggleMixer}
-        showMixer={showMixer}
+        onToggleMixer={() => { void handleToggleMixerVisibility(); }}
+        showMixer={showMixer || isMixerDetached}
       />
 
       {/* Custom Toolbars (Phase 15D) */}
@@ -1022,7 +886,25 @@ function App() {
           />
         </Suspense>
       )}
-      <div ref={workspaceRef} className="workspace flex-1" role="main" aria-label="Main workspace">
+      <div ref={workspaceRef} className="workspace relative flex-1" role="main" aria-label="Main workspace">
+        <EssentialControlsCard />
+        <div className="workspace-sticky-header">
+          <div className="workspace-sticky-tcp-header" style={{ width: tcpWidth }}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleAddTrack}
+              className="add-track-btn"
+              aria-label="Add new audio track"
+            >
+              + Add Track
+            </Button>
+          </div>
+          <div className="workspace-sticky-resize-spacer" aria-hidden="true" />
+          <TimelineRuler />
+        </div>
+        <div className="workspace-main-row">
+
         {/* Track Control Panel (Left Sidebar) */}
         <div className="track-control-panel" role="region" aria-label="Track control panel" style={{ width: tcpWidth }} onClick={(e) => {
           // Click on empty space (not a track header) → deselect all
@@ -1040,21 +922,13 @@ function App() {
             store.setTrackHeight(curHeight * delta);
           }
         }}>
-          <div className="tcp-header sticky top-0 z-100">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleAddTrack}
-              className="add-track-btn"
-              aria-label="Add new audio track"
-            >
-              + Add Track
-            </Button>
-          </div>
-
-          <div className="tcp-tracks z-20" onClick={(e) => {
+          <div className="tcp-tracks z-20 min-h-0" onClick={(e) => {
             if (e.target === e.currentTarget) {
               useDAWStore.getState().deselectAllTracks();
+            }
+          }} onContextMenu={(e) => {
+            if (e.target === e.currentTarget) {
+              openTcpContextMenu(e);
             }
           }}>
             <DndContext
@@ -1150,10 +1024,13 @@ function App() {
                 </div>
               </div>
             )}
+            <div
+              className="shrink-0"
+              style={{ height: tcpBottomSpacerHeight }}
+              onContextMenu={openTcpContextMenu}
+            />
           </div>
 
-          {/* Master Track in TCP */}
-          {showMasterTrackInTCP && <MasterTrackHeader />}
         </div>
 
         {/* Draggable resize handle between TCP and Timeline */}
@@ -1161,7 +1038,7 @@ function App() {
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize track panel"
-          className="w-1.5 shrink-0 self-stretch sticky top-0 cursor-col-resize group/resize z-50"
+          className="w-1.5 shrink-0 self-stretch cursor-col-resize group/resize z-50"
           onMouseDown={(e) => {
             e.preventDefault();
             const startX = e.clientX;
@@ -1183,14 +1060,26 @@ function App() {
           <div className="w-full h-full bg-neutral-900 group-hover/resize:bg-daw-accent/50 group-active/resize:bg-daw-accent transition-colors" />
         </div>
 
+        {showMasterTrackInTCP && (
+          <div className="tcp-master-overlay" style={{ width: tcpWidth, bottom: tcpOverlayBottom, left: tcpOverlayLeft }}>
+            <div className="pointer-events-auto">
+              <MasterTrackHeader />
+            </div>
+          </div>
+        )}
+
         {/* Timeline (Canvas-based) */}
         <Timeline
           tracks={visibleTracks}
+          footerHeight={masterFooterHeight}
           masterAutomation={showMasterTrackInTCP ? {
             lanes: masterAutomationLanes,
             showAutomation: showMasterAutomation,
           } : undefined}
+          onOpenAddMultipleTracksModal={openAddMultipleTracksModal}
+          showRuler={false}
         />
+      </div>
       </div>
       </div>{/* Close Media Explorer + Workspace wrapper */}
 
@@ -1255,7 +1144,7 @@ function App() {
         </div>
       )}
 
-      {/* S13PitchEditor kept for standalone/modal use if needed in future */}
+      {/* Pitch editor kept for standalone/modal use if needed in future */}
 
       {/* Undo History Panel */}
       {showUndoHistory && (
@@ -1354,13 +1243,29 @@ function App() {
       {/* Mixer Panel */}
       <div role="complementary" aria-label="Mixer panel">
       <MixerPanel
-        isVisible={showMixer || detachedPanels.includes("mixer")}
-        isDetached={detachedPanels.includes("mixer")}
-        onDetach={() => detachPanel("mixer")}
-        onAttach={() => attachPanel("mixer")}
-        onClose={toggleMixer}
+        isVisible={showMixer && !isMixerDetached}
+        isDetached={false}
+        onDetach={() => { void handleDetachMixer(); }}
+        onAttach={() => { void nativeBridge.closeMixerWindow(); }}
+        onClose={() => { void handleToggleMixerVisibility(); }}
       />
       </div>
+
+      <AddMultipleTracksModal
+        isOpen={showAddMultipleTracksModal}
+        initialType={addMultipleTracksType}
+        onClose={() => setShowAddMultipleTracksModal(false)}
+        onSubmit={handleAddMultipleTracks}
+      />
+
+      {tcpContextMenu && (
+        <ContextMenu
+          x={tcpContextMenu.x}
+          y={tcpContextMenu.y}
+          items={tcpContextMenu.items}
+          onClose={() => setTcpContextMenu(null)}
+        />
+      )}
 
       {/* Settings Modal */}
       {showSettings && (

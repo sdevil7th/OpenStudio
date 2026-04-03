@@ -40,6 +40,13 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
       }
     };
 
+    const handleDoubleClick = (e: React.MouseEvent) => {
+      if (defaultValue === undefined || !onChange) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onChange(defaultValue);
+    };
+
     // --- Custom pan slider logic (center-fill) ---
     const getValueFromMouseEvent = useCallback((e: MouseEvent | React.MouseEvent) => {
       if (!trackRef.current) return;
@@ -101,6 +108,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
             className="relative w-full h-2 rounded cursor-pointer select-none"
             style={{ background: '#3a3a3a' }}
             onMouseDown={handlePanMouseDown}
+            onDoubleClick={handleDoubleClick}
             title={rest.title as string}
             role="slider"
             aria-valuemin={min}
@@ -194,6 +202,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
           value={value}
           onChange={handleChange}
           onClick={handleClick}
+          onDoubleClick={handleDoubleClick}
           className={sliderClasses}
           style={inputStyle}
           aria-valuemin={min}

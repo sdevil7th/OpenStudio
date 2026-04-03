@@ -1,0 +1,371 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, for example 1.0.0"
+        required: true
+      release_notes_file:
+        description: "Path to a markdown file in the repo for release notes"
+        required: false
+        default: "packaging/release-notes-template.md"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      BUILD_DIR: build-release-windows
+      RELEASE_SITE_URL: https://openstudio.org.in
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+      WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
+      WINDOWS_CODESIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
+      WINDOWS_CODESIGN_CERT_THUMBPRINT: ${{ secrets.WINDOWS_CODESIGN_CERT_THUMBPRINT }}
+      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Doppler CLI
+        if: env.DOPPLER_TOKEN != ''
+        uses: dopplerhq/cli-action@v3
+
+      - name: Load release secrets from Doppler
+        if: env.DOPPLER_TOKEN != ''
+        shell: pwsh
+        run: |
+          $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
+          foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
+              continue
+            }
+
+            "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - name: Normalize version
+        shell: pwsh
+        run: |
+          $version = "${env:VERSION}" -replace '^v', ''
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        shell: pwsh
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B $env:BUILD_DIR -A x64 `
+            "-DOPENSTUDIO_APP_VERSION=$env:VERSION" `
+            "-DOPENSTUDIO_UPDATE_MANIFEST_URL_VALUE=$env:RELEASE_SITE_URL/releases/stable/latest.json" `
+            "-DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE=$env:RELEASE_SITE_URL/appcast/windows-stable.xml" `
+            "-DOPENSTUDIO_RELEASES_PAGE_URL_VALUE=$env:RELEASE_SITE_URL/download" `
+            "-DOPENSTUDIO_UPDATE_CHANNEL_VALUE=stable" `
+            "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" `
+            -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
+
+      - name: Build OpenStudio
+        shell: pwsh
+        run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
+
+      - name: Validate Windows runtime bundle
+        shell: pwsh
+        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
+
+      - name: Prepare Windows signing certificate
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_BASE64)) {
+            Write-Host "No Windows code-signing certificate secret was provided."
+            exit 0
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "openstudio-codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERT_BASE64))
+          "WINDOWS_CODESIGN_CERT_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package Windows installer
+        shell: pwsh
+        run: |
+          $arguments = @("-Version", $env:VERSION, "-SourceDir", "$env:BUILD_DIR/OpenStudio_artefacts/Release")
+
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PATH)) {
+            $arguments += @("-CertificateFile", $env:WINDOWS_CODESIGN_CERT_PATH)
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PASSWORD)) {
+            $arguments += @("-CertificatePassword", $env:WINDOWS_CODESIGN_CERT_PASSWORD)
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_THUMBPRINT)) {
+            $arguments += @("-CertificateThumbprint", $env:WINDOWS_CODESIGN_CERT_THUMBPRINT)
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
+            $arguments += @("-TimestampUrl", $env:WINDOWS_TIMESTAMP_URL)
+          }
+
+          ./tools/package-windows-release.ps1 @arguments
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/windows/OpenStudio-Setup-x64.exe
+
+  build-macos:
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      BUILD_DIR: build-release-macos
+      RELEASE_SITE_URL: https://openstudio.org.in
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+      MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+      MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Doppler CLI
+        if: env.DOPPLER_TOKEN != ''
+        uses: dopplerhq/cli-action@v3
+
+      - name: Load release secrets from Doppler
+        if: env.DOPPLER_TOKEN != ''
+        shell: pwsh
+        run: |
+          $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
+          foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
+              continue
+            }
+
+            "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - name: Normalize version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Prepare macOS signing certificate
+        if: env.MACOS_CERTIFICATE_BASE64 != ''
+        shell: bash
+        run: |
+          CERT_PATH="$RUNNER_TEMP/openstudio-macos-signing.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/openstudio-signing.keychain-db"
+          EXISTING_KEYCHAINS="$(security list-keychains -d user | sed 's/^[[:space:]]*//; s/^\"//; s/\"$//')"
+
+          echo "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcrun
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -S . -B "$BUILD_DIR" \
+            -DOPENSTUDIO_APP_VERSION="$VERSION" \
+            -DOPENSTUDIO_UPDATE_MANIFEST_URL_VALUE="$RELEASE_SITE_URL/releases/stable/latest.json" \
+            -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="$RELEASE_SITE_URL/appcast/macos-stable.xml" \
+            -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="$RELEASE_SITE_URL/download" \
+            -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
+            -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF \
+            -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
+
+      - name: Build OpenStudio
+        shell: bash
+        run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Validate macOS runtime bundle
+        shell: pwsh
+        run: |
+          $appPath = Get-ChildItem -Path $env:BUILD_DIR -Recurse -Directory -Filter OpenStudio.app | Select-Object -First 1
+          if (-not $appPath) {
+            throw "OpenStudio.app was not found in the build output."
+          }
+
+          ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath $appPath.FullName -ExpectedVersion $env:VERSION -EnforceLeanBundle
+
+      - name: Package macOS DMG
+        shell: bash
+        run: |
+          chmod +x ./tools/package-macos-release.sh
+          APP_PATH="$(find "$BUILD_DIR" -type d -name 'OpenStudio.app' | head -n 1)"
+          if [[ -z "$APP_PATH" ]]; then
+            echo "OpenStudio.app was not found in the build output." >&2
+            exit 1
+          fi
+          ./tools/package-macos-release.sh "$APP_PATH" "$VERSION"
+
+      - name: Clean up macOS signing keychain
+        if: always() && env.KEYCHAIN_PATH != ''
+        shell: bash
+        run: security delete-keychain "$KEYCHAIN_PATH" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: dist/macos/OpenStudio-macOS.dmg
+
+  publish:
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-macos
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_NOTES_FILE: ${{ github.event.inputs.release_notes_file || 'packaging/release-notes-template.md' }}
+      RELEASE_SITE_URL: https://openstudio.org.in
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Doppler CLI
+        if: env.DOPPLER_TOKEN != ''
+        uses: dopplerhq/cli-action@v3
+
+      - name: Load release secrets from Doppler
+        if: env.DOPPLER_TOKEN != ''
+        shell: pwsh
+        run: |
+          $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
+          foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
+              continue
+            }
+
+            "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Normalize version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-release
+          path: dist/macos
+
+      - name: Generate checksums and updater metadata
+        shell: pwsh
+        run: |
+          $tag = "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v$env:VERSION" }
+          $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
+          $windowsUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-Setup-x64.exe"
+          $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
+          ./tools/generate-release-metadata.ps1 `
+            -Version $env:VERSION `
+            -Channel stable `
+            -ReleasePageUrl $releaseUrl `
+            -FullReleaseNotesUrl $releaseUrl `
+            -NotesFile $env:RELEASE_NOTES_FILE `
+            -WindowsAssetPath "dist/windows/OpenStudio-Setup-x64.exe" `
+            -WindowsAssetUrl $windowsUrl `
+            -WindowsInstallerArguments "/SP- /NOICONS" `
+            -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
+            -MacAssetUrl $macosUrl
+
+      - name: Validate release metadata
+        shell: pwsh
+        run: |
+          ./tools/validate-release-metadata.ps1 `
+            -MetadataDir "dist/release-metadata" `
+            -Channel stable `
+            -WindowsAssetPath "dist/windows/OpenStudio-Setup-x64.exe" `
+            -MacAssetPath "dist/macos/OpenStudio-macOS.dmg"
+
+      - name: Prepare Netlify updater bundle
+        shell: pwsh
+        run: |
+          ./tools/prepare-netlify-release-site.ps1 `
+            -MetadataDir "dist/release-metadata" `
+            -OutputDir "dist/netlify-release-site" `
+            -RepoSlug "${{ github.repository }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netlify-release-site
+          path: dist/netlify-release-site
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', github.event.inputs.version) }}
+          name: OpenStudio ${{ env.VERSION }}
+          body_path: ${{ env.RELEASE_NOTES_FILE }}
+          files: |
+            dist/windows/OpenStudio-Setup-x64.exe
+            dist/macos/OpenStudio-macOS.dmg
+            dist/release-metadata/OpenStudio-checksums.txt
+            dist/release-metadata/releases/latest.json
+            dist/release-metadata/releases/stable/latest.json
+            dist/release-metadata/appcast/windows-stable.xml
+            dist/release-metadata/appcast/macos-stable.xml
+
+      - name: Deploy updater metadata to Netlify
+        if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
+        shell: bash
+        run: npx netlify-cli deploy --dir dist/netlify-release-site --site "$NETLIFY_SITE_ID" --prod
+
+      - name: Validate published release endpoints
+        if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
+        shell: pwsh
+        run: |
+          ./tools/validate-published-release.ps1 `
+            -MetadataDir "dist/release-metadata" `
+            -Channel stable `
+            -ReleaseSiteUrl $env:RELEASE_SITE_URL `
+            -ValidateRedirects

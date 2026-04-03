@@ -20,7 +20,7 @@ export function ScriptEditor() {
   })));
 
   const [code, setCode] = useState(
-    "-- Studio13 Lua Script\n-- API: s13.play(), s13.stop(), s13.getTempo(), s13.setTempo(bpm)\n-- s13.addTrack(), s13.removeTrack(id), s13.setTrackVolume(id, db)\n-- s13.print(msg) outputs to this console\n\ns13.print('Hello from Studio13!')\ns13.print('Tempo: ' .. s13.getTempo() .. ' BPM')\n",
+    "-- OpenStudio Lua Script\n-- API: s13.play(), s13.stop(), s13.getTempo(), s13.setTempo(bpm)\n-- s13.addTrack(), s13.removeTrack(id), s13.setTrackVolume(id, db)\n-- s13.print(msg) outputs to this console\n\ns13.print('Hello from OpenStudio!')\ns13.print('Tempo: ' .. s13.getTempo() .. ' BPM')\n",
   );
   const [selectedScriptId, setSelectedScriptId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -201,7 +201,7 @@ export function ScriptEditor() {
                   <div className="text-[9px] text-neutral-600 text-center py-4">
                     No .lua scripts found.
                     <br />
-                    Place scripts in Documents/Studio13/Scripts/
+                    Place scripts in Documents/OpenStudio/Scripts/
                   </div>
                 ) : (
                   nativeScripts.map((script) => (

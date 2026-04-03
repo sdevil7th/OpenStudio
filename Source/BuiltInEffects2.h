@@ -33,7 +33,7 @@ public:
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
-    const juce::String getName() const override { return "S13 Delay"; }
+    const juce::String getName() const override { return "OpenStudio Delay"; }
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
@@ -108,7 +108,7 @@ public:
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
-    const juce::String getName() const override { return "S13 Reverb"; }
+    const juce::String getName() const override { return "OpenStudio Reverb"; }
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
@@ -177,7 +177,7 @@ public:
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
-    const juce::String getName() const override { return "S13 Chorus"; }
+    const juce::String getName() const override { return "OpenStudio Chorus"; }
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }
@@ -245,7 +245,7 @@ public:
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
 
-    const juce::String getName() const override { return "S13 Saturator"; }
+    const juce::String getName() const override { return "OpenStudio Saturator"; }
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }

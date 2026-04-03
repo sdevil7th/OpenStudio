@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Stage, Layer, Rect, Line, Text, Group } from "react-konva";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type KonvaEvent = any; // Konva event handlers — full typing deferred to avoid 30+ null guards
 import { useDAWStore, MIDIEvent, MIDICCEvent } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { Button } from "./ui";
@@ -452,7 +454,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
   // ============================================
   // Velocity Lane Mouse Handlers (must be before early return)
   // ============================================
-  const handleVelocityMouseDown = useCallback((e: any) => {
+  const handleVelocityMouseDown = useCallback((e: KonvaEvent) => {
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
     if (!pos) return;
@@ -475,7 +477,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
     }
   }, [notePairs, velocityLaneY, pixelsPerSecond, scrollX, trackId, clipId, updateMIDINoteVelocity]);
 
-  const handleVelocityMouseMove = useCallback((e: any) => {
+  const handleVelocityMouseMove = useCallback((e: KonvaEvent) => {
     if (!velocityEditingNote) return;
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
@@ -493,7 +495,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
   // ============================================
   // CC Lane Mouse Handlers (must be before early return)
   // ============================================
-  const handleCCMouseDown = useCallback((e: any) => {
+  const handleCCMouseDown = useCallback((e: KonvaEvent) => {
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
     if (!pos) return;
@@ -518,7 +520,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
     updateMIDICCEvents(trackId, clipId, newEvents);
   }, [ccLaneY, scrollX, pixelsPerSecond, selectedCC, clipCCEvents, trackId, clipId, updateMIDICCEvents]);
 
-  const handleCCMouseMove = useCallback((e: any) => {
+  const handleCCMouseMove = useCallback((e: KonvaEvent) => {
     if (!ccDrawing) return;
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
@@ -562,7 +564,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
   }, [ccDrawing, trackId, clipId, updateMIDICCEvents]);
 
   // Combined stage mouse handlers (must be before early return)
-  const handleStageMouseDown = useCallback((e: any) => {
+  const handleStageMouseDown = useCallback((e: KonvaEvent) => {
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
     if (!pos) return;
@@ -574,7 +576,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
     }
   }, [ccLaneY, velocityLaneY, handleCCMouseDown, handleVelocityMouseDown]);
 
-  const handleStageMouseMove = useCallback((e: any) => {
+  const handleStageMouseMove = useCallback((e: KonvaEvent) => {
     if (velocityEditingNote) {
       handleVelocityMouseMove(e);
     } else if (ccDrawing) {
@@ -681,7 +683,7 @@ export function PianoRoll({ clipId, trackId, additionalClipIds = [] }: PianoRoll
     }));
   };
 
-  const handleStageClick = (e: any) => {
+  const handleStageClick = (e: KonvaEvent) => {
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
     const x = pos.x - PIANO_WIDTH + scrollX;

@@ -110,7 +110,7 @@ bool DDPExporter::writeDDPID(const juce::File& outputDir)
     buf[6] = '0';
 
     // Application ID
-    const char* appId = "Studio13 DDP Export";
+    const char* appId = "OpenStudio DDP Export";
     std::memcpy(buf + 16, appId, std::min(strlen(appId), (size_t)48));
 
     out.write(buf, 128);

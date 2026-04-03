@@ -6,6 +6,7 @@
  */
 
 import type { PitchNoteData, PitchContourData, PolyNoteData, UnifiedNoteData } from "../services/NativeBridge";
+import type { PitchRenderCoverageRange } from "../store/pitchEditorStore";
 import { polyToUnified, monoToUnified } from "../services/NativeBridge";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -43,6 +44,7 @@ export interface PitchEditorRenderState {
   salienceDownsampleFactor: number;
   salienceHopSize: number;
   salienceSampleRate: number;
+  renderCoverage: PitchRenderCoverageRange[];
 }
 
 // Convert a MIDI note to Y position on canvas
@@ -145,7 +147,7 @@ export function renderPitchEditor(
   const maxMidi = Math.ceil(topMidi);
 
   // Check if a non-chromatic scale is active
-  const hasScale = state.scaleNotes.some((v, i) => !v) || false;
+  const hasScale = state.scaleNotes.some((v) => !v) || false;
 
   // --- 1. Piano keys + semitone bands ---
   for (let midi = minMidi; midi <= maxMidi; midi++) {
@@ -233,6 +235,30 @@ export function renderPitchEditor(
   }
 
   // --- 2.5. Waveform RMS overlay (amplitude envelope behind notes) ---
+  if (state.renderCoverage.length > 0) {
+    for (const range of state.renderCoverage) {
+      if (range.state === "hq_ready") continue;
+      const x1 = timeToX(range.startTime, viewport);
+      const x2 = timeToX(range.endTime, viewport);
+      if (x2 < PIANO_WIDTH || x1 > width) continue;
+      ctx.fillStyle = range.state === "preview_ready"
+        ? "rgba(56, 189, 248, 0.12)"
+        : "rgba(245, 158, 11, 0.10)";
+      ctx.fillRect(Math.max(PIANO_WIDTH, x1), 0, Math.max(0, Math.min(width, x2) - Math.max(PIANO_WIDTH, x1)), height);
+
+      ctx.strokeStyle = range.state === "preview_ready"
+        ? "rgba(56, 189, 248, 0.22)"
+        : "rgba(245, 158, 11, 0.18)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x1, 0);
+      ctx.lineTo(x1, height);
+      ctx.moveTo(x2, 0);
+      ctx.lineTo(x2, height);
+      ctx.stroke();
+    }
+  }
+
   if (state.contour?.frames.rms && state.contour.frames.rms.length > 0) {
     const { times, rms, midi: rmsMidi, confidence: rmsConf } = state.contour.frames;
     const startTime = viewport.scrollX - viewport.clipStartTime;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 interface DetachablePanelProps {
@@ -16,78 +16,133 @@ export function DetachablePanel({
   width = 800,
   height = 400,
   isDetached,
-  onDetach,
+  onDetach: _onDetach,
   onAttach,
   children,
-}: DetachablePanelProps) {
-  const externalWindow = useRef<Window | null>(null);
-  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+}: Readonly<DetachablePanelProps>) {
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const isDragging = useRef(false);
+  const dragOffset = useRef({ x: 0, y: 0 });
 
+  // Center the panel when detaching
   useEffect(() => {
-    if (!isDetached) {
-      if (externalWindow.current && !externalWindow.current.closed) {
-        externalWindow.current.close();
-      }
-      externalWindow.current = null;
-      setContainerEl(null);
-      return;
-    }
-
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-
-    const win = window.open(
-      "",
-      `studio13_${title.toLowerCase().replace(/\s+/g, "_")}`,
-      `width=${width},height=${height},left=${left},top=${top},resizable=yes`,
-    );
-
-    if (!win) {
-      onAttach();
-      return;
-    }
-
-    externalWindow.current = win;
-
-    win.document.title = `${title} - Studio13`;
-
-    const container = win.document.createElement("div");
-    container.id = "detached-root";
-    win.document.body.appendChild(container);
-
-    win.document.body.style.margin = "0";
-    win.document.body.style.padding = "0";
-    win.document.body.style.overflow = "hidden";
-    win.document.body.style.backgroundColor = "#121212";
-
-    const parentStyleSheets = document.querySelectorAll(
-      'style, link[rel="stylesheet"]',
-    );
-    parentStyleSheets.forEach((node) => {
-      const clone = node.cloneNode(true) as HTMLElement;
-      win.document.head.appendChild(clone);
+    if (!isDetached) return;
+    setPosition({
+      x: Math.max(0, (window.innerWidth - width) / 2),
+      y: Math.max(0, (window.innerHeight - height) / 2),
     });
+  }, [isDetached, width, height]);
 
-    setContainerEl(container);
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isDragging.current) return;
+    setPosition({
+      x: Math.max(0, Math.min(e.clientX - dragOffset.current.x, window.innerWidth - width)),
+      y: Math.max(0, Math.min(e.clientY - dragOffset.current.y, window.innerHeight - 32)),
+    });
+  }, [width]);
 
-    const handleUnload = () => {
-      onAttach();
+  const handleMouseUp = useCallback(() => {
+    isDragging.current = false;
+    document.body.style.userSelect = "";
+    window.removeEventListener("mousemove", handleMouseMove);
+    window.removeEventListener("mouseup", handleMouseUp);
+  }, [handleMouseMove]);
+
+  const handleTitleBarMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    dragOffset.current = {
+      x: e.clientX - position.x,
+      y: e.clientY - position.y,
     };
-    win.addEventListener("beforeunload", handleUnload);
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  }, [position.x, position.y, handleMouseMove, handleMouseUp]);
 
+  // Cleanup on unmount or detach=false while dragging
+  useEffect(() => {
+    if (isDetached) return;
     return () => {
-      win.removeEventListener("beforeunload", handleUnload);
-      if (!win.closed) {
-        win.close();
-      }
-      externalWindow.current = null;
-      setContainerEl(null);
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.userSelect = "";
     };
-  }, [isDetached, title, width, height, onAttach, onDetach]);
+  }, [isDetached, handleMouseMove, handleMouseUp]);
 
-  if (isDetached && containerEl) {
-    return createPortal(children, containerEl);
+  if (!isDetached) {
+    return <>{children}</>;
   }
 
-  return <>{children}</>;
+  return createPortal(
+    <div
+      style={{
+        position: "fixed",
+        top: position.y,
+        left: position.x,
+        width,
+        height,
+        zIndex: 9999,
+        backgroundColor: "#1a1a1a",
+        border: "1px solid #333",
+        borderRadius: 6,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      {/* Drag handle / title bar */}
+      <div
+        onMouseDown={handleTitleBarMouseDown}
+        style={{
+          height: 32,
+          flexShrink: 0,
+          backgroundColor: "#252525",
+          borderBottom: "1px solid #333",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 8px 0 12px",
+          cursor: "grab",
+          userSelect: "none",
+        }}
+      >
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: "#ccc",
+            pointerEvents: "none",
+          }}
+        >
+          {title}
+        </span>
+        <button
+          onClick={onAttach}
+          aria-label="Re-attach panel"
+          style={{
+            background: "none",
+            border: "none",
+            color: "#999",
+            cursor: "pointer",
+            fontSize: 16,
+            lineHeight: 1,
+            padding: "2px 4px",
+            borderRadius: 3,
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#999"; }}
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Panel content */}
+      <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "auto" }}>
+        {children}
+      </div>
+    </div>,
+    document.body,
+  );
 }

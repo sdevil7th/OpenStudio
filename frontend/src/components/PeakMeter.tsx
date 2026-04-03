@@ -1,4 +1,20 @@
 import { useEffect, useRef, useCallback } from "react";
+import {
+  getMeterSegmentColor,
+  getPeakIndicatorColor,
+  getThresholdNormalized,
+  CENTER_DBFS_LABEL_FONT_PX,
+  MeterColorScheme,
+  METER_COLORS,
+  METER_RULER_FONT_PX,
+  METER_SEGMENT_GAP,
+  METER_SEGMENT_HEIGHT,
+  MeterScaleMode,
+  normalizeDbToMeter,
+  normalizeLevelToMeter,
+  normalizedMeterToDb,
+  MASTER_DBFS_RULING_MARKS,
+} from "./meterConfig";
 
 interface PeakMeterProps {
   level: number;
@@ -6,6 +22,19 @@ interface PeakMeterProps {
   height?: number;
   stereo?: boolean;
   clipping?: boolean; // Show red clip indicator
+  onReset?: () => void;
+  scaleMode?: MeterScaleMode;
+  showThresholdLine?: boolean;
+  showRulings?: boolean;
+  rulingMarksDb?: readonly number[];
+  width?: number;
+  resetSignal?: number;
+  showBorder?: boolean;
+  renderMode?: "segmented" | "continuous";
+  showCenterDivider?: boolean;
+  showRulingLabels?: boolean;
+  showRulingLines?: boolean;
+  colorScheme?: MeterColorScheme;
 }
 
 export function PeakMeter({
@@ -14,6 +43,19 @@ export function PeakMeter({
   height,
   stereo = true,
   clipping = false,
+  onReset,
+  scaleMode = "extended",
+  showThresholdLine = false,
+  showRulings = false,
+  rulingMarksDb = MASTER_DBFS_RULING_MARKS,
+  width,
+  resetSignal = 0,
+  showBorder = true,
+  renderMode = "segmented",
+  showCenterDivider = true,
+  showRulingLabels = false,
+  showRulingLines = true,
+  colorScheme = "default",
 }: PeakMeterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -57,25 +99,32 @@ export function PeakMeter({
   stereoRef.current = stereo;
   const clippingRef = useRef(clipping);
   clippingRef.current = clipping;
+  const onResetRef = useRef(onReset);
+  onResetRef.current = onReset;
+  const scaleModeRef = useRef(scaleMode);
+  scaleModeRef.current = scaleMode;
+  const showThresholdLineRef = useRef(showThresholdLine);
+  showThresholdLineRef.current = showThresholdLine;
+  const showRulingsRef = useRef(showRulings);
+  showRulingsRef.current = showRulings;
+  const rulingMarksDbRef = useRef(rulingMarksDb);
+  rulingMarksDbRef.current = rulingMarksDb;
+  const renderModeRef = useRef(renderMode);
+  renderModeRef.current = renderMode;
+  const showCenterDividerRef = useRef(showCenterDivider);
+  showCenterDividerRef.current = showCenterDivider;
+  const showRulingLabelsRef = useRef(showRulingLabels);
+  showRulingLabelsRef.current = showRulingLabels;
+  const showRulingLinesRef = useRef(showRulingLines);
+  showRulingLinesRef.current = showRulingLines;
+  const colorSchemeRef = useRef(colorScheme);
+  colorSchemeRef.current = colorScheme;
 
-  // Create gradient once and cache it
-  const gradientCacheRef = useRef<{ gradient: CanvasGradient; height: number; ctxId: CanvasRenderingContext2D } | null>(null);
-
-  const getGradient = useCallback((ctx: CanvasRenderingContext2D, h: number): CanvasGradient => {
-    const cached = gradientCacheRef.current;
-    if (cached && cached.height === h && cached.ctxId === ctx) {
-      return cached.gradient;
-    }
-    const grad = ctx.createLinearGradient(0, h, 0, 0);
-    grad.addColorStop(0, "#16a34a");     // Green 600 at bottom
-    grad.addColorStop(0.5, "#22c55e");   // Green 500
-    grad.addColorStop(0.7, "#4ade80");   // Green 400
-    grad.addColorStop(0.85, "#facc15");  // Yellow 400
-    grad.addColorStop(0.92, "#f97316");  // Orange 500
-    grad.addColorStop(1.0, "#ef4444");   // Red 500 at top
-    gradientCacheRef.current = { gradient: grad, height: h, ctxId: ctx };
-    return grad;
-  }, []);
+  useEffect(() => {
+    peakHoldLevelRef.current = 0;
+    peakHoldTimerRef.current = 0;
+    rmsSmoothedRef.current = 0;
+  }, [resetSignal]);
 
   // Animation loop for smooth peak hold decay
   useEffect(() => {
@@ -96,6 +145,15 @@ export function PeakMeter({
       const currentPeakHoldProp = peakHoldPropRef.current;
       const isStereo = stereoRef.current;
       const isClipping = clippingRef.current;
+      const currentScaleMode = scaleModeRef.current;
+      const shouldShowThresholdLine = showThresholdLineRef.current;
+      const shouldShowRulings = showRulingsRef.current;
+      const currentRulingMarks = rulingMarksDbRef.current;
+      const currentRenderMode = renderModeRef.current;
+      const shouldShowCenterDivider = showCenterDividerRef.current;
+      const shouldShowRulingLabels = showRulingLabelsRef.current;
+      const shouldShowRulingLines = showRulingLinesRef.current;
+      const currentColorScheme = colorSchemeRef.current;
       const ch = height || containerHeightRef.current;
       if (ch <= 0) { animFrameRef.current = requestAnimationFrame(draw); return; }
 
@@ -104,13 +162,13 @@ export function PeakMeter({
         canvas.height = ch;
       }
       const width = canvas.width;
-      const channelWidth = isStereo ? (width - 1) / 2 : width;
+      const dividerWidth = isStereo && shouldShowCenterDivider ? 1 : 0;
+      const leftWidth = isStereo ? Math.floor((width - dividerWidth) / 2) : width;
+      const rightX = leftWidth + dividerWidth;
+      const rightWidth = isStereo ? width - rightX : width;
 
       // Update peak hold with decay
-      const NOISE_FLOOR = 0.001;
-      const clampedLevel = currentLevel < NOISE_FLOOR ? 0 : currentLevel;
-      const dbLevel = clampedLevel > 0 ? 20 * Math.log10(clampedLevel) : -Infinity;
-      const normalizedLevel = dbLevel === -Infinity ? 0 : Math.max(0, Math.min(1, (dbLevel + 60) / 72));
+      const normalizedLevel = normalizeLevelToMeter(currentLevel, currentScaleMode);
 
       // RMS simulation: exponential smoothing of squared normalized level
       const smoothFactor = 0.3;
@@ -121,9 +179,7 @@ export function PeakMeter({
       // Use prop peakHold if provided, otherwise compute our own
       let peakDisplay: number;
       if (currentPeakHoldProp > 0) {
-        // External peak hold
-        const peakDb = 20 * Math.log10(currentPeakHoldProp);
-        peakDisplay = Math.max(0, Math.min(1, (peakDb + 60) / 72));
+        peakDisplay = normalizeLevelToMeter(currentPeakHoldProp, currentScaleMode);
       } else {
         peakDisplay = 0;
       }
@@ -145,35 +201,54 @@ export function PeakMeter({
       const effectivePeak = Math.max(peakDisplay, peakHoldLevelRef.current);
 
       // Clear canvas
-      ctx.fillStyle = "#0a0a0a";
+      ctx.fillStyle = METER_COLORS.background;
       ctx.fillRect(0, 0, width, ch);
-
-      const meterGradient = getGradient(ctx, ch);
 
       // Draw meter channel with gradient fill (RMS = dimmer bar, peak = bright bar on top)
       const drawChannel = (cx: number, w: number, peakLv: number, rmsLv: number) => {
         const peakH = ch * peakLv;
         const rmsH = ch * rmsLv;
 
-        // LED-style segments with gradient
-        const segHeight = 2;
-        const gap = 1;
-        for (let y = ch; y > 0; y -= segHeight + gap) {
-          const segY = y - segHeight;
+        if (currentRenderMode === "continuous") {
+          for (let y = 0; y < ch; ++y) {
+            const pixelNorm = 1 - ((y + 0.5) / ch);
+            const pixelDb = normalizedMeterToDb(pixelNorm, currentScaleMode);
+            const pixelColor = getMeterSegmentColor(pixelDb, currentScaleMode, currentColorScheme);
+            const litFromPeak = y >= ch - peakH;
+            const litFromRms = y >= ch - rmsH;
+
+            if (litFromPeak) {
+              ctx.fillStyle = pixelColor;
+              ctx.globalAlpha = 1;
+            } else if (litFromRms) {
+              ctx.fillStyle = pixelColor;
+              ctx.globalAlpha = 0.35;
+            } else {
+              ctx.fillStyle = METER_COLORS.unlit;
+              ctx.globalAlpha = 1;
+            }
+            ctx.fillRect(cx, y, w, 1);
+          }
+          ctx.globalAlpha = 1;
+          return;
+        }
+
+        for (let y = ch; y > 0; y -= METER_SEGMENT_HEIGHT + METER_SEGMENT_GAP) {
+          const segY = y - METER_SEGMENT_HEIGHT;
+          const segmentCenterNorm = 1 - ((segY + METER_SEGMENT_HEIGHT * 0.5) / ch);
+          const segmentDb = normalizedMeterToDb(segmentCenterNorm, currentScaleMode);
+          const segmentColor = getMeterSegmentColor(segmentDb, currentScaleMode, currentColorScheme);
           if (segY >= ch - peakH) {
-            // Peak: fully lit segment
-            ctx.fillStyle = meterGradient;
+            ctx.fillStyle = segmentColor;
             ctx.globalAlpha = 1;
           } else if (segY >= ch - rmsH) {
-            // RMS only zone: dimmer gradient
-            ctx.fillStyle = meterGradient;
+            ctx.fillStyle = segmentColor;
             ctx.globalAlpha = 0.35;
           } else {
-            // Unlit segment
-            ctx.fillStyle = "#171717";
+            ctx.fillStyle = METER_COLORS.unlit;
             ctx.globalAlpha = 1;
           }
-          ctx.fillRect(cx, segY, w, segHeight);
+          ctx.fillRect(cx, segY, w, METER_SEGMENT_HEIGHT);
         }
         ctx.globalAlpha = 1;
       };
@@ -183,29 +258,75 @@ export function PeakMeter({
         const rightLevel = normalizedLevel * 1.03;
         const leftRms = rmsLevel * 0.97;
         const rightRms = rmsLevel * 1.03;
-        drawChannel(0, channelWidth, leftLevel, leftRms);
-        drawChannel(channelWidth + 1, channelWidth, rightLevel, rightRms);
+        drawChannel(0, leftWidth, leftLevel, leftRms);
+        drawChannel(rightX, rightWidth, rightLevel, rightRms);
 
-        // Center divider
-        ctx.fillStyle = "#0a0a0a";
-        ctx.fillRect(channelWidth, 0, 1, ch);
+        if (shouldShowCenterDivider) {
+          ctx.fillStyle = METER_COLORS.background;
+          ctx.fillRect(leftWidth, 0, dividerWidth, ch);
+        }
       } else {
         drawChannel(0, width, normalizedLevel, rmsLevel);
+      }
+
+      if (shouldShowRulings) {
+        ctx.strokeStyle = METER_COLORS.rulerOverlay;
+        ctx.fillStyle = METER_COLORS.rulerOverlay;
+        ctx.lineWidth = 1;
+        const rulingFontPx =
+          currentColorScheme === "centerContrast" ? CENTER_DBFS_LABEL_FONT_PX : METER_RULER_FONT_PX;
+        ctx.font =
+          currentColorScheme === "centerContrast"
+            ? `900 ${rulingFontPx}px Arial, Helvetica, sans-serif`
+            : `${rulingFontPx}px Consolas, 'SFMono-Regular', monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        for (const markDb of currentRulingMarks) {
+          const markNorm = Math.max(0, Math.min(1, 1 - normalizeDbToMeter(markDb, currentScaleMode)));
+          const y = Math.round(markNorm * ch);
+          if (shouldShowRulingLines) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+          }
+
+          if (shouldShowRulingLabels) {
+            const label = markDb > 0 ? `+${markDb}` : `${markDb}`;
+            const labelY = Math.max(
+              rulingFontPx * 0.6,
+              Math.min(ch - rulingFontPx * 0.4, y),
+            );
+            if (currentColorScheme === "centerContrast") {
+              ctx.lineWidth = 2;
+              ctx.strokeStyle = "rgba(0, 0, 0, 0.95)";
+              ctx.strokeText(label, width * 0.5, labelY);
+              ctx.fillStyle = "rgba(18, 18, 18, 0.98)";
+            }
+            ctx.fillText(label, width * 0.5, labelY);
+          }
+        }
+      }
+
+      if (shouldShowThresholdLine) {
+        const thresholdY = ch - ch * getThresholdNormalized(currentScaleMode);
+        ctx.fillStyle = METER_COLORS.thresholdLine;
+        ctx.fillRect(0, Math.round(thresholdY), width, 1);
       }
 
       // Peak hold indicator line (white/bright line)
       if (effectivePeak > 0.01) {
         const peakY = ch - ch * effectivePeak;
-        // Determine peak color based on level
-        let peakColor: string;
-        if (effectivePeak > 0.92) peakColor = "#ef4444";
-        else if (effectivePeak > 0.85) peakColor = "#f97316";
-        else peakColor = "#ffffff";
+        const peakColor = getPeakIndicatorColor(
+          normalizedMeterToDb(effectivePeak, currentScaleMode),
+          currentScaleMode,
+          currentColorScheme,
+        );
 
         ctx.fillStyle = peakColor;
         if (isStereo) {
-          ctx.fillRect(0, peakY, channelWidth, 2);
-          ctx.fillRect(channelWidth + 1, peakY, channelWidth, 2);
+          ctx.fillRect(0, peakY, leftWidth, 2);
+          ctx.fillRect(rightX, peakY, rightWidth, 2);
         } else {
           ctx.fillRect(0, peakY, width, 2);
         }
@@ -213,7 +334,7 @@ export function PeakMeter({
 
       // Clip indicator - red block at top if clipping
       if (isClipping) {
-        ctx.fillStyle = "#dc2626";
+        ctx.fillStyle = METER_COLORS.clip;
         ctx.fillRect(0, 0, width, 3);
       }
 
@@ -226,15 +347,20 @@ export function PeakMeter({
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [getGradient, height]);
+  }, [height]);
 
   return (
     <div ref={containerCallbackRef} className="h-full">
       <canvas
         ref={canvasRef}
-        width={stereo ? 16 : 10}
+        width={width ?? (stereo ? 16 : 10)}
         height={containerHeightRef.current}
-        className="rounded-sm border border-neutral-700 h-full"
+        className={showBorder ? "rounded-sm border border-neutral-700 h-full" : "h-full"}
+        onClick={() => {
+          peakHoldLevelRef.current = 0;
+          peakHoldTimerRef.current = 0;
+          onResetRef.current?.();
+        }}
       />
     </div>
   );

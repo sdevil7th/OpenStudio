@@ -1,0 +1,14 @@
+/releases/latest.json
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/releases/stable/latest.json
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/appcast/windows-stable.xml
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/appcast/macos-stable.xml
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/OpenStudio-checksums.txt
+  Cache-Control: public, max-age=300

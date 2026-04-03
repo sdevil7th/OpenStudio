@@ -10,6 +10,7 @@
 #endif
 
 #include <JuceHeader.h>
+#include "ARADebug.h"
 
 #if S13_HAS_ARA
 #include <ARA_API/ARAInterface.h>
@@ -32,13 +33,45 @@
 class ARAHostController
 {
 public:
+    struct DebugSnapshot
+    {
+        float analysisProgress = 0.0f;
+        bool analysisComplete = false;
+        bool analysisRequested = false;
+        bool analysisStarted = false;
+        float lastAnalysisProgressValue = 0.0f;
+        int sourceCount = 0;
+        int playbackRegionCount = 0;
+        bool audioSourceSamplesAccessEnabled = false;
+        bool editorRendererAttached = false;
+        bool playbackRendererAttached = false;
+        bool transportPlaying = false;
+        double transportPositionSeconds = 0.0;
+        double timeSinceLastPlayStartMs = 0.0;
+        bool hasPendingEditSinceLastPlay = false;
+        double lastEditTimestampMs = 0.0;
+        juce::String lastEditType;
+        juce::String lastOperation;
+        juce::String lastClipId;
+        uint64 editGeneration = 0;
+    };
+
+    struct PlaybackRequestHandlers
+    {
+        std::function<void()> startPlayback;
+        std::function<void()> stopPlayback;
+        std::function<void(double)> setPlaybackPosition;
+        std::function<void(double, double)> setCycleRange;
+        std::function<void(bool)> enableCycle;
+    };
+
     ARAHostController();
     ~ARAHostController();
 
     // Initialize ARA hosting for a loaded plugin (async — uses createARAFactoryAsync)
     // Calls onComplete(true) on success, onComplete(false) on failure
     void initializeForPlugin (juce::AudioPluginInstance* plugin, double sampleRate, int blockSize,
-                              std::function<void (bool)> onComplete = nullptr);
+                              std::function<void (bool, bool, const juce::String&)> onComplete = nullptr);
 
     // Check if ARA is currently active
     bool isActive() const { return araActive; }
@@ -76,11 +109,21 @@ public:
     // Notify ARA of tempo/time signature changes
     void updateMusicalContext (double bpm, int timeSigNumerator, int timeSigDenominator);
 
+    void setPlaybackRequestHandlers(PlaybackRequestHandlers handlers);
+    float getAnalysisProgress() const;
+    bool isAnalysisComplete() const;
+    DebugSnapshot getDebugSnapshot() const;
+    void updateTransportDebugState(bool playing, double positionSeconds);
+    void notePlaybackStart(double positionSeconds);
+    void notePlaybackStop(double positionSeconds);
+
+
 private:
     bool araActive = false;
     juce::AudioPluginInstance* araProcessor = nullptr;
     double currentSampleRate = 44100.0;
     int currentBlockSize = 512;
+    int pluginInputChannelCount = 0;
 
 #if S13_HAS_ARA
 
@@ -159,6 +202,8 @@ private:
     class S13ModelUpdateController final : public ARA::Host::ModelUpdateControllerInterface
     {
     public:
+        explicit S13ModelUpdateController(ARAHostController& ownerIn) : owner(ownerIn) {}
+
         void notifyAudioSourceAnalysisProgress (ARA::ARAAudioSourceHostRef, ARA::ARAAnalysisProgressState, float) noexcept override;
         void notifyAudioSourceContentChanged (ARA::ARAAudioSourceHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept override;
         void notifyAudioModificationContentChanged (ARA::ARAAudioModificationHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept override;
@@ -167,16 +212,25 @@ private:
 
         std::atomic<float> analysisProgress { 0.0f };
         std::atomic<bool> analysisComplete { false };
+        std::atomic<int> lastLoggedAnalysisBucket { -1 };
+
+    private:
+        ARAHostController& owner;
     };
 
     class S13PlaybackController final : public ARA::Host::PlaybackControllerInterface
     {
     public:
+        explicit S13PlaybackController(ARAHostController& ownerIn) : owner(ownerIn) {}
+
         void requestStartPlayback() noexcept override;
         void requestStopPlayback() noexcept override;
         void requestSetPlaybackPosition (ARA::ARATimePosition timePosition) noexcept override;
         void requestSetCycleRange (ARA::ARATimePosition startTime, ARA::ARATimeDuration duration) noexcept override;
         void requestEnableCycle (bool enable) noexcept override;
+
+    private:
+        ARAHostController& owner;
     };
 
     // =========================================================================
@@ -187,7 +241,15 @@ private:
     {
         juce::String clipId;
         juce::File audioFile;
-        std::unique_ptr<juce::MemoryMappedAudioFormatReader> reader;
+        std::unique_ptr<juce::AudioFormatReader> reader;
+        int nativeChannelCount = 0;
+        int exposedChannelCount = 0;
+
+        // Pre-loaded audio data — eliminates disk I/O during processBlock.
+        // ARA plugins call readAudioSamples() on the audio thread; serving
+        // from memory avoids ~300ms/block disk contention.
+        juce::AudioBuffer<float> preloadedAudio;
+        bool preloaded = false;
 
         // ARA model objects (must be destroyed in reverse order of creation)
         std::unique_ptr<ARAHostModel::PlaybackRegion> playbackRegion;
@@ -212,6 +274,8 @@ private:
     // Plugin extension instance (returned by bindDocumentToPluginInstance)
     ARAHostModel::PlugInExtensionInstance pluginExtension;
     std::unique_ptr<ARAHostModel::PlaybackRendererInterface> playbackRenderer;
+    std::unique_ptr<ARAHostModel::EditorRendererInterface> editorRenderer;
+    std::vector<ARA::ARAContentType> requestedAnalysisContentTypes;
 
     // Musical context and region sequence
     std::unique_ptr<ARAHostModel::MusicalContext> musicalContext;
@@ -220,22 +284,41 @@ private:
     // Registered audio sources
     std::map<juce::String, std::unique_ptr<ARASourceEntry>> sources;
 
-    // Simple playhead for ARA renderer
-    struct SimplePlayHead final : public juce::AudioPlayHead
-    {
-        juce::Optional<juce::AudioPlayHead::PositionInfo> getPosition() const override;
-        std::atomic<juce::int64> timeInSamples { 0 };
-        std::atomic<bool> isPlaying { false };
-    };
-    SimplePlayHead araPlayHead;
-
     // Helper: complete initialization after factory is obtained
     void completeInitialization (juce::ARAFactoryWrapper factory,
-                                 std::function<void (bool)> onComplete);
+                                 std::function<void (bool, bool, const juce::String&)> onComplete);
 
     friend class S13AudioAccessController;
 
 #endif // S13_HAS_ARA
+
+    void noteDebugOperation(const juce::String& operationType, const juce::String& clipId);
+    void noteEditDrivenDebugEvent(const juce::String& eventType, const juce::String& clipId);
+    juce::String describeRequestedAnalysisContentTypes() const;
+
+    void requestStartPlaybackFromPlugin() const;
+    void requestStopPlaybackFromPlugin() const;
+    void requestSetPlaybackPositionFromPlugin(double timePosition) const;
+    void requestSetCycleRangeFromPlugin(double startTime, double duration) const;
+    void requestEnableCycleFromPlugin(bool enable) const;
+
+    PlaybackRequestHandlers playbackRequestHandlers;
+    mutable juce::CriticalSection debugStateLock;
+    std::atomic<bool> debugTransportPlaying { false };
+    std::atomic<double> debugTransportPositionSeconds { 0.0 };
+    std::atomic<double> debugLastPlayStartTimestampMs { 0.0 };
+    std::atomic<double> debugLastEditTimestampMs { 0.0 };
+    std::atomic<bool> debugAnalysisRequested { false };
+    std::atomic<bool> debugAnalysisStarted { false };
+    std::atomic<float> debugLastAnalysisProgressValue { 0.0f };
+    std::atomic<int> debugSourceCount { 0 };
+    std::atomic<int> debugPlaybackRegionCount { 0 };
+    std::atomic<int> debugSamplesAccessEnabledCount { 0 };
+    std::atomic<uint64> debugEditGeneration { 0 };
+    std::atomic<uint64> debugLastPlaybackObservedEditGeneration { 0 };
+    juce::String debugLastEditType;
+    juce::String debugLastOperation;
+    juce::String debugLastClipId;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ARAHostController)
 };

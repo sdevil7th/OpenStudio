@@ -12,6 +12,11 @@ PeakCache::~PeakCache()
 
 juce::File PeakCache::getPeakFilePath(const juce::File& audioFile)
 {
+    return audioFile.getSiblingFile(audioFile.getFileName() + ".ospeaks");
+}
+
+juce::File PeakCache::getLegacyPeakFilePath(const juce::File& audioFile)
+{
     return audioFile.getSiblingFile(audioFile.getFileName() + ".s13peaks");
 }
 
@@ -26,6 +31,9 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
 
     // Check disk
     auto peakFile = getPeakFilePath(audioFile);
+    if (!peakFile.existsAsFile())
+        peakFile = getLegacyPeakFilePath(audioFile);
+
     if (!peakFile.existsAsFile())
         return false;
 
@@ -76,6 +84,9 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
     if (!loaded)
     {
         auto peakFile = getPeakFilePath(audioFile);
+        if (!peakFile.existsAsFile())
+            peakFile = getLegacyPeakFilePath(audioFile);
+
         if (peakFile.existsAsFile() && loadFromFile(peakFile, audioFile, entry))
         {
             loaded = true;

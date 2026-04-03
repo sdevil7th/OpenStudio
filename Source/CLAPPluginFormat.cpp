@@ -1,4 +1,6 @@
 #include "CLAPPluginFormat.h"
+#include <cmath>
+#include <cstring>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -32,8 +34,8 @@ static clap_host_t makeHost()
     clap_host_t host{};
     host.clap_version = CLAP_VERSION;
     host.host_data = nullptr;
-    host.name = "Studio13";
-    host.vendor = "Studio13";
+    host.name = "OpenStudio";
+    host.vendor = "OpenStudio";
     host.url = "";
     host.version = "1.0.0";
     host.get_extension = hostGetExtension;
@@ -266,6 +268,11 @@ public:
 
     ~CLAPPluginInstance() override
     {
+        // CLAP spec requires deactivate before destroy. If releaseResources()
+        // wasn't called (e.g., unexpected destruction path), do it now.
+        if (clapPlugin && activated)
+            releaseResources();
+
         if (clapPlugin)
         {
             clapPlugin->destroy(clapPlugin);
@@ -317,7 +324,6 @@ public:
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) override
     {
-        juce::ignoreUnused(midiMessages);
         if (!clapPlugin || !activated)
             return;
 
@@ -350,7 +356,6 @@ public:
         clap_process_t process{};
         process.steady_time = -1;
         process.frames_count = (uint32_t)numSamples;
-        process.transport = nullptr;
         process.audio_inputs = &inputBuf;
         process.audio_outputs = &outputBuf;
         process.audio_inputs_count = 1;
@@ -358,16 +363,163 @@ public:
         process.in_events = nullptr;
         process.out_events = nullptr;
 
-        // Create empty event lists
+        clap_event_transport_t transport {};
+        transport.header.size = sizeof(clap_event_transport_t);
+        transport.header.time = 0;
+        transport.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        transport.header.type = CLAP_EVENT_TRANSPORT;
+        transport.header.flags = 0;
+
+        uint32_t transportFlags = CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+                                | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+                                | CLAP_TRANSPORT_HAS_TEMPO
+                                | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+
+        if (auto* playHead = getPlayHead())
+        {
+            auto position = playHead->getPosition();
+            if (position.hasValue())
+            {
+                auto info = *position;
+                const double seconds = info.getTimeInSeconds().orFallback(0.0);
+                const double bpm = info.getBpm().orFallback(120.0);
+                const auto timeSig = info.getTimeSignature().orFallback(juce::AudioPlayHead::TimeSignature { 4, 4 });
+                const double ppq = info.getPpqPosition().orFallback(seconds * (bpm / 60.0));
+                const double barStart = info.getPpqPositionOfLastBarStart().orFallback(0.0);
+
+                if (info.getIsPlaying())
+                    transportFlags |= CLAP_TRANSPORT_IS_PLAYING;
+                if (info.getIsRecording())
+                    transportFlags |= CLAP_TRANSPORT_IS_RECORDING;
+                if (info.getIsLooping())
+                    transportFlags |= CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+
+                transport.flags = transportFlags;
+                transport.song_pos_seconds = static_cast<clap_sectime>(std::llround(seconds * CLAP_SECTIME_FACTOR));
+                transport.song_pos_beats = static_cast<clap_beattime>(std::llround(ppq * CLAP_BEATTIME_FACTOR));
+                transport.tempo = bpm;
+                transport.tempo_inc = 0.0;
+                transport.bar_start = static_cast<clap_beattime>(std::llround(barStart * CLAP_BEATTIME_FACTOR));
+                transport.bar_number = (timeSig.numerator > 0 && timeSig.denominator > 0)
+                    ? static_cast<int32_t>(std::floor(barStart / (timeSig.numerator * (4.0 / timeSig.denominator))))
+                    : 0;
+                transport.tsig_num = static_cast<uint16_t>(juce::jlimit(1, 64, timeSig.numerator));
+                transport.tsig_denom = static_cast<uint16_t>(juce::jlimit(1, 64, timeSig.denominator));
+            }
+            else
+            {
+                transport.flags = transportFlags;
+            }
+        }
+        else
+        {
+            transport.flags = transportFlags;
+        }
+
+        process.transport = &transport;
+
+        struct InputEventsContext
+        {
+            std::vector<clap_event_midi_t> midiEvents;
+            std::vector<const clap_event_header_t*> headers;
+        };
+
+        InputEventsContext inContext;
+        inContext.midiEvents.reserve(static_cast<size_t>(midiMessages.getNumEvents()));
+        inContext.headers.reserve(static_cast<size_t>(midiMessages.getNumEvents()));
+
+        for (const auto metadata : midiMessages)
+        {
+            const auto& message = metadata.getMessage();
+            if (message.isSysEx())
+                continue;
+
+            const int rawSize = message.getRawDataSize();
+            if (rawSize <= 0 || rawSize > 3)
+                continue;
+
+            clap_event_midi_t event {};
+            event.header.size = sizeof(clap_event_midi_t);
+            event.header.time = static_cast<uint32_t>(juce::jlimit(0, juce::jmax(0, numSamples - 1), metadata.samplePosition));
+            event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+            event.header.type = CLAP_EVENT_MIDI;
+            event.header.flags = 0;
+            event.port_index = 0;
+            std::memset(event.data, 0, sizeof(event.data));
+            std::memcpy(event.data, message.getRawData(), static_cast<size_t>(rawSize));
+
+            inContext.midiEvents.push_back(event);
+            inContext.headers.push_back(&inContext.midiEvents.back().header);
+        }
+
         clap_input_events_t inEvents{};
-        inEvents.ctx = nullptr;
-        inEvents.size = [](const clap_input_events_t*) -> uint32_t { return 0; };
-        inEvents.get = [](const clap_input_events_t*, uint32_t) -> const clap_event_header_t* { return nullptr; };
+        inEvents.ctx = &inContext;
+        inEvents.size = [](const clap_input_events_t* events) -> uint32_t {
+            auto* ctx = static_cast<InputEventsContext*>(events->ctx);
+            return static_cast<uint32_t>(ctx->headers.size());
+        };
+        inEvents.get = [](const clap_input_events_t* events, uint32_t index) -> const clap_event_header_t* {
+            auto* ctx = static_cast<InputEventsContext*>(events->ctx);
+            if (index >= ctx->headers.size())
+                return nullptr;
+            return ctx->headers[index];
+        };
         process.in_events = &inEvents;
 
+        struct OutputEventsContext
+        {
+            juce::MidiBuffer* midiBuffer = nullptr;
+            int maxSamples = 0;
+        };
+
+        OutputEventsContext outContext { &midiMessages, numSamples };
         clap_output_events_t outEvents{};
-        outEvents.ctx = nullptr;
-        outEvents.try_push = [](const clap_output_events_t*, const clap_event_header_t*) -> bool { return true; };
+        outEvents.ctx = &outContext;
+        outEvents.try_push = [](const clap_output_events_t* events, const clap_event_header_t* header) -> bool {
+            if (events == nullptr || header == nullptr)
+                return false;
+
+            auto* ctx = static_cast<OutputEventsContext*>(events->ctx);
+            if (ctx == nullptr || ctx->midiBuffer == nullptr)
+                return false;
+
+            const int sampleOffset = juce::jlimit(0, juce::jmax(0, ctx->maxSamples - 1), static_cast<int>(header->time));
+
+            switch (header->type)
+            {
+                case CLAP_EVENT_MIDI:
+                {
+                    auto* midi = reinterpret_cast<const clap_event_midi_t*>(header);
+                    ctx->midiBuffer->addEvent(juce::MidiMessage(midi->data, 3), sampleOffset);
+                    return true;
+                }
+                case CLAP_EVENT_NOTE_ON:
+                {
+                    auto* note = reinterpret_cast<const clap_event_note_t*>(header);
+                    ctx->midiBuffer->addEvent(
+                        juce::MidiMessage::noteOn(
+                            juce::jlimit(1, 16, static_cast<int>(note->channel) + 1),
+                            juce::jlimit(0, 127, static_cast<int>(note->key)),
+                            static_cast<juce::uint8>(juce::jlimit(0, 127, static_cast<int>(std::round(note->velocity * 127.0))))),
+                        sampleOffset);
+                    return true;
+                }
+                case CLAP_EVENT_NOTE_OFF:
+                case CLAP_EVENT_NOTE_CHOKE:
+                {
+                    auto* note = reinterpret_cast<const clap_event_note_t*>(header);
+                    ctx->midiBuffer->addEvent(
+                        juce::MidiMessage::noteOff(
+                            juce::jlimit(1, 16, static_cast<int>(note->channel) + 1),
+                            juce::jlimit(0, 127, static_cast<int>(note->key))
+                        ),
+                        sampleOffset);
+                    return true;
+                }
+                default:
+                    return true;
+            }
+        };
         process.out_events = &outEvents;
 
         clapPlugin->process(clapPlugin, &process);
@@ -376,7 +528,7 @@ public:
     double getTailLengthSeconds() const override { return 0.0; }
 
     bool acceptsMidi() const override { return true; }
-    bool producesMidi() const override { return false; }
+    bool producesMidi() const override { return true; }
 
     juce::AudioProcessorEditor* createEditor() override
     {

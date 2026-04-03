@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
+import { useAiToolsStatus } from "../hooks/useAiToolsStatus";
 import {
   Button,
   Checkbox,
@@ -45,7 +46,7 @@ export default function StemSeparationModal() {
       stemSepClipName: s.stemSepClipName,
       stemSepClipDuration: s.stemSepClipDuration,
       closeStemSeparation: s.closeStemSeparation,
-    }))
+    })),
   );
 
   const [selectedStems, setSelectedStems] = useState<string[]>([...ALL_STEMS]);
@@ -53,6 +54,13 @@ export default function StemSeparationModal() {
   const [progress, setProgress] = useState<StemSepProgress>({ state: "idle", progress: 0 });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const completedRef = useRef(false);
+  const {
+    status: aiToolsStatus,
+    install: installAiTools,
+    cancel: cancelAiToolsInstall,
+    openHelp,
+    refresh: refreshAiToolsStatus,
+  } = useAiToolsStatus();
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -61,12 +69,17 @@ export default function StemSeparationModal() {
     }
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => stopPolling, [stopPolling]);
+
+  useEffect(() => {
+    if (showStemSeparation) {
+      void refreshAiToolsStatus();
+    }
+  }, [refreshAiToolsStatus, showStemSeparation]);
 
   const toggleStem = (stem: string) => {
     setSelectedStems((prev) =>
-      prev.includes(stem) ? prev.filter((s) => s !== stem) : [...prev, stem]
+      prev.includes(stem) ? prev.filter((s) => s !== stem) : [...prev, stem],
     );
   };
 
@@ -88,13 +101,12 @@ export default function StemSeparationModal() {
   };
 
   const handleSeparate = async () => {
-    if (!stemSepTrackId || !stemSepClipId || selectedStems.length === 0) return;
+    if (!stemSepTrackId || !stemSepClipId || selectedStems.length === 0 || !aiToolsStatus.available) return;
     setSeparating(true);
     setProgress({ state: "loading", progress: 0 });
     completedRef.current = false;
 
     try {
-      // Look up the clip's file path from the store
       const state = useDAWStore.getState();
       const sourceTrack = state.tracks.find((t) => t.id === stemSepTrackId);
       const sourceClip = sourceTrack?.clips.find((c) => c.id === stemSepClipId);
@@ -104,7 +116,6 @@ export default function StemSeparationModal() {
         return;
       }
 
-      // Start async separation — pass filePath so backend doesn't need clip ID lookup
       const result = await nativeBridge.separateStemsAsync(stemSepTrackId, stemSepClipId, {
         stems: selectedStems,
         filePath: sourceClip.filePath,
@@ -116,75 +127,68 @@ export default function StemSeparationModal() {
         return;
       }
 
-      // Poll for progress
       let idleCount = 0;
       pollRef.current = setInterval(async () => {
-        // Guard: if already completed or stopped, skip stale in-flight callbacks
         if (completedRef.current) return;
 
-        const p = await nativeBridge.getStemSeparationProgress();
-
-        // Re-check after async gap — another callback may have completed
+        const nextProgress = await nativeBridge.getStemSeparationProgress();
         if (completedRef.current) return;
 
-        setProgress(p);
+        setProgress(nextProgress);
 
-        // Safety: stop polling if state stays idle (separation never started)
-        if (p.state === "idle") {
+        if (nextProgress.state === "idle") {
           idleCount++;
           if (idleCount >= 10) {
             completedRef.current = true;
             stopPolling();
-            setProgress({ state: "error", progress: 0, error: "Separation did not start. Check Python installation." });
+            setProgress({ state: "error", progress: 0, error: "Separation did not start. Install AI Tools first." });
             setSeparating(false);
           }
           return;
         }
         idleCount = 0;
 
-        if (p.state === "done" && p.stemFiles) {
+        if (nextProgress.state === "done" && nextProgress.stemFiles) {
           completedRef.current = true;
           stopPolling();
-          const state = useDAWStore.getState();
-          const sourceTrack = state.tracks.find((t) => t.id === stemSepTrackId);
-          const sourceClip = sourceTrack?.clips.find((c) => c.id === stemSepClipId);
+          const latestState = useDAWStore.getState();
+          const latestTrack = latestState.tracks.find((t) => t.id === stemSepTrackId);
+          const latestClip = latestTrack?.clips.find((c) => c.id === stemSepClipId);
 
-          if (sourceClip) {
-            // Query actual file properties for each stem (duration & sampleRate
-            // may differ from source due to audio-separator processing)
+          if (latestClip) {
             const enrichedStems = await Promise.all(
-              p.stemFiles.map(async (stem) => {
+              nextProgress.stemFiles.map(async (stem) => {
                 try {
                   const info = await nativeBridge.importMediaFile(stem.filePath);
                   return {
                     name: stem.name,
                     filePath: stem.filePath,
-                    duration: info?.duration || sourceClip.duration,
-                    sampleRate: info?.sampleRate || sourceClip.sampleRate || 44100,
+                    duration: info?.duration || latestClip.duration,
+                    sampleRate: info?.sampleRate || latestClip.sampleRate || 44100,
                   };
                 } catch {
                   return {
                     name: stem.name,
                     filePath: stem.filePath,
-                    duration: sourceClip.duration,
-                    sampleRate: sourceClip.sampleRate || 44100,
+                    duration: latestClip.duration,
+                    sampleRate: latestClip.sampleRate || 44100,
                   };
                 }
-              })
+              }),
             );
 
-            state.completeStemSeparation(
+            latestState.completeStemSeparation(
               stemSepTrackId,
               stemSepClipId,
               stemSepClipName || "Audio",
               enrichedStems,
-              sourceClip.startTime,
+              latestClip.startTime,
             );
           }
 
           setSeparating(false);
           setTimeout(() => closeStemSeparation(), 800);
-        } else if (p.state === "error") {
+        } else if (nextProgress.state === "error") {
           completedRef.current = true;
           stopPolling();
           setSeparating(false);
@@ -196,25 +200,40 @@ export default function StemSeparationModal() {
     }
   };
 
+  const handleInstallAiTools = async () => {
+    if (aiToolsStatus.installInProgress || aiToolsStatus.available) return;
+    if (aiToolsStatus.state === "pythonMissing") {
+      await openHelp();
+      return;
+    }
+
+    await installAiTools();
+  };
+
   const handleCancel = async () => {
     if (separating) {
       stopPolling();
       await nativeBridge.cancelStemSeparation();
       setSeparating(false);
       setProgress({ state: "idle", progress: 0 });
-    } else {
-      closeStemSeparation();
+      return;
     }
+
+    if (aiToolsStatus.installInProgress) {
+      await cancelAiToolsInstall();
+      return;
+    }
+
+    closeStemSeparation();
   };
 
   if (!showStemSeparation) return null;
 
   return (
-    <Modal isOpen={showStemSeparation} onClose={handleCancel}>
+    <Modal isOpen={showStemSeparation} onClose={() => void handleCancel()}>
       <ModalHeader title="Separate Stems" />
       <ModalContent>
         <div className="space-y-4">
-          {/* Source info */}
           <div className="bg-daw-dark rounded p-3 text-sm">
             <div className="flex justify-between">
               <span className="text-daw-text-secondary">Source:</span>
@@ -226,39 +245,85 @@ export default function StemSeparationModal() {
             </div>
           </div>
 
-          {/* Model info */}
-          <div>
-            <label className="text-sm text-daw-text-secondary block mb-1">Model</label>
-            <div className="bg-daw-dark rounded p-2 text-sm">
-              BS-RoFormer SW — 6 Stems (Vocals / Drums / Bass / Guitar / Piano / Other)
-            </div>
-          </div>
+          {!aiToolsStatus.available ? (
+            <div className="space-y-3 rounded border border-neutral-700 bg-daw-dark p-4">
+              <div>
+                <p className="text-sm font-medium text-daw-text">AI Tools Required</p>
+                <p className="mt-1 text-xs text-daw-text-secondary">
+                  Stem separation is optional and installs on demand so the main app stays smaller.
+                </p>
+              </div>
 
-          {/* Stem selection */}
-          <div>
-            <label className="text-sm text-daw-text-secondary block mb-2">Stems to extract</label>
-            <div className="grid grid-cols-3 gap-2">
-              {ALL_STEMS.map((stem) => (
-                <label
-                  key={stem}
-                  className="flex items-center gap-2 p-2 rounded bg-daw-dark hover:bg-daw-surface cursor-pointer"
+              <div className="rounded bg-neutral-900/80 p-3 text-xs text-daw-text-secondary">
+                {aiToolsStatus.message || "Install AI Tools to enable stem separation."}
+                {aiToolsStatus.error ? (
+                  <p className="mt-2 text-daw-record">{aiToolsStatus.error}</p>
+                ) : null}
+              </div>
+
+              {aiToolsStatus.installInProgress && (
+                <div className="space-y-2">
+                  <div className="w-full bg-neutral-900 rounded-full h-2">
+                    <div
+                      className="bg-daw-accent h-2 rounded-full transition-all duration-200"
+                      style={{ width: `${Math.round(aiToolsStatus.progress * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-daw-text-secondary text-center">
+                    {aiToolsStatus.message || "Installing AI Tools..."}
+                  </p>
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Button
+                  variant="primary"
+                  onClick={() => void handleInstallAiTools()}
+                  disabled={aiToolsStatus.installInProgress}
                 >
-                  <Checkbox
-                    checked={selectedStems.includes(stem)}
-                    onChange={() => toggleStem(stem)}
-                    disabled={separating}
-                  />
-                  <span
-                    className="w-3 h-3 rounded-full inline-block"
-                    style={{ backgroundColor: STEM_COLORS[stem] }}
-                  />
-                  <span className="text-sm">{stem}</span>
-                </label>
-              ))}
+                  {aiToolsStatus.state === "pythonMissing" ? "Get Python" : "Install AI Tools"}
+                </Button>
+                {aiToolsStatus.state === "pythonMissing" && (
+                  <Button variant="ghost" onClick={() => void openHelp()}>
+                    Python Download
+                  </Button>
+                )}
+              </div>
             </div>
-          </div>
+          ) : (
+            <>
+              <div>
+                <label className="text-sm text-daw-text-secondary block mb-1">Model</label>
+                <div className="bg-daw-dark rounded p-2 text-sm">
+                  BS-RoFormer SW - 6 Stems (Vocals / Drums / Bass / Guitar / Piano / Other)
+                </div>
+              </div>
 
-          {/* Progress */}
+              <div>
+                <label className="text-sm text-daw-text-secondary block mb-2">Stems to extract</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {ALL_STEMS.map((stem) => (
+                    <label
+                      key={stem}
+                      className="flex items-center gap-2 p-2 rounded bg-daw-dark hover:bg-daw-surface cursor-pointer"
+                    >
+                      <Checkbox
+                        checked={selectedStems.includes(stem)}
+                        onChange={() => toggleStem(stem)}
+                        disabled={separating}
+                      />
+                      <span
+                        className="w-3 h-3 rounded-full inline-block"
+                        style={{ backgroundColor: STEM_COLORS[stem] }}
+                      />
+                      <span className="text-sm">{stem}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
           {separating && (
             <div className="space-y-2">
               <div className="w-full bg-daw-dark rounded-full h-2">
@@ -273,20 +338,19 @@ export default function StemSeparationModal() {
             </div>
           )}
 
-          {/* Error */}
           {progress.state === "error" && !separating && (
             <p className="text-xs text-daw-record text-center">{progress.error}</p>
           )}
         </div>
       </ModalContent>
       <ModalFooter>
-        <Button variant="ghost" onClick={handleCancel}>
-          {separating ? "Cancel" : "Close"}
+        <Button variant="ghost" onClick={() => void handleCancel()}>
+          {separating ? "Cancel" : aiToolsStatus.installInProgress ? "Cancel Install" : "Close"}
         </Button>
-        {!separating && progress.state !== "done" && (
+        {!separating && progress.state !== "done" && aiToolsStatus.available && (
           <Button
             variant="primary"
-            onClick={handleSeparate}
+            onClick={() => void handleSeparate()}
             disabled={selectedStems.length === 0}
           >
             Separate

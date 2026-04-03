@@ -176,20 +176,24 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
         return notes;
 
     const float minNoteDuration = 0.05f;     // 50 ms minimum note
-    const float pitchJumpThreshold = 2.3f;   // 2.3 semitones — tolerates vibrato (±1-2 sem),
-                                             // only splits on genuine melodic note changes
-    const float confidenceThreshold = 0.35f; // relaxed from 0.5 — avoids ending a note on a
+    const float pitchJumpThreshold = 1.5f;   // semitones — tolerates vibrato (±1 sem),
+                                             // splits on genuine melodic note changes
+    const float confidenceThreshold = 0.40f; // relaxed from 0.5 — avoids ending a note on a
                                              // momentarily low-confidence frame mid-vibrato
-    const float silenceThreshold = -60.0f;   // dB
+    const float silenceThreshold = -50.0f;   // dB
     const int stableFrames = 3;              // pitch deviation must be sustained this many
                                              // consecutive frames before triggering a split
                                              // (prevents vibrato peaks from splitting notes)
+    const float energyDipSplitDB = 10.0f;    // dB drop from running avg triggers a note split
+    const int energyDipMinFrames = 2;        // energy must dip for at least this many frames
 
     int noteStartIdx = -1;
     float noteSum = 0.0f;
     int noteCount = 0;
     int noteId = 0;
-    int deviationRun = 0; // consecutive frames exceeding pitchJumpThreshold
+    int deviationRun = 0;    // consecutive frames exceeding pitchJumpThreshold
+    float runningEnergySum = 0.0f; // running energy sum for current note
+    int energyDipRun = 0;    // consecutive frames with significant energy dip
 
     auto finalizeNote = [&](int endIdx)
     {
@@ -243,6 +247,8 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
                 noteSum = 0.0f;
                 noteCount = 0;
                 deviationRun = 0;
+                runningEnergySum = 0.0f;
+                energyDipRun = 0;
             }
             continue;
         }
@@ -254,9 +260,41 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
             noteSum = f.midiNote;
             noteCount = 1;
             deviationRun = 0;
+            runningEnergySum = f.rmsDB;
+            energyDipRun = 0;
         }
         else
         {
+            // --- Energy-dip-based splitting (syllable/word boundaries) ---
+            // If energy drops significantly below the note's running average,
+            // this likely indicates a consonant or breath between syllables.
+            float avgEnergy = runningEnergySum / static_cast<float>(noteCount);
+            float energyDrop = avgEnergy - f.rmsDB;
+
+            if (energyDrop > energyDipSplitDB)
+            {
+                ++energyDipRun;
+                if (energyDipRun >= energyDipMinFrames)
+                {
+                    // Sustained energy dip → syllable boundary, split here
+                    finalizeNote(i - energyDipRun);
+                    noteStartIdx = -1;
+                    noteSum = 0.0f;
+                    noteCount = 0;
+                    deviationRun = 0;
+                    runningEnergySum = 0.0f;
+                    energyDipRun = 0;
+                    // Don't start new note on the dip frame — let the loop
+                    // naturally pick up when energy rises again
+                    continue;
+                }
+            }
+            else
+            {
+                energyDipRun = 0;
+            }
+
+            // --- Pitch-jump-based splitting ---
             float avgSoFar = noteSum / static_cast<float>(noteCount);
             float deviation = std::abs(f.midiNote - avgSoFar);
 
@@ -271,12 +309,15 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
                     // Recompute sum for the new note's initial frames
                     noteSum = 0.0f;
                     noteCount = 0;
+                    runningEnergySum = 0.0f;
                     for (int k = noteStartIdx; k <= i; ++k)
                     {
                         noteSum += frames[static_cast<size_t>(k)].midiNote;
+                        runningEnergySum += frames[static_cast<size_t>(k)].rmsDB;
                         ++noteCount;
                     }
                     deviationRun = 0;
+                    energyDipRun = 0;
                 }
                 // else: don't split yet — might be a vibrato transient
             }
@@ -284,6 +325,7 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
             {
                 deviationRun = 0;
                 noteSum += f.midiNote;
+                runningEnergySum += f.rmsDB;
                 ++noteCount;
             }
         }
@@ -294,14 +336,16 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
         finalizeNote(static_cast<int>(frames.size()) - 1);
 
     // -------------------------------------------------------------------------
-    // Merge pass: collapse adjacent notes that are close in time and pitch.
-    // Brief unvoiced gaps (consonants, breath noise) within a phrase often split
-    // what should be a single note into two. Re-join them if:
-    //   • gap < 150 ms (brief consonant or detection gap, not a real pause)
-    //   • pitch centers within 1.5 semitones (same note or tight step)
+    // Merge pass: collapse adjacent notes ONLY across very brief detection
+    // dropouts (1-2 frames of YIN uncertainty), NOT across real syllable gaps.
+    // Conditions:
+    //   • gap < 40 ms (only detection glitches, not consonants/breath)
+    //   • pitch centers within 1.0 semitone (clearly same note)
+    //   • no significant energy dip in the gap frames
     // -------------------------------------------------------------------------
-    const float mergeGapSec = 0.15f;  // 150 ms
-    const float mergePitchSem = 1.5f; // semitones
+    const float mergeGapSec = 0.04f;   // 40 ms — only merge across detection glitches
+    const float mergePitchSem = 1.0f;  // semitones
+    const float mergeEnergyDipDB = 8.0f; // don't merge if gap has energy dip > this
 
     bool merged = true;
     while (merged)
@@ -316,6 +360,30 @@ std::vector<PitchAnalyzer::PitchNote> PitchAnalyzer::segmentNotes(
 
             if (gap >= 0.0f && gap < mergeGapSec && pitchDiff < mergePitchSem)
             {
+                // Check for energy dip in gap frames — if there's a real dip, don't merge
+                bool hasEnergyDip = false;
+                for (size_t fi = 0; fi < frames.size(); ++fi)
+                {
+                    if (frames[fi].time >= a.endTime && frames[fi].time <= b.startTime)
+                    {
+                        // Get energy of the boundary frames of both notes
+                        float aEndEnergy = -60.0f;
+                        float bStartEnergy = -60.0f;
+                        if (fi > 0) aEndEnergy = frames[fi - 1].rmsDB;
+                        if (fi < frames.size()) bStartEnergy = frames[fi].rmsDB;
+                        float refEnergy = std::max(aEndEnergy, bStartEnergy);
+
+                        if ((refEnergy - frames[fi].rmsDB) > mergeEnergyDipDB)
+                        {
+                            hasEnergyDip = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (hasEnergyDip)
+                    continue;
+
                 // Weighted average pitch (by duration as proxy for frame count)
                 float aDur = a.endTime - a.startTime;
                 float bDur = b.endTime - b.startTime;

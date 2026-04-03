@@ -80,7 +80,7 @@ export function NoteInspector() {
 
   const pitchDisplay = note ? formatNoteName(note.correctedPitch) : "\u2014";
   const centsDisplay = note ? `${Math.round((note.correctedPitch - Math.round(note.correctedPitch)) * 100)}` : "\u2014";
-  const formantDisplay = note ? note.formantShift.toFixed(1) : "\u2014";
+  const formantDisplay = note ? Math.round(note.formantShift * 100).toString() : "\u2014";
   const gainDisplay = note ? note.gain.toFixed(1) : "\u2014";
   const modulationDisplay = note ? Math.round(note.vibratoDepth * 100).toString() : "\u2014";
   const driftDisplay = note ? Math.round(note.driftCorrectionAmount * 100).toString() : "\u2014";
@@ -128,14 +128,14 @@ export function NoteInspector() {
             }}
           />
 
-          {/* Formant */}
+          {/* Formant (cents) */}
           <InspectorRow
             label="Formant"
             value={formantDisplay}
-            suffix="st"
+            suffix="ct"
             disabled={!note}
-            min={-12} max={12} step={0.5}
-            onChange={(v) => { if (note) setNoteFormant(note.id, v); }}
+            min={-386} max={386} step={1}
+            onChange={(v) => { if (note) setNoteFormant(note.id, v / 100); }}
           />
 
           {/* Volume */}

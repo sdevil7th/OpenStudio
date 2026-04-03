@@ -8,6 +8,19 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <limits>
+
+#if JUCE_DEBUG
+static constexpr bool kPitchEditorFormantDebugLogs = true;
+#else
+static constexpr bool kPitchEditorFormantDebugLogs = false;
+#endif
+
+static void logPitchEditorFormant(const juce::String& message)
+{
+    if (kPitchEditorFormantDebugLogs)
+        juce::Logger::writeToLog ("[pitchEditor.formant] " + message);
+}
 
 std::vector<std::vector<float>> SignalsmithShifter::process (
     const float* const* input,
@@ -15,7 +28,8 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
     int numSamples,
     double sampleRate,
     const std::vector<float>& ratios,
-    const std::vector<float>& formantRatios)
+    const std::vector<float>& formantRatios,
+    const std::vector<float>& detectedPitchHz)
 {
     // Passthrough guard
     if (numSamples <= 0 || numChannels <= 0)
@@ -26,7 +40,7 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
         return result;
     }
 
-    // Check if anything actually needs shifting
+    // Check if anything actually needs shifting (pitch OR formant)
     bool hasShift = false;
     for (int s = 0; s < numSamples && ! hasShift; s += 512)
     {
@@ -35,32 +49,46 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
             hasShift = true;
     }
 
-    if (! hasShift)
+    // Also check formant ratios — formant-only edits must still be processed
+    bool hasFormant = false;
+    if (! formantRatios.empty())
     {
-        // No edits — return input unchanged
+        for (int s = 0; s < numSamples && ! hasFormant; s += 512)
+        {
+            if (static_cast<size_t> (s) < formantRatios.size()
+                && std::abs (formantRatios[static_cast<size_t> (s)] - 1.0f) > 1e-4f)
+                hasFormant = true;
+        }
+    }
+
+    if (! hasShift && ! hasFormant)
+    {
+        // No pitch or formant edits — return input unchanged
         std::vector<std::vector<float>> result (static_cast<size_t> (numChannels));
         for (int ch = 0; ch < numChannels; ++ch)
             result[static_cast<size_t> (ch)].assign (input[ch], input[ch] + numSamples);
         return result;
     }
 
+    const bool useLegacyPitchOnlyPath = ! hasFormant;
+
     // -------------------------------------------------------------------------
     // Configure Signalsmith Stretch
-    // presetDefault: blockSamples = sampleRate * 0.12, intervalSamples = sampleRate * 0.03
-    // At 44100 Hz: blockSamples ≈ 5292, intervalSamples ≈ 1323 (~30ms per block)
+    // Pitch-only uses the old stable presetDefault() path from 609c5cb.
+    // Explicit formant work keeps the newer custom path and pitch-base guidance.
     // -------------------------------------------------------------------------
     signalsmith::stretch::SignalsmithStretch<float> stretcher;
 
-    // Offline quality preset: 120ms analysis window (same as presetDefault), 10ms hop.
-    // presetDefault uses 30ms intervals — at large shifts this means the 40ms pre-roll
-    // transition is only 1-2 staircase steps, which sounds coarse.
-    // Finer interval (10ms) gives 4-6 steps per transition → much smoother blending.
-    // Keeping the 120ms block (not 200ms) avoids inter-note smearing: a 200ms window
-    // straddles both notes when two differently-corrected notes are close together,
-    // which garbles the output for multiple nearby note edits.
+    if (useLegacyPitchOnlyPath)
     {
-        int blockSamples    = static_cast<int> (sampleRate * 0.12); // 120 ms (same as presetDefault)
-        int intervalSamples = static_cast<int> (sampleRate * 0.01); // 10 ms hop (3× finer)
+        stretcher.presetDefault (numChannels, static_cast<float> (sampleRate));
+    }
+    else
+    {
+        // Offline quality preset: 120ms analysis window (same as presetDefault), 10ms hop.
+        // This newer path is kept only for explicit formant rendering.
+        int blockSamples    = static_cast<int> (sampleRate * 0.12);
+        int intervalSamples = static_cast<int> (sampleRate * 0.01);
         stretcher.configure (numChannels, blockSamples, intervalSamples);
     }
 
@@ -78,6 +106,15 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
     // Per-channel pointer vectors reused across blocks
     std::vector<const float*> inPtrs  (static_cast<size_t> (numChannels));
     std::vector<float*>       outPtrs (static_cast<size_t> (numChannels));
+    float minAvgRatio = std::numeric_limits<float>::max();
+    float maxAvgRatio = 0.0f;
+    float minAvgFormant = std::numeric_limits<float>::max();
+    float maxAvgFormant = 0.0f;
+    float minTargetFormant = std::numeric_limits<float>::max();
+    float maxTargetFormant = 0.0f;
+    float minLibraryFormant = std::numeric_limits<float>::max();
+    float maxLibraryFormant = 0.0f;
+    int blocksWithPitchBase = 0;
 
     // -------------------------------------------------------------------------
     // Process input in blocks of blockSize, updating pitch ratio per block
@@ -100,14 +137,43 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
         }
         float avgRatio = (counted > 0) ? sumRatio / static_cast<float> (counted) : 1.0f;
         avgRatio = juce::jlimit (0.25f, 4.0f, avgRatio);
+        minAvgRatio = std::min (minAvgRatio, avgRatio);
+        maxAvgRatio = std::max (maxAvgRatio, avgRatio);
 
         stretcher.setTransposeFactor (avgRatio);
 
-        // Formant compensation:
-        //   If the user has explicit per-note formant ratios, use those.
-        //   Otherwise, compensate automatically so formants stay at original position.
-        //   setFormantFactor(1/pitchRatio) cancels the pitch-induced formant shift.
-        if (! formantRatios.empty())
+        // Provide detected fundamental frequency so the library's formant
+        // envelope estimation uses the correct smoothing width.
+        // Without this, it uses a "VERY rough" auto-detection that often
+        // fails, especially on downward-shifted audio with denser harmonics.
+        if (! useLegacyPitchOnlyPath && ! detectedPitchHz.empty())
+        {
+            float sumPitch = 0.0f;
+            int   cntPitch = 0;
+            for (int s = pos; s < pos + thisBlock; ++s)
+            {
+                if (static_cast<size_t> (s) < detectedPitchHz.size()
+                    && detectedPitchHz[static_cast<size_t> (s)] > 0.0f)
+                {
+                    sumPitch += detectedPitchHz[static_cast<size_t> (s)];
+                    ++cntPitch;
+                }
+            }
+            if (cntPitch > 0)
+            {
+                stretcher.setFormantBase (sumPitch / static_cast<float> (cntPitch));
+                ++blocksWithPitchBase;
+            }
+            else
+                stretcher.setFormantBase (0); // fall back to auto-detect
+        }
+
+        // Formant handling — two-pass approach:
+        //   Pass 1 (here): Signalsmith's built-in compensatePitch=true does
+        //   coarse formant preservation using its spectral envelope estimator.
+        //   Pass 2 (PitchResynthesizer post-correction): log-domain envelope
+        //   matching catches residual formant drift the library missed.
+        if (! useLegacyPitchOnlyPath)
         {
             float sumFormant = 0.0f;
             int   cntFormant = 0;
@@ -121,12 +187,24 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
             }
             float avgFormant = (cntFormant > 0) ? sumFormant / static_cast<float> (cntFormant) : 1.0f;
             avgFormant = juce::jlimit (0.25f, 4.0f, avgFormant);
-            stretcher.setFormantFactor (avgFormant);
+            const float targetFormant = juce::jlimit (0.25f, 4.0f, avgFormant / avgRatio);
+            const float libraryFormant = juce::jlimit (0.35f, 3.5f, targetFormant);
+            minAvgFormant = std::min (minAvgFormant, avgFormant);
+            maxAvgFormant = std::max (maxAvgFormant, avgFormant);
+            minTargetFormant = std::min (minTargetFormant, targetFormant);
+            maxTargetFormant = std::max (maxTargetFormant, targetFormant);
+            minLibraryFormant = std::min (minLibraryFormant, libraryFormant);
+            maxLibraryFormant = std::max (maxLibraryFormant, libraryFormant);
+            stretcher.setFormantFactor (libraryFormant, true);
         }
         else
         {
-            // Auto-preserve: cancel the pitch shift's effect on formants
-            stretcher.setFormantFactor (1.0f / avgRatio);
+            const float preservedFormant = juce::jlimit (0.25f, 4.0f, 1.0f / avgRatio);
+            minTargetFormant = std::min (minTargetFormant, preservedFormant);
+            maxTargetFormant = std::max (maxTargetFormant, preservedFormant);
+            minLibraryFormant = std::min (minLibraryFormant, preservedFormant);
+            maxLibraryFormant = std::max (maxLibraryFormant, preservedFormant);
+            stretcher.setFormantFactor (preservedFormant);
         }
 
         // Set input and output pointers for this block
@@ -176,9 +254,39 @@ std::vector<std::vector<float>> SignalsmithShifter::process (
         // If latency > numSamples (extremely short clips), the rest stays zero.
     }
 
-    juce::Logger::writeToLog ("SignalsmithShifter: processed " + juce::String (numSamples)
-                               + " samples, " + juce::String (numChannels) + " ch, "
-                               + "latency=" + juce::String (outputLatency));
+    {
+        float minFormant = 1.0f, maxFormant = 1.0f;
+        for (const auto& f : formantRatios) { minFormant = std::min (minFormant, f); maxFormant = std::max (maxFormant, f); }
+        juce::Logger::writeToLog ("SignalsmithShifter: processed " + juce::String (numSamples)
+                                   + " samples, " + juce::String (numChannels) + " ch, "
+                                   + "latency=" + juce::String (outputLatency)
+                                   + " formantRange=[" + juce::String (minFormant, 3) + "," + juce::String (maxFormant, 3) + "]"
+                                   + " mode=" + juce::String (useLegacyPitchOnlyPath ? "pitch_only_legacy" : "explicit_formant"));
+        if (! useLegacyPitchOnlyPath)
+        {
+            logPitchEditorFormant ("Signalsmith blocks=" + juce::String ((numSamples + blockSize - 1) / blockSize)
+                + " avgPitchRange=[" + juce::String (minAvgRatio, 3) + "," + juce::String (maxAvgRatio, 3) + "]"
+                + " avgFormantRange=[" + juce::String (minAvgFormant == std::numeric_limits<float>::max() ? 1.0f : minAvgFormant, 3)
+                + "," + juce::String (maxAvgFormant, 3) + "]"
+                + " targetFormantRange=[" + juce::String (minTargetFormant == std::numeric_limits<float>::max() ? 1.0f : minTargetFormant, 3)
+                + "," + juce::String (maxTargetFormant, 3) + "]"
+                + " libraryFormantRange=[" + juce::String (minLibraryFormant == std::numeric_limits<float>::max() ? 1.0f : minLibraryFormant, 3)
+                + "," + juce::String (maxLibraryFormant, 3) + "]"
+                + " pitchBaseBlocks=" + juce::String (blocksWithPitchBase)
+                + " latency=" + juce::String (outputLatency)
+                + " copiedSamples=" + juce::String (numSamples));
+        }
+        else
+        {
+            logPitchEditorFormant ("Signalsmith pitch-only legacy blocks=" + juce::String ((numSamples + blockSize - 1) / blockSize)
+                + " avgPitchRange=[" + juce::String (minAvgRatio, 3) + "," + juce::String (maxAvgRatio, 3) + "]"
+                + " preservedFormantRange=[" + juce::String (minTargetFormant == std::numeric_limits<float>::max() ? 1.0f : minTargetFormant, 3)
+                + "," + juce::String (maxTargetFormant, 3) + "]"
+                + " pitchBaseBlocks=" + juce::String (blocksWithPitchBase)
+                + " latency=" + juce::String (outputLatency)
+                + " copiedSamples=" + juce::String (numSamples));
+        }
+    }
 
     return result;
 }

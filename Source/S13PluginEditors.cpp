@@ -1412,7 +1412,7 @@ void S13EQEditor::timerCallback()
 
 void S13EQEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 EQ");
+    paintEditorBackground(g, *this, "OpenStudio EQ");
 
     // HP icon (high-pass filter slope icon)
     auto hpBounds = hpEnabledBtn->getBounds().toFloat();
@@ -1678,7 +1678,7 @@ void S13CompressorEditor::timerCallback() { syncFromProcessor(); }
 
 void S13CompressorEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Compressor");
+    paintEditorBackground(g, *this, "OpenStudio Compressor");
 }
 
 void S13CompressorEditor::resized()
@@ -1790,7 +1790,7 @@ void S13GateEditor::timerCallback()
 
 void S13GateEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Gate");
+    paintEditorBackground(g, *this, "OpenStudio Gate");
 
     // Gate indicator
     auto indBounds = gateIndicator.getBounds().toFloat();
@@ -1871,7 +1871,7 @@ void S13LimiterEditor::timerCallback()
 
 void S13LimiterEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Limiter");
+    paintEditorBackground(g, *this, "OpenStudio Limiter");
 }
 
 void S13LimiterEditor::resized()
@@ -1982,7 +1982,7 @@ void S13DelayEditor::timerCallback() { syncFromProcessor(); }
 
 void S13DelayEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Delay");
+    paintEditorBackground(g, *this, "OpenStudio Delay");
 }
 
 void S13DelayEditor::resized()
@@ -2123,7 +2123,7 @@ void S13ReverbEditor::timerCallback() { syncFromProcessor(); }
 
 void S13ReverbEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Reverb");
+    paintEditorBackground(g, *this, "OpenStudio Reverb");
 }
 
 void S13ReverbEditor::resized()
@@ -2242,7 +2242,7 @@ void S13ChorusEditor::timerCallback() { syncFromProcessor(); }
 
 void S13ChorusEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Chorus");
+    paintEditorBackground(g, *this, "OpenStudio Chorus");
 }
 
 void S13ChorusEditor::resized()
@@ -2340,7 +2340,7 @@ void S13SaturatorEditor::timerCallback() { syncFromProcessor(); }
 
 void S13SaturatorEditor::paint(juce::Graphics& g)
 {
-    paintEditorBackground(g, *this, "S13 Saturator");
+    paintEditorBackground(g, *this, "OpenStudio Saturator");
 }
 
 void S13SaturatorEditor::resized()

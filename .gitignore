@@ -1,5 +1,6 @@
 # CMake
 /build
+/build-*/
 /out
 /cmake-build-*
 CMakeCache.txt
@@ -21,6 +22,7 @@ cmake_install.cmake
 node_modules
 /frontend/node_modules
 /frontend/dist
+/dist/
 
 # JUCE
 /juce
@@ -29,9 +31,30 @@ node_modules
 __pycache__/
 *.pyc
 get-pip.py
+.env
+.env.local
+.env.*.local
+.doppler/
 
 # Bundled Python environment (downloaded per-machine, not committed)
 /tools/python/
+
+# Release artifacts and local publish validation
+/dist/netlify-release-site/
+/dist/release-metadata/
+/dist/test-release-metadata/
+/dist/published-release-test/
+/dist/remote-release-validation-*/
+/build-version-check/
+
+# Signing material
+*.pfx
+*.p12
+*.cer
+*.pvk
+*.mobileprovision
+*.keychain
+*.keychain-db
 
 # Third-party SDKs & runtime binaries (downloaded per-machine)
 /thirdparty/onnxruntime/

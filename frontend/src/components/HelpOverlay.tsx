@@ -3,6 +3,7 @@ import { useShallow } from "zustand/shallow";
 import { X, Search, Keyboard, HelpCircle } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { getAllHelpTexts, type HelpEntry } from "../utils/helpTexts";
+import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { Button } from "./ui";
 
 /**
@@ -16,14 +17,27 @@ import { Button } from "./ui";
 function categorizeEntries(entries: Record<string, HelpEntry>): Record<string, Array<{ id: string } & HelpEntry>> {
   const categories: Record<string, Array<{ id: string } & HelpEntry>> = {};
   const categoryNames: Record<string, string> = {
+    navigation: "Navigation",
     timeline: "Timeline",
     transport: "Transport",
     mixer: "Mixer",
-    track: "Track",
+    tracks: "Tracks",
+    midi: "MIDI & Instruments",
     fx: "Effects (FX)",
-    pianoroll: "Piano Roll",
-    toolbar: "Toolbar",
-    meter: "Metering",
+    automation: "Automation",
+    pitch: "Pitch",
+    stem: "Stem Separation",
+    routing: "Routing",
+    render: "Render & Export",
+    media: "Media",
+    markers: "Markers & Regions",
+    metering: "Metering",
+    project: "Project",
+    session: "Session View",
+    scripting: "Scripting",
+    customization: "Customization",
+    video: "Video",
+    shortcuts: "Keyboard Shortcuts",
     settings: "Settings",
   };
 
@@ -46,10 +60,12 @@ export function HelpOverlay() {
       toggleContextualHelp: s.toggleContextualHelp,
     }))
   );
+  const customShortcuts = useDAWStore((s) => s.customShortcuts);
 
   const [searchQuery, setSearchQuery] = useState("");
 
-  const allEntries = useMemo(() => getAllHelpTexts(), []);
+  const allEntries = useMemo(() => getAllHelpTexts(), [customShortcuts]);
+  const helpShortcut = getEffectiveActionShortcut("help.contextualHelp") ?? "F1";
 
   const filteredCategories = useMemo(() => {
     const categorized = categorizeEntries(allEntries);
@@ -96,7 +112,7 @@ export function HelpOverlay() {
           <div className="flex items-center gap-2">
             <HelpCircle size={18} className="text-daw-accent" />
             <h2 className="text-lg font-semibold text-daw-text">Help Reference</h2>
-            <span className="text-xs text-neutral-500 ml-2">F1</span>
+            <span className="text-xs text-neutral-500 ml-2">{helpShortcut}</span>
           </div>
           <Button
             variant="ghost"
@@ -175,7 +191,7 @@ export function HelpOverlay() {
 
         {/* Footer */}
         <div className="px-4 py-2.5 border-t border-daw-border text-xs text-neutral-500 flex items-center justify-between shrink-0">
-          <span>Press F1 to close</span>
+          <span>Press {helpShortcut} to close</span>
           <span>{Object.values(allEntries).length} topics available</span>
         </div>
       </div>

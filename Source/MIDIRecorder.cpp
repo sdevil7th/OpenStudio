@@ -16,8 +16,12 @@ void MIDIRecorder::startRecording(const juce::String& trackId, double sampleRate
     state.trackId = trackId;
     state.events.clear();
     state.events.reserve(1024);  // Pre-allocate for typical session
+    state.previewNoteEvents.clear();
+    state.previewNoteEvents.reserve(1024);
+    state.activeHeldNotes.clear();
     state.startTime = 0.0;
     state.sampleRate = sampleRate;
+    state.generation = nextPreviewGeneration.fetch_add(1, std::memory_order_relaxed);
     state.isActive = true;
 
     juce::Logger::writeToLog("MIDIRecorder: Started recording track " + trackId);
@@ -43,6 +47,41 @@ void MIDIRecorder::recordEvent(const juce::String& trackId, double timeInSeconds
         relativeTime = 0.0;
 
     state.events.emplace_back(relativeTime, message);
+
+    if (message.isNoteOn())
+    {
+        state.previewNoteEvents.emplace_back(relativeTime, message);
+        state.activeHeldNotes.push_back(HeldPreviewNote {
+            message.getNoteNumber(),
+            juce::jlimit(1, 16, message.getChannel()),
+            relativeTime,
+        });
+    }
+    else if (message.isNoteOff())
+    {
+        state.previewNoteEvents.emplace_back(relativeTime, message);
+
+        for (auto itHeld = state.activeHeldNotes.rbegin(); itHeld != state.activeHeldNotes.rend(); ++itHeld)
+        {
+            if (itHeld->note == message.getNoteNumber()
+                && itHeld->channel == juce::jlimit(1, 16, message.getChannel()))
+            {
+                state.activeHeldNotes.erase(std::next(itHeld).base());
+                break;
+            }
+        }
+    }
+    else if (message.isAllNotesOff() || message.isAllSoundOff())
+    {
+        const int channel = juce::jlimit(1, 16, message.getChannel());
+        state.activeHeldNotes.erase(
+            std::remove_if(state.activeHeldNotes.begin(), state.activeHeldNotes.end(),
+                [channel](const HeldPreviewNote& heldNote)
+                {
+                    return heldNote.channel == channel;
+                }),
+            state.activeHeldNotes.end());
+    }
 }
 
 void MIDIRecorder::setRecordingStartTime(const juce::String& trackId, double timeInSeconds)
@@ -130,6 +169,53 @@ std::vector<MIDIRecorder::CompletedMIDIRecording> MIDIRecorder::stopAllRecording
                              juce::String(completed.size()) + " MIDI clips.");
 
     return completed;
+}
+
+std::vector<MIDIRecorder::LivePreviewSnapshot> MIDIRecorder::getLivePreviewSnapshots(
+    const std::vector<LivePreviewRequest>& requests) const
+{
+    std::vector<LivePreviewSnapshot> snapshots;
+
+    const juce::ScopedTryLock stl(recLock);
+    if (!stl.isLocked())
+        return snapshots;
+
+    snapshots.reserve(requests.size());
+
+    for (const auto& request : requests)
+    {
+        auto it = activeRecordings.find(request.trackId);
+        if (it == activeRecordings.end() || !it->second.isActive.load())
+            continue;
+
+        const auto& state = it->second;
+        LivePreviewSnapshot snapshot;
+        snapshot.trackId = request.trackId;
+        snapshot.generation = state.generation;
+        snapshot.recordingStartTime = state.startTime;
+        snapshot.totalEventCount = static_cast<int>(state.previewNoteEvents.size());
+
+        int copyStartIndex = 0;
+        if (request.generation == state.generation)
+            copyStartIndex = juce::jlimit(0, snapshot.totalEventCount, request.knownEventCount);
+
+        snapshot.deltaEvents.reserve(static_cast<size_t>(juce::jmax(0, snapshot.totalEventCount - copyStartIndex)));
+        for (int eventIndex = copyStartIndex; eventIndex < snapshot.totalEventCount; ++eventIndex)
+            snapshot.deltaEvents.push_back(state.previewNoteEvents[static_cast<size_t>(eventIndex)]);
+
+        snapshot.activeNotes.reserve(state.activeHeldNotes.size());
+        for (const auto& heldNote : state.activeHeldNotes)
+        {
+            snapshot.activeNotes.push_back(LivePreviewActiveNote {
+                heldNote.note,
+                heldNote.startTimestamp,
+            });
+        }
+
+        snapshots.push_back(std::move(snapshot));
+    }
+
+    return snapshots;
 }
 
 void MIDIRecorder::stopRecording(const juce::String& trackId)

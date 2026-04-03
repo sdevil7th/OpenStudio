@@ -27,7 +27,7 @@ public:
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
     void releaseResources() override;
 
-    const juce::String getName() const override { return "S13 Pitch Correct"; }
+    const juce::String getName() const override { return "OpenStudio Pitch Correct"; }
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return false; }

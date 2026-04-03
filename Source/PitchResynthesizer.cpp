@@ -4,184 +4,654 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <numeric>
+
+#if JUCE_DEBUG
+static constexpr bool kPitchEditorFormantDebugLogs = true;
+#else
+static constexpr bool kPitchEditorFormantDebugLogs = false;
+#endif
+
+static void logPitchEditorFormant(const juce::String& message)
+{
+    if (kPitchEditorFormantDebugLogs)
+        juce::Logger::writeToLog ("[pitchEditor.formant] " + message);
+}
 
 static float midiToHz(float midi)
 {
     return 440.0f * std::pow(2.0f, (midi - 69.0f) / 12.0f);
 }
 
-// Formant post-correction (currently disabled — SMS engine handles formant preservation
-// via LPC spectral envelope, and this STFT-based correction was adding subtle artifacts).
-// Kept as dead code for future re-activation with improved algorithm.
-#if 0
-static void applyFormantPostCorrection(
+static float interpolateEnvelopeBin (const std::vector<float>& env, float sourceIndex)
+{
+    if (env.empty())
+        return 1.0f;
+
+    if (sourceIndex <= 0.0f)
+        return env.front();
+
+    const float lastIndex = static_cast<float> (env.size() - 1);
+    if (sourceIndex >= lastIndex)
+        return env.back();
+
+    const auto lo = static_cast<size_t> (sourceIndex);
+    const auto hi = std::min (env.size() - 1, lo + 1);
+    const float frac = sourceIndex - static_cast<float> (lo);
+    return env[lo] + (env[hi] - env[lo]) * frac;
+}
+
+static float smoothstep01 (float x)
+{
+    x = juce::jlimit (0.0f, 1.0f, x);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+static float mapRequestedFormantRatio (float requestedRatio)
+{
+    requestedRatio = juce::jlimit (0.25f, 4.0f, requestedRatio);
+    if (requestedRatio >= 1.0f)
+        return std::pow (requestedRatio, 1.10f);
+    return std::pow (requestedRatio, 1.08f);
+}
+
+// ---------------------------------------------------------------------------
+// Formant post-correction — second pass after Signalsmith Stretch.
+//
+// Uses log-domain moving average for spectral envelope estimation.
+// No IFFT/FFT round-trip = no normalization ambiguity, guaranteed correct.
+// Smoothing width adapts to detected pitch (3× fundamental spacing in bins).
+//
+// This is a RESIDUAL corrector: Signalsmith's built-in compensatePitch=true
+// does first-pass correction; this catches what the library missed.
+// ---------------------------------------------------------------------------
+static void applyFormantPostCorrection (
     std::vector<std::vector<float>>& output,
-    const float* originalMono,
+    const float* const* originalInput,
     int numChannels,
     int numSamples,
     double sampleRate,
-    const std::vector<float>& ratios)
+    const std::vector<float>& ratios,
+    const std::vector<float>& detectedPitchHz)
 {
-    // Only proceed if there are shifts large enough to benefit from extra correction.
-    // Ratio of ~1.19 = +3 semitones, ~0.84 = -3 semitones.
-    const float ratioThreshold = 0.15f;
-    bool hasLargeShift = false;
-    for (size_t i = 0; i < ratios.size() && !hasLargeShift; i += 256)
-        if (std::abs(ratios[i] - 1.0f) > ratioThreshold) hasLargeShift = true;
-    if (!hasLargeShift) return;
+    const float ratioThreshold = 0.06f;
+    bool hasShift = false;
+    for (size_t i = 0; i < ratios.size() && ! hasShift; i += 256)
+        if (std::abs (ratios[i] - 1.0f) > ratioThreshold) hasShift = true;
+    if (! hasShift) return;
 
-    const int fftOrder = 11; // 2^11 = 2048
-    const int fftSize = 1 << fftOrder;
-    const int hopLen = fftSize / 4; // 75% overlap for clean overlap-add
+    const int fftOrder = 12;
+    const int fftSize  = 1 << fftOrder;
+    const int hopLen   = fftSize / 4;
     const int halfBins = fftSize / 2 + 1;
+    const float pi     = juce::MathConstants<float>::pi;
+    const float binHz  = static_cast<float> (sampleRate) / static_cast<float> (fftSize);
 
-    // Spectral envelope smoothing width: ~500 Hz (captures formant peaks without
-    // following individual harmonics). At 44100 Hz with 2048 FFT, bin width = 21.5 Hz,
-    // so ~23 bins = 500 Hz.
-    const int envSmoothBins = std::max(3,
-        static_cast<int>(500.0 * static_cast<double>(fftSize) / sampleRate));
+    juce::dsp::FFT fft (fftOrder);
 
-    juce::dsp::FFT fft(fftOrder);
-
-    // Hann window (precomputed)
-    std::vector<float> hannWin(static_cast<size_t>(fftSize));
+    std::vector<float> hannWin (static_cast<size_t> (fftSize));
     for (int i = 0; i < fftSize; ++i)
-        hannWin[static_cast<size_t>(i)] = 0.5f * (1.0f - std::cos(
-            2.0f * juce::MathConstants<float>::pi * static_cast<float>(i)
-            / static_cast<float>(fftSize - 1)));
+        hannWin[static_cast<size_t> (i)] = 0.5f * (1.0f - std::cos (
+            2.0f * pi * static_cast<float> (i) / static_cast<float> (fftSize - 1)));
 
-    // Smooth a magnitude spectrum to get spectral envelope via moving average
-    auto smoothEnvelope = [&](const std::vector<float>& mag, std::vector<float>& env) {
+    std::vector<float> origFFTBuf (static_cast<size_t> (fftSize * 2));
+    std::vector<float> outFFTBuf  (static_cast<size_t> (fftSize * 2));
+    std::vector<float> origLogMag (static_cast<size_t> (halfBins));
+    std::vector<float> outLogMag  (static_cast<size_t> (halfBins));
+    std::vector<float> origEnv    (static_cast<size_t> (halfBins));
+    std::vector<float> outEnv     (static_cast<size_t> (halfBins));
+
+    // Log-domain moving average spectral envelope estimation.
+    // Smooths log magnitudes with a window of ~3× the fundamental frequency
+    // spacing in bins. This averages over ~3 harmonics, yielding a smooth
+    // formant envelope. Log domain = geometric mean, which follows formant
+    // peaks without being pulled by individual harmonics.
+    auto computeEnvelope = [&] (const float* fftBufData, int smoothHalfW,
+                                 const std::vector<float>& logMag,
+                                 std::vector<float>& env)
+    {
+        juce::ignoreUnused (fftBufData);
         for (int i = 0; i < halfBins; ++i)
         {
+            int lo = std::max (0, i - smoothHalfW);
+            int hi = std::min (halfBins - 1, i + smoothHalfW);
             float sum = 0.0f;
-            int lo = std::max(0, i - envSmoothBins / 2);
-            int hi = std::min(halfBins - 1, i + envSmoothBins / 2);
             for (int j = lo; j <= hi; ++j)
-                sum += mag[static_cast<size_t>(j)];
-            env[static_cast<size_t>(i)] = sum / static_cast<float>(hi - lo + 1) + 1e-10f;
+                sum += logMag[static_cast<size_t> (j)];
+            env[static_cast<size_t> (i)] = std::exp (sum / static_cast<float> (hi - lo + 1));
         }
     };
 
-    std::vector<float> origFFTBuf(static_cast<size_t>(fftSize * 2));
-    std::vector<float> outFFTBuf(static_cast<size_t>(fftSize * 2));
-    std::vector<float> origMag(static_cast<size_t>(halfBins));
-    std::vector<float> outMag(static_cast<size_t>(halfBins));
-    std::vector<float> origEnv(static_cast<size_t>(halfBins));
-    std::vector<float> outEnv(static_cast<size_t>(halfBins));
-
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        auto& out = output[static_cast<size_t>(ch)];
-        std::vector<float> corrected(static_cast<size_t>(numSamples), 0.0f);
-        std::vector<float> winSum(static_cast<size_t>(numSamples), 0.0f);
+        auto& out         = output[static_cast<size_t> (ch)];
+        const float* orig = originalInput[ch];
+
+        std::vector<float> corrected (static_cast<size_t> (numSamples), 0.0f);
+        std::vector<float> winSum    (static_cast<size_t> (numSamples), 0.0f);
 
         for (int pos = 0; pos < numSamples; pos += hopLen)
         {
-            // Average ratio in this frame
             float avgRatio = 0.0f;
-            int cnt = 0;
-            for (int i = pos; i < std::min(pos + fftSize, numSamples); ++i)
+            int   cnt = 0;
+            for (int i = pos; i < std::min (pos + fftSize, numSamples); ++i)
             {
-                avgRatio += ratios[static_cast<size_t>(i)];
-                ++cnt;
+                if (static_cast<size_t> (i) < ratios.size())
+                {
+                    avgRatio += ratios[static_cast<size_t> (i)];
+                    ++cnt;
+                }
             }
-            avgRatio = (cnt > 0) ? avgRatio / static_cast<float>(cnt) : 1.0f;
+            avgRatio = (cnt > 0) ? avgRatio / static_cast<float> (cnt) : 1.0f;
 
-            bool needsCorrection = (std::abs(avgRatio - 1.0f) > ratioThreshold);
-
-            if (!needsCorrection)
+            if (std::abs (avgRatio - 1.0f) <= ratioThreshold)
             {
-                // Pass through unchanged (just overlap-add with window)
                 for (int i = 0; i < fftSize; ++i)
                 {
                     int idx = pos + i;
                     if (idx >= 0 && idx < numSamples)
                     {
-                        float w = hannWin[static_cast<size_t>(i)];
-                        corrected[static_cast<size_t>(idx)] += out[static_cast<size_t>(idx)] * w;
-                        winSum[static_cast<size_t>(idx)] += w * w;
+                        float w = hannWin[static_cast<size_t> (i)];
+                        corrected[static_cast<size_t> (idx)] += out[static_cast<size_t> (idx)] * w;
+                        winSum[static_cast<size_t> (idx)]    += w * w;
                     }
                 }
                 continue;
             }
 
-            // Window original mono and output channel
-            std::fill(origFFTBuf.begin(), origFFTBuf.end(), 0.0f);
-            std::fill(outFFTBuf.begin(), outFFTBuf.end(), 0.0f);
-            for (int i = 0; i < fftSize; ++i)
-            {
-                int idx = pos + i;
-                float w = hannWin[static_cast<size_t>(i)];
-                origFFTBuf[static_cast<size_t>(i)] =
-                    (idx >= 0 && idx < numSamples) ? originalMono[idx] * w : 0.0f;
-                outFFTBuf[static_cast<size_t>(i)] =
-                    (idx >= 0 && idx < numSamples) ? out[static_cast<size_t>(idx)] * w : 0.0f;
-            }
-
-            // Forward FFT
-            fft.performRealOnlyForwardTransform(origFFTBuf.data(), true);
-            fft.performRealOnlyForwardTransform(outFFTBuf.data(), true);
-
-            // Compute magnitudes
-            for (int i = 0; i < halfBins; ++i)
-            {
-                float ore = origFFTBuf[static_cast<size_t>(i * 2)];
-                float oim = origFFTBuf[static_cast<size_t>(i * 2 + 1)];
-                origMag[static_cast<size_t>(i)] = std::sqrt(ore * ore + oim * oim);
-
-                float ure = outFFTBuf[static_cast<size_t>(i * 2)];
-                float uim = outFFTBuf[static_cast<size_t>(i * 2 + 1)];
-                outMag[static_cast<size_t>(i)] = std::sqrt(ure * ure + uim * uim);
-            }
-
-            // Smooth to spectral envelopes
-            smoothEnvelope(origMag, origEnv);
-            smoothEnvelope(outMag, outEnv);
-
-            // Correction strength scales with shift magnitude:
-            //   <= 3 semitones (ratio threshold): 0%
-            //   12 semitones (ratio ~2.0): 60%
-            float shiftMagnitude = std::abs(avgRatio - 1.0f);
-            float strength = juce::jlimit(0.0f, 0.6f, (shiftMagnitude - ratioThreshold) * 1.5f);
-
-            // Apply spectral envelope correction to output FFT
-            for (int i = 0; i < halfBins; ++i)
-            {
-                float gain = std::pow(origEnv[static_cast<size_t>(i)]
-                                    / outEnv[static_cast<size_t>(i)], strength);
-                gain = juce::jlimit(0.25f, 4.0f, gain); // prevent extreme corrections
-                outFFTBuf[static_cast<size_t>(i * 2)] *= gain;
-                outFFTBuf[static_cast<size_t>(i * 2 + 1)] *= gain;
-            }
-
-            // Inverse FFT
-            fft.performRealOnlyInverseTransform(outFFTBuf.data());
-
-            // Overlap-add
+            // Window and FFT both signals
+            std::fill (origFFTBuf.begin(), origFFTBuf.end(), 0.0f);
+            std::fill (outFFTBuf.begin(),  outFFTBuf.end(),  0.0f);
             for (int i = 0; i < fftSize; ++i)
             {
                 int idx = pos + i;
                 if (idx >= 0 && idx < numSamples)
                 {
-                    float w = hannWin[static_cast<size_t>(i)];
-                    corrected[static_cast<size_t>(idx)] += outFFTBuf[static_cast<size_t>(i)] * w;
-                    winSum[static_cast<size_t>(idx)] += w * w;
+                    float w = hannWin[static_cast<size_t> (i)];
+                    origFFTBuf[static_cast<size_t> (i)] = orig[idx] * w;
+                    outFFTBuf[static_cast<size_t> (i)]  = out[static_cast<size_t> (idx)] * w;
+                }
+            }
+            fft.performRealOnlyForwardTransform (origFFTBuf.data(), true);
+            fft.performRealOnlyForwardTransform (outFFTBuf.data(), true);
+
+            // Compute log magnitudes
+            for (int i = 0; i < halfBins; ++i)
+            {
+                float ore = origFFTBuf[static_cast<size_t> (i * 2)];
+                float oim = origFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                origLogMag[static_cast<size_t> (i)] = std::log (std::sqrt (ore * ore + oim * oim) + 1e-10f);
+
+                float sre = outFFTBuf[static_cast<size_t> (i * 2)];
+                float sim = outFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                outLogMag[static_cast<size_t> (i)] = std::log (std::sqrt (sre * sre + sim * sim) + 1e-10f);
+            }
+
+            // Adaptive smoothing width: ~3× fundamental spacing in bins.
+            // For 200Hz voice at 44.1kHz/4096: 200/10.77 ≈ 18.6 bins, 3× = 56 bins half-width ~28
+            float avgPitch = 0.0f;
+            int pitchCnt = 0;
+            if (! detectedPitchHz.empty())
+            {
+                for (int i = pos; i < std::min (pos + fftSize, numSamples); ++i)
+                    if (static_cast<size_t> (i) < detectedPitchHz.size()
+                        && detectedPitchHz[static_cast<size_t> (i)] > 0.0f)
+                    {
+                        avgPitch += detectedPitchHz[static_cast<size_t> (i)];
+                        ++pitchCnt;
+                    }
+                if (pitchCnt > 0) avgPitch /= static_cast<float> (pitchCnt);
+            }
+            // Smoothing width: 5× fundamental spacing in bins.
+            // Wide enough to average over ~5 harmonics → captures only the
+            // broad formant shape, never follows individual harmonic peaks.
+            // This is critical: if the envelope tracks harmonics, the correction
+            // cuts/boosts harmonics individually → artificial sound.
+            int smoothHalfW;
+            if (avgPitch > 50.0f)
+                smoothHalfW = std::max (15, static_cast<int> (2.5f * avgPitch / binHz));
+            else
+                smoothHalfW = 50; // fallback: ~540Hz at 44.1kHz/4096
+            smoothHalfW = std::min (smoothHalfW, halfBins / 3);
+
+            computeEnvelope (origFFTBuf.data(), smoothHalfW, origLogMag, origEnv);
+            computeEnvelope (outFFTBuf.data(),  smoothHalfW, outLogMag,  outEnv);
+
+            // Correction strength — gentle residual on top of library's first pass.
+            // Kept moderate to avoid destroying harmonics.
+            float shiftMag    = std::abs (avgRatio - 1.0f);
+            float maxStrength = (avgRatio < 1.0f) ? 0.75f : 0.55f;
+            float strength    = juce::jlimit (0.0f, maxStrength,
+                                              (shiftMag - ratioThreshold) * 2.5f);
+
+            // Measure energy before correction
+            float energyBefore = 0.0f;
+            for (int i = 0; i < halfBins; ++i)
+            {
+                float re = outFFTBuf[static_cast<size_t> (i * 2)];
+                float im = outFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                energyBefore += re * re + im * im;
+            }
+
+            // Apply spectral envelope correction
+            for (int i = 0; i < halfBins; ++i)
+            {
+                float gain = std::pow (origEnv[static_cast<size_t> (i)]
+                                     / (outEnv[static_cast<size_t> (i)] + 1e-10f), strength);
+                gain = juce::jlimit (0.5f, 2.0f, gain); // ±6dB max — reshape, never remove harmonics
+                outFFTBuf[static_cast<size_t> (i * 2)]     *= gain;
+                outFFTBuf[static_cast<size_t> (i * 2 + 1)] *= gain;
+            }
+
+            // Preserve total spectral energy
+            float energyAfter = 0.0f;
+            for (int i = 0; i < halfBins; ++i)
+            {
+                float re = outFFTBuf[static_cast<size_t> (i * 2)];
+                float im = outFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                energyAfter += re * re + im * im;
+            }
+            if (energyAfter > 1e-10f)
+            {
+                float scale = std::sqrt (energyBefore / energyAfter);
+                for (int i = 0; i < halfBins; ++i)
+                {
+                    outFFTBuf[static_cast<size_t> (i * 2)]     *= scale;
+                    outFFTBuf[static_cast<size_t> (i * 2 + 1)] *= scale;
+                }
+            }
+
+            fft.performRealOnlyInverseTransform (outFFTBuf.data());
+
+            for (int i = 0; i < fftSize; ++i)
+            {
+                int idx = pos + i;
+                if (idx >= 0 && idx < numSamples)
+                {
+                    float w = hannWin[static_cast<size_t> (i)];
+                    corrected[static_cast<size_t> (idx)] += outFFTBuf[static_cast<size_t> (i)] * w;
+                    winSum[static_cast<size_t> (idx)]    += w * w;
                 }
             }
         }
 
-        // Normalize by window sum (COLA condition)
         for (int s = 0; s < numSamples; ++s)
         {
-            if (winSum[static_cast<size_t>(s)] > 0.001f)
-                out[static_cast<size_t>(s)] = corrected[static_cast<size_t>(s)]
-                                            / winSum[static_cast<size_t>(s)];
+            if (winSum[static_cast<size_t> (s)] > 0.001f)
+                out[static_cast<size_t> (s)] = corrected[static_cast<size_t> (s)]
+                                             / winSum[static_cast<size_t> (s)];
         }
     }
 }
-#endif // formant post-correction disabled
+
+static void applyExplicitFormantWarp (
+    std::vector<std::vector<float>>& output,
+    const float* const* originalInput,
+    int numChannels,
+    int numSamples,
+    double sampleRate,
+    const std::vector<float>& formantRatios,
+    const std::vector<float>& detectedPitchHz,
+    float warpIntensity,
+    bool formantOnly,
+    PitchResynthesizer::RenderQuality renderQuality,
+    std::function<bool()> shouldCancel)
+{
+    const bool previewFast = renderQuality == PitchResynthesizer::RenderQuality::PreviewFast;
+    const float ratioThreshold = 0.03f;
+    bool hasShift = false;
+    float requestedMinRatio = 1.0f;
+    float requestedMaxRatio = 1.0f;
+
+    for (size_t i = 0; i < formantRatios.size(); i += 256)
+    {
+        const float ratio = formantRatios[i];
+        requestedMinRatio = std::min (requestedMinRatio, ratio);
+        requestedMaxRatio = std::max (requestedMaxRatio, ratio);
+        if (std::abs (ratio - 1.0f) > ratioThreshold)
+            hasShift = true;
+    }
+
+    if (! hasShift)
+        return;
+
+    const int fftOrder = formantOnly
+        ? (previewFast ? 10 : 11)
+        : (previewFast ? 11 : 12);
+    const int fftSize  = 1 << fftOrder;
+    const int hopLen   = previewFast ? (fftSize / 2) : (fftSize / 4);
+    const int halfBins = fftSize / 2 + 1;
+    const float pi     = juce::MathConstants<float>::pi;
+    const float binHz  = static_cast<float> (sampleRate) / static_cast<float> (fftSize);
+
+    juce::dsp::FFT fft (fftOrder);
+
+    std::vector<float> hannWin (static_cast<size_t> (fftSize));
+    for (int i = 0; i < fftSize; ++i)
+        hannWin[static_cast<size_t> (i)] = 0.5f * (1.0f - std::cos (
+            2.0f * pi * static_cast<float> (i) / static_cast<float> (fftSize - 1)));
+
+    std::vector<float> origFFTBuf (static_cast<size_t> (fftSize * 2));
+    std::vector<float> outFFTBuf  (static_cast<size_t> (fftSize * 2));
+    std::vector<float> preWarpFFTBuf (static_cast<size_t> (fftSize * 2));
+    std::vector<float> origLogMag (static_cast<size_t> (halfBins));
+    std::vector<float> outLogMag  (static_cast<size_t> (halfBins));
+    std::vector<float> origEnv    (static_cast<size_t> (halfBins));
+    std::vector<float> outEnv     (static_cast<size_t> (halfBins));
+    std::vector<float> targetEnv  (static_cast<size_t> (halfBins));
+
+    auto computeEnvelope = [&] (const std::vector<float>& logMag,
+                                int smoothHalfW,
+                                std::vector<float>& env)
+    {
+        for (int i = 0; i < halfBins; ++i)
+        {
+            const int lo = std::max (0, i - smoothHalfW);
+            const int hi = std::min (halfBins - 1, i + smoothHalfW);
+            float sum = 0.0f;
+            for (int j = lo; j <= hi; ++j)
+                sum += logMag[static_cast<size_t> (j)];
+            env[static_cast<size_t> (i)] = std::exp (sum / static_cast<float> (hi - lo + 1));
+        }
+    };
+
+    int shiftedBlocks = 0;
+    float appliedMinRatio = std::numeric_limits<float>::max();
+    float appliedMaxRatio = 0.0f;
+    float avgVoicedBlendApplied = 0.0f;
+    float minSmoothedVoicedBlend = std::numeric_limits<float>::max();
+    float maxSmoothedVoicedBlend = 0.0f;
+    float minEffectiveStrength = std::numeric_limits<float>::max();
+    float maxEffectiveStrength = 0.0f;
+    float totalEnvelopeDeltaBefore = 0.0f;
+    float totalEnvelopeDeltaAfter = 0.0f;
+    int totalEnvelopeDeltaBins = 0;
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        auto& out = output[static_cast<size_t> (ch)];
+        const float* orig = originalInput[ch];
+
+        std::vector<float> corrected (static_cast<size_t> (numSamples), 0.0f);
+        std::vector<float> winSum    (static_cast<size_t> (numSamples), 0.0f);
+        float prevVoicedBlend = 0.0f;
+        float prevStrength = 0.0f;
+        float prevOriginalBlend = 0.0f;
+
+        for (int pos = 0; pos < numSamples; pos += hopLen)
+        {
+            if (shouldCancel && shouldCancel())
+                return;
+            float avgFormantRatio = 0.0f;
+            int ratioCount = 0;
+            float frameEnergy = 0.0f;
+            int frameSamples = 0;
+            for (int i = pos; i < std::min (pos + fftSize, numSamples); ++i)
+            {
+                if (static_cast<size_t> (i) < formantRatios.size())
+                {
+                    avgFormantRatio += formantRatios[static_cast<size_t> (i)];
+                    ++ratioCount;
+                }
+                const float sample = orig[i];
+                frameEnergy += sample * sample;
+                ++frameSamples;
+            }
+            avgFormantRatio = ratioCount > 0 ? avgFormantRatio / static_cast<float> (ratioCount) : 1.0f;
+            const float frameRms = frameSamples > 0 ? std::sqrt (frameEnergy / static_cast<float> (frameSamples)) : 0.0f;
+
+            if (std::abs (avgFormantRatio - 1.0f) <= ratioThreshold)
+            {
+                for (int i = 0; i < fftSize; ++i)
+                {
+                    const int idx = pos + i;
+                    if (idx >= 0 && idx < numSamples)
+                    {
+                        const float w = hannWin[static_cast<size_t> (i)];
+                        corrected[static_cast<size_t> (idx)] += out[static_cast<size_t> (idx)] * w;
+                        winSum[static_cast<size_t> (idx)] += w * w;
+                    }
+                }
+                continue;
+            }
+
+            ++shiftedBlocks;
+
+            std::fill (origFFTBuf.begin(), origFFTBuf.end(), 0.0f);
+            std::fill (outFFTBuf.begin(), outFFTBuf.end(), 0.0f);
+            for (int i = 0; i < fftSize; ++i)
+            {
+                const int idx = pos + i;
+                if (idx >= 0 && idx < numSamples)
+                {
+                    const float w = hannWin[static_cast<size_t> (i)];
+                    origFFTBuf[static_cast<size_t> (i)] = orig[idx] * w;
+                    outFFTBuf[static_cast<size_t> (i)] = out[static_cast<size_t> (idx)] * w;
+                }
+            }
+
+            fft.performRealOnlyForwardTransform (origFFTBuf.data(), true);
+            fft.performRealOnlyForwardTransform (outFFTBuf.data(), true);
+            std::copy (outFFTBuf.begin(), outFFTBuf.end(), preWarpFFTBuf.begin());
+
+            for (int i = 0; i < halfBins; ++i)
+            {
+                const float ore = origFFTBuf[static_cast<size_t> (i * 2)];
+                const float oim = origFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                origLogMag[static_cast<size_t> (i)] = std::log (std::sqrt (ore * ore + oim * oim) + 1e-10f);
+
+                const float sre = outFFTBuf[static_cast<size_t> (i * 2)];
+                const float sim = outFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                outLogMag[static_cast<size_t> (i)] = std::log (std::sqrt (sre * sre + sim * sim) + 1e-10f);
+            }
+
+            float avgPitch = 0.0f;
+            int pitchCount = 0;
+            int voicedSamples = 0;
+            if (! detectedPitchHz.empty())
+            {
+                for (int i = pos; i < std::min (pos + fftSize, numSamples); ++i)
+                {
+                    if (static_cast<size_t> (i) < detectedPitchHz.size()
+                        && detectedPitchHz[static_cast<size_t> (i)] > 0.0f)
+                    {
+                        avgPitch += detectedPitchHz[static_cast<size_t> (i)];
+                        ++pitchCount;
+                        ++voicedSamples;
+                    }
+                }
+                if (pitchCount > 0)
+                    avgPitch /= static_cast<float> (pitchCount);
+            }
+
+            const float rawVoicedBlend = smoothstep01 (static_cast<float> (voicedSamples)
+                                                      / static_cast<float> (std::max (1, std::min (fftSize, numSamples - pos)))
+                                                      * (formantOnly ? 1.48f : 1.36f));
+            const float voicedBlend = (pos == 0)
+                ? rawVoicedBlend
+                : ((formantOnly ? 0.82f : 0.76f) * prevVoicedBlend
+                    + (formantOnly ? 0.18f : 0.24f) * rawVoicedBlend);
+            prevVoicedBlend = voicedBlend;
+            avgVoicedBlendApplied += voicedBlend;
+            minSmoothedVoicedBlend = std::min (minSmoothedVoicedBlend, voicedBlend);
+            maxSmoothedVoicedBlend = std::max (maxSmoothedVoicedBlend, voicedBlend);
+
+            int smoothHalfW;
+            if (avgPitch > 50.0f)
+                smoothHalfW = std::max (previewFast ? (formantOnly ? 10 : 12) : (formantOnly ? 14 : 16),
+                                        static_cast<int> ((formantOnly ? (previewFast ? 1.35f : 1.75f) : (previewFast ? 1.85f : 2.45f)) * avgPitch / binHz));
+            else
+                smoothHalfW = previewFast ? (formantOnly ? 24 : 30) : (formantOnly ? 36 : 50);
+            smoothHalfW = std::min (smoothHalfW, halfBins / 3);
+
+            computeEnvelope (origLogMag, smoothHalfW, origEnv);
+            computeEnvelope (outLogMag, smoothHalfW, outEnv);
+
+            const float effectiveShiftSemitones = std::abs (12.0f * std::log2 (std::max (avgFormantRatio, 1.0e-4f)));
+            const float bassFocus = formantOnly && avgPitch > 0.0f
+                ? smoothstep01 ((195.0f - avgPitch) / 110.0f)
+                : 0.0f;
+            const float lowRegisterBoost = formantOnly && avgPitch > 0.0f
+                ? (1.0f + (previewFast ? 0.24f : 0.34f) * bassFocus)
+                : 1.0f;
+            const float voicedStrengthBias = formantOnly
+                ? (0.48f + 0.52f * voicedBlend)
+                : (0.28f + 0.72f * voicedBlend);
+            const float rawStrength = juce::jlimit (0.0f, formantOnly ? (previewFast ? 1.38f : 1.58f) : (previewFast ? 1.15f : 1.42f),
+                                                    (0.76f + effectiveShiftSemitones * 0.20f)
+                                                        * voicedStrengthBias * warpIntensity * lowRegisterBoost);
+            const float strength = (pos == 0)
+                ? rawStrength
+                : ((formantOnly ? 0.78f : 0.72f) * prevStrength
+                    + (formantOnly ? 0.22f : 0.28f) * rawStrength);
+            prevStrength = strength;
+            minEffectiveStrength = std::min (minEffectiveStrength, strength);
+            maxEffectiveStrength = std::max (maxEffectiveStrength, strength);
+            appliedMinRatio = std::min (appliedMinRatio, avgFormantRatio);
+            appliedMaxRatio = std::max (appliedMaxRatio, avgFormantRatio);
+
+            float energyBefore = 0.0f;
+            for (int i = 0; i < halfBins; ++i)
+            {
+                const float re = outFFTBuf[static_cast<size_t> (i * 2)];
+                const float im = outFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                energyBefore += re * re + im * im;
+            }
+
+            for (int i = 0; i < halfBins; ++i)
+            {
+                const float freqHz = static_cast<float> (i) * binHz;
+                const float lowAnchor = std::max (formantOnly ? 65.0f : 90.0f, avgPitch > 0.0f ? avgPitch * (formantOnly ? 0.78f : 0.95f) : (formantOnly ? 90.0f : 120.0f));
+                const float lowFull = std::max (formantOnly ? 220.0f : 320.0f, avgPitch > 0.0f ? avgPitch * (formantOnly ? 1.65f : 2.15f) : (formantOnly ? 300.0f : 430.0f));
+                const float lowBandBase = formantOnly
+                    ? (0.58f + 0.12f * bassFocus)
+                    : 0.30f;
+                const float lowBandLift = formantOnly
+                    ? (0.42f - 0.10f * bassFocus)
+                    : 0.70f;
+                const float lowBandWeight = lowBandBase + lowBandLift
+                    * smoothstep01 ((freqHz - lowAnchor) / std::max (45.0f, lowFull - lowAnchor));
+                const float detailProtect = smoothstep01 ((freqHz - 3400.0f) / 2200.0f);
+                const float airProtection = 1.0f - (formantOnly ? 0.16f : 0.28f)
+                    * smoothstep01 ((freqHz - 5200.0f) / 2600.0f);
+                const float perBinWeight = juce::jlimit (0.0f, 1.0f, voicedStrengthBias * lowBandWeight * airProtection);
+
+                targetEnv[static_cast<size_t> (i)] = interpolateEnvelopeBin (
+                    origEnv, static_cast<float> (i) / avgFormantRatio);
+
+                const float targetBlend = juce::jlimit (0.0f, 1.10f,
+                    perBinWeight * (formantOnly ? (previewFast ? 1.06f : 1.10f) : 1.02f));
+                const float blendedTargetEnv = outEnv[static_cast<size_t> (i)]
+                    + (targetEnv[static_cast<size_t> (i)] - outEnv[static_cast<size_t> (i)])
+                        * targetBlend;
+                const float sourceEnv = outEnv[static_cast<size_t> (i)] + 1.0e-10f;
+                const float targetValue = blendedTargetEnv + 1.0e-10f;
+                totalEnvelopeDeltaBefore += std::abs (std::log (targetValue / sourceEnv));
+
+                float gain = std::pow (targetValue / sourceEnv,
+                                       strength);
+                float minGain = juce::jmap (voicedBlend, 0.0f, 1.0f,
+                    detailProtect > 0.25f ? 0.84f : 0.72f,
+                    detailProtect > 0.25f ? 0.68f : (previewFast ? 0.56f : 0.46f));
+                float maxGain = juce::jmap (voicedBlend, 0.0f, 1.0f,
+                    detailProtect > 0.25f ? 1.20f : 1.55f,
+                    detailProtect > 0.25f ? 1.54f : (previewFast ? 2.05f : 2.45f));
+                if (formantOnly && bassFocus > 0.0f && freqHz < std::max (420.0f, avgPitch > 0.0f ? avgPitch * 3.1f : 420.0f))
+                    maxGain *= (1.0f + 0.16f * bassFocus);
+                gain = juce::jlimit (minGain, maxGain, gain);
+                totalEnvelopeDeltaAfter += std::abs (std::log (targetValue / (sourceEnv * gain)));
+                ++totalEnvelopeDeltaBins;
+                outFFTBuf[static_cast<size_t> (i * 2)] *= gain;
+                outFFTBuf[static_cast<size_t> (i * 2 + 1)] *= gain;
+            }
+
+            float energyAfter = 0.0f;
+            for (int i = 0; i < halfBins; ++i)
+            {
+                const float re = outFFTBuf[static_cast<size_t> (i * 2)];
+                const float im = outFFTBuf[static_cast<size_t> (i * 2 + 1)];
+                energyAfter += re * re + im * im;
+            }
+            if (energyAfter > 1.0e-10f)
+            {
+                const float energyRatio = energyBefore / energyAfter;
+                const float scale = std::pow (energyRatio, formantOnly ? 0.24f : 0.24f);
+                for (int i = 0; i < halfBins; ++i)
+                {
+                    outFFTBuf[static_cast<size_t> (i * 2)] *= scale;
+                    outFFTBuf[static_cast<size_t> (i * 2 + 1)] *= scale;
+                }
+            }
+
+            for (int i = 0; i < halfBins; ++i)
+            {
+                const float freqHz = static_cast<float> (i) * binHz;
+                const float detailProtect = smoothstep01 ((freqHz - 3200.0f) / 2000.0f);
+                const float detailKeep = juce::jlimit (0.0f, 0.72f,
+                    detailProtect * (0.20f
+                        + 0.46f * (1.0f - voicedBlend)
+                        + 0.18f * smoothstep01 ((0.028f - frameRms) / 0.018f)));
+                if (detailKeep <= 0.001f)
+                    continue;
+                outFFTBuf[static_cast<size_t> (i * 2)] =
+                    outFFTBuf[static_cast<size_t> (i * 2)] * (1.0f - detailKeep)
+                    + preWarpFFTBuf[static_cast<size_t> (i * 2)] * detailKeep;
+                outFFTBuf[static_cast<size_t> (i * 2 + 1)] =
+                    outFFTBuf[static_cast<size_t> (i * 2 + 1)] * (1.0f - detailKeep)
+                    + preWarpFFTBuf[static_cast<size_t> (i * 2 + 1)] * detailKeep;
+            }
+
+            fft.performRealOnlyInverseTransform (outFFTBuf.data());
+
+            const float rawOriginalBlend = formantOnly
+                ? juce::jlimit (0.10f, 0.50f,
+                                0.10f
+                                    + (1.0f - voicedBlend) * 0.24f
+                                    + smoothstep01 ((0.032f - frameRms) / 0.020f) * 0.14f)
+                : 0.0f;
+            const float originalBlend = (pos == 0)
+                ? rawOriginalBlend
+                : (0.82f * prevOriginalBlend + 0.18f * rawOriginalBlend);
+            prevOriginalBlend = originalBlend;
+
+            for (int i = 0; i < fftSize; ++i)
+            {
+                const int idx = pos + i;
+                if (idx >= 0 && idx < numSamples)
+                {
+                    const float w = hannWin[static_cast<size_t> (i)];
+                    const float processedSample = outFFTBuf[static_cast<size_t> (i)] * (1.0f - originalBlend)
+                        + orig[idx] * originalBlend;
+                    corrected[static_cast<size_t> (idx)] += processedSample * w;
+                    winSum[static_cast<size_t> (idx)] += w * w;
+                }
+            }
+        }
+
+        for (int s = 0; s < numSamples; ++s)
+        {
+            if (winSum[static_cast<size_t> (s)] > 0.001f)
+                out[static_cast<size_t> (s)] = corrected[static_cast<size_t> (s)]
+                                             / winSum[static_cast<size_t> (s)];
+        }
+    }
+
+    logPitchEditorFormant ("explicit formant warp blocks=" + juce::String (shiftedBlocks)
+        + " requestedRatio=[" + juce::String (requestedMinRatio, 3) + "," + juce::String (requestedMaxRatio, 3) + "]"
+        + " appliedRatio=[" + juce::String (appliedMinRatio == std::numeric_limits<float>::max() ? 1.0f : appliedMinRatio, 3)
+        + "," + juce::String (appliedMaxRatio, 3) + "]"
+        + " avgVoicedBlend=" + juce::String (shiftedBlocks > 0 ? avgVoicedBlendApplied / static_cast<float> (shiftedBlocks) : 0.0f, 3)
+        + " voicedBlendRange=[" + juce::String (minSmoothedVoicedBlend == std::numeric_limits<float>::max() ? 0.0f : minSmoothedVoicedBlend, 3)
+        + "," + juce::String (maxSmoothedVoicedBlend, 3) + "]"
+        + " strengthRange=[" + juce::String (minEffectiveStrength == std::numeric_limits<float>::max() ? 0.0f : minEffectiveStrength, 3)
+        + "," + juce::String (maxEffectiveStrength, 3) + "]"
+        + " warpIntensity=" + juce::String (warpIntensity, 3)
+        + " renderQuality=" + juce::String (previewFast ? "preview_fast" : "final_hq")
+        + " mode=" + juce::String (formantOnly ? "formant-only" : "mixed")
+        + " envDeltaBefore=" + juce::String (totalEnvelopeDeltaBins > 0 ? totalEnvelopeDeltaBefore / static_cast<float> (totalEnvelopeDeltaBins) : 0.0f, 4)
+        + " envDeltaAfter=" + juce::String (totalEnvelopeDeltaBins > 0 ? totalEnvelopeDeltaAfter / static_cast<float> (totalEnvelopeDeltaBins) : 0.0f, 4));
+}
 
 // Gaussian-smooth the per-frame pitch contour to remove YIN detection jitter.
 // This operates in MIDI (semitone) domain — the correct domain for pitch smoothing
@@ -459,6 +929,14 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
     // (vibrato, expression, drift) while eliminating detection noise.
     auto smoothedContour = smoothPitchContour(frames, sampleRate, 10.0f);
 
+    // frames[0] may start before sample 0 (window-relative time < 0) because
+    // AudioEngine includes up to 0.5s of pre-window frames for context.
+    // All frameIdx computations must account for this offset, otherwise every
+    // lookup is shifted ~0.5s earlier — landing in unvoiced/silent territory
+    // and causing all pitch corrections to be silently skipped (ratio = 1.0).
+    const int firstFrameSample = static_cast<int>(
+        std::round(static_cast<double>(frames[0].time) * sampleRate));
+
     // Sort notes by start time for efficient adjacent-note lookup (portamento).
     std::vector<size_t> noteOrder(notes.size());
     std::iota(noteOrder.begin(), noteOrder.end(), 0);
@@ -542,10 +1020,10 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
         bool hasDecomp = false;
         if (driftCorrection > 0.01f || std::abs(note.vibratoDepth - 1.0f) > 0.01f)
         {
-            int noteStartFrame = startSample / hopSize;
-            int noteEndFrame   = endSample   / hopSize;
-            noteStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteStartFrame);
-            noteEndFrame   = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteEndFrame);
+            int noteStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1,
+                                              (startSample - firstFrameSample) / hopSize);
+            int noteEndFrame   = juce::jlimit(0, static_cast<int>(frames.size()) - 1,
+                                              (endSample   - firstFrameSample) / hopSize);
             int noteFrameCount = noteEndFrame - noteStartFrame + 1;
 
             if (noteFrameCount >= 4)
@@ -566,15 +1044,15 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
             }
         }
         // noteBodyStartFrame/End computed below for per-sample indexing
-        int noteBodyStartFrame = startSample / hopSize;
-        noteBodyStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteBodyStartFrame);
-        int noteBodyEndFrame = endSample / hopSize;
-        noteBodyEndFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1, noteBodyEndFrame);
+        int noteBodyStartFrame = juce::jlimit(0, static_cast<int>(frames.size()) - 1,
+                                              (startSample - firstFrameSample) / hopSize);
+        int noteBodyEndFrame   = juce::jlimit(0, static_cast<int>(frames.size()) - 1,
+                                              (endSample   - firstFrameSample) / hopSize);
         int noteFrameCount = noteBodyEndFrame - noteBodyStartFrame + 1;
 
         for (int s = loopStart; s <= loopEnd; ++s)
         {
-            int frameIdx = s / hopSize;
+            int frameIdx = (s - firstFrameSample) / hopSize;
             if (frameIdx < 0 || frameIdx >= static_cast<int>(frames.size())) continue;
 
             const auto& frame = frames[static_cast<size_t>(frameIdx)];
@@ -694,7 +1172,7 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
         if (totalBlend <= 0.0f)
             continue; // no correction applied here
 
-        int frameIdx = s / hopSize;
+        int frameIdx = (s - firstFrameSample) / hopSize;
         if (frameIdx < 0 || frameIdx >= static_cast<int>(frames.size()))
             continue;
 
@@ -717,10 +1195,12 @@ std::vector<float> PitchResynthesizer::buildCorrectionCurve(
 
 std::vector<float> PitchResynthesizer::buildFormantCurve(
     int numSamples, double sampleRate,
-    const std::vector<PitchAnalyzer::PitchNote>& notes)
+    const std::vector<PitchAnalyzer::PitchNote>& notes,
+    float globalFormantSemitones)
 {
     // Check if any note has formant shift
-    bool hasFormantShift = false;
+    bool hasFormantShift = std::abs (globalFormantSemitones) > 0.01f;
+    int noteLocalSampleCount = 0;
     for (const auto& note : notes)
     {
         if (std::abs (note.formantShift) > 0.01f)
@@ -733,7 +1213,8 @@ std::vector<float> PitchResynthesizer::buildFormantCurve(
     if (! hasFormantShift)
         return {}; // empty = no formant shifting needed
 
-    std::vector<float> ratios (static_cast<size_t> (numSamples), 1.0f);
+    const float globalRatio = mapRequestedFormantRatio (std::pow (2.0f, globalFormantSemitones / 12.0f));
+    std::vector<float> ratios (static_cast<size_t> (numSamples), globalRatio);
 
     for (const auto& note : notes)
     {
@@ -743,7 +1224,7 @@ std::vector<float> PitchResynthesizer::buildFormantCurve(
         int startSample = juce::jlimit (0, numSamples - 1, static_cast<int> (note.startTime * sampleRate));
         int endSample = juce::jlimit (0, numSamples - 1, static_cast<int> (note.endTime * sampleRate));
 
-        float formantRatio = std::pow (2.0f, note.formantShift / 12.0f);
+        float formantRatio = mapRequestedFormantRatio (std::pow (2.0f, note.formantShift / 12.0f));
 
         // Smoothstep transition at note boundaries (15ms) to prevent clicks
         float transMs = 15.0f;
@@ -766,8 +1247,26 @@ std::vector<float> PitchResynthesizer::buildFormantCurve(
                 blend = std::min (blend, t * t * (3.0f - 2.0f * t));
             }
 
-            ratios[static_cast<size_t> (s)] = 1.0f + (formantRatio - 1.0f) * blend;
+            ratios[static_cast<size_t> (s)] = globalRatio * (1.0f + (formantRatio - 1.0f) * blend);
+            ++noteLocalSampleCount;
         }
+    }
+
+    if (kPitchEditorFormantDebugLogs)
+    {
+        float minRatio = ratios.front();
+        float maxRatio = ratios.front();
+        for (const auto ratio : ratios)
+        {
+            minRatio = std::min (minRatio, ratio);
+            maxRatio = std::max (maxRatio, ratio);
+        }
+        logPitchEditorFormant ("buildFormantCurve globalSt=" + juce::String (globalFormantSemitones, 3)
+            + " globalRatio=" + juce::String (globalRatio, 3)
+            + " minRatio=" + juce::String (minRatio, 3)
+            + " maxRatio=" + juce::String (maxRatio, 3)
+            + " noteLocalSamples=" + juce::String (noteLocalSampleCount)
+            + " totalSamples=" + juce::String (numSamples));
     }
 
     return ratios;
@@ -780,11 +1279,24 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
     double sampleRate,
     const std::vector<PitchAnalyzer::PitchFrame>& frames,
     const std::vector<PitchAnalyzer::PitchNote>& notes,
-    PitchEngine engine)
+    PitchEngine engine,
+    float globalFormantSemitones,
+    RenderQuality renderQuality,
+    std::function<bool()> shouldCancel)
 {
     juce::ignoreUnused (engine); // Signalsmith is always used; engine param kept for API compat
 
-    if (numSamples == 0 || numChannels == 0 || frames.empty())
+    enum class ProcessingMode
+    {
+        PitchOnly,
+        FormantOnly,
+        PitchPlusFormant
+    };
+
+    const bool hasExplicitFormant = std::abs (globalFormantSemitones) > 0.01f
+        || std::any_of (notes.begin(), notes.end(), [] (const auto& note) { return std::abs (note.formantShift) > 0.01f; });
+
+    if (numSamples == 0 || numChannels == 0 || (frames.empty() && ! hasExplicitFormant))
     {
         std::vector<std::vector<float>> result (static_cast<size_t> (numChannels));
         for (int ch = 0; ch < numChannels; ++ch)
@@ -802,11 +1314,103 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
 
     // Build per-sample pitch ratio curve and formant ratio curve
     auto ratios       = buildCorrectionCurve (numSamples, sampleRate, frames, notes, hopSize);
-    auto formantRatios = buildFormantCurve (numSamples, sampleRate, notes);
+    auto formantRatios = buildFormantCurve (numSamples, sampleRate, notes, globalFormantSemitones);
+    bool hasPitchShift = false;
+    for (size_t i = 0; i < ratios.size() && ! hasPitchShift; i += 256)
+        hasPitchShift = std::abs (ratios[i] - 1.0f) > 0.001f;
 
-    // Shift audio with Signalsmith Stretch (native stereo, formant-preserving)
-    auto output = SignalsmithShifter::process (input, numChannels, numSamples, sampleRate,
-                                               ratios, formantRatios);
+    ProcessingMode processingMode = ProcessingMode::PitchOnly;
+    if (! formantRatios.empty())
+        processingMode = hasPitchShift ? ProcessingMode::PitchPlusFormant : ProcessingMode::FormantOnly;
+
+    const auto processingModeName = [&]() -> const char*
+    {
+        switch (processingMode)
+        {
+            case ProcessingMode::PitchOnly:      return "pitch_only";
+            case ProcessingMode::FormantOnly:    return "formant_only";
+            case ProcessingMode::PitchPlusFormant:return "pitch_plus_formant";
+        }
+        return "unknown";
+    };
+
+    logPitchEditorFormant ("processMultiChannel samples=" + juce::String (numSamples)
+        + " channels=" + juce::String (numChannels)
+        + " globalFormantSt=" + juce::String (globalFormantSemitones, 3)
+        + " formantCurve=" + juce::String (formantRatios.empty() ? "disabled" : "enabled")
+        + " pitchShift=" + juce::String (hasPitchShift ? "true" : "false")
+        + " mode=" + juce::String (processingModeName())
+        + " renderQuality=" + juce::String (renderQuality == RenderQuality::PreviewFast ? "preview_fast" : "final_hq"));
+
+    // Build per-sample detected pitch in Hz only for explicit-formant processing.
+    std::vector<float> detectedPitchHz;
+    if (processingMode != ProcessingMode::PitchOnly)
+    {
+        detectedPitchHz.assign (static_cast<size_t> (numSamples), 0.0f);
+        for (size_t fi = 0; fi < frames.size(); ++fi)
+        {
+            const auto& f = frames[fi];
+            if (f.frequency <= 0.0f) continue;
+            int sampleStart = static_cast<int> (f.time * sampleRate);
+            int sampleEnd   = std::min (numSamples, sampleStart + hopSize);
+            for (int s = std::max (0, sampleStart); s < sampleEnd; ++s)
+                detectedPitchHz[static_cast<size_t> (s)] = f.frequency;
+        }
+    }
+
+    std::vector<std::vector<float>> output (static_cast<size_t> (numChannels));
+    switch (processingMode)
+    {
+        case ProcessingMode::PitchOnly:
+        {
+            if (shouldCancel && shouldCancel())
+                return output;
+            output = SignalsmithShifter::process (input, numChannels, numSamples, sampleRate, ratios);
+            logPitchEditorFormant ("using legacy pitch-only shifter path");
+            break;
+        }
+        case ProcessingMode::FormantOnly:
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+                output[static_cast<size_t> (ch)].assign (input[ch], input[ch] + numSamples);
+            logPitchEditorFormant ("skipping Signalsmith pitch shifter for formant-only render");
+            break;
+        }
+        case ProcessingMode::PitchPlusFormant:
+        {
+            if (shouldCancel && shouldCancel())
+                return output;
+            output = SignalsmithShifter::process (input, numChannels, numSamples, sampleRate,
+                                                  ratios, formantRatios, detectedPitchHz);
+            logPitchEditorFormant ("using preserved-timbre pitch base with explicit formant overlay");
+            break;
+        }
+    }
+
+    const bool formantOnlyRender = processingMode == ProcessingMode::FormantOnly;
+
+    // Keep pitch-only edits on the old stable base path.
+    // The residual post-correction pass was previously disabled because it
+    // introduced artifacts; bringing it back is a likely source of the
+    // crackle/dropouts heard on plain note shifts. Let Signalsmith's base
+    // formant preservation handle pitch-only edits, and reserve the explicit
+    // warp stage for actual user-requested formant changes.
+    if (processingMode != ProcessingMode::PitchOnly)
+    {
+        logPitchEditorFormant ("applying explicit formant warp stage");
+        applyExplicitFormantWarp (output, input, numChannels, numSamples,
+                                  sampleRate, formantRatios, detectedPitchHz,
+                                  formantOnlyRender
+                                      ? (renderQuality == RenderQuality::PreviewFast ? 0.92f : 1.32f)
+                                      : (renderQuality == RenderQuality::PreviewFast ? 0.98f : 1.10f),
+                                  formantOnlyRender,
+                                  renderQuality,
+                                  shouldCancel);
+    }
+    else if (hasPitchShift)
+    {
+        logPitchEditorFormant ("pitch-only render kept on preserved-timbre base path");
+    }
 
     // Apply per-note gain adjustments (all channels)
     for (const auto& note : notes)

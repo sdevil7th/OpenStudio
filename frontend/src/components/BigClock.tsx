@@ -44,7 +44,7 @@ export function BigClock() {
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1 bg-neutral-900 border-b border-neutral-800">
         <span className="text-[10px] text-neutral-500 uppercase tracking-wider">
-          {projectName || "Studio13"} | {tempo} BPM | {timeSignature.numerator}/{timeSignature.denominator}
+          {projectName || "OpenStudio"} | {tempo} BPM | {timeSignature.numerator}/{timeSignature.denominator}
         </span>
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon-sm" onClick={toggleBigClockFormat} title="Toggle format">

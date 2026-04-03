@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-Studio13 uses the following open-source libraries and dependencies.
+OpenStudio uses the following open-source libraries and dependencies.
 
 ---
 
@@ -12,7 +12,7 @@ Studio13 uses the following open-source libraries and dependencies.
 - **Usage:** Audio engine, GUI framework, plugin hosting, WebView2 integration
 
 The JUCE framework is dual-licensed under the AGPLv3 and a commercial license.
-Studio13 is released under AGPLv3-compatible terms.
+OpenStudio is released under AGPLv3-compatible terms.
 
 ---
 
@@ -79,7 +79,7 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 - **Usage:** Audio format conversion (MP3, OGG, etc.) via external process
 
 FFmpeg is distributed as a standalone executable and is not linked into
-the Studio13 binary. It is invoked as a child process for lossy format
+the OpenStudio binary. It is invoked as a child process for lossy format
 encoding and sample rate conversion.
 
 ---
@@ -92,7 +92,7 @@ encoding and sample rate conversion.
 - **Usage:** Low-latency audio driver support on Windows
 
 The ASIO SDK headers are used at compile time only. The SDK is not
-redistributed with Studio13 binaries.
+redistributed with OpenStudio binaries.
 
 ---
 
@@ -112,3 +112,64 @@ The React frontend uses packages installed via npm. Key dependencies include:
 
 For a complete list of frontend dependencies and their licenses, see
 `frontend/package.json` and run `npx license-checker` in the frontend directory.
+
+---
+
+## CLAP SDK 1.2.2
+
+- **Website:** https://github.com/free-audio/clap
+- **License:** MIT License
+- **Copyright:** (c) free-audio contributors
+- **Usage:** CLAP plugin format hosting headers
+
+---
+
+## Signalsmith Stretch
+
+- **Website:** https://signalsmith-audio.co.uk/code/stretch/
+- **License:** MIT License
+- **Copyright:** (c) Signalsmith Audio Ltd
+- **Usage:** Pitch shifting with formant preservation (header-only library)
+
+Includes signalsmith-linear (FFT/STFT), also MIT licensed.
+
+---
+
+## ONNX Runtime (Optional)
+
+- **Website:** https://onnxruntime.ai/
+- **License:** MIT License
+- **Copyright:** (c) Microsoft Corporation
+- **Usage:** Neural network inference for polyphonic pitch detection (Basic-Pitch model)
+
+Pre-built binary; not compiled from source. See `thirdparty/onnxruntime/ThirdPartyNotices.txt`
+for full third-party notices.
+
+---
+
+## ARA SDK 2.2.0 (Optional)
+
+- **Website:** https://www.celemony.com/ara
+- **License:** Apache License 2.0
+- **Copyright:** (c) Celemony Software GmbH
+- **Usage:** ARA 2 plugin hosting (Melodyne, SpectraLayers integration)
+
+Includes nested dependencies: cpp-base64 (zlib), pugixml (MIT).
+
+---
+
+## dr_libs
+
+- **Website:** https://github.com/mackron/dr_libs
+- **License:** Unlicense / MIT (dual choice)
+- **Copyright:** (c) David Reid
+- **Usage:** Audio format decoding (WAV, MP3, FLAC) — header-only
+
+---
+
+## stb
+
+- **Website:** https://github.com/nothings/stb
+- **License:** MIT License / Public Domain (dual choice)
+- **Copyright:** (c) Sean Barrett
+- **Usage:** Image I/O utilities — header-only

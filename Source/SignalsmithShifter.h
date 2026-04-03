@@ -21,14 +21,18 @@ public:
     /**
      * Process audio with per-sample pitch ratios.
      *
-     * @param input          Array of numChannels pointers, each numSamples floats
-     * @param numChannels    Number of channels (1 = mono, 2 = stereo, etc.)
-     * @param numSamples     Number of samples per channel
-     * @param sampleRate     Sample rate in Hz
-     * @param ratios         Per-sample pitch ratio (1.0 = no change, 1.122 = +2 semitones)
-     * @param formantRatios  Per-sample formant ratio. Empty = preserve formants automatically.
-     *                       1.0 = keep at original position, 1.5 = brighter, 0.7 = darker.
-     * @return               Vector of numChannels vectors, each exactly numSamples floats.
+     * @param input            Array of numChannels pointers, each numSamples floats
+     * @param numChannels      Number of channels (1 = mono, 2 = stereo, etc.)
+     * @param numSamples       Number of samples per channel
+     * @param sampleRate       Sample rate in Hz
+     * @param ratios           Per-sample pitch ratio (1.0 = no change, 1.122 = +2 semitones)
+     * @param formantRatios    Per-sample formant ratio. Empty = preserve formants automatically.
+     *                         1.0 = keep at original position, 1.5 = brighter, 0.7 = darker.
+     * @param detectedPitchHz  Per-sample detected fundamental frequency in Hz.
+     *                         Empty = let the library auto-detect (less accurate).
+     *                         Providing this dramatically improves formant preservation
+     *                         because it controls the spectral envelope smoothing width.
+     * @return                 Vector of numChannels vectors, each exactly numSamples floats.
      */
     static std::vector<std::vector<float>> process (
         const float* const* input,
@@ -36,5 +40,6 @@ public:
         int numSamples,
         double sampleRate,
         const std::vector<float>& ratios,
-        const std::vector<float>& formantRatios = {});
+        const std::vector<float>& formantRatios = {},
+        const std::vector<float>& detectedPitchHz = {});
 };

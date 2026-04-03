@@ -11,6 +11,13 @@ import { PianoIcon, TRACK_ICONS, TRACK_ICON_LABELS } from "./icons";
 import { Power, StickyNote } from "lucide-react";
 import { Button, Input, Select, Knob, Textarea, Slider } from "./ui";
 import { getAutomationParamDef, getAutomationColor, getAutomationShortLabel, getTrackAutomationParams, automationToBackend } from "../store/automationParams";
+import { subscribeToInstrumentChanged } from "../utils/fxChain";
+import {
+  TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS,
+  TCP_HEADER_BUTTON_PAIR_CLASS,
+  TCP_HEADER_PRIMARY_BUTTON_CLASS,
+  TCP_HEADER_TOGGLE_BUTTON_CLASS,
+} from "./tcpHeaderButtonStyles";
 
 interface TrackHeaderProps {
   track: Track;
@@ -29,6 +36,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
     toggleTrackSolo,
     toggleTrackArmed,
     toggleTrackFXBypass,
+    toggleTrackAutomationEnabled,
     setTrackInput,
     updateTrack,
     setTrackVolume,
@@ -48,6 +56,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
       toggleTrackSolo: s.toggleTrackSolo,
       toggleTrackArmed: s.toggleTrackArmed,
       toggleTrackFXBypass: s.toggleTrackFXBypass,
+      toggleTrackAutomationEnabled: s.toggleTrackAutomationEnabled,
       setTrackInput: s.setTrackInput,
       updateTrack: s.updateTrack,
       setTrackVolume: s.setTrackVolume,
@@ -116,6 +125,16 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
     }
   }, [audioDeviceSetup, refreshAudioDeviceSetup]);
 
+  useEffect(() => {
+    return subscribeToInstrumentChanged((detail) => {
+      if (detail.trackId !== track.id) {
+        return;
+      }
+
+      setShowInstrumentBrowser(false);
+    });
+  }, [track.id]);
+
   const hasFx = track.inputFxCount + track.trackFxCount > 0;
   let fxButtonClass = "hover:text-green-500 hover:border-green-500";
   if (hasFx && track.fxBypassed)
@@ -134,6 +153,27 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
       ? "Enable FX"
       : "Bypass FX"
     : "No FX loaded";
+
+  const hasAutomation =
+    (track.showAutomation && track.automationLanes.some((l) => l.visible)) ||
+    track.automationLanes.some((l) => l.armed);
+  let autoButtonClass = "hover:text-green-500 hover:border-green-500";
+  if (hasAutomation && !track.automationEnabled)
+    autoButtonClass =
+      "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]";
+  else if (hasAutomation)
+    autoButtonClass =
+      "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]";
+
+  let autoPowerClass = "hover:text-green-500 hover:border-green-500";
+  if (hasAutomation && !track.automationEnabled)
+    autoPowerClass = "text-red-400! border-red-500!";
+  else if (hasAutomation) autoPowerClass = "text-green-400! border-green-500!";
+  const autoPowerTitle = hasAutomation
+    ? track.automationEnabled
+      ? "Suspend automation"
+      : "Enable automation"
+    : "No automation lanes";
 
   const handleRecordArm = () => toggleTrackArmed(track.id);
   const handleMute = () => toggleTrackMute(track.id);
@@ -336,7 +376,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
           {/* M S FX A Buttons */}
           <span className="flex gap-px">
             <Button
-              variant="success"
+              variant="default"
               size="icon-sm"
               shape="square"
               active={track.muted}
@@ -359,14 +399,14 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
               S
             </Button>
           </span>
-          <span className="flex">
+          <span data-tcp-pair="fx" className={TCP_HEADER_BUTTON_PAIR_CLASS}>
             <Button
               variant="default"
               size="icon-sm"
               shape="square"
               onClick={handleOpenFX}
               title="FX Chain"
-              className={fxButtonClass}
+              className={`${fxButtonClass} ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`}
             >
               FX
             </Button>
@@ -382,17 +422,20 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
                 }
               }}
               title={fxBypassTitle}
-              className={fxBypassClass}
+              className={`${fxBypassClass} ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`}
             >
               <Power size={10} strokeWidth={2.5} />
             </Button>
           </span>
-          <div ref={autoBtnRef} className="relative inline-flex">
+          <div
+            ref={autoBtnRef}
+            data-tcp-pair="automation"
+            className={TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS}
+          >
             <Button
               variant="default"
               size="icon-sm"
               shape="square"
-              active={track.showAutomation}
               onClick={() => useDAWStore.getState().openEnvelopeManager(track.id)}
               onContextMenu={(e: React.MouseEvent) => {
                 e.preventDefault();
@@ -400,9 +443,25 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
                 setShowAutoMenu(!showAutoMenu);
               }}
               title="Envelope Manager (right-click for quick options)"
-              className={`${track.showAutomation ? "text-green-400!" : ""} rounded-r`}
+              className={`${autoButtonClass} ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`}
             >
               A
+            </Button>
+            <Button
+              variant="default"
+              size="icon-xs"
+              shape="square"
+              onClick={() => {
+                if (!hasAutomation) {
+                  useDAWStore.getState().openEnvelopeManager(track.id);
+                } else {
+                  toggleTrackAutomationEnabled(track.id);
+                }
+              }}
+              title={autoPowerTitle}
+              className={`${autoPowerClass} ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`}
+            >
+              <Power size={10} strokeWidth={2.5} />
             </Button>
             {showAutoMenu && autoBtnRef.current && createPortal(
               <div
@@ -416,6 +475,17 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
                   className="bg-neutral-800 border border-neutral-600 rounded shadow-lg py-1 text-[11px] min-w-[180px]"
                   onMouseLeave={() => setShowAutoMenu(false)}
                 >
+                  <button
+                    className="w-full text-left px-3 py-1 hover:bg-neutral-700 text-neutral-300 flex items-center justify-between gap-2"
+                    onClick={() => {
+                      toggleTrackAutomationEnabled(track.id);
+                      setShowAutoMenu(false);
+                    }}
+                  >
+                    <span>{track.automationEnabled ? "Suspend Automation" : "Enable Automation"}</span>
+                    <Power size={10} />
+                  </button>
+                  <div className="border-t border-neutral-700 my-1" />
                   {/* Show/hide individual params */}
                   {getTrackAutomationParams(track.type).map(({ id, label }) => {
                     const lane = track.automationLanes.find((l) => l.param === id);
@@ -695,7 +765,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
               <button
                 className={`text-[8px] w-8 h-4 rounded shrink-0 cursor-pointer transition-colors ${
                   track.muted
-                    ? "bg-green-600 text-white"
+                    ? "bg-neutral-500 text-white"
                     : "bg-neutral-700 text-neutral-400 hover:text-neutral-200"
                 }`}
                 onClick={() => toggleTrackMute(track.id)}

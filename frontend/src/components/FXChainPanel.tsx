@@ -41,6 +41,13 @@ import {
   SaturationGraph,
   ChorusGraph,
 } from "./ParametricGraph";
+import {
+  getFXChainSlots,
+  notifyFXChainChanged,
+  notifyInstrumentChanged,
+  subscribeToFXChainChanged,
+  waitForFXChainLength,
+} from "../utils/fxChain";
 import "./FXChainPanel.css";
 
 interface FXChainPanelProps {
@@ -55,6 +62,8 @@ interface FXSlot {
   name: string;
   type?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin" | "";
   pluginPath?: string;
+  precisionOverride?: "auto" | "float32";
+  bypassed?: boolean;
 }
 
 interface S13FXSlider {
@@ -82,6 +91,7 @@ interface Plugin {
   category: string;
   fileOrIdentifier: string;
   isInstrument: boolean;
+  hasARA?: boolean;
   snapshot?: string;
   pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin";
 }
@@ -157,6 +167,7 @@ export function FXChainPanel({
   const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<number | null>(null);
   const [showPresetMenu, setShowPresetMenu] = useState(false);
   const [presetName, setPresetName] = useState("");
+  const [precisionUpdatingFx, setPrecisionUpdatingFx] = useState<number | null>(null);
 
   // Plugin parameter list state (per-slot)
   const [expandedParamsFx, setExpandedParamsFx] = useState<number | null>(null);
@@ -251,13 +262,25 @@ export function FXChainPanel({
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
 
-  useEffect(() => {
-    loadPlugins();
-    loadAvailablePlugins();
-  }, [trackId, chainType]);
+  const applyLoadedPlugins = useCallback((loadedPlugins: FXSlot[]) => {
+    setFxSlots(loadedPlugins);
+    setBypassedFx(
+      new Set(
+        loadedPlugins
+          .filter((fx: FXSlot) => Boolean(fx.bypassed))
+          .map((fx: FXSlot) => fx.index),
+      ),
+    );
+
+    if (chainType === "master") {
+      useDAWStore.setState({ masterFxCount: loadedPlugins.length });
+    } else {
+      void updateFxCounts();
+    }
+  }, [chainType, trackId, updateTrack]);
 
   // Sync FX counts to the store so track headers/channel strips can show indicators
-  const updateFxCounts = async () => {
+  async function updateFxCounts() {
     try {
       const inputFx = await nativeBridge.getTrackInputFX(trackId);
       const trackFx = await nativeBridge.getTrackFX(trackId);
@@ -268,34 +291,21 @@ export function FXChainPanel({
     } catch (e) {
       // Non-critical, ignore
     }
-  };
+  }
 
-  const loadPlugins = async () => {
+  const loadPlugins = useCallback(async () => {
     setLoading(true);
     try {
-      const plugins =
-        chainType === "master"
-          ? await nativeBridge.getMasterFX()
-          : chainType === "input"
-            ? await nativeBridge.getTrackInputFX(trackId)
-            : await nativeBridge.getTrackFX(trackId);
-      setFxSlots(plugins);
-      // Reset bypass tracking when FX list changes (indices may have shifted)
-      setBypassedFx(new Set());
-      // Update store FX counts
-      if (chainType === "master") {
-        useDAWStore.setState({ masterFxCount: plugins.length });
-      } else {
-        updateFxCounts();
-      }
+      const plugins = await getFXChainSlots(trackId, chainType);
+      applyLoadedPlugins(plugins);
     } catch (e) {
       console.error("[FXChain] Failed to load plugins:", e);
     } finally {
       setLoading(false);
     }
-  };
+  }, [applyLoadedPlugins, chainType, trackId]);
 
-  const loadAvailablePlugins = async () => {
+  const loadAvailablePlugins = useCallback(async () => {
     setPluginsLoading(true);
     try {
       const pluginList = await nativeBridge.getAvailablePlugins();
@@ -328,7 +338,7 @@ export function FXChainPanel({
         const builtIns = await nativeBridge.getAvailableBuiltInFX();
         builtInPlugins = builtIns.map((b: any) => ({
           name: b.name,
-          manufacturer: "Studio13",
+          manufacturer: "OpenStudio",
           category: b.category || "Built-in",
           fileOrIdentifier: b.name,
           isInstrument: false,
@@ -344,7 +354,22 @@ export function FXChainPanel({
     } finally {
       setPluginsLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void loadPlugins();
+    void loadAvailablePlugins();
+  }, [chainType, loadAvailablePlugins, loadPlugins, trackId]);
+
+  useEffect(() => {
+    return subscribeToFXChainChanged((detail) => {
+      if (detail.trackId !== trackId || detail.chainType !== chainType) {
+        return;
+      }
+
+      void loadPlugins();
+    });
+  }, [chainType, loadPlugins, trackId]);
 
   const handleScan = async () => {
     setPluginsLoading(true);
@@ -362,6 +387,10 @@ export function FXChainPanel({
     setAddingPlugin(plugin.fileOrIdentifier);
     try {
       let success = false;
+      const expectedLength =
+        chainType === "master"
+          ? null
+          : (await getFXChainSlots(trackId, chainType)).length + 1;
 
       if (plugin.pluginType === "builtin") {
         if (chainType === "master") {
@@ -379,21 +408,109 @@ export function FXChainPanel({
         }
       } else if (chainType === "master") {
         success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
+      } else if (plugin.isInstrument && chainType === "track" && trackId) {
+        // Instrument plugins (VSTi) must be loaded via loadInstrument so the
+        // track is set to Instrument type and receives MIDI for synthesis.
+        success = await nativeBridge.loadInstrument(trackId, plugin.fileOrIdentifier);
+        if (success) {
+          updateTrack(trackId, { instrumentPlugin: plugin.fileOrIdentifier });
+          notifyInstrumentChanged({
+            trackId,
+            instrumentPlugin: plugin.fileOrIdentifier,
+          });
+          await nativeBridge.openInstrumentEditor(trackId);
+        }
       } else if (chainType === "input" || chainType === "track") {
         success = await addTrackFXWithUndo(trackId, plugin.fileOrIdentifier, chainType);
       }
 
       if (success) {
-        console.log(`[FXChain] Added ${plugin.name} to ${chainType} chain`);
-        await loadPlugins();
+        console.log(`[FXChain] Added ${plugin.name} to ${chainType} chain`, {
+          hasARA: plugin.hasARA,
+          pluginType: plugin.pluginType,
+          chainType,
+          trackId,
+          fileOrIdentifier: plugin.fileOrIdentifier,
+        });
+        let updatedFx: FXSlot[] = [];
+        if (chainType === "master") {
+          await loadPlugins();
+        } else if (expectedLength !== null) {
+          updatedFx = await waitForFXChainLength(trackId, chainType, expectedLength);
+          applyLoadedPlugins(updatedFx);
+        }
+
+        if (
+          chainType === "master" ||
+          plugin.pluginType === "builtin" ||
+          plugin.pluginType === "s13fx"
+        ) {
+          notifyFXChainChanged({ trackId, chainType });
+        }
+
+        // ARA flow: C++ auto-detects ARA support at load time and initializes.
+        // For ARA plugins, C++ does NOT open the editor (needs clips first).
+        // We sync clips, poll until ARA is ready, feed clips, then open the editor.
+        // For non-ARA plugins, C++ opens the editor in its async callback.
+        if (chainType === "track" && trackId && updatedFx.length > 0) {
+          const lastFx = updatedFx[updatedFx.length - 1];
+          const lastIdx = lastFx?.index ?? (updatedFx.length - 1);
+
+          try {
+            let araStatus = await nativeBridge.getARAStatus(trackId);
+            for (let attempt = 0; attempt < 25; attempt++) {
+              if (araStatus.lastAttemptFxIndex === lastIdx && araStatus.lastAttemptComplete) {
+                break;
+              }
+
+              await new Promise(resolve => setTimeout(resolve, 200));
+              araStatus = await nativeBridge.getARAStatus(trackId);
+            }
+
+            if (araStatus.lastAttemptFxIndex === lastIdx
+              && araStatus.lastAttemptComplete
+              && araStatus.lastAttemptWasARAPlugin) {
+              if (!araStatus.lastAttemptSucceeded || araStatus.activeFxIndex !== lastIdx) {
+                alert(araStatus.error || `Failed to initialize ${plugin.name} as an ARA plugin.`);
+              } else {
+                await useDAWStore.getState().syncClipsWithBackend();
+
+                const track = useDAWStore.getState().tracks.find((t: { id: string }) => t.id === trackId);
+                if (!track || track.clips.length === 0) {
+                  alert(`${plugin.name} is ready, but this track has no audio clips to attach yet.`);
+                } else {
+                  let clipsAttached = 0;
+                  let firstClipError = "";
+
+                  for (const clip of track.clips) {
+                    const clipResult = await nativeBridge.addARAClip(trackId, clip.id);
+                    if (clipResult.success) {
+                      console.log(`[FXChain] Added clip ${clip.id} to ARA`);
+                      clipsAttached += 1;
+                    } else if (!firstClipError) {
+                      firstClipError = clipResult.error || "";
+                    }
+                  }
+
+                  if (clipsAttached > 0) {
+                    const readyStatus = await nativeBridge.getARAStatus(trackId);
+                    console.log("[FXChain] Opening ARA plugin editor after clips are fed", readyStatus);
+                    handleOpenEditor(lastIdx);
+                  } else {
+                    alert(firstClipError || `Failed to attach clips to ${plugin.name}.`);
+                  }
+                }
+              }
+            }
+          } catch {
+            // Non-ARA plugins or unavailable status — normal editor flow is handled natively.
+          }
+        }
+
         // Auto-open native editor for built-in plugins after add
-        if (plugin.pluginType === "builtin" && chainType !== "master") {
-          // Get the updated FX list to find the last index
-          const updatedFx = chainType === "input"
-            ? await nativeBridge.getTrackInputFX(trackId)
-            : await nativeBridge.getTrackFX(trackId);
-          if (updatedFx.length > 0) {
-            const lastFx = updatedFx[updatedFx.length - 1];
+        if (plugin.pluginType === "builtin" && chainType !== "master" && updatedFx.length > 0) {
+          const lastFx = updatedFx[updatedFx.length - 1];
+          if (lastFx) {
             handleOpenEditor(lastFx.index);
           }
         }
@@ -433,6 +550,9 @@ export function FXChainPanel({
       if (success) {
         console.log(`[FXChain] Removed ${chainType} FX ${fxIndex}`);
         await loadPlugins();
+        if (chainType === "master") {
+          notifyFXChainChanged({ trackId, chainType });
+        }
       }
     } catch (e) {
       console.error("[FXChain] Failed to remove plugin:", e);
@@ -445,8 +565,7 @@ export function FXChainPanel({
     try {
       let success = false;
       if (chainType === "master") {
-        // Master FX bypass not supported in backend yet
-        success = false;
+        success = await nativeBridge.bypassMasterFX(fxIndex, newBypassed);
       } else if (chainType === "input") {
         success = await nativeBridge.bypassTrackInputFX(trackId, fxIndex, newBypassed);
       } else {
@@ -464,6 +583,32 @@ export function FXChainPanel({
       console.error("[FXChain] Failed to toggle bypass:", e);
     }
   };
+
+  const handleSetPrecisionOverride = useCallback(
+    async (fxIndex: number, mode: "auto" | "float32") => {
+      setPrecisionUpdatingFx(fxIndex);
+      try {
+        if (chainType === "master") {
+          await nativeBridge.setMasterFXPrecisionOverride(fxIndex, mode);
+        } else if (chainType === "input") {
+          await nativeBridge.setTrackPluginPrecisionOverride(trackId, fxIndex, true, mode);
+        } else {
+          await nativeBridge.setTrackPluginPrecisionOverride(trackId, fxIndex, false, mode);
+        }
+
+        setFxSlots((prev) =>
+          prev.map((fx) =>
+            fx.index === fxIndex ? { ...fx, precisionOverride: mode } : fx,
+          ),
+        );
+      } catch (e) {
+        console.error("[FXChain] Failed to update precision override:", e);
+      } finally {
+        setPrecisionUpdatingFx(null);
+      }
+    },
+    [chainType, trackId],
+  );
 
   const handleDragStart = (index: number) => {
     setDraggedIndex(index);
@@ -496,6 +641,7 @@ export function FXChainPanel({
           `[FXChain] Reordered ${chainType} FX from ${draggedIndex} to ${dropIndex}`,
         );
         await loadPlugins();
+        notifyFXChainChanged({ trackId, chainType });
       }
     } catch (e) {
       console.error("[FXChain] Failed to reorder:", e);
@@ -536,6 +682,7 @@ export function FXChainPanel({
       if (success) {
         console.log("[FXChain] Reloaded S13FX at index", fxIndex);
         await loadPlugins();
+        notifyFXChainChanged({ trackId, chainType });
         if (expandedS13FX === fxIndex) {
           const sliders = await nativeBridge.getS13FXSliders(trackId, fxIndex, isInputFX);
           setS13fxSliders(sliders);
@@ -601,6 +748,7 @@ export function FXChainPanel({
       const isInputFX = chainType === "input";
       await nativeBridge.loadPluginPreset(trackId, fxIndex, isInputFX, presetNameStr);
       console.log(`[FXChain] Loaded preset "${presetNameStr}" on FX ${fxIndex}`);
+      notifyFXChainChanged({ trackId, chainType });
     } catch (e) {
       console.error("[FXChain] Failed to load plugin preset:", e);
     }
@@ -727,6 +875,7 @@ export function FXChainPanel({
                           onClick={async () => {
                             await loadFXChainPreset(trackId, idx, chainType);
                             await loadPlugins();
+                            notifyFXChainChanged({ trackId, chainType });
                             setShowPresetMenu(false);
                           }}
                           title={`Load preset "${preset.name}"`}
@@ -774,7 +923,7 @@ export function FXChainPanel({
                         onDrop={(e) => handleDrop(e, index)}
                         onClick={() => {
                           if (isS13FX) handleToggleS13FXSliders(fx.index);
-                          else if (isBuiltIn && fx.name === "S13 Pitch Correct") setExpandedPitchCorrector(expandedPitchCorrector === fx.index ? null : fx.index);
+                          else if (isBuiltIn && fx.name.includes("Pitch Correct")) setExpandedPitchCorrector(expandedPitchCorrector === fx.index ? null : fx.index);
                           else handleOpenEditor(fx.index);
                         }}
                       >
@@ -850,6 +999,26 @@ export function FXChainPanel({
                             </button>
                           );
                         })()}
+                        {!isS13FX && (
+                          <select
+                            value={fx.precisionOverride || "auto"}
+                            disabled={precisionUpdatingFx === fx.index}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              void handleSetPrecisionOverride(
+                                fx.index,
+                                e.target.value as "auto" | "float32",
+                              );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="shrink-0 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-[10px] text-neutral-300 outline-none focus:border-sky-500"
+                            title="Processing precision override"
+                            aria-label={`Precision override for ${fx.name}`}
+                          >
+                            <option value="auto">Auto</option>
+                            <option value="float32">Float32</option>
+                          </select>
+                        )}
                         {/* Parameters button */}
                         {!isS13FX && (
                           <button
@@ -1092,7 +1261,7 @@ export function FXChainPanel({
                       })()}
 
                       {/* Pitch Corrector inline panel */}
-                      {isBuiltIn && fx.name === "S13 Pitch Correct" && expandedPitchCorrector === fx.index && (
+                      {isBuiltIn && fx.name.includes("Pitch Correct") && expandedPitchCorrector === fx.index && (
                         <div className="p-2">
                           <PitchCorrectorPanel
                             trackId={trackId}
@@ -1212,7 +1381,7 @@ export function FXChainPanel({
                           {plugin.manufacturer}
                         </div>
                         <div className="text-[9px] text-neutral-500">
-                          {isScript ? "JSFX Script" : isBuiltInPlugin ? "Studio13 Built-in" : plugin.category}
+                          {isScript ? "JSFX Script" : isBuiltInPlugin ? "OpenStudio Built-in" : plugin.category}
                         </div>
                       </div>
                       <Button

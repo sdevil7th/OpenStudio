@@ -1,4 +1,4 @@
-# Studio13 v3 User Manual
+# OpenStudio User Manual
 
 Version 3.0 -- Comprehensive Reference Guide
 
@@ -30,13 +30,13 @@ Version 3.0 -- Comprehensive Reference Guide
 
 ### 1.1 System Requirements
 
-Studio13 v3 is a Windows-native DAW built with a JUCE C++ audio backend and a React/TypeScript frontend rendered through WebView2.
+OpenStudio is a desktop DAW built with a JUCE C++ audio backend and a React/TypeScript frontend rendered through an embedded web UI.
 
 **Minimum requirements:**
 
-- Windows 10 or later (64-bit)
-- WebView2 Runtime (typically pre-installed on Windows 10/11)
-- Audio interface with ASIO, WASAPI, or DirectSound drivers
+- Windows 10 or later (64-bit), or macOS for the desktop release
+- WebView2 Runtime on Windows (typically pre-installed on Windows 10/11)
+- Audio interface with ASIO, WASAPI, or DirectSound drivers on Windows
 - 4 GB RAM (8 GB or more recommended)
 - Multi-core processor
 
@@ -50,20 +50,28 @@ Studio13 v3 is a Windows-native DAW built with a JUCE C++ audio backend and a Re
 
 ### 1.2 Installation
 
-Studio13 is distributed as a single executable. No traditional installer is required.
+OpenStudio production releases are distributed as platform-specific install packages.
 
-1. Download the `Studio13.exe` file from the distribution package.
-2. Place it in a directory of your choice (e.g., `C:\Program Files\Studio13\`).
-3. Double-click to launch.
+1. Download the latest Windows installer or macOS package from the official download page.
+2. Run the installer and complete the setup steps for your platform.
+3. Launch OpenStudio from the Start menu, Applications folder, or desktop shortcut.
 
-On first launch, Studio13 will:
+**Windows:** run the installer and follow the wizard. If you are using the unsigned zero-cost release path, Windows SmartScreen may warn before first launch.
+
+**macOS:** OpenStudio v1 ships as an unsigned DMG. Drag `OpenStudio.app` to `Applications`. If macOS blocks launch, right-click the app, choose **Open**, and if needed allow it under **System Settings > Privacy & Security**.
+
+OpenStudio also includes automatic update support. You can trigger a manual update check from **Help > Check for Updates...**.
+
+Stem separation uses optional AI Tools that are installed separately from the base app. If AI Tools are missing, use the **AI Tools** button beside the Settings button or the **Install AI Tools** button inside the Stem Separation dialog.
+
+On first launch, OpenStudio will:
 - Create default configuration files in the application data directory.
 - Scan for available audio devices and drivers.
 - Present the default project with an empty timeline.
 
 ### 1.3 First Launch and Audio Setup
 
-When you first open Studio13, you should configure your audio settings:
+When you first open OpenStudio, you should configure your audio settings:
 
 1. Open the Audio Settings dialog:
    - Go to **View > Audio Settings...** in the menu bar, or
@@ -88,11 +96,11 @@ After configuring audio, you are ready to begin:
    - Browse and select an audio file (WAV, AIFF, FLAC, MP3, OGG).
    - The file will be placed at the playhead position on the selected track.
 4. Press `Space` to play back.
-5. Save your project with `Ctrl+S` (project files use the `.s13` extension).
+5. Save your project with `Ctrl+S` (project files use the `.osproj` extension).
 
 ### 1.5 Project File Format
 
-Studio13 projects are saved as `.s13` files. These contain:
+OpenStudio projects are saved as `.osproj` files. Legacy `.s13` projects continue to load. These contain:
 
 - Track layout and properties (names, colors, types, volume, pan, solo, mute, armed state)
 - Clip references (file paths, positions, durations, offsets, fades, volume)
@@ -110,7 +118,7 @@ Audio files are stored externally and referenced by path. Moving or deleting sou
 
 ## 2. Interface Overview
 
-Studio13's interface follows a professional DAW layout with the following main areas arranged from top to bottom:
+OpenStudio's interface follows a professional DAW layout with the following main areas arranged from top to bottom:
 
 ```text
 +--------------------------------------------------+
@@ -138,7 +146,7 @@ The Menu Bar runs along the top of the window and doubles as the title bar (drag
 | **View**  | Toggle panels (Mixer, Keyboard, Undo History), zoom, screensets, grid     |
 | **Insert**| Add tracks, media files, markers, regions, empty items, MIDI clips        |
 | **Options**| Record mode, ripple editing, locking, themes, preferences                |
-| **Help**  | Keyboard shortcuts reference, Command Palette, About                      |
+| **Help**  | Getting Started Guide, Help Reference, Keyboard Shortcuts, updates, About |
 
 The right side of the Menu Bar contains standard window controls: Minimize, Maximize/Restore, and Close.
 
@@ -168,6 +176,7 @@ The Main Toolbar sits below the Menu Bar and provides quick access to commonly u
 
 **View Toggles:**
 - Mixer panel toggle (`Ctrl+M`)
+- AI Tools button for optional stem-separation runtime install/status
 - Audio Settings (gear icon)
 
 ### 2.3 Track Control Panel (TCP)
@@ -213,8 +222,17 @@ The Timeline is the central canvas-based workspace where you arrange audio and M
 - **Time selection**: A highlighted region created by clicking and dragging on the ruler or timeline background.
 - **Razor edits**: Semi-transparent selection areas created with Alt+drag for precise non-destructive editing.
 
+**Essential Navigation:**
+- **Scroll**: native vertical scrolling through the workspace.
+- **Ctrl+Scroll**: horizontal timeline zoom around the mouse pointer.
+- **Shift+Scroll**: horizontal timeline scroll.
+- **Alt+Scroll**: track height resize.
+- **Ctrl+Shift+Scroll**: track-height zoom style adjustment for faster resizing.
+- **First-session hotkeys**: `Space`, `Ctrl+R`, `Ctrl+T`, `Ctrl+M`, `S`, `B`, `Delete`, `Ctrl+S`, `F1`, `Ctrl+Shift+P`.
+- **Need a refresher?** Press `F1` for the searchable **Help Reference** and open **Help > Keyboard Shortcuts** for the full shortcut list and custom global rebinding.
+
 **Zoom and Scroll:**
-- **Horizontal zoom**: Scroll wheel (or Ctrl+Plus / Ctrl+Minus). Zoom range: 1 to 1000 pixels per second.
+- **Horizontal zoom**: `Ctrl+Scroll wheel` (or `Ctrl+Plus` / `Ctrl+Minus`). Zoom range: 1 to 1000 pixels per second.
 - **Horizontal scroll**: Shift+scroll wheel, or use the horizontal scrollbar.
 - **Vertical scroll**: Scroll wheel when hovering over the track area.
 - **Zoom to Fit**: `Ctrl+0` resets zoom to a standard overview level.
@@ -271,7 +289,7 @@ For detailed mixer usage, see [Section 8: Mixing](#8-mixing).
 
 ### 2.7 Additional Panels
 
-Studio13 includes several additional panels accessible via the View menu:
+OpenStudio includes several additional panels accessible via the View menu:
 
 | Panel                    | Access                  | Description                                    |
 |--------------------------|-------------------------|------------------------------------------------|
@@ -291,7 +309,8 @@ Studio13 includes several additional panels accessible via the View menu:
 | Script Editor            | View menu               | Lua scripting environment                       |
 | Toolbar Editor           | View menu               | Customize toolbar layout                        |
 | Command Palette          | `Ctrl+Shift+P`          | Fuzzy search for any action in the application  |
-| Keyboard Shortcuts       | `F1`                    | Searchable reference of all keyboard shortcuts  |
+| Help Reference           | `F1`                    | Searchable in-app reference for controls and features |
+| Keyboard Shortcuts       | Help menu               | Searchable shortcut reference and custom global rebinding |
 
 ---
 
@@ -299,7 +318,7 @@ Studio13 includes several additional panels accessible via the View menu:
 
 ### 3.1 Track Types
 
-Studio13 supports several track types:
+OpenStudio supports several track types:
 
 | Type        | Description                                                      |
 |-------------|------------------------------------------------------------------|
@@ -498,7 +517,7 @@ Recorded audio files are saved as WAV files in the project directory.
 
 ### 4.5 Record Modes
 
-Studio13 offers three record modes, configurable via **Options > Record Mode**:
+OpenStudio offers three record modes, configurable via **Options > Record Mode**:
 
 | Mode        | Behavior                                                              |
 |-------------|-----------------------------------------------------------------------|
@@ -543,7 +562,7 @@ When recording in Overdub mode, each recording pass creates a new **take** assoc
 
 ### 5.1 MIDI Device Setup
 
-Studio13 automatically detects connected MIDI devices:
+OpenStudio automatically detects connected MIDI devices:
 
 - MIDI devices are listed in the Track Header's MIDI input selector.
 - Select a MIDI device from the dropdown on a MIDI or Instrument track.
@@ -573,7 +592,7 @@ Step input allows you to enter MIDI notes one at a time using your computer keyb
 
 ### 5.4 Virtual MIDI Keyboard
 
-Studio13 includes an 88-key on-screen MIDI keyboard:
+OpenStudio includes an 88-key on-screen MIDI keyboard:
 
 - Toggle with `Alt+B` or **View > Show Virtual MIDI Keyboard**.
 - Click keys to send MIDI notes to the selected MIDI/Instrument track.
@@ -581,7 +600,7 @@ Studio13 includes an 88-key on-screen MIDI keyboard:
 
 ### 5.5 MIDI Learn
 
-MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons to Studio13 parameters:
+MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons to OpenStudio parameters:
 
 1. Right-click a parameter (e.g., a track fader or plugin knob).
 2. Select "MIDI Learn" from the context menu.
@@ -662,7 +681,7 @@ Each clip has adjustable fade-in and fade-out regions:
 
 ### 6.7 Undo and Redo
 
-Studio13 provides comprehensive undo/redo support for virtually all editing operations:
+OpenStudio provides comprehensive undo/redo support for virtually all editing operations:
 
 - **Undo**: `Ctrl+Z`
 - **Redo**: `Ctrl+Shift+Z`
@@ -854,7 +873,7 @@ Align note start times to the grid:
 
 ### 7.9 MIDI Transform Operations
 
-Studio13 provides several MIDI transform operations available via the Edit and MIDI menus:
+OpenStudio provides several MIDI transform operations available via the Edit and MIDI menus:
 
 | Operation              | Description                                               |
 |------------------------|-----------------------------------------------------------|
@@ -1008,7 +1027,7 @@ The Routing Matrix (**View > Routing Matrix**) provides a visual overview of all
 
 ### 9.1 FX Chain Architecture
 
-Studio13 supports three FX chain positions per track:
+OpenStudio supports three FX chain positions per track:
 
 | Chain Position | Description                                                          |
 |----------------|----------------------------------------------------------------------|
@@ -1023,21 +1042,21 @@ Studio13 supports three FX chain positions per track:
 3. Use the chain type selector to switch between Input FX and Track FX.
 4. For the master, access via the Master channel strip FX button.
 
-### 9.3 Built-in S13 Effects
+### 9.3 Built-in OpenStudio Effects
 
-Studio13 includes a set of built-in effects identified by the "S13" prefix. These are lightweight, CPU-efficient processors with visual parameter displays:
+OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `S13` effect names are still accepted for compatibility in older projects and scripts.
 
 | Effect           | Description                                    |
 |------------------|------------------------------------------------|
-| **S13 EQ**       | Parametric equalizer with graphical display    |
-| **S13 Compressor** | Dynamic range compressor with graph         |
-| **S13 Gate**     | Noise gate with threshold visualization        |
-| **S13 Delay**    | Tempo-synced delay effect with graph           |
-| **S13 Reverb**   | Algorithmic reverb with visualization          |
-| **S13 Saturation** | Harmonic saturation/distortion               |
-| **S13 Chorus**   | Chorus modulation effect                       |
+| **OpenStudio EQ**         | Parametric equalizer with graphical display |
+| **OpenStudio Compressor** | Dynamic range compressor with graph         |
+| **OpenStudio Gate**       | Noise gate with threshold visualization     |
+| **OpenStudio Delay**      | Tempo-synced delay effect with graph        |
+| **OpenStudio Reverb**     | Algorithmic reverb with visualization       |
+| **OpenStudio Saturator**  | Harmonic saturation/distortion              |
+| **OpenStudio Chorus**     | Chorus modulation effect                    |
 
-Each S13 effect includes:
+Each built-in OpenStudio effect includes:
 - Dedicated parameter sliders
 - Visual graph showing the effect curve or response
 - Preset management (save/load presets)
@@ -1045,7 +1064,7 @@ Each S13 effect includes:
 
 ### 9.4 VST3 Plugin Support
 
-Studio13 hosts third-party VST3 plugins for both effects and virtual instruments:
+OpenStudio hosts third-party VST3 plugins for both effects and virtual instruments:
 
 **Scanning for plugins:**
 1. Go to the FX Chain Panel or Plugin Browser.
@@ -1078,7 +1097,7 @@ Studio13 hosts third-party VST3 plugins for both effects and virtual instruments
 
 ### 9.6 A/B Comparison
 
-For VST3 plugins, Studio13 supports A/B comparison:
+For VST3 plugins, OpenStudio supports A/B comparison:
 
 1. Set up your "A" settings.
 2. Switch to the "B" slot.
@@ -1111,7 +1130,7 @@ If a project with heavy or problematic plugins is slow to load, open it in Safe 
 
 ### 10.1 Automation Overview
 
-Automation allows parameter values to change over time. Studio13 supports automation for:
+Automation allows parameter values to change over time. OpenStudio supports automation for:
 
 - Track volume
 - Track pan
@@ -1349,7 +1368,7 @@ For CD mastering, use **File > DDP Disc Image Export...** to create a DDP (Disc 
 
 | Action              | Shortcut         | Description                              |
 |---------------------|------------------|------------------------------------------|
-| Open                | `Ctrl+O`         | Browse and open a .s13 project file      |
+| Open                | `Ctrl+O`         | Browse and open a `.osproj` project file |
 | Open (Safe Mode)    | `Ctrl+Shift+O`   | Open with all FX plugins bypassed        |
 | Open Recent         | File menu        | Quick access to recently opened projects |
 
@@ -1380,7 +1399,7 @@ Templates save the project layout (tracks, routing, FX chains, settings) without
 
 ### 13.6 Project Tabs
 
-Studio13 supports multiple project tabs:
+OpenStudio supports multiple project tabs:
 
 - **File > New Project Tab**: Opens an additional project tab.
 - Switch between tabs to work on multiple projects simultaneously.
@@ -1405,7 +1424,7 @@ The Media Pool (**View > Media Pool** or **File > Media Pool**) lists all audio 
 
 When a project references audio files that cannot be found at their stored paths:
 
-1. Studio13 displays a warning on project load.
+1. OpenStudio displays a warning on project load.
 2. The Missing Media dialog allows you to browse for moved files or point to new locations.
 3. Resolved paths are saved with the project.
 
@@ -1451,7 +1470,7 @@ Convert multiple audio files between formats:
 
 ### 13.15 Capture Output
 
-Record Studio13's master output in real-time:
+Record OpenStudio's master output in real-time:
 
 - Go to **File > Capture Output** to toggle live capture.
 - Audio is recorded to a file as it plays.
@@ -1463,7 +1482,7 @@ Record Studio13's master output in real-time:
 
 ### 14.1 Overview
 
-Studio13 includes a Lua scripting engine that provides programmatic access to nearly all DAW functions. Scripts can automate repetitive tasks, create custom workflows, and extend Studio13's capabilities.
+OpenStudio includes a Lua scripting engine that provides programmatic access to nearly all DAW functions. Scripts can automate repetitive tasks, create custom workflows, and extend OpenStudio's capabilities.
 
 ### 14.2 Script Editor
 
@@ -1476,7 +1495,7 @@ Open the Script Editor via **View > Script Editor**:
 
 ### 14.3 Scripting API Overview
 
-All scripting functions are accessed through the `s13.*` namespace. Key categories include:
+All scripting functions are currently accessed through the legacy `s13.*` namespace. Key categories include:
 
 **Track Operations:**
 ```lua
@@ -1504,7 +1523,7 @@ s13.setLoop(true, 4, 12)               -- Enable loop from 4s to 12s
 **FX Chain:**
 ```lua
 s13.addTrackFX(trackId, pluginId)        -- Add VST3 plugin
-s13.addTrackS13FX(trackId, "S13 EQ")    -- Add built-in effect
+s13.addTrackS13FX(trackId, "OpenStudio EQ") -- Add built-in effect
 s13.removeTrackFX(trackId, 0)           -- Remove first FX
 s13.bypassTrackFX(trackId, 0, true)     -- Bypass first FX
 local fx = s13.getAvailableS13FX()       -- List built-in effects
@@ -1559,7 +1578,7 @@ s13.renderProject("C:/output/mix.wav", "wav", 24, 44100, 0, 60)
 
 **Utility:**
 ```lua
-s13.print("Hello from Studio13!")        -- Console output
+s13.print("Hello from OpenStudio!")      -- Console output
 local ver = s13.getAppVersion()          -- Get version string
 s13.showMessage("Alert", "Processing complete!")  -- Dialog
 local file = s13.fileDialog("Open Audio", "*.wav;*.aiff")  -- File picker
@@ -1588,7 +1607,7 @@ s13.setTrackPan(guitar, -0.3)
 
 -- Add EQ to all tracks
 for _, id in ipairs({ drums, bass, guitar, vocal }) do
-    s13.addTrackS13FX(id, "S13 EQ")
+    s13.addTrackS13FX(id, "OpenStudio EQ")
 end
 
 s13.setTempo(120)
@@ -1610,7 +1629,7 @@ end
 
 ### 15.1 Themes
 
-Studio13 includes several built-in themes:
+OpenStudio includes several built-in themes:
 
 | Theme           | Description                            |
 |-----------------|----------------------------------------|
@@ -1627,9 +1646,15 @@ For custom theming, open **View > Theme Editor...**. The Theme Editor allows you
 
 ### 15.3 Keyboard Shortcuts
 
-View all keyboard shortcuts via **Help > Keyboard Shortcuts** or press `F1`. The shortcuts reference is searchable and organized by category.
+Open the **Keyboard Shortcuts** window from the **Help** menu to browse the searchable shortcut reference, print a cheat sheet, and rebind supported shortcuts.
 
-To customize shortcuts, use the Preferences dialog or modify shortcut bindings in the settings.
+Press `F1` for the **Help Reference**, which is separate from the Keyboard Shortcuts window.
+
+Use **Help > Getting Started Guide** for the built-in first-session walkthrough covering navigation gestures, essential hotkeys, track creation, recording, and export.
+
+Custom shortcut rebinding currently lives in the **Keyboard Shortcuts** window, not in Preferences.
+
+Custom rebinding currently applies to **global shortcuts**. Timeline- and editor-scoped shortcuts are documented in the reference but are not rebindable in this pass.
 
 ### 15.4 Preferences
 
@@ -1710,7 +1735,7 @@ Press `Ctrl+Shift+P` to open the Command Palette. Type to fuzzy-search through a
 
 ### 15.9 Plugin Bridge (32-bit)
 
-If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environment:
+If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environment:
 
 - Toggle via **Options > Toggle 32-bit Plugin Bridge**.
 - This enables a bridging mechanism to load 32-bit plugins.
@@ -1726,7 +1751,7 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 | Play / Pause          | `Space`                 |
 | Stop                  | `Space` (while playing) |
 | Record                | `Ctrl+R`                |
-| Go to Start           | `Home`                  |
+| Go to Start           | Transport button / command palette |
 | Toggle Loop           | `L`                     |
 | Set Loop to Selection | `Ctrl+L`                |
 | Tap Tempo             | `T`                     |
@@ -1796,7 +1821,8 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 | Toggle Virtual MIDI Keyboard    | `Alt+B`              |
 | Toggle Undo History             | `Ctrl+Alt+Z`         |
 | Clip Properties                 | `F2`                 |
-| Keyboard Shortcuts              | `F1`                 |
+| Help Reference                  | `F1`                 |
+| Keyboard Shortcuts              | Help menu            |
 | Zoom to Time Selection          | `Ctrl+Shift+E`       |
 | Zoom In                         | `Ctrl+Plus`          |
 | Zoom Out                        | `Ctrl+Minus`         |
@@ -1827,7 +1853,7 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 
 | Action                     | Shortcut |
 |----------------------------|----------|
-| Quantize Notes             | `Q`      |
+| Quantize Notes             | Quantize dialog / command palette |
 | Transpose +1 Semitone      | (via menu/command palette) |
 | Transpose -1 Semitone      | (via menu/command palette) |
 | Transpose Octave Up (+12)  | (via menu/command palette) |
@@ -1842,16 +1868,21 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 
 | Action                    | Mouse Gesture                          |
 |---------------------------|----------------------------------------|
+| Vertical navigate         | Scroll                                 |
+| Timeline zoom             | Ctrl+Scroll                            |
+| Horizontal navigate       | Shift+Scroll                           |
+| Resize track height       | Alt+Scroll                             |
+| Faster track-height zoom  | Ctrl+Shift+Scroll                      |
 | Move clip                 | Drag clip                              |
 | Copy clip                 | Ctrl+Drag clip                         |
 | Constrain to horizontal   | Shift+Drag clip                        |
-| Bypass snap               | Alt+Drag                               |
+| Slip edit                 | Alt+Drag inside clip                   |
 | Trim clip edge            | Drag left/right edge of clip           |
 | Create fade               | Drag top-left or top-right corner      |
-| Slip edit                 | Ctrl+Shift+Drag inside clip            |
+| Add gain point            | Shift+Click in clip                    |
 | Rubber-band select clips  | Drag on empty timeline space           |
 | Create razor edit         | Alt+Drag on timeline                   |
-| Horizontal zoom           | Scroll wheel (on timeline)             |
+| Horizontal zoom           | Ctrl+Scroll wheel (on timeline)        |
 | Horizontal scroll         | Shift+Scroll wheel                     |
 | Move playhead             | Click on ruler                         |
 | Create time selection     | Drag on ruler                          |
@@ -1900,12 +1931,12 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 **Solutions**:
 1. Ensure the plugin is installed in a standard VST3 directory.
 2. Open the FX Chain Panel and click **Scan** to rescan for plugins.
-3. Verify the plugin is a 64-bit VST3 (Studio13 only supports 64-bit plugins natively; use the 32-bit bridge for older plugins).
+3. Verify the plugin is a 64-bit VST3 (OpenStudio only supports 64-bit plugins natively; use the 32-bit bridge for older plugins).
 4. Check that the plugin file is not corrupted.
 
 ### 17.5 Plugin Causing Crashes or Noise
 
-**Symptoms**: A specific plugin causes Studio13 to crash, hang, or produce unexpected noise.
+**Symptoms**: A specific plugin causes OpenStudio to crash, hang, or produce unexpected noise.
 
 **Solutions**:
 1. Open the project in **Safe Mode** (`Ctrl+Shift+O`) to bypass all plugins on load.
@@ -1950,9 +1981,9 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 **Symptoms**: MIDI device does not appear in the input selector.
 
 **Solutions**:
-1. Ensure the MIDI controller is connected and powered on before launching Studio13.
+1. Ensure the MIDI controller is connected and powered on before launching OpenStudio.
 2. Check that the MIDI driver is installed (if required by the device).
-3. Restart Studio13 after connecting the device.
+3. Restart OpenStudio after connecting the device.
 4. Verify the device appears in Windows Device Manager under Sound, video, and game controllers.
 
 ### 17.10 Waveform Not Displaying
@@ -1961,7 +1992,7 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 
 **Solutions**:
 1. This may occur on first load as the peak cache is being built. Wait a moment.
-2. Studio13 uses `.s13peaks` sidecar files for waveform display. If these are deleted, they will be regenerated automatically.
+2. OpenStudio uses `.ospeaks` sidecar files for waveform display. Legacy `.s13peaks` files are still supported and will be regenerated automatically if needed.
 3. Ensure the referenced audio file exists and is readable.
 4. Try zooming in or out to trigger a waveform refresh.
 
@@ -1992,16 +2023,17 @@ If you have 32-bit VST plugins that need to run in the 64-bit Studio13 environme
 **Symptoms**: Keyboard shortcuts do not trigger their expected actions.
 
 **Solutions**:
-1. Ensure the main Studio13 window has focus (click on the timeline or a panel).
+1. Ensure the main OpenStudio window has focus (click on the timeline or a panel).
 2. If a text input field is focused (e.g., renaming a track), keyboard shortcuts are temporarily disabled. Press `Esc` to defocus.
 3. Check the keyboard shortcuts reference (`F1`) to confirm the correct binding.
-4. Some shortcuts are context-dependent (e.g., MIDI shortcuts only work when the Piano Roll is open).
+4. Open **Help > Keyboard Shortcuts** to confirm whether a global shortcut was customized or reset it to the default binding.
+5. Some shortcuts are context-dependent (e.g., MIDI shortcuts only work when the Piano Roll is open).
 
 ---
 
 ## Appendix A: Project File Location
 
-Studio13 project files (`.s13`) are saved to the location you choose when saving. The default suggestion is the user's Documents folder. Recorded audio files are stored in a subdirectory alongside the project file.
+OpenStudio project files (`.osproj`) are saved to the location you choose when saving. Legacy `.s13` files are still supported. Recorded audio files are stored in a subdirectory alongside the project file.
 
 ## Appendix B: Audio Format Support
 
@@ -2013,7 +2045,7 @@ Studio13 project files (`.s13`) are saved to the location you choose when saving
 
 ## Appendix C: Supported Audio Interfaces
 
-Studio13 supports any audio interface that provides:
+OpenStudio supports any audio interface that provides:
 - ASIO drivers (recommended for professional use)
 - WASAPI drivers (built into Windows)
 - DirectSound drivers (legacy support)
@@ -2024,7 +2056,7 @@ ASIO is strongly recommended for recording and low-latency monitoring.
 
 ## Appendix D: Signal Flow
 
-Understanding Studio13's signal flow helps with troubleshooting and advanced mixing:
+Understanding OpenStudio's signal flow helps with troubleshooting and advanced mixing:
 
 ```text
 Audio Input (Device Channel)
@@ -2068,24 +2100,24 @@ Key points:
 
 ## Appendix E: File Formats and Technical Specifications
 
-### Peak Cache Files (.s13peaks)
+### Peak Cache Files (.ospeaks)
 
-Studio13 generates `.s13peaks` sidecar files alongside audio files for efficient waveform display:
+OpenStudio generates `.ospeaks` sidecar files alongside audio files for efficient waveform display:
 
 - These files cache multi-resolution peak data at 4 mipmap levels (64, 256, 1024, 4096 samples per peak).
 - They are automatically generated on first load and regenerated if the source audio changes.
-- Deleting `.s13peaks` files is safe; they will be regenerated automatically.
+- Deleting `.ospeaks` files is safe; they will be regenerated automatically.
 - Peak cache files are typically much smaller than their source audio files.
 
 ### Sample Rate Handling
 
-- Studio13 handles sample rate conversion automatically when importing audio files recorded at different rates than the project's device rate.
+- OpenStudio handles sample rate conversion automatically when importing audio files recorded at different rates than the project's device rate.
 - Linear interpolation is used for real-time sample rate conversion during playback.
 - For rendering, the "Resample Quality" setting (Fast/Good/Best) controls the quality of the conversion algorithm.
 
 ### Audio Thread Safety
 
-Studio13 uses professional-grade audio thread safety patterns:
+OpenStudio uses professional-grade audio thread safety patterns:
 - Non-blocking locks on the audio thread (try-lock pattern) ensure glitch-free playback.
 - Pre-allocated audio buffers avoid heap allocations during audio processing.
 - Pre-loaded audio file readers prevent disk I/O on the audio thread.
@@ -2160,7 +2192,7 @@ Studio13 uses professional-grade audio thread safety patterns:
 | **Nudge**           | Moving a clip by a small, precise amount.                                |
 | **Offline Render**  | Bouncing/exporting audio faster than real-time.                          |
 | **Pan**             | Stereo positioning of a signal between left and right.                    |
-| **Peak Cache**      | Pre-computed waveform data stored in .s13peaks files.                     |
+| **Peak Cache**      | Pre-computed waveform data stored in `.ospeaks` files.                    |
 | **Playhead**        | The vertical line indicating the current position in time.                |
 | **Punch In/Out**    | Recording only within a specific time range.                              |
 | **Quantize**        | Aligning MIDI notes or clips to the grid.                                |
@@ -2186,5 +2218,5 @@ Studio13 uses professional-grade audio thread safety patterns:
 
 ---
 
-*Studio13 v3 -- User Manual*
+*OpenStudio -- User Manual*
 *For the latest documentation and updates, refer to the project repository.*

@@ -116,6 +116,6 @@ export const nativeSelectSizeStyles: Record<NativeSelectSize, string> = {
  */
 export const nativeSelectVariantStyles: Record<NativeSelectVariant, string> = {
   default: 'bg-neutral-800 border border-neutral-700 text-neutral-200 focus:outline-none focus:border-blue-500',
-  compact: 'bg-black/30 border border-white/10 text-white focus:outline-none focus:border-cyan-400',
+  compact: 'bg-neutral-800 border border-neutral-700 text-neutral-400 focus:outline-none',
   dark: 'bg-neutral-900 border border-neutral-600 text-white focus:outline-none focus:border-blue-500',
 };

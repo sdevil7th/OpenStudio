@@ -1,10 +1,15 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useDAWStore, AUTOMATION_LANE_HEIGHT, AutomationModeType } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import { Button, Slider } from "./ui";
+import { Button, Knob } from "./ui";
 import { Volume2, VolumeX, Power } from "lucide-react";
 import { FXChainPanel } from "./FXChainPanel";
 import { getAutomationColor, getAutomationShortLabel, getAutomationParamDef } from "../store/automationParams";
+import {
+  TCP_HEADER_BUTTON_PAIR_CLASS,
+  TCP_HEADER_PRIMARY_BUTTON_CLASS,
+  TCP_HEADER_TOGGLE_BUTTON_CLASS,
+} from "./tcpHeaderButtonStyles";
 
 /**
  * MasterTrackHeader - Compact master channel displayed at the bottom of the TCP sidebar
@@ -18,10 +23,12 @@ export function MasterTrackHeader() {
     masterMono,
     masterAutomationLanes,
     showMasterAutomation,
+    masterAutomationEnabled,
     setMasterVolume,
     toggleMasterMute,
     toggleMasterMono,
     toggleMasterAutomation,
+    toggleMasterAutomationEnabled,
     openEnvelopeManager,
     toggleMasterAutomationLaneVisibility,
     setMasterAutomationLaneMode,
@@ -33,10 +40,12 @@ export function MasterTrackHeader() {
     masterMono: s.masterMono,
     masterAutomationLanes: s.masterAutomationLanes,
     showMasterAutomation: s.showMasterAutomation,
+    masterAutomationEnabled: s.masterAutomationEnabled,
     setMasterVolume: s.setMasterVolume,
     toggleMasterMute: s.toggleMasterMute,
     toggleMasterMono: s.toggleMasterMono,
     toggleMasterAutomation: s.toggleMasterAutomation,
+    toggleMasterAutomationEnabled: s.toggleMasterAutomationEnabled,
     openEnvelopeManager: s.openEnvelopeManager,
     toggleMasterAutomationLaneVisibility: s.toggleMasterAutomationLaneVisibility,
     setMasterAutomationLaneMode: s.setMasterAutomationLaneMode,
@@ -47,7 +56,29 @@ export function MasterTrackHeader() {
   const [fxBypassed, setFxBypassed] = useState(false);
 
   const hasFx = masterFxCount > 0;
-  const hasVisibleLanes = masterAutomationLanes.some((l) => l.visible);
+  const hasAutomation =
+    (showMasterAutomation &&
+      masterAutomationLanes.some((lane) => lane.visible)) ||
+    masterAutomationLanes.some((lane) => lane.armed);
+
+  let autoButtonClass = "hover:text-green-500 hover:border-green-500";
+  if (hasAutomation && !masterAutomationEnabled)
+    autoButtonClass =
+      "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]";
+  else if (hasAutomation)
+    autoButtonClass =
+      "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]";
+
+  let autoPowerClass = "hover:text-green-500 hover:border-green-500";
+  if (hasAutomation && !masterAutomationEnabled)
+    autoPowerClass = "text-red-400! border-red-500!";
+  else if (hasAutomation) autoPowerClass = "text-green-400! border-green-500!";
+
+  const autoPowerTitle = hasAutomation
+    ? masterAutomationEnabled
+      ? "Suspend master automation"
+      : "Enable master automation"
+    : "No automation lanes";
 
   const masterVolumeDB =
     masterVolume > 0 ? 20 * Math.log10(masterVolume) : -60;
@@ -56,6 +87,8 @@ export function MasterTrackHeader() {
     const linear = db <= -60 ? 0 : Math.pow(10, db / 20);
     void setMasterVolume(linear);
   };
+  const formatVolume = (db: number) =>
+    db <= -60 ? "-inf dB" : `${db.toFixed(1)} dB`;
 
   const handleAutomationClick = useCallback(() => {
     openEnvelopeManager("master");
@@ -70,16 +103,17 @@ export function MasterTrackHeader() {
   return (
     <>
       <div className="border-t border-daw-border bg-daw-panel px-2 py-1.5 shrink-0">
-        <div className="flex items-center gap-1.5">
+        <div className="flex min-h-6 items-center gap-1.5">
           {/* Label */}
-          <span className="text-[10px] font-bold uppercase text-daw-text-muted shrink-0">
+          <span className="self-center leading-none text-[10px] font-bold uppercase text-daw-text-muted shrink-0">
             Master
           </span>
 
           {/* Mute */}
           <Button
-            variant={isMasterMuted ? "danger" : "default"}
+            variant="default"
             size="icon-sm"
+            active={isMasterMuted}
             onClick={toggleMasterMute}
             title={isMasterMuted ? "Unmute Master" : "Mute Master"}
           >
@@ -89,17 +123,23 @@ export function MasterTrackHeader() {
           {/* Mono */}
           <Button
             variant="default"
-            size="icon-sm"
-            shape="square"
+            size="sm"
             onClick={toggleMasterMono}
             title={masterMono ? "Disable Mono" : "Enable Mono"}
-            className={masterMono ? "bg-yellow-600! text-white! border-yellow-500!" : ""}
+            className={`self-center font-bold ${
+              masterMono
+                ? "bg-yellow-600! text-white! border-yellow-500!"
+                : "hover:text-yellow-300 hover:border-yellow-500"
+            }`}
           >
-            <span className="text-[8px] font-bold">M</span>
+            MONO
           </Button>
 
           {/* FX + Bypass */}
-          <div className="flex gap-px shrink-0">
+          <div
+            data-tcp-pair="fx"
+            className={`${TCP_HEADER_BUTTON_PAIR_CLASS} self-center`}
+          >
             <Button
               variant="default"
               size="icon-sm"
@@ -108,25 +148,25 @@ export function MasterTrackHeader() {
               title="Master FX Chain"
               className={
                 hasFx
-                  ? "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)] rounded-l"
-                  : "hover:text-green-500 hover:border-green-500 rounded-l"
+                  ? `text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)] ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`
+                  : `hover:text-green-500 hover:border-green-500 ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`
               }
             >
               FX
             </Button>
             <Button
               variant="default"
-              size="icon-sm"
+              size="icon-xs"
               shape="square"
               onClick={() => setFxBypassed(!fxBypassed)}
               title={hasFx ? (fxBypassed ? "Enable FX" : "Bypass FX") : "No FX loaded"}
               disabled={!hasFx}
               className={
                 !hasFx
-                  ? "opacity-40 rounded-r"
+                  ? `opacity-40 ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`
                   : fxBypassed
-                    ? "text-red-400! border-red-500! rounded-r"
-                    : "text-green-400! border-green-500! rounded-r"
+                    ? `text-red-400! border-red-500! ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`
+                    : `text-green-400! border-green-500! ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`
               }
             >
               <Power size={10} strokeWidth={2.5} />
@@ -134,31 +174,50 @@ export function MasterTrackHeader() {
           </div>
 
           {/* Automation button */}
-          <Button
-            variant="default"
-            size="icon-sm"
-            shape="square"
-            onClick={handleAutomationClick}
-            onContextMenu={handleAutomationContextMenu}
-            title="Master Automation (right-click to toggle lanes)"
-            className={hasVisibleLanes ? "text-daw-accent! border-daw-accent!" : ""}
+          <div
+            data-tcp-pair="automation"
+            className={`${TCP_HEADER_BUTTON_PAIR_CLASS} self-center`}
           >
-            <span className="text-[9px] font-bold">A</span>
-          </Button>
+            <Button
+              variant="default"
+              size="icon-sm"
+              shape="square"
+              onClick={handleAutomationClick}
+              onContextMenu={handleAutomationContextMenu}
+              title="Master Automation (right-click to toggle lanes)"
+              className={`${autoButtonClass} ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`}
+            >
+              <span className="text-[9px] font-bold">A</span>
+            </Button>
+            <Button
+              variant="default"
+              size="icon-xs"
+              shape="square"
+              onClick={toggleMasterAutomationEnabled}
+              title={autoPowerTitle}
+              className={`${autoPowerClass} ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`}
+            >
+              <Power size={10} strokeWidth={2.5} />
+            </Button>
+          </div>
 
-          {/* Volume Fader */}
-          <div className="flex-1 min-w-0">
-            <Slider
+          {/* Master Volume Knob */}
+          <div className="shrink-0 self-center flex items-center">
+            <Knob
+              variant="default"
+              size="sm"
               min={-60}
               max={12}
-              step={0.1}
               value={masterVolumeDB}
               onChange={handleVolumeChange}
+              defaultValue={0}
+              formatValue={formatVolume}
+              label="Master Volume"
             />
           </div>
 
           {/* dB Display */}
-          <span className="text-[10px] font-mono text-daw-text-muted w-11 text-right shrink-0">
+          <span className="self-center leading-none text-[10px] font-mono text-daw-text-muted w-11 text-right shrink-0">
             {masterVolumeDB <= -60 ? "-inf" : `${masterVolumeDB.toFixed(1)}`} dB
           </span>
         </div>

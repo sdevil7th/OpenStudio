@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { Search, Printer } from "lucide-react";
 import { useShallow } from "zustand/shallow";
-import { getRegisteredActions } from "../store/actionRegistry";
+import { getActionShortcutScopeLabel, getRegisteredActions } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
@@ -206,7 +206,7 @@ export function KeyboardShortcutsModal({
     const html = `<!DOCTYPE html>
 <html>
 <head>
-  <title>Studio13 - Keyboard Shortcuts</title>
+  <title>OpenStudio - Keyboard Shortcuts</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -266,7 +266,7 @@ export function KeyboardShortcutsModal({
   </style>
 </head>
 <body>
-  <h1>Studio13 Keyboard Shortcuts</h1>
+  <h1>OpenStudio Keyboard Shortcuts</h1>
   <p class="subtitle">Generated on ${new Date().toLocaleDateString()}</p>
   <div class="no-print" style="text-align:center;margin-bottom:16px;">
     <button onclick="window.print()" style="padding:6px 20px;font-size:13px;cursor:pointer;border:1px solid #ccc;border-radius:4px;background:#f8f8f8;">
@@ -328,6 +328,10 @@ export function KeyboardShortcutsModal({
           </div>
         )}
 
+        <div className="text-xs text-neutral-500 px-1">
+          Rebinding currently applies to global shortcuts. Timeline- and editor-scoped shortcuts are shown here for reference but cannot be rebound yet.
+        </div>
+
         {/* Shortcuts List */}
         <div className="overflow-y-auto flex-1 min-h-0">
           {Object.entries(grouped).map(([category, categoryActions]) => (
@@ -343,6 +347,9 @@ export function KeyboardShortcutsModal({
                     action.id,
                     action.shortcut
                   );
+                  const shortcutScope = action.shortcutScope ?? "global";
+                  const shortcutScopeLabel = getActionShortcutScopeLabel(shortcutScope);
+                  const canRebind = shortcutScope === "global";
                   const isListening = listeningActionId === action.id;
 
                   return (
@@ -370,20 +377,25 @@ export function KeyboardShortcutsModal({
                       <div className="flex items-center gap-1.5 shrink-0 ml-2">
                         {/* Shortcut badge */}
                         {effectiveShortcut ? (
-                          <span
-                            className={`text-xs px-1.5 py-0.5 rounded font-mono ${
-                              isCustom
-                                ? "bg-daw-accent/30 text-daw-accent font-bold border border-daw-accent/50"
-                                : "text-daw-text-muted bg-neutral-700"
-                            }`}
-                            title={
-                              isCustom
-                                ? `Custom (default: ${action.shortcut || "none"})`
-                                : undefined
-                            }
-                          >
-                            {effectiveShortcut}
-                          </span>
+                          <>
+                            <span
+                              className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                                isCustom
+                                  ? "bg-daw-accent/30 text-daw-accent font-bold border border-daw-accent/50"
+                                  : "text-daw-text-muted bg-neutral-700"
+                              }`}
+                              title={
+                                isCustom
+                                  ? `Custom (default: ${action.shortcut || "none"})`
+                                  : undefined
+                              }
+                            >
+                              {effectiveShortcut}
+                            </span>
+                            <span className="text-[10px] uppercase tracking-wide text-daw-text-muted/70">
+                              {shortcutScopeLabel}
+                            </span>
+                          </>
                         ) : (
                           <span className="text-xs text-neutral-600 w-6 text-center">
                             —
@@ -397,9 +409,11 @@ export function KeyboardShortcutsModal({
                           className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-1.5 py-0.5 h-auto"
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (!canRebind) return;
                             handleStartRebind(action.id);
                           }}
-                          disabled={!!listeningActionId}
+                          disabled={!!listeningActionId || !canRebind}
+                          title={canRebind ? "Rebind" : `${shortcutScopeLabel} shortcut`}
                         >
                           Rebind
                         </Button>

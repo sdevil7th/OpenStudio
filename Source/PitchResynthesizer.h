@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "PitchAnalyzer.h"
 #include <vector>
+#include <functional>
 
 /**
  * PitchResynthesizer — Offline pitch correction from graphical edits.
@@ -23,6 +24,12 @@ public:
         PhaseVocoder    // Basic phase vocoder fallback
     };
 
+    enum class RenderQuality
+    {
+        PreviewFast,
+        FinalHQ
+    };
+
     PitchResynthesizer();
 
     /**
@@ -36,7 +43,10 @@ public:
         double sampleRate,
         const std::vector<PitchAnalyzer::PitchFrame>& frames,
         const std::vector<PitchAnalyzer::PitchNote>& notes,
-        PitchEngine engine = PitchEngine::Signalsmith);
+        PitchEngine engine = PitchEngine::Signalsmith,
+        float globalFormantSemitones = 0.0f,
+        RenderQuality renderQuality = RenderQuality::FinalHQ,
+        std::function<bool()> shouldCancel = {});
 
     /**
      * Build a per-sample pitch shift ratio curve from the note edits.
@@ -54,7 +64,8 @@ public:
      */
     static std::vector<float> buildFormantCurve (
         int numSamples, double sampleRate,
-        const std::vector<PitchAnalyzer::PitchNote>& notes);
+        const std::vector<PitchAnalyzer::PitchNote>& notes,
+        float globalFormantSemitones = 0.0f);
 
     /** No-op — kept for API compatibility with AudioEngine. */
     void clearCache() {}

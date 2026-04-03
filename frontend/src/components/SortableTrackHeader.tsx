@@ -42,10 +42,10 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     removeTrack,
     deleteSelectedTracks,
     updateTrack,
+    duplicateTrack,
     toggleTrackMute,
     toggleTrackSolo,
     toggleTrackArmed,
-    addTrack,
     trackGroups,
     addTrackGroup,
     removeTrackGroup,
@@ -60,10 +60,10 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     removeTrack: s.removeTrack,
     deleteSelectedTracks: s.deleteSelectedTracks,
     updateTrack: s.updateTrack,
+    duplicateTrack: s.duplicateTrack,
     toggleTrackMute: s.toggleTrackMute,
     toggleTrackSolo: s.toggleTrackSolo,
     toggleTrackArmed: s.toggleTrackArmed,
-    addTrack: s.addTrack,
     trackGroups: s.trackGroups,
     addTrackGroup: s.addTrackGroup,
     removeTrackGroup: s.removeTrackGroup,
@@ -184,14 +184,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
           },
           {
             label: "Duplicate Track",
-            onClick: async () => {
-              const newId = crypto.randomUUID();
-              addTrack({
-                id: newId,
-                name: `${track.name} (copy)`,
-                color: track.color,
-              });
-            },
+            onClick: async () => duplicateTrack(track.id),
           },
           { divider: true, label: "" },
           {

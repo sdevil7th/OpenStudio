@@ -6,7 +6,7 @@
 
 //==============================================================================
 /**
- * Base class for all Studio13 built-in effects.
+ * Base class for all OpenStudio built-in effects.
  */
 class S13BuiltInEffect : public juce::AudioProcessor
 {
@@ -62,7 +62,7 @@ public:
     S13EQ();
     ~S13EQ() override = default;
 
-    const juce::String getName() const override { return "S13 EQ"; }
+    const juce::String getName() const override { return "OpenStudio EQ"; }
     juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
@@ -161,7 +161,7 @@ public:
     S13Compressor();
     ~S13Compressor() override = default;
 
-    const juce::String getName() const override { return "S13 Compressor"; }
+    const juce::String getName() const override { return "OpenStudio Compressor"; }
     juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
@@ -224,7 +224,7 @@ public:
     S13Gate();
     ~S13Gate() override = default;
 
-    const juce::String getName() const override { return "S13 Gate"; }
+    const juce::String getName() const override { return "OpenStudio Gate"; }
     juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
@@ -279,7 +279,7 @@ public:
     S13Limiter();
     ~S13Limiter() override = default;
 
-    const juce::String getName() const override { return "S13 Limiter"; }
+    const juce::String getName() const override { return "OpenStudio Limiter"; }
     juce::AudioProcessorEditor* createEditor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;

@@ -336,10 +336,10 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
   const saveUserPreset = useCallback(async () => {
     const params = captureCurrentParams();
     if (!params) return;
-    const path = await nativeBridge.showSaveDialog("preset.s13preset", "Save Preset");
+    const path = await nativeBridge.showSaveDialog("preset.ospreset", "Save Preset", "*.ospreset");
     if (!path) return;
     const preset: PitchCorrectorPreset = {
-      name: path.split(/[/\\]/).pop()?.replace(".s13preset", "") || "User Preset",
+      name: path.split(/[/\\]/).pop()?.replace(/\.ospreset$/i, "") || "User Preset",
       category: "User",
       params,
     };
@@ -348,7 +348,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
 
   // Load user preset
   const loadUserPreset = useCallback(async () => {
-    const path = await nativeBridge.showOpenDialog("Load Preset");
+    const path = await nativeBridge.showOpenDialog("Load Preset", "*.ospreset;*.s13preset");
     if (!path) return;
     const json = await nativeBridge.loadProjectFromFile(path);
     if (!json) return;
@@ -397,7 +397,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
       <div className="flex items-center justify-between px-3 py-1.5 bg-neutral-800 border-b border-neutral-700 flex-wrap gap-1">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-blue-500" />
-          <span className="text-[11px] font-semibold text-neutral-200">S13 Pitch Correct</span>
+          <span className="text-[11px] font-semibold text-neutral-200">OpenStudio Pitch Correct</span>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Preset selector */}
@@ -416,12 +416,12 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
                   <button
                     className="flex-1 text-[9px] text-neutral-400 hover:text-white bg-neutral-700 rounded px-1 py-0.5"
                     onClick={saveUserPreset}
-                    title="Save current settings as a .s13preset file"
+                    title="Save current settings as an .ospreset file"
                   >Save...</button>
                   <button
                     className="flex-1 text-[9px] text-neutral-400 hover:text-white bg-neutral-700 rounded px-1 py-0.5"
                     onClick={loadUserPreset}
-                    title="Load a .s13preset file from disk"
+                    title="Load an .ospreset or legacy .s13preset file from disk"
                   >Load...</button>
                 </div>
                 {/* Factory presets by category */}

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
 

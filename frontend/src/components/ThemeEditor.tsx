@@ -114,8 +114,8 @@ export function ThemeEditor({ isOpen, onClose }: ThemeEditorProps) {
       if (file.name.endsWith(".ReaperTheme") || file.name.endsWith(".reapertheme")) {
         // REAPER theme INI format
         overrides = parseReaperTheme(content);
-      } else if (file.name.endsWith(".s13theme") || file.name.endsWith(".json")) {
-        // Studio13 theme JSON format
+      } else if (file.name.endsWith(".ostheme") || file.name.endsWith(".s13theme") || file.name.endsWith(".json")) {
+        // OpenStudio theme JSON format
         try {
           const parsed = JSON.parse(content);
           if (parsed.colors && typeof parsed.colors === "object") {
@@ -144,7 +144,7 @@ export function ThemeEditor({ isOpen, onClose }: ThemeEditorProps) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${theme}-custom.s13theme`;
+    a.download = `${theme}-custom.ostheme`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -303,12 +303,12 @@ export function ThemeEditor({ isOpen, onClose }: ThemeEditorProps) {
             </Button>
           </div>
           <div className="text-[9px] text-neutral-500 mt-1">
-            Supports .s13theme (JSON), .ReaperTheme (REAPER color import)
+            Supports .ostheme, legacy .s13theme, and .ReaperTheme imports
           </div>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".s13theme,.json,.ReaperTheme,.reapertheme"
+            accept=".ostheme,.s13theme,.json,.ReaperTheme,.reapertheme"
             className="hidden"
             onChange={handleImportFile}
           />

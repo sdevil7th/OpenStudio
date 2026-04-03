@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Checkbox, Input, NativeSelect } from "./ui";
@@ -66,6 +67,10 @@ export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
       </div>
     </Modal>
   );
+}
+
+function shortcut(actionId: string, fallback: string): string {
+  return getEffectiveActionShortcut(actionId) ?? fallback;
 }
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
@@ -139,7 +144,7 @@ function GeneralTab() {
         <span className="text-xs text-daw-text-muted">Audio</span>
       </Row>
       <Row label="Project Extension">
-        <span className="text-xs text-daw-text-muted">.s13</span>
+        <span className="text-xs text-daw-text-muted">.osproj</span>
       </Row>
     </div>
   );
@@ -265,8 +270,11 @@ function DisplayTab() {
 
       <SectionHeader>Panels</SectionHeader>
       <Row label="Show Mixer on Start">
-        <span className="text-xs text-daw-text-muted">Use Ctrl+M to toggle</span>
+        <span className="text-xs text-daw-text-muted">Use {shortcut("view.toggleMixer", "Ctrl+M")} to toggle</span>
       </Row>
+      <div className="text-[9px] text-daw-text-muted mb-2 ml-1">
+        Keyboard shortcut rebinding is handled in the Keyboard Shortcuts window, not in Preferences.
+      </div>
     </div>
   );
 }

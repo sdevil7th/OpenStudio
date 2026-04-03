@@ -15,6 +15,21 @@ extern "C" {
 static const char* const kEngineKey = "s13_engine_ptr";
 static const char* const kScriptEngineKey = "s13_script_engine_ptr";
 
+namespace
+{
+juce::File getOpenStudioDocumentsDirectory()
+{
+    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return documentsDir.getChildFile("OpenStudio");
+}
+
+juce::File getLegacyStudio13DocumentsDirectory()
+{
+    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return documentsDir.getChildFile("Studio13");
+}
+}
+
 static AudioEngine* getEngine(lua_State* L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, kEngineKey);
@@ -472,7 +487,7 @@ static int l_isMetronomeEnabled(lua_State* L)
 // ============================================================================
 static int l_getAppVersion(lua_State* L)
 {
-    lua_pushstring(L, "0.0.1");
+    lua_pushstring(L, ProjectInfo::versionString);
     return 1;
 }
 
@@ -1398,14 +1413,27 @@ bool ScriptEngine::executeString(const juce::String& luaCode)
 
 juce::File ScriptEngine::getUserScriptsDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("Scripts");
+    auto openStudioDir = getOpenStudioDocumentsDirectory().getChildFile("Scripts");
+    auto legacyDir = getLegacyStudio13DocumentsDirectory().getChildFile("Scripts");
+
+    if (!openStudioDir.isDirectory() && legacyDir.isDirectory())
+        return legacyDir;
+
+    return openStudioDir;
 }
 
 juce::File ScriptEngine::getStockScriptsDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentExecutableFile)
-        .getParentDirectory().getChildFile("scripts");
+    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+        .getParentDirectory();
+
+   #if JUCE_MAC
+    auto bundleResources = exeDir.getParentDirectory().getChildFile("Resources").getChildFile("scripts");
+    if (bundleResources.isDirectory())
+        return bundleResources;
+   #endif
+
+    return exeDir.getChildFile("scripts");
 }
 
 std::vector<ScriptEngine::ScriptInfo> ScriptEngine::listAvailableScripts() const

@@ -17,6 +17,13 @@ import {
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import {
+  getFXChainSlots,
+  notifyFXChainChanged,
+  notifyInstrumentChanged,
+  waitForFXChainLength,
+  waitForInstrumentPlugin,
+} from "../utils/fxChain";
 import { Button, Input, Select } from "./ui";
 
 // Persist favorites in localStorage
@@ -38,7 +45,170 @@ interface Plugin {
   fileOrIdentifier: string;
   isInstrument: boolean;
   snapshot?: string; // base64 data URL from C++ snapshot lookup
+  pluginFormat?: string;
+  pluginFormatName?: string;
   pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin"; // Plugin format type
+  producesMidi?: boolean;
+  isMidiEffect?: boolean;
+  supportsDoublePrecision?: boolean;
+}
+
+type PluginCapabilityPatch = Pick<
+  Plugin,
+  | "pluginType"
+  | "pluginFormat"
+  | "isInstrument"
+  | "producesMidi"
+  | "isMidiEffect"
+  | "supportsDoublePrecision"
+>;
+
+const pluginCatalogCache: {
+  plugins: Plugin[] | null;
+  loadPromise: Promise<Plugin[]> | null;
+  capabilityPromise: Promise<Plugin[]> | null;
+  capabilityPatches: Map<string, PluginCapabilityPatch>;
+} = {
+  plugins: null,
+  loadPromise: null,
+  capabilityPromise: null,
+  capabilityPatches: new Map(),
+};
+
+function applyCachedCapabilities(plugin: Plugin): Plugin {
+  const cached = pluginCatalogCache.capabilityPatches.get(plugin.fileOrIdentifier);
+  return cached ? { ...plugin, ...cached } : plugin;
+}
+
+async function fetchPluginCatalog(): Promise<Plugin[]> {
+  if (pluginCatalogCache.plugins) {
+    return pluginCatalogCache.plugins;
+  }
+
+  if (pluginCatalogCache.loadPromise) {
+    return pluginCatalogCache.loadPromise;
+  }
+
+  pluginCatalogCache.loadPromise = (async () => {
+    const pluginList = await nativeBridge.getAvailablePlugins();
+    const hostPlugins: Plugin[] = pluginList.map((p: any) => {
+      const fmt = (p.pluginFormat || p.pluginFormatName || "").toLowerCase();
+      let pluginType: Plugin["pluginType"] = "vst3";
+      if (fmt.includes("lv2")) pluginType = "lv2";
+      else if (fmt.includes("clap")) pluginType = "clap";
+      return applyCachedCapabilities({ ...p, pluginType });
+    });
+
+    let s13fxPlugins: Plugin[] = [];
+    try {
+      const scripts = await nativeBridge.getAvailableS13FX();
+      s13fxPlugins = scripts.map((s: any) => ({
+        name: s.name,
+        manufacturer: s.author || "S13FX",
+        category: s.tags?.[0] || "Script",
+        fileOrIdentifier: s.filePath,
+        isInstrument: false,
+        pluginType: "s13fx" as const,
+      }));
+    } catch {
+      // S13FX not available, that's OK
+    }
+
+    const combined = [...hostPlugins, ...s13fxPlugins];
+    pluginCatalogCache.plugins = combined;
+    return combined;
+  })();
+
+  try {
+    return await pluginCatalogCache.loadPromise;
+  } finally {
+    pluginCatalogCache.loadPromise = null;
+  }
+}
+
+async function hydratePluginCapabilities(catalog: Plugin[]): Promise<Plugin[]> {
+  const hostPluginsNeedingCapabilities = catalog.filter(
+    (plugin) =>
+      plugin.pluginType !== "s13fx" &&
+      !pluginCatalogCache.capabilityPatches.has(plugin.fileOrIdentifier),
+  );
+
+  if (hostPluginsNeedingCapabilities.length === 0) {
+    return pluginCatalogCache.plugins ?? catalog;
+  }
+
+  if (pluginCatalogCache.capabilityPromise) {
+    return pluginCatalogCache.capabilityPromise;
+  }
+
+  pluginCatalogCache.capabilityPromise = (async () => {
+    await Promise.all(
+      hostPluginsNeedingCapabilities.map(async (plugin) => {
+        try {
+          const capabilities = await nativeBridge.getPluginCapabilities(
+            plugin.fileOrIdentifier,
+          );
+
+          if (!capabilities?.success) {
+            return;
+          }
+
+          const fmt = (
+            capabilities.pluginFormat ||
+            plugin.pluginFormat ||
+            plugin.pluginFormatName ||
+            ""
+          ).toLowerCase();
+
+          let pluginType: Plugin["pluginType"] = plugin.pluginType ?? "vst3";
+          if (fmt.includes("lv2")) pluginType = "lv2";
+          else if (fmt.includes("clap")) pluginType = "clap";
+          else if (fmt.includes("builtin")) pluginType = "builtin";
+          else pluginType = "vst3";
+
+          pluginCatalogCache.capabilityPatches.set(plugin.fileOrIdentifier, {
+            pluginType,
+            pluginFormat: capabilities.pluginFormat || plugin.pluginFormat,
+            isInstrument:
+              typeof capabilities.isInstrument === "boolean"
+                ? capabilities.isInstrument
+                : plugin.isInstrument,
+            producesMidi:
+              typeof capabilities.producesMidi === "boolean"
+                ? capabilities.producesMidi
+                : plugin.producesMidi,
+            isMidiEffect:
+              typeof capabilities.isMidiEffect === "boolean"
+                ? capabilities.isMidiEffect
+                : plugin.isMidiEffect,
+            supportsDoublePrecision:
+              typeof capabilities.supportsDoublePrecision === "boolean"
+                ? capabilities.supportsDoublePrecision
+                : plugin.supportsDoublePrecision,
+          });
+        } catch {
+          // Ignore capability failures and keep cached scan metadata.
+        }
+      }),
+    );
+
+    const mergedCatalog = (pluginCatalogCache.plugins ?? catalog).map(applyCachedCapabilities);
+    pluginCatalogCache.plugins = mergedCatalog;
+    return mergedCatalog;
+  })();
+
+  try {
+    return await pluginCatalogCache.capabilityPromise;
+  } finally {
+    pluginCatalogCache.capabilityPromise = null;
+  }
+}
+
+function invalidatePluginCatalogCache() {
+  pluginCatalogCache.plugins = null;
+  pluginCatalogCache.loadPromise = null;
+  pluginCatalogCache.capabilityPromise = null;
+  pluginCatalogCache.capabilityPatches.clear();
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -117,8 +287,8 @@ export function PluginBrowser({
   onClose,
   embedded = false,
 }: PluginBrowserProps) {
-  const [plugins, setPlugins] = useState<Plugin[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [plugins, setPlugins] = useState<Plugin[]>(() => pluginCatalogCache.plugins ?? []);
+  const [loading, setLoading] = useState(() => pluginCatalogCache.plugins == null);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [categoryGroupFilter, setCategoryGroupFilter] = useState<CategoryGroupId>("all");
@@ -136,52 +306,49 @@ export function PluginBrowser({
     });
   };
 
-  useEffect(() => {
-    loadPlugins();
-  }, []);
-
   const loadPlugins = async () => {
-    setLoading(true);
     try {
-      const pluginList = await nativeBridge.getAvailablePlugins();
-      const vst3Plugins: Plugin[] = pluginList.map((p: any) => {
-        const fmt = (p.pluginFormatName || "").toLowerCase();
-        let pluginType: Plugin["pluginType"] = "vst3";
-        if (fmt.includes("lv2")) pluginType = "lv2";
-        else if (fmt.includes("clap")) pluginType = "clap";
-        return { ...p, pluginType };
-      });
+      if (pluginCatalogCache.plugins) {
+        setPlugins(pluginCatalogCache.plugins);
+        setLoading(false);
 
-      // Also load S13FX scripts (not for instrument target)
-      let s13fxPlugins: Plugin[] = [];
-      if (targetChain !== "instrument") {
-        try {
-          const scripts = await nativeBridge.getAvailableS13FX();
-          s13fxPlugins = scripts.map((s: any) => ({
-            name: s.name,
-            manufacturer: s.author || "S13FX",
-            category: s.tags?.[0] || "Script",
-            fileOrIdentifier: s.filePath,
-            isInstrument: false,
-            pluginType: "s13fx" as const,
-          }));
-        } catch {
-          // S13FX not available, that's OK
-        }
+        void hydratePluginCapabilities(pluginCatalogCache.plugins)
+          .then((hydratedCatalog) => {
+            setPlugins(hydratedCatalog);
+          })
+          .catch((e) => {
+            console.error("[PluginBrowser] Failed to hydrate cached capabilities:", e);
+          });
+        return;
       }
 
-      setPlugins([...vst3Plugins, ...s13fxPlugins]);
+      setLoading(true);
+      const catalog = await fetchPluginCatalog();
+      setPlugins(catalog);
+      setLoading(false);
+
+      void hydratePluginCapabilities(catalog)
+        .then((hydratedCatalog) => {
+          setPlugins(hydratedCatalog);
+        })
+        .catch((e) => {
+          console.error("[PluginBrowser] Failed to hydrate plugin capabilities:", e);
+        });
     } catch (e) {
       console.error("[PluginBrowser] Failed to load plugins:", e);
-    } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void loadPlugins();
+  }, []);
 
   const handleScan = async () => {
     setLoading(true);
     try {
       await nativeBridge.scanForPlugins();
+      invalidatePluginCatalogCache();
       await loadPlugins();
     } catch (e) {
       console.error("[PluginBrowser] Failed to scan:", e);
@@ -194,18 +361,33 @@ export function PluginBrowser({
     setAddingPlugin(plugin.fileOrIdentifier);
     try {
       let success = false;
+      let shouldNotifyChain = false;
+      const store = useDAWStore.getState();
 
       if (plugin.pluginType === "s13fx") {
         // S13FX script — use dedicated bridge
         if (targetChain === "master") {
           success = await nativeBridge.addMasterS13FX(plugin.fileOrIdentifier);
+          shouldNotifyChain = success;
         } else {
-          const isInputFX = targetChain === "input";
+          const fxTargetChain =
+            targetChain === "input" || targetChain === "track"
+              ? targetChain
+              : null;
+          const isInputFX = fxTargetChain === "input";
+          const expectedLength =
+            fxTargetChain !== null
+              ? (await getFXChainSlots(trackId, fxTargetChain)).length + 1
+              : null;
           success = await nativeBridge.addTrackS13FX(
             trackId,
             plugin.fileOrIdentifier,
             isInputFX,
           );
+          if (success && expectedLength !== null && fxTargetChain !== null) {
+            await waitForFXChainLength(trackId, fxTargetChain, expectedLength);
+            shouldNotifyChain = true;
+          }
         }
       } else if (targetChain === "instrument") {
         success = await nativeBridge.loadInstrument(
@@ -213,26 +395,47 @@ export function PluginBrowser({
           plugin.fileOrIdentifier,
         );
         if (success) {
-          useDAWStore.getState().updateTrack(trackId, {
+          store.updateTrack(trackId, {
+            instrumentPlugin: plugin.fileOrIdentifier,
+          });
+          await waitForInstrumentPlugin(
+            trackId,
+            plugin.fileOrIdentifier,
+            (candidateTrackId) =>
+              useDAWStore
+                .getState()
+                .tracks.find((track) => track.id === candidateTrackId)?.instrumentPlugin,
+          );
+          notifyInstrumentChanged({
+            trackId,
             instrumentPlugin: plugin.fileOrIdentifier,
           });
           await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (targetChain === "input") {
-        success = await nativeBridge.addTrackInputFX(
+        success = await store.addTrackFXWithUndo(
           trackId,
           plugin.fileOrIdentifier,
+          "input",
         );
       } else if (targetChain === "track") {
-        success = await nativeBridge.addTrackFX(
+        success = await store.addTrackFXWithUndo(
           trackId,
           plugin.fileOrIdentifier,
+          "track",
         );
       } else if (targetChain === "master") {
         success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
+        shouldNotifyChain = success;
       }
 
       if (success) {
+        if (shouldNotifyChain && targetChain !== "instrument") {
+          notifyFXChainChanged({
+            trackId,
+            chainType: targetChain,
+          });
+        }
         console.log(
           `[PluginBrowser] Added ${plugin.name} to ${targetChain}`,
         );
@@ -256,7 +459,9 @@ export function PluginBrowser({
     // For pure MIDI tracks (no instrument loaded), audio FX won't work
     // — only show S13FX and plugins that explicitly support MIDI
     if (trackType === "midi") {
-      filtered = filtered.filter((p) => p.pluginType === "s13fx");
+      filtered = filtered.filter(
+        (p) => p.pluginType === "s13fx" || p.producesMidi || p.isMidiEffect,
+      );
     }
     return filtered;
   }, [plugins, targetChain, trackType]);
@@ -411,7 +616,7 @@ export function PluginBrowser({
               </div>
             ))}
             <div className="text-center text-xs text-daw-text-muted mt-2">
-              Scanning for plugins...
+              Loading available plugins...
             </div>
           </div>
         ) : sortedPlugins.length === 0 ? (

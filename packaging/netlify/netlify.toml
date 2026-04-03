@@ -1,0 +1,14 @@
+[build]
+  publish = "."
+
+[[redirects]]
+  from = "/download/windows/latest"
+  to = "https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe"
+  status = 302
+  force = true
+
+[[redirects]]
+  from = "/download/macos/latest"
+  to = "https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg"
+  status = 302
+  force = true

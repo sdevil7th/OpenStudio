@@ -21,6 +21,29 @@ public:
     MIDIRecorder() = default;
     ~MIDIRecorder() = default;
 
+    struct LivePreviewActiveNote
+    {
+        int note = 60;
+        double startTimestamp = 0.0;
+    };
+
+    struct LivePreviewRequest
+    {
+        juce::String trackId;
+        uint64_t generation = 0;
+        int knownEventCount = 0;
+    };
+
+    struct LivePreviewSnapshot
+    {
+        juce::String trackId;
+        uint64_t generation = 0;
+        double recordingStartTime = 0.0;
+        int totalEventCount = 0;
+        std::vector<MIDIEvent> deltaEvents;
+        std::vector<LivePreviewActiveNote> activeNotes;
+    };
+
     /// Start recording for a track. Call on message thread.
     void startRecording(const juce::String& trackId, double sampleRate);
 
@@ -48,21 +71,36 @@ public:
     /// Call on message thread.
     std::vector<CompletedMIDIRecording> stopAllRecordings(const juce::File& outputFolder, double tempo);
 
+    /// Get live MIDI preview snapshots for actively recording tracks.
+    /// Uses ScopedTryLock to avoid stalling the MIDI callback.
+    std::vector<LivePreviewSnapshot> getLivePreviewSnapshots(const std::vector<LivePreviewRequest>& requests) const;
+
     /// Stop a single track recording.
     void stopRecording(const juce::String& trackId);
 
 private:
+    struct HeldPreviewNote
+    {
+        int note = 60;
+        int channel = 1;
+        double startTimestamp = 0.0;
+    };
+
     struct ActiveMIDIRecording
     {
         juce::String trackId;
         std::vector<MIDIEvent> events;   // Accumulated MIDI events
+        std::vector<MIDIEvent> previewNoteEvents; // Note-only events for live preview
+        std::vector<HeldPreviewNote> activeHeldNotes;
         double startTime = 0.0;          // Timeline start time in seconds
         double sampleRate = 44100.0;
+        uint64_t generation = 0;
         std::atomic<bool> isActive { false };
     };
 
     std::map<juce::String, ActiveMIDIRecording> activeRecordings;
     mutable juce::CriticalSection recLock;  // Protects activeRecordings map
+    std::atomic<uint64_t> nextPreviewGeneration { 1 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MIDIRecorder)
 };

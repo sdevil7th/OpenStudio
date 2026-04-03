@@ -41,10 +41,10 @@ public:
     std::unique_ptr<juce::AudioProcessor> loadPluginFromFile(const juce::String& filePath,
                                                               double sampleRate = 44100.0, int blockSize = 512);
 
-    // Get the user effects directory (Documents/Studio13/Effects/)
+    // Get the user effects directory (Documents/OpenStudio/Effects/, with Studio13 fallback)
     static juce::File getUserEffectsDirectory();
 
-    // Get the stock effects directory (app bundle/effects/)
+    // Get the stock effects directory (app bundle Resources/effects on macOS, or <exe>/effects)
     static juce::File getStockEffectsDirectory();
 
     // ARA plugin detection

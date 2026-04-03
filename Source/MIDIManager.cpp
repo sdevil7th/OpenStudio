@@ -70,7 +70,8 @@ bool MIDIManager::openDevice(const juce::String& deviceName)
     info.isOpen = true;
     
     devices.push_back(std::move(info));
-    
+    rebuildDeviceRoutes();
+
     juce::Logger::writeToLog("MIDIManager: Opened device: " + deviceName);
     return true;
 }
@@ -87,6 +88,7 @@ void MIDIManager::closeDevice(const juce::String& deviceName)
     if (it != devices.end())
     {
         devices.erase(it, devices.end());
+        rebuildDeviceRoutes();
         juce::Logger::writeToLog("MIDIManager: Closed device: " + deviceName);
     }
 }
@@ -95,6 +97,7 @@ void MIDIManager::closeAllDevices()
 {
     juce::ScopedLock sl(lock);
     devices.clear();
+    rebuildDeviceRoutes();
     juce::Logger::writeToLog("MIDIManager: Closed all devices");
 }
 
@@ -115,32 +118,32 @@ juce::StringArray MIDIManager::getOpenDevices() const
 void MIDIManager::setMessageCallback(MIDIMessageCallback callback)
 {
     juce::ScopedLock sl(lock);
-    messageCallback = callback;
+    messageCallback = std::make_shared<MIDIMessageCallback>(std::move(callback));
 }
 
 void MIDIManager::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
-    juce::ScopedLock sl(lock);
-    
-    if (messageCallback == nullptr)
+    auto callback = std::atomic_load_explicit(&messageCallback, std::memory_order_acquire);
+    if (callback == nullptr || !(*callback))
         return;
-    
-    // Find which device sent this message
+
+    auto routes = std::atomic_load_explicit(&deviceRoutes, std::memory_order_acquire);
+
     juce::String deviceName;
-    for (const auto& device : devices)
+    if (routes != nullptr)
     {
-        if (device.input.get() == source)
+        for (const auto& route : *routes)
         {
-            deviceName = device.name;
-            break;
+            if (route.input == source)
+            {
+                deviceName = route.name;
+                break;
+            }
         }
     }
-    
-    // Extract MIDI channel (1-16)
+
     int channel = message.getChannel();
-    
-    // Call the callback
-    messageCallback(deviceName, channel, message);
+    (*callback)(deviceName, channel, message);
 }
 
 MIDIManager::DeviceInfo* MIDIManager::findDevice(const juce::String& name)
@@ -151,4 +154,20 @@ MIDIManager::DeviceInfo* MIDIManager::findDevice(const juce::String& name)
             return &device;
     }
     return nullptr;
+}
+
+void MIDIManager::rebuildDeviceRoutes()
+{
+    std::vector<DeviceRoute> routes;
+    routes.reserve(devices.size());
+
+    for (const auto& device : devices)
+    {
+        routes.push_back(DeviceRoute { device.input.get(), device.name });
+    }
+
+    std::atomic_store_explicit(
+        &deviceRoutes,
+        std::make_shared<const std::vector<DeviceRoute>>(std::move(routes)),
+        std::memory_order_release);
 }

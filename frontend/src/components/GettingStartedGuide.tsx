@@ -1,27 +1,24 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import {
   X,
   ChevronLeft,
   ChevronRight,
+  Sparkles,
+  Navigation,
+  Settings2,
   Music,
   Mic,
-  FileAudio,
-  MousePointer,
-  Sliders,
   Keyboard,
+  Scissors,
+  SlidersHorizontal,
   Download,
-  Sparkles,
+  Wand2,
+  HelpCircle,
 } from "lucide-react";
+import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
-
-/**
- * GettingStartedGuide — Interactive multi-step onboarding guide.
- *
- * Shows a modal with 8 steps covering the core DAW workflow.
- * "Don't show again" preference persisted in localStorage.
- */
 
 interface GuideStep {
   icon: React.ReactNode;
@@ -31,145 +28,202 @@ interface GuideStep {
   tip?: string;
 }
 
-const STEPS: GuideStep[] = [
-  {
-    icon: <Sparkles size={32} className="text-daw-accent" />,
-    title: "Welcome to Studio13",
-    description:
-      "Studio13 is a full-featured Digital Audio Workstation for recording, editing, mixing, and exporting music and audio. This guide will walk you through the essentials to get you started.",
-    details: [
-      "Hybrid architecture: C++ audio engine with a modern React UI",
-      "VST3 plugin support for virtual instruments and effects",
-      "Canvas-based timeline for precise audio and MIDI editing",
-      "Keyboard-driven workflow with 100+ shortcuts",
-    ],
-    tip: "Press Ctrl+Shift+P anytime to open the Command Palette and search for any action.",
-  },
-  {
-    icon: <Music size={32} className="text-daw-accent" />,
-    title: "Creating Tracks",
-    description:
-      "Tracks are the foundation of your project. Studio13 supports audio tracks for recording and playback, MIDI tracks for virtual instruments, and instrument tracks that combine both.",
-    details: [
-      "Right-click in the track area or use Insert menu to add tracks",
-      "Audio tracks: record from microphones, line inputs, or import audio files",
-      "MIDI tracks: sequence notes that drive external MIDI devices",
-      "Instrument tracks: built-in virtual instrument with MIDI input",
-      "Folder tracks: organize related tracks into collapsible groups",
-    ],
-    tip: "Use Ctrl+T to quickly add a new audio track.",
-  },
-  {
-    icon: <Mic size={32} className="text-daw-accent" />,
-    title: "Recording Audio",
-    description:
-      "To record audio, arm a track for recording, select your input source, then hit the record button. Studio13 records to WAV files with zero-latency monitoring.",
-    details: [
-      "Click the record arm button (R) on the track header",
-      "Select your audio input from the track's input dropdown",
-      "Press Ctrl+R or click the record button in the transport bar",
-      "Press Space or click Stop to finish recording",
-      "A new audio clip will appear on the timeline",
-    ],
-    tip: "Open Audio Settings (Ctrl+Shift+S) to configure your audio device and buffer size for low-latency recording.",
-  },
-  {
-    icon: <FileAudio size={32} className="text-daw-accent" />,
-    title: "Importing Audio Files",
-    description:
-      "Bring existing audio into your project by dragging files directly from your file manager onto the timeline, or use the File menu to import.",
-    details: [
-      "Drag & drop WAV, AIFF, FLAC, or MP3 files onto the timeline",
-      "Files are automatically placed at the drop position",
-      "Sample rate conversion is handled automatically",
-      "Use the Media Explorer (Ctrl+Shift+M) to browse audio files",
-      "Multiple files can be imported at once",
-    ],
-    tip: "Hold Ctrl while dropping to place files on consecutive tracks instead of the same track.",
-  },
-  {
-    icon: <MousePointer size={32} className="text-daw-accent" />,
-    title: "Using the Timeline",
-    description:
-      "The timeline is your main workspace. Here you arrange, edit, trim, split, and move clips. Zoom and scroll to navigate your project.",
-    details: [
-      "Ctrl+Scroll to zoom in/out horizontally",
-      "Shift+Scroll to scroll vertically through tracks",
-      "Click on the ruler to set the playhead position",
-      "Drag clip edges to trim, drag body to move",
-      "Press S to split clips at the playhead",
-      "Press B to toggle the split (blade) tool",
-      "Press Delete to remove selected clips",
-    ],
-    tip: "Use Ctrl+= and Ctrl+- for precise zoom control. Double-click a clip to open its properties.",
-  },
-  {
-    icon: <Sliders size={32} className="text-daw-accent" />,
-    title: "Mixing Basics",
-    description:
-      "Use the mixer to balance levels, pan instruments in the stereo field, and add effects. Each track has a channel strip with volume fader, pan knob, and FX chain.",
-    details: [
-      "Press Ctrl+M to toggle the mixer panel",
-      "Drag faders to adjust volume, double-click to reset to 0 dB",
-      "Use pan knobs to position sounds left/right",
-      "S button: solo a track (hear only that track)",
-      "M button: mute a track (silence it)",
-      "Click the FX button to open the effects chain",
-    ],
-    tip: "Automate any parameter over time by adding automation lanes to tracks.",
-  },
-  {
-    icon: <Keyboard size={32} className="text-daw-accent" />,
-    title: "Keyboard Shortcuts",
-    description:
-      "Studio13 is designed for fast keyboard-driven workflows. Learn the essential shortcuts to speed up your work dramatically.",
-    details: [
-      "Space: Play / Pause",
-      "Ctrl+R: Start / Stop Recording",
-      "Ctrl+Z / Ctrl+Y: Undo / Redo",
-      "Ctrl+S: Save Project",
-      "Ctrl+C / Ctrl+V: Copy / Paste clips",
-      "S: Split at playhead",
-      "L: Toggle loop mode",
-      "F1: Open Help Reference",
-    ],
-    tip: "Press Shift+/ (?) to view the complete keyboard shortcuts reference.",
-  },
-  {
-    icon: <Download size={32} className="text-daw-accent" />,
-    title: "Export Your Project",
-    description:
-      "When your mix is ready, render it to an audio file. Studio13 supports multiple formats and bit depths for distribution or further mastering.",
-    details: [
-      "Go to File > Render / Export or press Ctrl+Shift+R",
-      "Choose format: WAV, AIFF, or FLAC",
-      "Select bit depth: 16-bit, 24-bit, or 32-bit float",
-      "Mono or stereo output",
-      "Optional normalize and render tail for reverb/delay tails",
-      "Rendered file is saved to your project directory",
-    ],
-    tip: "For streaming platforms, export at 24-bit WAV and target -14 LUFS loudness.",
-  },
-];
+function shortcut(actionId: string, fallback: string): string {
+  return getEffectiveActionShortcut(actionId) ?? fallback;
+}
 
-const LS_KEY = "s13_gettingStartedDismissed";
+function buildGuideSteps(): GuideStep[] {
+  const commandPaletteShortcut = shortcut("view.commandPalette", "Ctrl+Shift+P");
+  const audioTrackShortcut = shortcut("insert.audioTrack", "Ctrl+T");
+  const midiTrackShortcut = shortcut("insert.midiTrack", "Ctrl+Shift+T");
+  const instrumentTrackShortcut = shortcut("insert.quickAddInstrument", "Ctrl+Shift+I");
+  const recordShortcut = shortcut("transport.record", "Ctrl+R");
+  const preferencesShortcut = shortcut("options.preferences", "Ctrl+,");
+  const importShortcut = shortcut("insert.mediaFile", "Insert");
+  const saveShortcut = shortcut("file.save", "Ctrl+S");
+  const renderShortcut = shortcut("file.render", "Ctrl+Alt+R");
+  const helpShortcut = shortcut("help.contextualHelp", "F1");
+  const splitToolShortcut = shortcut("tools.splitTool", "B");
+  const splitShortcut = shortcut("edit.splitAtCursor", "S");
+  const playShortcut = shortcut("transport.play", "Space");
+  const mixerShortcut = shortcut("view.toggleMixer", "Ctrl+M");
+  const virtualKeyboardShortcut = shortcut("view.toggleVirtualKeyboard", "Alt+B");
+
+  return [
+    {
+      icon: <Sparkles size={32} className="text-daw-accent" />,
+      title: "Welcome to OpenStudio",
+      description:
+        "OpenStudio is a modern desktop DAW for recording, editing, MIDI work, mixing, and advanced production tasks. This guide focuses on the first-session actions that matter most, then points you toward deeper features.",
+      details: [
+        "C++ audio engine with a modern React timeline and mixer UI",
+        "Audio, MIDI, instrument, and bus tracks in one session",
+        "Integrated plugin workflow, pitch tools, routing, and export",
+        "Advanced tools like stem separation, scripting, and project utilities",
+      ],
+      tip: `Press ${commandPaletteShortcut} at any time to search for actions instead of hunting through menus.`,
+    },
+    {
+      icon: <Navigation size={32} className="text-daw-accent" />,
+      title: "Essential Navigation Gestures & Hotkeys",
+      description:
+        "Learn these controls first. They cover most of what a new user needs in the first two minutes and match the current app behavior exactly.",
+      details: [
+        "Scroll: native vertical scrolling through the workspace",
+        "Ctrl+Scroll: zoom the timeline horizontally around the pointer",
+        "Shift+Scroll: move horizontally through the timeline",
+        "Alt+Scroll: resize track height",
+        "Ctrl+Shift+Scroll: zoom track height more aggressively",
+        `${playShortcut}: Play / Stop`,
+        `${recordShortcut}: Start recording on armed tracks`,
+        `${audioTrackShortcut}: New audio track`,
+        `${mixerShortcut}: Toggle mixer`,
+        `${splitShortcut}: Split at playhead | ${splitToolShortcut}: Split tool`,
+      ],
+      tip: `${helpShortcut} opens the Help Reference, and ${commandPaletteShortcut} is the fastest way to find any feature or command.`,
+    },
+    {
+      icon: <Settings2 size={32} className="text-daw-accent" />,
+      title: "Set Up Audio First",
+      description:
+        "Before recording, choose the right audio driver, hardware input/output, sample rate, and buffer size so monitoring and latency feel right.",
+      details: [
+        "Open Audio Settings from the toolbar or File menu audio/settings path",
+        "Choose your driver and hardware devices",
+        "Set sample rate and buffer size for a good latency/CPU balance",
+        "Return to Preferences for editing, display, mouse, and backup options",
+      ],
+      tip: `Use ${preferencesShortcut} for Preferences. Shortcut rebinding is handled in Keyboard Shortcuts, not inside Preferences.`,
+    },
+    {
+      icon: <Music size={32} className="text-daw-accent" />,
+      title: "Create the Right Track Type",
+      description:
+        "OpenStudio supports different track types for different jobs, so the quickest path is to pick the right one at the start.",
+      details: [
+        `${audioTrackShortcut}: audio track for microphones, line inputs, and imported audio`,
+        `${midiTrackShortcut}: MIDI track for note data and MIDI devices`,
+        `${instrumentTrackShortcut}: instrument track for playing a plugin immediately`,
+        "Bus/group tracks are used for routing and submixing later in the mix",
+      ],
+      tip: `If you are starting from a synth or sampler, use ${instrumentTrackShortcut} so the plugin browser opens in the right workflow.`,
+    },
+    {
+      icon: <Mic size={32} className="text-daw-accent" />,
+      title: "Record Audio",
+      description:
+        "Arm an audio track, choose the correct input, and record from the transport. Recorded takes appear directly on the timeline as audio clips.",
+      details: [
+        "Arm the track in the header or mixer",
+        "Pick the hardware input and enable monitoring if needed",
+        `Press ${recordShortcut} to record and ${playShortcut} to stop`,
+        "Recorded clips appear in place and are ready to edit immediately",
+      ],
+      tip: "If monitoring feels late, lower the buffer size in Audio Settings until it feels comfortable without overloading the CPU.",
+    },
+    {
+      icon: <Keyboard size={32} className="text-daw-accent" />,
+      title: "Record MIDI & Instruments",
+      description:
+        "MIDI and instrument tracks record note performance instead of audio waveforms. Instrument tracks also let you hear the loaded plugin while you play.",
+      details: [
+        "Choose a MIDI input device on the track",
+        "Load an instrument plugin for instrument tracks",
+        `Use ${virtualKeyboardShortcut} for the on-screen keyboard if no controller is connected`,
+        "Recorded MIDI clips open into the Piano Roll for note editing",
+      ],
+      tip: "Use an instrument track when you want the fastest \"play and hear\" workflow from a plugin.",
+    },
+    {
+      icon: <Scissors size={32} className="text-daw-accent" />,
+      title: "Edit on the Timeline",
+      description:
+        "The timeline is where you arrange, trim, split, mute, and move both audio and MIDI clips. Most day-to-day editing starts here.",
+      details: [
+        "Drag clip bodies to move them",
+        "Drag clip edges to trim timing",
+        `${splitShortcut}: split at the playhead`,
+        `${splitToolShortcut}: switch into split-tool editing`,
+        `${shortcut("edit.delete", "Delete")}: remove selected clips or tracks`,
+        `${importShortcut}: import media at the current position`,
+      ],
+      tip: "Use the ruler to place the playhead before splitting, looping, or importing.",
+    },
+    {
+      icon: <SlidersHorizontal size={32} className="text-daw-accent" />,
+      title: "Mixing, FX & Snapshots",
+      description:
+        "Once material is on the timeline, move into the mixer for balancing, panning, mute/solo work, plugin access, and snapshot comparisons.",
+      details: [
+        `${mixerShortcut}: open the mixer`,
+        "Use channel strips for volume, pan, mute, solo, arm, and FX access",
+        "Open plugin editors from the FX chain workflow",
+        "Use mixer snapshots to compare alternate balances quickly",
+        "The mixer can also be detached into its own native window",
+      ],
+      tip: "Monitoring FX are for what you hear while working, not for what gets rendered into the final export.",
+    },
+    {
+      icon: <Download size={32} className="text-daw-accent" />,
+      title: "Render & Deliver",
+      description:
+        "Render creates the final output of your session. Use it for standard exports, delivery files, and broader session management tasks.",
+      details: [
+        `${renderShortcut}: open Render / Export`,
+        "Choose file format, bit depth, and output settings",
+        "Project tools also include MIDI export, session archive, and delivery helpers like DDP where available",
+      ],
+      tip: `Save first with ${saveShortcut}, then render once the mix and routing are where you want them.`,
+    },
+    {
+      icon: <Wand2 size={32} className="text-daw-accent" />,
+      title: "Advanced Capabilities Overview",
+      description:
+        "OpenStudio includes deeper tools that go beyond the basic record-edit-mix loop. You do not need them on day one, but they are worth knowing about early.",
+      details: [
+        "Pitch editing and pitch correction inside the session",
+        "Stem separation for remixing, cleanup, practice, and creative extraction",
+        "Routing matrix, buses, sends, and monitoring FX for larger mixes",
+        "Theme editing, toolbar customization, scripting, templates, and project utilities",
+      ],
+      tip: `Use ${commandPaletteShortcut} to jump straight into advanced tools once you know what you want.`,
+    },
+    {
+      icon: <HelpCircle size={32} className="text-daw-accent" />,
+      title: "Where to Go Next",
+      description:
+        "Once you know the core gestures and shortcuts, the fastest next step is to use the built-in references instead of memorizing everything immediately.",
+      details: [
+        `${helpShortcut}: Help Reference for searchable feature guidance`,
+        "Keyboard Shortcuts window for the full shortcut list and custom global rebinding",
+        `Preferences (${preferencesShortcut}) for editing, display, mouse, and backup settings`,
+        `Command Palette (${commandPaletteShortcut}) to find actions by name`,
+      ],
+      tip: "If a shortcut behaves differently than expected, check the Keyboard Shortcuts window first because global bindings may have been customized.",
+    },
+  ];
+}
+
+const LS_KEY = "openstudio_gettingStartedDismissed";
 
 export function GettingStartedGuide() {
   const { showGettingStarted, toggleGettingStarted } = useDAWStore(
     useShallow((s) => ({
       showGettingStarted: s.showGettingStarted,
       toggleGettingStarted: s.toggleGettingStarted,
-    }))
+    })),
   );
+  const customShortcuts = useDAWStore((s) => s.customShortcuts);
 
   const [currentStep, setCurrentStep] = useState(0);
   const [dontShowAgain, setDontShowAgain] = useState(
-    () => localStorage.getItem(LS_KEY) === "true"
+    () => localStorage.getItem(LS_KEY) === "true",
   );
 
-  const step = STEPS[currentStep];
+  const steps = useMemo(() => buildGuideSteps(), [customShortcuts]);
+  const step = steps[currentStep];
   const isFirst = currentStep === 0;
-  const isLast = currentStep === STEPS.length - 1;
+  const isLast = currentStep === steps.length - 1;
 
   const handleClose = useCallback(() => {
     if (dontShowAgain) {
@@ -185,7 +239,7 @@ export function GettingStartedGuide() {
     } else {
       setCurrentStep((s) => s + 1);
     }
-  }, [isLast, handleClose]);
+  }, [handleClose, isLast]);
 
   const handlePrev = useCallback(() => {
     setCurrentStep((s) => Math.max(0, s - 1));
@@ -195,20 +249,14 @@ export function GettingStartedGuide() {
 
   return (
     <div className="fixed inset-0 z-2000 flex items-center justify-center p-4">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={handleClose}
-      />
+      <div className="absolute inset-0 bg-black/60" onClick={handleClose} />
 
-      {/* Modal */}
-      <div className="relative w-[640px] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden">
-        {/* Header */}
+      <div className="relative w-[680px] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden">
         <div className="flex items-center justify-between px-5 py-3 border-b border-daw-border">
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-daw-text">Getting Started</h2>
             <span className="text-xs text-neutral-500">
-              Step {currentStep + 1} of {STEPS.length}
+              Step {currentStep + 1} of {steps.length}
             </span>
           </div>
           <Button
@@ -222,28 +270,21 @@ export function GettingStartedGuide() {
           </Button>
         </div>
 
-        {/* Progress bar */}
         <div className="h-1 bg-daw-dark">
           <div
             className="h-full bg-daw-accent transition-all duration-300 ease-out"
-            style={{ width: `${((currentStep + 1) / STEPS.length) * 100}%` }}
+            style={{ width: `${((currentStep + 1) / steps.length) * 100}%` }}
           />
         </div>
 
-        {/* Step Content */}
-        <div className="px-6 py-5 space-y-4 min-h-[380px]">
-          {/* Icon + Title */}
+        <div className="px-6 py-5 space-y-4 min-h-[420px]">
           <div className="flex items-center gap-3">
             {step.icon}
             <h3 className="text-xl font-semibold text-daw-text">{step.title}</h3>
           </div>
 
-          {/* Description */}
-          <p className="text-sm text-neutral-300 leading-relaxed">
-            {step.description}
-          </p>
+          <p className="text-sm text-neutral-300 leading-relaxed">{step.description}</p>
 
-          {/* Details list */}
           <div className="bg-daw-dark/50 border border-daw-border/50 rounded-md p-4">
             <ul className="space-y-2">
               {step.details.map((detail, i) => (
@@ -255,7 +296,6 @@ export function GettingStartedGuide() {
             </ul>
           </div>
 
-          {/* Tip */}
           {step.tip && (
             <div className="flex items-start gap-2 px-3 py-2.5 bg-daw-accent/10 border border-daw-accent/20 rounded-md">
               <Sparkles size={14} className="text-daw-accent mt-0.5 shrink-0" />
@@ -267,9 +307,8 @@ export function GettingStartedGuide() {
           )}
         </div>
 
-        {/* Step indicators (dots) */}
         <div className="flex items-center justify-center gap-1.5 pb-3">
-          {STEPS.map((_, i) => (
+          {steps.map((_, i) => (
             <button
               key={i}
               className={`w-2 h-2 rounded-full transition-colors ${
@@ -285,9 +324,7 @@ export function GettingStartedGuide() {
           ))}
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-between px-5 py-3 border-t border-daw-border">
-          {/* Don't show again */}
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
               type="checkbox"
@@ -298,34 +335,20 @@ export function GettingStartedGuide() {
             <span className="text-xs text-neutral-400">Don&apos;t show again</span>
           </label>
 
-          {/* Navigation buttons */}
           <div className="flex items-center gap-2">
             <Button
               variant="ghost"
               size="sm"
-              onClick={handleClose}
+              onClick={handlePrev}
+              disabled={isFirst}
+              className="gap-1"
             >
-              Skip
+              <ChevronLeft size={14} />
+              Previous
             </Button>
-
-            {!isFirst && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handlePrev}
-              >
-                <ChevronLeft size={14} className="mr-1" />
-                Previous
-              </Button>
-            )}
-
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleNext}
-            >
+            <Button variant="primary" size="sm" onClick={handleNext} className="gap-1">
               {isLast ? "Finish" : "Next"}
-              {!isLast && <ChevronRight size={14} className="ml-1" />}
+              {!isLast && <ChevronRight size={14} />}
             </Button>
           </div>
         </div>

@@ -161,10 +161,49 @@ body {
 .workspace {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: stretch;
   min-height: 0; /* Critical: allows flex item to shrink below content size */
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+.workspace-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  background: #121212;
+}
+
+.workspace-sticky-tcp-header {
+  flex-shrink: 0;
+  padding: 2px 6px 3px 6px;
+  border-bottom: 1px solid #2a2a2a;
+  background: #121212;
+}
+
+.workspace-sticky-resize-spacer {
+  width: 6px;
+  flex-shrink: 0;
+  border-bottom: 1px solid #2a2a2a;
+  background: #0f0f0f;
+}
+
+.workspace-sticky-ruler {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 1px solid #2a2a2a;
+  background: #0a0a0a;
+}
+
+.workspace-main-row {
+  display: flex;
+  align-items: stretch;
+  flex: 1 0 auto;
+  min-height: 0;
 }
 
 .track-control-panel {
@@ -172,6 +211,7 @@ body {
   background: #1a1a1a;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .tcp-header {
@@ -199,10 +239,17 @@ body {
 
 .tcp-tracks {
   flex: 1;
+  min-height: 0;
 }
 
 .tcp-master {
   border-top: 1px solid #2a2a2a;
+}
+
+.tcp-master-overlay {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
 }
 
 /* Accessibility: Visible focus indicators for keyboard navigation */

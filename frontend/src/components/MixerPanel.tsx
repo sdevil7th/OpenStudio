@@ -26,12 +26,20 @@ import { useCallback, useState, useEffect } from "react";
 interface MixerPanelProps {
   isVisible: boolean;
   isDetached?: boolean;
+  renderInOwnWindow?: boolean;
   onDetach?: () => void;
   onAttach?: () => void;
   onClose?: () => void;
 }
 
-export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, onClose }: MixerPanelProps) {
+export function MixerPanel({
+  isVisible,
+  isDetached = false,
+  renderInOwnWindow = false,
+  onDetach,
+  onAttach,
+  onClose,
+}: MixerPanelProps) {
   const {
     tracks,
     masterVolume,
@@ -88,12 +96,14 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
     name: string;
     pluginPath?: string;
     bypassed?: boolean;
+    precisionOverride?: "auto" | "float32";
   }
   const [monitorFXList, setMonitorFXList] = useState<MonitorFXSlot[]>([]);
   const [showMonitorPluginPicker, setShowMonitorPluginPicker] = useState(false);
   const [availablePlugins, setAvailablePlugins] = useState<{ name: string; fileOrIdentifier: string }[]>([]);
   const [monitorPluginSearch, setMonitorPluginSearch] = useState("");
   const [addingMonitorPlugin, setAddingMonitorPlugin] = useState(false);
+  const [updatingMonitorPrecision, setUpdatingMonitorPrecision] = useState<number | null>(null);
 
   const refreshMonitorFX = useCallback(async () => {
     try {
@@ -152,6 +162,22 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
     }
   }, []);
 
+  const handleSetMonitorPrecisionOverride = useCallback(async (fxIndex: number, mode: "auto" | "float32") => {
+    setUpdatingMonitorPrecision(fxIndex);
+    try {
+      await nativeBridge.setMonitoringFXPrecisionOverride(fxIndex, mode);
+      setMonitorFXList((prev) =>
+        prev.map((fx) =>
+          fx.index === fxIndex ? { ...fx, precisionOverride: mode } : fx,
+        ),
+      );
+    } catch (e) {
+      console.error("[MixerPanel] Failed to set monitor precision override:", e);
+    } finally {
+      setUpdatingMonitorPrecision(null);
+    }
+  }, []);
+
   const handleOpenMonitorPluginPicker = useCallback(async () => {
     try {
       const plugins = await nativeBridge.getAvailablePlugins();
@@ -200,6 +226,8 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
     clipping: false,
     automationLanes: [],
     showAutomation: false,
+    automationEnabled: true,
+    suspendedAutomationState: null,
     frozen: false,
     takes: [],
     activeTakeIndex: 0,
@@ -217,9 +245,9 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
   const mixerContent = (
     <section
       aria-label="Mixer"
-      className="bg-neutral-800 border-t-2 border-neutral-950 flex flex-col shrink-0 overflow-hidden"
+      className="bg-neutral-800 border-t-2 border-neutral-950 flex flex-col shrink-0 overflow-hidden min-h-0 min-w-0"
       style={isDetached
-        ? { height: "100vh" }
+        ? { height: "100%", width: "100%", flex: "1 1 auto" }
         : {
             height: isVisible ? 340 : 0,
             opacity: isVisible ? 1 : 0,
@@ -309,7 +337,7 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
 
       {/* Channel Strips Container */}
       <div
-        className="relative flex-1 flex overflow-x-auto overflow-y-hidden bg-neutral-900 p-1 gap-px pl-0"
+        className="relative flex-1 flex overflow-x-auto overflow-y-hidden bg-neutral-900 p-1 gap-px pl-0 min-h-0 min-w-0"
         onClick={(e) => {
           if (e.target === e.currentTarget) deselectAllTracks();
         }}
@@ -395,9 +423,25 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
                     onClick={() => handleOpenMonitorFXEditor(fx.index)}
                     title={`Open editor for ${fx.name}`}
                     aria-label={`Open editor for monitor effect ${fx.name}`}
+                    >
+                      {fx.name}
+                    </button>
+                  <select
+                    value={fx.precisionOverride || "auto"}
+                    disabled={updatingMonitorPrecision === fx.index}
+                    onChange={(e) => {
+                      void handleSetMonitorPrecisionOverride(
+                        fx.index,
+                        e.target.value as "auto" | "float32",
+                      );
+                    }}
+                    className="shrink-0 bg-neutral-900 border border-neutral-600 rounded px-1 py-0.5 text-[9px] text-neutral-300 outline-none focus:border-amber-500"
+                    title="Monitoring FX precision override"
+                    aria-label={`Precision override for monitor effect ${fx.name}`}
                   >
-                    {fx.name}
-                  </button>
+                    <option value="auto">Auto</option>
+                    <option value="float32">Float32</option>
+                  </select>
                   <button
                     className="shrink-0 text-neutral-500 hover:text-red-400 transition-colors cursor-pointer"
                     onClick={() => handleRemoveMonitorFX(fx.index)}
@@ -460,6 +504,10 @@ export function MixerPanel({ isVisible, isDetached = false, onDetach, onAttach, 
       </div>
     </section>
   );
+
+  if (renderInOwnWindow) {
+    return mixerContent;
+  }
 
   return (
     <DetachablePanel

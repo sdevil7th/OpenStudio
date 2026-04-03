@@ -3,13 +3,24 @@
  * Used by Command Palette, keyboard shortcuts reference, and Actions menu
  */
 
+import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "./useDAWStore";
+
+export type ActionShortcutScope =
+  | "global"
+  | "timeline"
+  | "pitch_editor"
+  | "piano_roll"
+  | "contextual";
 
 export interface ActionDef {
   id: string;
   name: string;
   category: string;
   shortcut?: string;
+  shortcutScope?: ActionShortcutScope;
+  shortcutAliases?: string[];
+  canHandleShortcut?: () => boolean;
   execute: () => void;
 }
 
@@ -24,7 +35,7 @@ export function getRegisteredActions(): ActionDef[] {
     // ===== Transport =====
     { id: "transport.play", name: "Play / Pause", category: "Transport", shortcut: "Space", execute: () => s().togglePlayPause() },
     { id: "transport.stop", name: "Stop", category: "Transport", shortcut: "Space (while playing)", execute: () => s().stop() },
-    { id: "transport.record", name: "Record", category: "Transport", shortcut: "Ctrl+R", execute: () => s().record() },
+    { id: "transport.record", name: "Record", category: "Transport", shortcut: "Ctrl+R", canHandleShortcut: () => s().tracks.some((t) => t.armed), execute: () => s().record() },
     { id: "transport.rewind", name: "Go to Start", category: "Transport", execute: () => s().setCurrentTime(0) },
     { id: "transport.loop", name: "Toggle Loop", category: "Transport", shortcut: "L", execute: () => s().toggleLoop() },
 
@@ -59,24 +70,24 @@ export function getRegisteredActions(): ActionDef[] {
     }},
 
     // ===== Tools =====
-    { id: "tools.selectTool", name: "Select Tool", category: "Tools", shortcut: "V", execute: () => s().setToolMode("select") },
-    { id: "tools.splitTool", name: "Split Tool", category: "Tools", shortcut: "B", execute: () => s().toggleSplitTool() },
-    { id: "tools.muteTool", name: "Mute Tool", category: "Tools", shortcut: "X", execute: () => s().toggleMuteTool() },
-    { id: "tools.smartTool", name: "Smart Tool", category: "Tools", shortcut: "Y", execute: () => s().setToolMode("smart") },
+    { id: "tools.selectTool", name: "Select Tool", category: "Tools", shortcut: "V", shortcutScope: "timeline", execute: () => s().setToolMode("select") },
+    { id: "tools.splitTool", name: "Split Tool", category: "Tools", shortcut: "B", shortcutScope: "timeline", execute: () => s().toggleSplitTool() },
+    { id: "tools.muteTool", name: "Mute Tool", category: "Tools", shortcut: "X", shortcutScope: "timeline", execute: () => s().toggleMuteTool() },
+    { id: "tools.smartTool", name: "Smart Tool", category: "Tools", shortcut: "Y", shortcutScope: "timeline", execute: () => s().setToolMode("smart") },
 
     // ===== Edit =====
-    { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", execute: () => s().undo() },
-    { id: "edit.redo", name: "Redo", category: "Edit", shortcut: "Ctrl+Shift+Z", execute: () => s().redo() },
-    { id: "edit.cut", name: "Cut Selected Clips", category: "Edit", shortcut: "Ctrl+X", execute: () => s().cutSelectedClips() },
-    { id: "edit.copy", name: "Copy Selected Clips", category: "Edit", shortcut: "Ctrl+C", execute: () => s().copySelectedClips() },
+    { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().undo() },
+    { id: "edit.redo", name: "Redo", category: "Edit", shortcut: "Ctrl+Shift+Z", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().redo() },
+    { id: "edit.cut", name: "Cut Selected Clips", category: "Edit", shortcut: "Ctrl+X", canHandleShortcut: () => s().selectedClipIds.length > 0, execute: () => s().cutSelectedClips() },
+    { id: "edit.copy", name: "Copy Selected Clips", category: "Edit", shortcut: "Ctrl+C", canHandleShortcut: () => s().selectedClipIds.length > 0, execute: () => s().copySelectedClips() },
     { id: "edit.paste", name: "Paste Clips", category: "Edit", shortcut: "Ctrl+V", execute: () => s().pasteClips() },
     { id: "edit.delete", name: "Delete Selected", category: "Edit", shortcut: "Delete", execute: () => {
       const state = s();
       if (state.selectedTrackIds.length > 0) state.deleteSelectedTracks();
       else if (state.selectedClipIds.length > 0) state.selectedClipIds.forEach((id) => state.deleteClip(id));
     }},
-    { id: "edit.selectAllTracks", name: "Select All Tracks", category: "Edit", shortcut: "Ctrl+A", execute: () => s().selectAllTracks() },
-    { id: "edit.selectAllClips", name: "Select All Clips", category: "Edit", shortcut: "Ctrl+Shift+A", execute: () => s().selectAllClips() },
+    { id: "edit.selectAllTracks", name: "Select All Tracks", category: "Edit", shortcut: "Ctrl+A", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().selectAllTracks() },
+    { id: "edit.selectAllClips", name: "Select All Clips", category: "Edit", shortcut: "Ctrl+Shift+A", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().selectAllClips() },
     { id: "edit.deselectAll", name: "Deselect All", category: "Edit", shortcut: "Esc", execute: () => s().deselectAllTracks() },
     { id: "edit.splitAtCursor", name: "Split at Cursor", category: "Edit", shortcut: "S", execute: () => s().splitClipAtPlayhead() },
     { id: "edit.splitAtSelection", name: "Split at Time Selection", category: "Edit", execute: () => s().splitAtTimeSelection() },
@@ -117,6 +128,37 @@ export function getRegisteredActions(): ActionDef[] {
       state.createFolderTrack(`Folder ${state.tracks.filter((t: any) => t.isFolder).length + 1}`);
     }},
     { id: "insert.marker", name: "Add Marker at Playhead", category: "Insert", shortcut: "M", execute: () => s().addMarker(s().transport.currentTime) },
+    { id: "insert.markerNamed", name: "Add Named Marker", category: "Insert", shortcut: "Shift+M", execute: () => {
+      const name = prompt("Enter marker name:");
+      if (name !== null) s().addMarker(s().transport.currentTime, name);
+    }},
+    { id: "insert.regionFromSelection", name: "Region from Selection", category: "Insert", shortcut: "Shift+R", canHandleShortcut: () => Boolean(s().timeSelection), execute: () => {
+      const state = s();
+      if (state.timeSelection) state.addRegion(state.timeSelection.start, state.timeSelection.end);
+    }},
+    { id: "insert.mediaFile", name: "Import Media File", category: "Insert", shortcut: "Insert", execute: () => {
+      const state = s();
+      void (async () => {
+        const filePath = await nativeBridge.showOpenDialog("Import Audio/Video File");
+        if (!filePath) return;
+
+        let targetTrackId = state.selectedTrackIds[0];
+        if (!targetTrackId) {
+          const firstAudioTrack = state.tracks.find((t) => t.type === "audio");
+          if (!firstAudioTrack) {
+            alert("No audio track available. Please create an audio track first.");
+            return;
+          }
+          targetTrackId = firstAudioTrack.id;
+        }
+
+        try {
+          await state.importMedia(filePath, targetTrackId, state.transport.currentTime);
+        } catch (error) {
+          alert(`Failed to import media: ${error}`);
+        }
+      })();
+    }},
 
     // ===== View =====
     { id: "view.toggleMixer", name: "Toggle Mixer", category: "View", shortcut: "Ctrl+M", execute: () => s().toggleMixer() },
@@ -129,9 +171,23 @@ export function getRegisteredActions(): ActionDef[] {
     // ===== File =====
     { id: "file.new", name: "New Project", category: "File", shortcut: "Ctrl+N", execute: () => s().newProject() },
     { id: "file.save", name: "Save Project", category: "File", shortcut: "Ctrl+S", execute: () => s().saveProject() },
+    { id: "file.saveAs", name: "Save Project As...", category: "File", shortcut: "Ctrl+Shift+S", execute: () => s().saveProject(true) },
     { id: "file.open", name: "Open Project", category: "File", shortcut: "Ctrl+O", execute: () => { void s().loadProject(); } },
+    { id: "file.closeProject", name: "Close Project", category: "File", shortcut: "Ctrl+F4", execute: () => {
+      const state = s();
+      if (state.isModified) {
+        if (confirm("Save changes before closing?")) {
+          void state.saveProject().then(() => state.newProject());
+        } else {
+          void state.newProject();
+        }
+      } else {
+        void state.newProject();
+      }
+    }},
     { id: "file.projectSettings", name: "Project Settings", category: "File", shortcut: "Alt+Enter", execute: () => s().openProjectSettings() },
     { id: "file.render", name: "Render / Export", category: "File", shortcut: "Ctrl+Alt+R", execute: () => s().openRenderModal() },
+    { id: "file.quit", name: "Quit", category: "File", shortcut: "Ctrl+Q", execute: () => { void nativeBridge.closeWindow(); } },
     { id: "file.settings", name: "Audio Settings", category: "File", execute: () => s().openSettings() },
     { id: "project.compare", name: "Compare with Saved Version", category: "File", execute: () => { void s().compareWithSavedProject(); } },
 
@@ -148,6 +204,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "view.keyboardShortcuts", name: "Keyboard Shortcuts", category: "View", execute: () => s().toggleKeyboardShortcuts() },
     { id: "help.contextualHelp", name: "Help Reference", category: "Help", shortcut: "F1", execute: () => s().toggleContextualHelp() },
     { id: "help.gettingStarted", name: "Getting Started Guide", category: "Help", execute: () => s().toggleGettingStarted() },
+    { id: "view.commandPalette", name: "Command Palette", category: "View", shortcut: "Ctrl+Shift+P", execute: () => s().toggleCommandPalette() },
     { id: "options.preferences", name: "Preferences", category: "Options", shortcut: "Ctrl+,", execute: () => s().togglePreferences() },
     { id: "options.recordNormal", name: "Record Mode: Normal", category: "Options", execute: () => s().setRecordMode("normal") },
     { id: "options.recordOverdub", name: "Record Mode: Overdub", category: "Options", execute: () => s().setRecordMode("overdub") },
@@ -221,6 +278,18 @@ export function getRegisteredActions(): ActionDef[] {
 
     // ===== Sprint 18: Interaction/Workflow =====
     { id: "view.zoomToSelection", name: "Zoom to Time Selection", category: "View", shortcut: "Ctrl+Shift+E", execute: () => s().zoomToSelection() },
+    { id: "view.zoomIn", name: "Zoom In", category: "View", shortcut: "Ctrl++", shortcutAliases: ["Ctrl+=", "Ctrl+Shift++"], execute: () => {
+      const state = s();
+      state.setZoom(Math.min(state.pixelsPerSecond * 1.5, 500));
+    }},
+    { id: "view.zoomOut", name: "Zoom Out", category: "View", shortcut: "Ctrl+-", execute: () => {
+      const state = s();
+      state.setZoom(Math.max(state.pixelsPerSecond / 1.5, 10));
+    }},
+    { id: "view.zoomToFit", name: "Zoom to Fit", category: "View", shortcut: "Ctrl+0", execute: () => s().setZoom(50) },
+    { id: "view.setLoopToSelection", name: "Set Loop to Selection", category: "View", shortcut: "Ctrl+L", canHandleShortcut: () => Boolean(s().timeSelection), execute: () => {
+      if (s().timeSelection) s().setLoopToSelection();
+    }},
     { id: "view.autoScroll", name: "Toggle Auto-Scroll During Playback", category: "View", execute: () => s().toggleAutoScroll() },
     { id: "edit.transpose", name: "Transpose Selected Notes", category: "Edit", execute: () => { /* Handled in PianoRoll */ } },
     { id: "edit.velocityScale", name: "Scale Velocity of Selected Notes", category: "Edit", execute: () => { /* Handled in PianoRoll */ } },
@@ -236,7 +305,6 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "edit.invertNotes", name: "Invert MIDI Note Pitches", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.invertMIDINotes(st.pianoRollClipId); } },
 
     // ===== Sprint 19: MIDI + Plugin + Mixing =====
-    { id: "midi.quantize", name: "Quantize Notes...", category: "MIDI", shortcut: "Q", execute: () => s().toggleQuantizeDialog() },
     { id: "midi.transpose", name: "Transpose Notes...", category: "MIDI", execute: () => { /* PianoRoll modal */ } },
     { id: "midi.selectAll", name: "Select All Notes", category: "MIDI", execute: () => s().selectAllMIDINotes() },
     { id: "view.drumEditor", name: "Toggle Drum Editor", category: "View", execute: () => s().toggleDrumEditor() },
@@ -249,7 +317,6 @@ export function getRegisteredActions(): ActionDef[] {
 
     // ===== Sprint 20: Cross-Platform + Accessibility =====
     { id: "view.loudnessMeter", name: "Toggle Loudness Meter", category: "View", execute: () => s().toggleLoudnessMeter() },
-    { id: "view.spectrumAnalyzer", name: "Toggle Spectrum Analyzer", category: "View", execute: () => s().toggleSpectrumAnalyzer() },
     { id: "view.phaseCorrelation", name: "Toggle Phase Correlation Meter", category: "View", execute: () => s().togglePhaseCorrelation() },
     { id: "file.archiveSession", name: "Archive Session...", category: "File", execute: () => { void s().archiveSession(); } },
     { id: "file.newFromTemplate", name: "New from Template...", category: "File", execute: () => s().toggleProjectTemplates() },
@@ -314,4 +381,61 @@ export function getRegisteredActions(): ActionDef[] {
       if (name) s().saveAsTemplate(name);
     }},
   ];
+}
+
+export function getRegisteredAction(actionId: string): ActionDef | undefined {
+  return getRegisteredActions().find((action) => action.id === actionId);
+}
+
+export function getActionShortcut(actionId: string): string | undefined {
+  return getRegisteredAction(actionId)?.shortcut;
+}
+
+export function getEffectiveActionShortcut(actionId: string): string | undefined {
+  const customShortcut = useDAWStore.getState().customShortcuts[actionId];
+  if (customShortcut !== undefined) {
+    return customShortcut;
+  }
+
+  return getActionShortcut(actionId);
+}
+
+export function getActionShortcutScope(actionId: string): ActionShortcutScope | undefined {
+  return getRegisteredAction(actionId)?.shortcutScope;
+}
+
+export function getActionShortcutScopeLabel(scope?: ActionShortcutScope): string {
+  switch (scope) {
+    case "timeline": return "Timeline";
+    case "pitch_editor": return "Pitch Editor";
+    case "piano_roll": return "Piano Roll";
+    case "contextual": return "Contextual";
+    case "global":
+    default:
+      return "Global";
+  }
+}
+
+export function getGlobalShortcutConflicts(): string[] {
+  const owners = new Map<string, string>();
+  const conflicts = new Set<string>();
+
+  for (const action of getRegisteredActions()) {
+    if ((action.shortcutScope ?? "global") !== "global") continue;
+    const shortcuts = [action.shortcut, ...(action.shortcutAliases ?? [])].filter(
+      (shortcut): shortcut is string => Boolean(shortcut)
+    );
+
+    for (const shortcut of shortcuts) {
+      if (shortcut.includes("(")) continue;
+      const existing = owners.get(shortcut);
+      if (existing && existing !== action.id) {
+        conflicts.add(`${shortcut}: ${existing}, ${action.id}`);
+      } else {
+        owners.set(shortcut, action.id);
+      }
+    }
+  }
+
+  return [...conflicts].sort();
 }

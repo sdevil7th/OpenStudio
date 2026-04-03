@@ -1,4 +1,11 @@
 // Type definitions for the JUCE backend
+const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
+
+function shouldLogPitchEditorFormant() {
+  const win = window as Window & { __S13_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
+  const host = win.location?.hostname ?? "";
+  return win.__S13_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
+}
 
 // Pitch Corrector data types
 export interface PitchCorrectorData {
@@ -58,6 +65,19 @@ export interface PitchContourData {
   };
   notes: PitchNoteData[];
 }
+
+export interface ClipPitchPreviewPayload {
+  pitchSegments: {
+    startTime: number;
+    endTime: number;
+    pitchRatio: number;
+  }[];
+  globalFormantSemitones?: number;
+  previewStartSec?: number;
+  previewEndSec?: number;
+}
+
+export type PitchCorrectionRenderMode = "single" | "preview_segment" | "full_clip_hq";
 
 // Polyphonic pitch detection types (Phase 6)
 export interface PolyNoteData {
@@ -139,11 +159,218 @@ export interface StemSepProgress {
   error?: string;
 }
 
+export interface ActiveRecordingMIDIPreviewRequest {
+  trackId: string;
+  generation: number;
+  knownEventCount: number;
+}
+
+export interface ActiveRecordingMIDIPreviewActiveNote {
+  note: number;
+  startTimestamp: number;
+}
+
+export interface ActiveRecordingMIDIPreviewResponse {
+  trackId: string;
+  generation: number;
+  recordingStartTime: number;
+  totalEventCount: number;
+  deltaEvents: Array<{
+    timestamp: number;
+    type: string;
+    note?: number;
+    velocity?: number;
+    channel?: number;
+  }>;
+  activeNotes: ActiveRecordingMIDIPreviewActiveNote[];
+}
+
+export interface WindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface MixerWindowState {
+  isOpen: boolean;
+}
+
+export interface MixerUISnapshotEnvelope<T = any> {
+  originWindowId: string;
+  revision: number;
+  payload: T;
+}
+
+export interface AiToolsStatus {
+  state:
+    | "idle"
+    | "installing"
+    | "checking"
+    | "creating_venv"
+    | "pythonMissing"
+    | "runtimeMissing"
+    | "modelMissing"
+    | "ready"
+    | "error"
+    | "cancelled";
+  progress: number;
+  available: boolean;
+  pythonDetected: boolean;
+  scriptAvailable: boolean;
+  runtimeInstalled: boolean;
+  modelInstalled: boolean;
+  installInProgress: boolean;
+  message?: string;
+  error?: string;
+  helpUrl?: string;
+}
+
+export interface InstallAiToolsResponse {
+  started: boolean;
+  error?: string;
+  message?: string;
+  status?: AiToolsStatus;
+}
+
 export interface ARAPluginInfo {
   name: string;
   manufacturer: string;
   pluginId: string;
   category: string;
+}
+
+export interface ARAStatus {
+  active: boolean;
+  activeFxIndex: number;
+  lastAttemptFxIndex: number;
+  lastAttemptComplete: boolean;
+  lastAttemptWasARAPlugin: boolean;
+  lastAttemptSucceeded: boolean;
+  analysisProgress?: number;
+  analysisComplete?: boolean;
+  analysisRequested?: boolean;
+  analysisStarted?: boolean;
+  lastAnalysisProgressValue?: number;
+  sourceCount?: number;
+  playbackRegionCount?: number;
+  audioSourceSamplesAccessEnabled?: boolean;
+  editorRendererAttached?: boolean;
+  playbackRendererAttached?: boolean;
+  error?: string;
+}
+
+export interface NativeGlobalShortcutEvent {
+  key: string;
+  code?: string;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  metaKey?: boolean;
+  repeat?: boolean;
+  source?: string;
+}
+
+// Audio device configuration (matches C++ backend response shape)
+export interface AudioDeviceConfig {
+  audioDeviceType: string;
+  inputDevice: string;
+  outputDevice: string;
+  sampleRate: number;
+  bufferSize: number;
+  [key: string]: unknown;
+}
+
+export interface AudioDeviceSetupResponse {
+  current: AudioDeviceConfig;
+  availableTypes?: string[];
+  inputs?: string[];
+  outputs?: string[];
+  sampleRates?: number[];
+  bufferSizes?: number[];
+  inputChannelNames?: string[];
+  outputChannelNames?: string[];
+  [key: string]: unknown;
+}
+
+// Diagnostic and testing result types
+export interface MidiDiagnosticsReport {
+  inputDevices: string[];
+  outputDevices: string[];
+  openDevices: string[];
+  lateMidiEvents: number;
+  [key: string]: unknown;
+}
+
+export interface PluginCapabilities {
+  success?: boolean;
+  pluginFormat?: string;
+  format?: string;
+  name?: string;
+  vendor?: string;
+  category?: string;
+  numInputChannels?: number;
+  numOutputChannels?: number;
+  supportsDouble?: boolean;
+  supportsDoublePrecision?: boolean;
+  isInstrument?: boolean;
+  producesMidi?: boolean;
+  isMidiEffect?: boolean;
+  hasMidiInput?: boolean;
+  hasMidiOutput?: boolean;
+  hasEditor?: boolean;
+  [key: string]: unknown;
+}
+
+export interface BenchmarkResults {
+  cpuUsage: number;
+  callbackDurationMs: number;
+  bufferSize: number;
+  sampleRate: number;
+  trackCount: number;
+  [key: string]: unknown;
+}
+
+export interface AudioDebugTrackSnapshot {
+  trackId: string;
+  clipCount: number;
+}
+
+export interface AudioDebugSnapshot {
+  transportPlaying: boolean;
+  transportRecording: boolean;
+  transportPosition: number;
+  sampleRate: number;
+  blockSize: number;
+  playbackClipCount: number;
+  activeOutputChannels: number;
+  postTrackPlaybackPeak: number;
+  postMonitoringInputPeak: number;
+  postMasterFxPeak: number;
+  postMonitoringFxPeak: number;
+  finalOutputPeak: number;
+  lastRecordingClipCountReturned: number;
+  playbackTracks: AudioDebugTrackSnapshot[];
+  [key: string]: unknown;
+}
+
+export interface GuardrailsReport {
+  passed: boolean;
+  checks: Array<{ name: string; passed: boolean; message?: string }>;
+  [key: string]: unknown;
+}
+
+export interface ClipLauncherSlotState {
+  trackIndex: number;
+  slotIndex: number;
+  state: "empty" | "stopped" | "playing" | "queued";
+  clipId?: string;
+  clipName?: string;
+}
+
+export interface ClipLauncherState {
+  slots: ClipLauncherSlotState[];
+  [key: string]: unknown;
 }
 
 // Waveform visualization data type
@@ -187,7 +414,7 @@ declare global {
           trackId: string,
           newPosition: number,
         ) => Promise<boolean>;
-        getAudioDeviceSetup?: () => Promise<any>;
+        getAudioDeviceSetup?: () => Promise<AudioDeviceSetupResponse>;
         setAudioDeviceSetup?: (config: any) => Promise<boolean>;
 
         // Track Control (Phase 1)
@@ -270,6 +497,9 @@ declare global {
             }>;
           }>
         >;
+        getActiveRecordingMIDIPreviews?: (
+          requests: ActiveRecordingMIDIPreviewRequest[],
+        ) => Promise<ActiveRecordingMIDIPreviewResponse[]>;
         // Live recording waveform - returns peaks for recording in progress
         getRecordingPeaks?: (
           trackId: string,
@@ -301,6 +531,7 @@ declare global {
         // Metering (Phase 4)
         getMeterLevels?: () => Promise<number[]>;
         getMasterLevel?: () => Promise<number>;
+        resetMeterClip?: (trackId: string) => Promise<boolean>;
 
         // Master (Phase 5)
         addMasterFX?: (pluginPath: string) => Promise<boolean>;
@@ -339,6 +570,8 @@ declare global {
           fadeIn: number,
           fadeOut: number,
           clipId: string,
+          pitchCorrectionSourceFilePath?: string,
+          pitchCorrectionSourceOffset?: number,
         ) => Promise<boolean>;
         addPlaybackClipsBatch?: (clipsJSON: string) => Promise<boolean>;
         removePlaybackClip?: (
@@ -457,6 +690,7 @@ declare global {
           deviceName: string,
           channel: number,
         ) => Promise<boolean>;
+        setTrackMIDIClips?: (trackId: string, clipsJSON: string) => Promise<boolean>;
         loadInstrument?: (trackId: string, vstPath: string) => Promise<boolean>;
         openInstrumentEditor?: (trackId: string) => Promise<boolean>;
 
@@ -464,13 +698,16 @@ declare global {
         showSaveDialog?: (
           defaultPath?: string,
           title?: string,
+          filters?: string,
         ) => Promise<string>;
-        showOpenDialog?: (title?: string) => Promise<string>;
+        showOpenDialog?: (title?: string, filters?: string) => Promise<string>;
+        openFileExternal?: (path: string) => Promise<boolean>;
         saveProjectToFile?: (
           filePath: string,
           jsonContent: string,
         ) => Promise<boolean>;
         loadProjectFromFile?: (filePath: string) => Promise<string>;
+        consumePendingLaunchProjectPath?: () => Promise<string>;
 
         // Plugin State Serialization (F2)
         getPluginState?: (
@@ -491,12 +728,51 @@ declare global {
         ) => Promise<boolean>;
 
         // MIDI
+        getAudioDebugSnapshot?: () => Promise<AudioDebugSnapshot>;
         sendMidiNote?: (
           trackId: string,
           note: number,
           velocity: number,
           isNoteOn: boolean,
         ) => Promise<void>;
+        getMidiDiagnostics?: () => Promise<MidiDiagnosticsReport>;
+        getPluginCapabilities?: (pluginPath: string) => Promise<PluginCapabilities>;
+        setProcessingPrecision?: (mode: "float32" | "hybrid64") => Promise<boolean>;
+        getProcessingPrecision?: () => Promise<"float32" | "hybrid64">;
+        getPluginCompatibilityMatrix?: () => Promise<Record<string, PluginCapabilities>>;
+        runEngineBenchmarks?: () => Promise<BenchmarkResults>;
+        setTrackPluginPrecisionOverride?: (
+          trackId: string,
+          fxIndex: number,
+          isInputFX: boolean,
+          mode: "auto" | "float32",
+        ) => Promise<boolean>;
+        setInstrumentPrecisionOverride?: (
+          trackId: string,
+          mode: "auto" | "float32",
+        ) => Promise<boolean>;
+        setMasterFXPrecisionOverride?: (
+          fxIndex: number,
+          mode: "auto" | "float32",
+        ) => Promise<boolean>;
+        bypassMasterFX?: (fxIndex: number, bypassed: boolean) => Promise<boolean>;
+        setMonitoringFXPrecisionOverride?: (
+          fxIndex: number,
+          mode: "auto" | "float32",
+        ) => Promise<boolean>;
+        runReleaseGuardrails?: () => Promise<GuardrailsReport>;
+        runAutomatedRegressionSuite?: () => Promise<GuardrailsReport>;
+        getAppVersion?: () => Promise<string>;
+        checkForUpdates?: (manual?: boolean) => Promise<any>;
+        downloadAndInstallUpdate?: (
+          downloadUrl: string,
+          version?: string,
+          sha256?: string,
+          releasePageUrl?: string,
+          installerArguments?: string,
+          size?: number,
+        ) => Promise<any>;
+        openExternalURL?: (url: string) => Promise<boolean>;
 
         // Media Import (F10)
         importMediaFile?: (filePath: string) => Promise<{
@@ -630,7 +906,7 @@ declare global {
         stopAllSlots?: () => Promise<boolean>;
         setSlotClip?: (trackIndex: number, slotIndex: number, filePath: string, duration: number) => Promise<boolean>;
         clearSlot?: (trackIndex: number, slotIndex: number) => Promise<boolean>;
-        getClipLauncherState?: () => Promise<any>;
+        getClipLauncherState?: () => Promise<ClipLauncherState>;
 
         // Phase 3.14: Session Interchange (AAF/RPP/EDL)
         importSession?: (filePath: string) => Promise<{ success: boolean; tempo?: number; sampleRate?: number; tracks?: any[]; error?: string }>;
@@ -711,7 +987,7 @@ declare global {
         analyzePitchContour?: (trackId: string, clipId: string) => Promise<PitchContourData>;
         analyzePitchContourDirect?: (filePath: string, offset: number, duration: number, clipId: string) => Promise<PitchContourData>;
         getLastPitchAnalysisResult?: () => Promise<PitchContourData>;
-        applyPitchCorrection?: (trackId: string, clipId: string, notes: PitchNoteData[], frames?: PitchContourData['frames']) => Promise<{ outputFile: string; success: boolean }>;
+        applyPitchCorrection?: (trackId: string, clipId: string, notes: PitchNoteData[], frames?: PitchContourData['frames'], requestId?: string, globalFormantSemitones?: number, windowStartSec?: number, windowEndSec?: number, renderMode?: PitchCorrectionRenderMode, requestGroupId?: string) => Promise<{ outputFile: string; success: boolean }>;
         previewPitchCorrection?: (trackId: string, clipId: string, notes: PitchNoteData[]) => Promise<{ outputFile: string; success: boolean }>;
 
         // Polyphonic Pitch Detection (Phase 6)
@@ -725,22 +1001,28 @@ declare global {
         setPitchCorrectionBypass?: (trackId: string, clipId: string, bypass: boolean) => Promise<void>;
 
         // Real-time pitch preview (Phase 7.5)
-        setClipPitchPreview?: (clipId: string, segments: { startTime: number; endTime: number; pitchRatio: number }[]) => Promise<boolean>;
+        setClipPitchPreview?: (clipId: string, payload: ClipPitchPreviewPayload) => Promise<boolean>;
         clearClipPitchPreview?: (clipId: string) => Promise<boolean>;
+        clearClipRenderedPreviewSegments?: (clipId: string) => Promise<boolean>;
 
         // Source Separation (Phase 8 + Phase 10)
         separateStems?: (trackId: string, clipId: string) => Promise<StemSeparationResult>;
         isStemSeparationAvailable?: () => Promise<boolean>;
+        getAiToolsStatus?: () => Promise<AiToolsStatus>;
+        installAiTools?: () => Promise<InstallAiToolsResponse>;
         separateStemsAsync?: (trackId: string, clipId: string, optionsJSON: string) => Promise<{ started: boolean; error?: string; cached?: boolean }>;
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
+        cancelAiToolsInstall?: () => Promise<void>;
 
         // ARA Plugin Hosting (Phase 9)
         initializeARA?: (trackId: string, fxIndex: number) => Promise<{ success: boolean; error?: string }>;
         addARAClip?: (trackId: string, clipId: string) => Promise<{ success: boolean; error?: string }>;
         removeARAClip?: (trackId: string, clipId: string) => Promise<{ success: boolean }>;
-        getARAPlugins?: () => Promise<ARAPluginInfo[]>;
+        getARAStatus?: (trackId: string) => Promise<ARAStatus>;
         shutdownARA?: (trackId: string) => Promise<{ success: boolean }>;
+        isARAActive?: (trackId: string) => Promise<boolean>;
+        hasAnyActiveARA?: () => Promise<boolean>;
 
         // Clip Gain Envelope
         setClipGainEnvelope?: (trackId: string, clipId: string, envelopeJSON: string) => Promise<boolean>;
@@ -763,6 +1045,11 @@ declare global {
         closeWindow?: () => Promise<void>;
         isWindowMaximized?: () => Promise<boolean>;
         startWindowDrag?: () => Promise<void>;
+        openMixerWindow?: (bounds?: Partial<WindowBounds>) => Promise<boolean>;
+        closeMixerWindow?: () => Promise<boolean>;
+        getMixerWindowState?: () => Promise<MixerWindowState>;
+        publishMixerUISnapshot?: (snapshot: any) => Promise<boolean>;
+        getMixerUISnapshot?: () => Promise<any>;
 
         // Event system
         addEventListener?: (
@@ -787,13 +1074,17 @@ class NativeBridge {
   private isNative: boolean;
   private eventListeners: Map<string, Set<(data: any) => void>> = new Map();
 
+  private getBackend() {
+    return typeof window !== "undefined" ? window.__JUCE__?.backend : undefined;
+  }
+
   constructor() {
-    this.isNative = typeof window.__JUCE__ !== "undefined";
+    const juce = typeof window !== "undefined" ? window.__JUCE__ : undefined;
+    this.isNative = typeof juce !== "undefined";
     if (this.isNative) {
       console.log("NativeBridge: JUCE Object found.");
 
       // Debugging: Alert the available keys to see what we are working with
-      const juce = window.__JUCE__;
       const backend = juce?.backend;
       if (backend) {
         const keys = Object.keys(backend);
@@ -826,7 +1117,7 @@ class NativeBridge {
   // Subscribe to peak-cache-ready events emitted by C++ after background peak generation.
   // Returns an unsubscribe function (or no-op in dev mode).
   onPeaksReady(callback: (filePath: string) => void): () => void {
-    const backend = window.__JUCE__?.backend;
+    const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener(
         "peaksReady",
@@ -840,7 +1131,7 @@ class NativeBridge {
   // Subscribe to pitch analysis completion events from C++ background thread.
   // Returns an unsubscribe function (or no-op in dev mode).
   onPitchAnalysisComplete(callback: (data: PitchContourData) => void): () => void {
-    const backend = window.__JUCE__?.backend;
+    const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener(
         "pitchAnalysisComplete",
@@ -853,8 +1144,8 @@ class NativeBridge {
 
   // Subscribe to pitch correction completion events (emitted when WORLD vocoder finishes).
   // Returns an unsubscribe function (or no-op in dev mode).
-  onPitchCorrectionComplete(callback: (data: { clipId: string; success: boolean; outputFile?: string }) => void): () => void {
-    const backend = window.__JUCE__?.backend;
+  onPitchCorrectionComplete(callback: (data: { clipId: string; success: boolean; outputFile?: string; requestId?: string; restored?: boolean; renderMode?: PitchCorrectionRenderMode; cancelled?: boolean; swapDeferred?: boolean }) => void): () => void {
+    const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener(
         "pitchCorrectionComplete",
@@ -868,7 +1159,7 @@ class NativeBridge {
   // Subscribe to transport position updates from C++ (emitted at 10Hz).
   // Returns an unsubscribe function (or no-op in dev mode).
   onTransportUpdate(callback: (data: { position: number; isPlaying: boolean }) => void): () => void {
-    const backend = window.__JUCE__?.backend;
+    const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener("transportUpdate", (data: any) => {
         callback(data);
@@ -882,13 +1173,16 @@ class NativeBridge {
   onMeterUpdate(
     callback: (data: {
       trackLevels: number[];
+      trackClipping?: Record<string, boolean>;
       masterLevel: number;
+      masterClipping?: boolean;
       timestamp: number;
     }) => void,
   ) {
-    if (!this.isNative || !window.__JUCE__?.backend?.addEventListener) return;
+    const backend = this.getBackend();
+    if (!this.isNative || !backend?.addEventListener) return;
 
-    window.__JUCE__.backend.addEventListener("meterUpdate", (data: any) => {
+    backend.addEventListener("meterUpdate", (data: any) => {
       callback(data);
     });
   }
@@ -927,7 +1221,7 @@ class NativeBridge {
     }
   }
 
-  async getAudioDeviceSetup(): Promise<any> {
+  async getAudioDeviceSetup(): Promise<AudioDeviceSetupResponse> {
     console.log(
       "[NativeBridge] getAudioDeviceSetup called, isNative:",
       this.isNative,
@@ -1075,6 +1369,7 @@ class NativeBridge {
   // Transport Control (Phase 2)
   async setTransportPlaying(playing: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportPlaying) {
+      console.log("[audio.transport] NativeBridge.setTransportPlaying", { playing });
       return await window.__JUCE__.backend.setTransportPlaying(playing);
     } else {
       console.log(`[NativeBridge] Mock setTransportPlaying: ${playing}`);
@@ -1084,6 +1379,7 @@ class NativeBridge {
 
   async setTransportRecording(recording: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportRecording) {
+      console.log("[audio.record] NativeBridge.setTransportRecording", { recording });
       return await window.__JUCE__.backend.setTransportRecording(recording);
     } else {
       console.log(`[NativeBridge] Mock setTransportRecording: ${recording}`);
@@ -1143,6 +1439,7 @@ class NativeBridge {
 
   async setTransportPosition(seconds: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportPosition) {
+      console.log("[audio.transport] NativeBridge.setTransportPosition", { seconds });
       return await window.__JUCE__.backend.setTransportPosition(seconds);
     } else {
       console.log(`[NativeBridge] Mock setTransportPosition: ${seconds}s`);
@@ -1229,6 +1526,7 @@ class NativeBridge {
     }>
   > {
     if (this.isNative && window.__JUCE__?.backend.getLastCompletedClips) {
+      console.log("[audio.record] NativeBridge.getLastCompletedClips");
       return await window.__JUCE__.backend.getLastCompletedClips();
     }
     return [];
@@ -1257,6 +1555,15 @@ class NativeBridge {
     return [];
   }
 
+  async getActiveRecordingMIDIPreviews(
+    requests: ActiveRecordingMIDIPreviewRequest[],
+  ): Promise<ActiveRecordingMIDIPreviewResponse[]> {
+    if (this.isNative && window.__JUCE__?.backend.getActiveRecordingMIDIPreviews) {
+      return await window.__JUCE__.backend.getActiveRecordingMIDIPreviews(requests);
+    }
+    return [];
+  }
+
   // Live recording waveform - get peaks for recording in progress
   async getRecordingPeaks(
     trackId: string,
@@ -1264,6 +1571,11 @@ class NativeBridge {
     numPixels: number,
   ): Promise<WaveformPeak[]> {
     if (this.isNative && window.__JUCE__?.backend.getRecordingPeaks) {
+      console.log("[audio.record] NativeBridge.getRecordingPeaks", {
+        trackId,
+        samplesPerPixel,
+        numPixels,
+      });
       const flat = await window.__JUCE__.backend.getRecordingPeaks(
         trackId,
         samplesPerPixel,
@@ -1285,6 +1597,37 @@ class NativeBridge {
       }
       return peaks;
     }
+  }
+
+  async getAudioDebugSnapshot(): Promise<AudioDebugSnapshot> {
+    if (this.isNative && window.__JUCE__?.backend.getAudioDebugSnapshot) {
+      console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot");
+      const snapshot = await window.__JUCE__.backend.getAudioDebugSnapshot();
+      try {
+        console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot result", snapshot, JSON.stringify(snapshot, null, 2));
+      } catch {
+        console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot result", snapshot);
+      }
+      return snapshot;
+    }
+    const fallbackSnapshot = {
+      transportPlaying: false,
+      transportRecording: false,
+      transportPosition: 0,
+      sampleRate: 44100,
+      blockSize: 512,
+      playbackClipCount: 0,
+      activeOutputChannels: 0,
+      postTrackPlaybackPeak: 0,
+      postMonitoringInputPeak: 0,
+      postMasterFxPeak: 0,
+      postMonitoringFxPeak: 0,
+      finalOutputPeak: 0,
+      lastRecordingClipCountReturned: 0,
+      playbackTracks: [],
+    };
+    console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot fallback", fallbackSnapshot, JSON.stringify(fallbackSnapshot, null, 2));
+    return fallbackSnapshot;
   }
 
   // FX Management (Phase 3)
@@ -1498,7 +1841,7 @@ class NativeBridge {
         {
           name: "Mock Gain",
           filePath: "/mock/gain.jsfx",
-          author: "Studio13",
+          author: "OpenStudio",
           isStock: true,
           type: "s13fx",
           tags: ["utility"],
@@ -1607,8 +1950,15 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.getScriptDirectory) {
       return await window.__JUCE__.backend.getScriptDirectory();
     } else {
-      return String.raw`C:\Users\Mock\Documents\Studio13\Scripts`;
+      return String.raw`C:\Users\Mock\Documents\OpenStudio\Scripts`;
     }
+  }
+
+  async openFileExternal(path: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openFileExternal) {
+      return await window.__JUCE__.backend.openFileExternal(path);
+    }
+    return false;
   }
 
   async listScripts(): Promise<
@@ -1652,6 +2002,13 @@ class NativeBridge {
     }
   }
 
+  async resetMeterClip(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.resetMeterClip) {
+      return await window.__JUCE__.backend.resetMeterClip(trackId);
+    }
+    return true;
+  }
+
   // Master & Monitoring (Phase 5)
   async addMasterFX(pluginPath: string): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.addMasterFX) {
@@ -1662,7 +2019,7 @@ class NativeBridge {
     }
   }
 
-  async getMasterFX(): Promise<{ index: number; name: string; pluginPath?: string }[]> {
+  async getMasterFX(): Promise<{ index: number; name: string; pluginPath?: string; bypassed?: boolean; precisionOverride?: "auto" | "float32" }[]> {
     if (this.isNative && window.__JUCE__?.backend.getMasterFX) {
       return await window.__JUCE__.backend.getMasterFX();
     }
@@ -1679,6 +2036,13 @@ class NativeBridge {
   async openMasterFXEditor(fxIndex: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.openMasterFXEditor) {
       return await window.__JUCE__.backend.openMasterFXEditor(fxIndex);
+    }
+    return false;
+  }
+
+  async bypassMasterFX(fxIndex: number, bypassed: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.bypassMasterFX) {
+      return await window.__JUCE__.backend.bypassMasterFX(fxIndex, bypassed);
     }
     return false;
   }
@@ -1802,8 +2166,18 @@ class NativeBridge {
     fadeIn: number = 0,
     fadeOut: number = 0,
     clipId: string = "",
+    pitchCorrectionSourceFilePath?: string,
+    pitchCorrectionSourceOffset?: number,
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.addPlaybackClip) {
+      console.log("[audio.playback] NativeBridge.addPlaybackClip", {
+        trackId,
+        clipId,
+        filePath,
+        startTime,
+        duration,
+        offset,
+      });
       return await window.__JUCE__.backend.addPlaybackClip(
         trackId,
         filePath,
@@ -1814,6 +2188,8 @@ class NativeBridge {
         fadeIn,
         fadeOut,
         clipId,
+        pitchCorrectionSourceFilePath,
+        pitchCorrectionSourceOffset,
       );
     }
     return false;
@@ -1834,6 +2210,7 @@ class NativeBridge {
 
   async clearPlaybackClips(): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.clearPlaybackClips) {
+      console.log("[audio.playback] NativeBridge.clearPlaybackClips");
       return await window.__JUCE__.backend.clearPlaybackClips();
     }
     return false;
@@ -1853,11 +2230,24 @@ class NativeBridge {
       fadeIn: number;
       fadeOut: number;
       clipId?: string;
+      pitchCorrectionSourceFilePath?: string;
+      pitchCorrectionSourceOffset?: number;
     }>,
   ): Promise<boolean> {
     if (clips.length === 0) return true;
     // Single bridge call — C++ parses JSON array and adds all clips in one go
     if (this.isNative && window.__JUCE__?.backend.addPlaybackClipsBatch) {
+      console.log("[audio.playback] NativeBridge.addPlaybackClipsBatch", {
+        count: clips.length,
+        clips: clips.map((clip) => ({
+          trackId: clip.trackId,
+          clipId: clip.clipId,
+          filePath: clip.filePath,
+          startTime: clip.startTime,
+          duration: clip.duration,
+          offset: clip.offset,
+        })),
+      });
       return await window.__JUCE__.backend.addPlaybackClipsBatch(JSON.stringify(clips));
     }
     // Fallback: individual calls (for dev mode or if backend doesn't support batch)
@@ -1873,6 +2263,8 @@ class NativeBridge {
           clip.fadeIn,
           clip.fadeOut,
           clip.clipId ?? "",
+          clip.pitchCorrectionSourceFilePath,
+          clip.pitchCorrectionSourceOffset,
         ),
       ),
     );
@@ -2028,6 +2420,16 @@ class NativeBridge {
     return false;
   }
 
+  async setTrackMIDIClips(trackId: string, clips: Array<any>): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackMIDIClips) {
+      return await window.__JUCE__.backend.setTrackMIDIClips(
+        trackId,
+        JSON.stringify(clips),
+      );
+    }
+    return true;
+  }
+
   async loadInstrument(trackId: string, vstPath: string): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.loadInstrument) {
       return await window.__JUCE__.backend.loadInstrument(trackId, vstPath);
@@ -2043,20 +2445,68 @@ class NativeBridge {
   }
 
   // Project Save/Load (F2)
-  async showSaveDialog(defaultPath?: string, title?: string): Promise<string> {
+  async showSaveDialog(defaultPath?: string, title?: string, filters?: string): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.showSaveDialog) {
-      return await window.__JUCE__.backend.showSaveDialog(defaultPath, title);
+      return await window.__JUCE__.backend.showSaveDialog(defaultPath, title, filters);
     }
     console.log("[NativeBridge] Mock showSaveDialog");
     return "";
   }
 
-  async showOpenDialog(title?: string): Promise<string> {
+  async showOpenDialog(title?: string, filters?: string): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.showOpenDialog) {
-      return await window.__JUCE__.backend.showOpenDialog(title);
+      return await window.__JUCE__.backend.showOpenDialog(title, filters);
     }
     console.log("[NativeBridge] Mock showOpenDialog");
     return "";
+  }
+
+  async getAppVersion(): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getAppVersion) {
+      return await window.__JUCE__.backend.getAppVersion();
+    }
+    return "0.0.1";
+  }
+
+  async checkForUpdates(manual = true): Promise<any> {
+    if (this.isNative && window.__JUCE__?.backend.checkForUpdates) {
+      return await window.__JUCE__.backend.checkForUpdates(manual);
+    }
+    return { status: "error", message: "Updates are unavailable in the web preview." };
+  }
+
+  async downloadAndInstallUpdate(
+    downloadUrl: string,
+    version?: string,
+    sha256?: string,
+    releasePageUrl?: string,
+    installerArguments?: string,
+    size?: number,
+  ): Promise<any> {
+    if (this.isNative && window.__JUCE__?.backend.downloadAndInstallUpdate) {
+      return await window.__JUCE__.backend.downloadAndInstallUpdate(
+        downloadUrl,
+        version,
+        sha256,
+        releasePageUrl,
+        installerArguments,
+        size,
+      );
+    }
+    return { status: "error", message: "Installer downloads are unavailable in the web preview." };
+  }
+
+  async openExternalURL(url: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openExternalURL) {
+      return await window.__JUCE__.backend.openExternalURL(url);
+    }
+
+    if (typeof window !== "undefined" && typeof window.open === "function") {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return true;
+    }
+
+    return false;
   }
 
   async saveProjectToFile(
@@ -2080,6 +2530,13 @@ class NativeBridge {
       return await window.__JUCE__.backend.loadProjectFromFile(filePath);
     }
     console.log(`[NativeBridge] Mock loadProjectFromFile: ${filePath}`);
+    return "";
+  }
+
+  async consumePendingLaunchProjectPath(): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.consumePendingLaunchProjectPath) {
+      return await window.__JUCE__.backend.consumePendingLaunchProjectPath();
+    }
     return "";
   }
 
@@ -2182,6 +2639,118 @@ class NativeBridge {
     console.log(
       `[NativeBridge] Mock sendMidiNote: track=${trackId}, note=${note}, velocity=${velocity}, on=${isNoteOn}`,
     );
+  }
+
+  async getMidiDiagnostics(): Promise<MidiDiagnosticsReport> {
+    if (this.isNative && window.__JUCE__?.backend.getMidiDiagnostics) {
+      return await window.__JUCE__.backend.getMidiDiagnostics();
+    }
+    return {
+      inputDevices: [],
+      outputDevices: [],
+      openDevices: [],
+      lateMidiEvents: 0,
+    };
+  }
+
+  async getPluginCapabilities(pluginPath: string): Promise<PluginCapabilities> {
+    if (this.isNative && window.__JUCE__?.backend.getPluginCapabilities) {
+      return await window.__JUCE__.backend.getPluginCapabilities(pluginPath);
+    }
+    return {
+      format: "unknown", name: "Mock", vendor: "Mock", category: "",
+      numInputChannels: 2, numOutputChannels: 2, supportsDouble: false,
+      hasMidiInput: false, hasMidiOutput: false, hasEditor: false,
+    };
+  }
+
+  async setProcessingPrecision(mode: "float32" | "hybrid64"): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setProcessingPrecision) {
+      return await window.__JUCE__.backend.setProcessingPrecision(mode);
+    }
+    return true;
+  }
+
+  async getProcessingPrecision(): Promise<"float32" | "hybrid64"> {
+    if (this.isNative && window.__JUCE__?.backend.getProcessingPrecision) {
+      return await window.__JUCE__.backend.getProcessingPrecision();
+    }
+    return "float32";
+  }
+
+  async getPluginCompatibilityMatrix(): Promise<Record<string, PluginCapabilities>> {
+    if (this.isNative && window.__JUCE__?.backend.getPluginCompatibilityMatrix) {
+      return await window.__JUCE__.backend.getPluginCompatibilityMatrix();
+    }
+    return {};
+  }
+
+  async runEngineBenchmarks(): Promise<BenchmarkResults> {
+    if (this.isNative && window.__JUCE__?.backend.runEngineBenchmarks) {
+      return await window.__JUCE__.backend.runEngineBenchmarks();
+    }
+    return { cpuUsage: 0, callbackDurationMs: 0, bufferSize: 512, sampleRate: 44100, trackCount: 0 };
+  }
+
+  async setTrackPluginPrecisionOverride(
+    trackId: string,
+    fxIndex: number,
+    isInputFX: boolean,
+    mode: "auto" | "float32",
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackPluginPrecisionOverride) {
+      return await window.__JUCE__.backend.setTrackPluginPrecisionOverride(
+        trackId,
+        fxIndex,
+        isInputFX,
+        mode,
+      );
+    }
+    return true;
+  }
+
+  async setInstrumentPrecisionOverride(
+    trackId: string,
+    mode: "auto" | "float32",
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setInstrumentPrecisionOverride) {
+      return await window.__JUCE__.backend.setInstrumentPrecisionOverride(trackId, mode);
+    }
+    return true;
+  }
+
+  async setMasterFXPrecisionOverride(
+    fxIndex: number,
+    mode: "auto" | "float32",
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMasterFXPrecisionOverride) {
+      return await window.__JUCE__.backend.setMasterFXPrecisionOverride(fxIndex, mode);
+    }
+    return true;
+  }
+
+  async setMonitoringFXPrecisionOverride(
+    fxIndex: number,
+    mode: "auto" | "float32",
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMonitoringFXPrecisionOverride) {
+      return await window.__JUCE__.backend.setMonitoringFXPrecisionOverride(fxIndex, mode);
+    }
+    return true;
+  }
+
+  async runReleaseGuardrails(): Promise<GuardrailsReport> {
+    if (this.isNative && window.__JUCE__?.backend.runReleaseGuardrails) {
+      return await window.__JUCE__.backend.runReleaseGuardrails();
+    }
+    return { passed: false, checks: [] };
+  }
+
+  async runAutomatedRegressionSuite(): Promise<GuardrailsReport> {
+    if (this.isNative && window.__JUCE__?.backend.runAutomatedRegressionSuite) {
+      return await window.__JUCE__.backend.runAutomatedRegressionSuite();
+    }
+    return { passed: false, checks: [] };
   }
 
   // Media Import (F10)
@@ -2891,14 +3460,14 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.getAvailableBuiltInFX)
       return await window.__JUCE__.backend.getAvailableBuiltInFX();
     return [
-      { name: "S13 EQ", category: "Built-in" },
-      { name: "S13 Compressor", category: "Built-in" },
-      { name: "S13 Gate", category: "Built-in" },
-      { name: "S13 Limiter", category: "Built-in" },
-      { name: "S13 Delay", category: "Built-in" },
-      { name: "S13 Reverb", category: "Built-in" },
-      { name: "S13 Chorus", category: "Built-in" },
-      { name: "S13 Saturator", category: "Built-in" },
+      { name: "OpenStudio EQ", category: "Built-in" },
+      { name: "OpenStudio Compressor", category: "Built-in" },
+      { name: "OpenStudio Gate", category: "Built-in" },
+      { name: "OpenStudio Limiter", category: "Built-in" },
+      { name: "OpenStudio Delay", category: "Built-in" },
+      { name: "OpenStudio Reverb", category: "Built-in" },
+      { name: "OpenStudio Chorus", category: "Built-in" },
+      { name: "OpenStudio Saturator", category: "Built-in" },
     ];
   }
 
@@ -3062,7 +3631,7 @@ class NativeBridge {
     return true;
   }
 
-  async getClipLauncherState(): Promise<any> {
+  async getClipLauncherState(): Promise<ClipLauncherState> {
     if (this.isNative && window.__JUCE__?.backend.getClipLauncherState)
       return await window.__JUCE__.backend.getClipLauncherState();
     return { slots: [], numTracks: 0, numSlots: 8 };
@@ -3101,6 +3670,41 @@ class NativeBridge {
     }
   }
 
+  async openMixerWindow(bounds?: Partial<WindowBounds>): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openMixerWindow) {
+      return await window.__JUCE__.backend.openMixerWindow(bounds);
+    }
+    return false;
+  }
+
+  async closeMixerWindow(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.closeMixerWindow) {
+      return await window.__JUCE__.backend.closeMixerWindow();
+    }
+    return false;
+  }
+
+  async getMixerWindowState(): Promise<MixerWindowState> {
+    if (this.isNative && window.__JUCE__?.backend.getMixerWindowState) {
+      return await window.__JUCE__.backend.getMixerWindowState();
+    }
+    return { isOpen: false };
+  }
+
+  async publishMixerUISnapshot(snapshot: any): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.publishMixerUISnapshot) {
+      return await window.__JUCE__.backend.publishMixerUISnapshot(snapshot);
+    }
+    return false;
+  }
+
+  async getMixerUISnapshot<T = any>(): Promise<T | null> {
+    if (this.isNative && window.__JUCE__?.backend.getMixerUISnapshot) {
+      return await window.__JUCE__.backend.getMixerUISnapshot();
+    }
+    return null;
+  }
+
   // Event subscription
   subscribe(eventId: string, callback: (data: any) => void): () => void {
     if (this.isNative && window.__JUCE__?.backend.addEventListener) {
@@ -3120,6 +3724,10 @@ class NativeBridge {
         this.eventListeners.get(eventId)?.delete(callback);
       };
     }
+  }
+
+  onNativeGlobalShortcut(callback: (event: NativeGlobalShortcutEvent) => void): () => void {
+    return this.subscribe("nativeGlobalShortcut", callback);
   }
 
   // Sprint 16: Performance + Audio Quality
@@ -3346,9 +3954,51 @@ class NativeBridge {
     return null;
   }
 
-  async applyPitchCorrection(trackId: string, clipId: string, notes: PitchNoteData[], frames?: PitchContourData['frames']): Promise<{ outputFile: string; success: boolean } | null> {
+  async applyPitchCorrection(
+    trackId: string,
+    clipId: string,
+    notes: PitchNoteData[],
+    frames?: PitchContourData['frames'],
+    requestId?: string,
+    globalFormantSemitones?: number,
+    windowStartSec?: number,
+    windowEndSec?: number,
+    renderMode: PitchCorrectionRenderMode = "single",
+    requestGroupId?: string,
+  ): Promise<{ outputFile: string; success: boolean } | null> {
+    if (shouldLogPitchEditorFormant()) {
+      let pitchEdits = 0;
+      let noteFormantEdits = 0;
+      let gainEdits = 0;
+      let driftEdits = 0;
+      let vibratoEdits = 0;
+      for (const note of notes) {
+        if (Math.abs(note.correctedPitch - note.detectedPitch) > 0.01) pitchEdits++;
+        if (Math.abs(note.formantShift) > 0.01) noteFormantEdits++;
+        if (Math.abs(note.gain) > 0.01) gainEdits++;
+        if (note.driftCorrectionAmount > 0.01) driftEdits++;
+        if (Math.abs(note.vibratoDepth - 1.0) > 0.01) vibratoEdits++;
+      }
+      console.log(FORMANT_LOG_PREFIX, "bridge applyPitchCorrection payload", {
+        trackId,
+        clipId,
+        requestId,
+        noteCount: notes.length,
+        pitchEdits,
+        noteFormantEdits,
+        gainEdits,
+        driftEdits,
+        vibratoEdits,
+        frameCount: frames?.times?.length ?? 0,
+        globalFormantSemitones: globalFormantSemitones ?? 0,
+        windowStartSec: windowStartSec ?? null,
+        windowEndSec: windowEndSec ?? null,
+        renderMode,
+        requestGroupId: requestGroupId ?? null,
+      });
+    }
     if (this.isNative && window.__JUCE__?.backend.applyPitchCorrection)
-      return await window.__JUCE__.backend.applyPitchCorrection(trackId, clipId, notes, frames);
+      return await window.__JUCE__.backend.applyPitchCorrection(trackId, clipId, notes, frames, requestId, globalFormantSemitones, windowStartSec, windowEndSec, renderMode, requestGroupId);
     return null;
   }
 
@@ -3356,6 +4006,12 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.previewPitchCorrection)
       return await window.__JUCE__.backend.previewPitchCorrection(trackId, clipId, notes);
     return null;
+  }
+
+  async clearClipRenderedPreviewSegments(clipId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.clearClipRenderedPreviewSegments)
+      return await window.__JUCE__.backend.clearClipRenderedPreviewSegments(clipId);
+    return false;
   }
 
   // ==================== Polyphonic Pitch Detection (Phase 6) ====================
@@ -3398,10 +4054,10 @@ class NativeBridge {
       await window.__JUCE__.backend.setPitchCorrectionBypass(trackId, clipId, bypass);
   }
 
-  /** Set real-time pitch preview segments for a clip (enables live pitch shifting during playback) */
-  async setClipPitchPreview(clipId: string, segments: { startTime: number; endTime: number; pitchRatio: number }[]): Promise<boolean> {
+  /** Set real-time pitch/formant preview state for a clip */
+  async setClipPitchPreview(clipId: string, payload: ClipPitchPreviewPayload): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setClipPitchPreview)
-      return await window.__JUCE__.backend.setClipPitchPreview(clipId, segments);
+      return await window.__JUCE__.backend.setClipPitchPreview(clipId, payload);
     return false;
   }
 
@@ -3427,6 +4083,37 @@ class NativeBridge {
     return false;
   }
 
+  async getAiToolsStatus(): Promise<AiToolsStatus> {
+    if (this.isNative && window.__JUCE__?.backend.getAiToolsStatus) {
+      return await window.__JUCE__.backend.getAiToolsStatus();
+    }
+
+    return {
+      state: "runtimeMissing",
+      progress: 0,
+      available: false,
+      pythonDetected: false,
+      scriptAvailable: false,
+      runtimeInstalled: false,
+      modelInstalled: false,
+      installInProgress: false,
+      message: "AI tools are unavailable in the web preview.",
+      helpUrl: "https://www.python.org/downloads/",
+    };
+  }
+
+  async installAiTools(): Promise<InstallAiToolsResponse> {
+    if (this.isNative && window.__JUCE__?.backend.installAiTools) {
+      return await window.__JUCE__.backend.installAiTools();
+    }
+
+    return {
+      started: false,
+      error: "AI tools installation is unavailable in the web preview.",
+      status: await this.getAiToolsStatus(),
+    };
+  }
+
   // ==================== Phase 10: Stem Separation Workflow ====================
 
   async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
@@ -3445,6 +4132,11 @@ class NativeBridge {
   async cancelStemSeparation(): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.cancelStemSeparation)
       return await window.__JUCE__.backend.cancelStemSeparation();
+  }
+
+  async cancelAiToolsInstall(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.cancelAiToolsInstall)
+      return await window.__JUCE__.backend.cancelAiToolsInstall();
   }
 
   // ==================== Phase 9: ARA Plugin Hosting ====================
@@ -3467,16 +4159,46 @@ class NativeBridge {
     return { success: false };
   }
 
-  async getARAPlugins(): Promise<ARAPluginInfo[]> {
-    if (this.isNative && window.__JUCE__?.backend.getARAPlugins)
-      return await window.__JUCE__.backend.getARAPlugins();
-    return [];
+  async getARAStatus(trackId: string): Promise<ARAStatus> {
+    if (this.isNative && window.__JUCE__?.backend.getARAStatus)
+      return await window.__JUCE__.backend.getARAStatus(trackId);
+    return {
+      active: false,
+      activeFxIndex: -1,
+      lastAttemptFxIndex: -1,
+      lastAttemptComplete: false,
+      lastAttemptWasARAPlugin: false,
+      lastAttemptSucceeded: false,
+      analysisProgress: 0,
+      analysisComplete: false,
+      analysisRequested: false,
+      analysisStarted: false,
+      lastAnalysisProgressValue: 0,
+      sourceCount: 0,
+      playbackRegionCount: 0,
+      audioSourceSamplesAccessEnabled: false,
+      editorRendererAttached: false,
+      playbackRendererAttached: false,
+      error: "",
+    };
   }
 
   async shutdownARA(trackId: string): Promise<{ success: boolean }> {
     if (this.isNative && window.__JUCE__?.backend.shutdownARA)
       return await window.__JUCE__.backend.shutdownARA(trackId);
     return { success: false };
+  }
+
+  async isARAActive(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.isARAActive)
+      return await window.__JUCE__.backend.isARAActive(trackId);
+    return false;
+  }
+
+  async hasAnyActiveARA(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.hasAnyActiveARA)
+      return await window.__JUCE__.backend.hasAnyActiveARA();
+    return false;
   }
 
   // ==================== Sprint 20: File System Helpers ====================
