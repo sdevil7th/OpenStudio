@@ -18,9 +18,17 @@ endif()
 # ==============================================================================
 
 # Set ASIO SDK path for JUCE (Windows only — required for ASIO support)
+set(OPENSTUDIO_HAS_ASIO_SDK OFF)
 if(WIN32)
     set(JUCE_ASIOSDK_PATH "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK" CACHE PATH "Path to ASIO SDK")
-    message(STATUS "ASIO SDK Path: ${JUCE_ASIOSDK_PATH}")
+    set(OPENSTUDIO_ASIO_HEADER "${JUCE_ASIOSDK_PATH}/common/iasiodrv.h")
+
+    if(EXISTS "${OPENSTUDIO_ASIO_HEADER}")
+        set(OPENSTUDIO_HAS_ASIO_SDK ON)
+        message(STATUS "ASIO SDK found at ${JUCE_ASIOSDK_PATH}")
+    else()
+        message(WARNING "ASIO SDK not found at ${JUCE_ASIOSDK_PATH}; Windows builds will continue with ASIO support disabled.")
+    endif()
 endif()
 
 # Check if JUCE folder exists, otherwise fetch it (or use CPM if preferred, but standard FetchContent is fine)
@@ -186,12 +194,12 @@ if(HAS_ARA)
 endif()
 
 # Platform-specific include directories
-if(WIN32)
+if(WIN32 AND OPENSTUDIO_HAS_ASIO_SDK)
     target_include_directories(OpenStudio PRIVATE
         # ASIO SDK include paths (Windows only)
-        "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK/common"
-        "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK/host"
-        "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK/host/pc"
+        "${JUCE_ASIOSDK_PATH}/common"
+        "${JUCE_ASIOSDK_PATH}/host"
+        "${JUCE_ASIOSDK_PATH}/host/pc"
     )
 endif()
 
@@ -261,7 +269,7 @@ if(WIN32)
         JUCE_WEB_BROWSER=1
         JUCE_USE_WIN_WEBVIEW2=1
         JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1
-        JUCE_ASIO=1
+        JUCE_ASIO=$<IF:$<BOOL:${OPENSTUDIO_HAS_ASIO_SDK}>,1,0>
         JUCE_WASAPI=1
         JUCE_DIRECTSOUND=1
         JUCE_PLUGINHOST_AU=0
