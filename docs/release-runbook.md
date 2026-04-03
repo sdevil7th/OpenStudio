@@ -19,9 +19,10 @@ For normal public releases, do not draft a GitHub release manually and do not up
 Use this flow instead:
 
 1. Push the release-ready commit(s) to GitHub.
-2. Push a version tag like `v0.0.2`.
-3. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and optionally deploy the Netlify updater bundle.
-4. Verify the published direct-download URLs:
+2. Wait for `.github/workflows/verify.yml` to pass on that commit.
+3. Push a version tag like `v0.0.2`.
+4. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and optionally deploy the Netlify updater bundle.
+5. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
 
@@ -31,11 +32,14 @@ If a release page shows only GitHub's default source archives, treat that as a f
 
 ## SDK and runtime policy
 
-- `thirdparty/ARA_SDK` is vendored in the repo and required for normal builds.
+- `thirdparty/ARA_SDK` is vendored in the repo, pinned to the OpenStudio ARA host integration, and required for normal builds.
+- `thirdparty/asio` stays out of git and is generated locally or in CI when Windows builds require ASIO.
 - `thirdparty/onnxruntime` stays out of git and is generated locally when needed.
-- Windows ASIO remains environment-provided and is enabled only when the ASIO SDK is available on the build machine.
+- Official Windows CI and release builds provision ASIO explicitly and fail early if the SDK is unavailable.
 - To install the pinned optional ONNX Runtime package locally, run:
   `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
+- To install the pinned ASIO SDK locally, run:
+  `powershell -ExecutionPolicy Bypass -File tools/setup-asio-sdk.ps1`
 - To include ONNX Runtime in the Windows GitHub Actions build, set the repository variable `OPENSTUDIO_SETUP_ONNXRUNTIME=true`.
 
 ## Local Windows release flow
@@ -44,20 +48,21 @@ If you want one command for the full guarded Windows path, use:
 `./tools/run-release-preflight.ps1 -Version 1.0.0 -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -RepoSlug <org>/<repo>`
 
 1. Build the frontend: `cd frontend && npm ci && npm run build`
-2. Optional: install ONNX Runtime for polyphonic pitch detection: `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
-3. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
-4. Build the release target: `cmake --build build-release-windows --config Release --target OpenStudio`
-5. Validate the runtime bundle: `./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath build-release-windows/OpenStudio_artefacts/Release -ExpectedVersion 1.0.0 -EnforceLeanBundle`
-6. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
+2. Install the ASIO SDK when you want parity with the official Windows release path: `powershell -ExecutionPolicy Bypass -File tools/setup-asio-sdk.ps1`
+3. Optional: install ONNX Runtime for polyphonic pitch detection: `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
+4. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DJUCE_ASIOSDK_PATH=thirdparty/asio" "-DOPENSTUDIO_REQUIRE_ASIO=ON" "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
+5. Build the release target: `cmake --build build-release-windows --config Release --target OpenStudio`
+6. Validate the runtime bundle: `./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath build-release-windows/OpenStudio_artefacts/Release -ExpectedVersion 1.0.0 -EnforceLeanBundle`
+7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
-7. Generate updater metadata:
+8. Generate updater metadata:
    `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe`
    Optional appcast fields: `-FullReleaseNotesUrl https://openstudio.org.in/releases/1.0.0 -WindowsInstallerArguments "/SP- /NOICONS"`
-8. Validate the generated metadata:
+9. Validate the generated metadata:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe`
-9. Prepare the Netlify bundle for updater/download endpoints:
+10. Prepare the Netlify bundle for updater/download endpoints:
    `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo>`
-10. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
+11. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
 
 ## Local macOS release flow
 

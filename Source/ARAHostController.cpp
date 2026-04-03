@@ -349,10 +349,6 @@ void ARAHostController::S13ModelUpdateController::notifyPlaybackRegionContentCha
     auto* entry = RegConverter::fromHostRef(playbackRegionHostRef);
     owner.noteEditDrivenDebugEvent("notifyPlaybackRegionContentChanged", entry != nullptr ? entry->clipId : juce::String());
 }
-void ARAHostController::S13ModelUpdateController::notifyDocumentDataChanged() noexcept
-{
-    owner.noteEditDrivenDebugEvent("notifyDocumentDataChanged", {});
-}
 
 // Playback Controller
 void ARAHostController::S13PlaybackController::requestStartPlayback() noexcept

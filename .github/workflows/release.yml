@@ -20,6 +20,7 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       BUILD_DIR: build-release-windows
+      ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
       RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
@@ -70,6 +71,10 @@ jobs:
         shell: pwsh
         run: choco install innosetup -y --no-progress
 
+      - name: Install ASIO SDK
+        shell: pwsh
+        run: ./tools/setup-asio-sdk.ps1 -Destination $env:ASIO_SDK_DIR
+
       - name: Install optional ONNX Runtime
         if: vars.OPENSTUDIO_SETUP_ONNXRUNTIME == 'true'
         shell: pwsh
@@ -84,6 +89,8 @@ jobs:
             "-DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE=$env:RELEASE_SITE_URL/appcast/windows-stable.xml" `
             "-DOPENSTUDIO_RELEASES_PAGE_URL_VALUE=$env:RELEASE_SITE_URL/download" `
             "-DOPENSTUDIO_UPDATE_CHANNEL_VALUE=stable" `
+            "-DJUCE_ASIOSDK_PATH=$env:GITHUB_WORKSPACE/$env:ASIO_SDK_DIR" `
+            "-DOPENSTUDIO_REQUIRE_ASIO=ON" `
             "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" `
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 

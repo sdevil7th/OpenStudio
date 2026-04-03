@@ -204,11 +204,11 @@ private:
     public:
         explicit S13ModelUpdateController(ARAHostController& ownerIn) : owner(ownerIn) {}
 
+        // Keep this adapter aligned with the vendored ARA 2.2.0 SDK.
         void notifyAudioSourceAnalysisProgress (ARA::ARAAudioSourceHostRef, ARA::ARAAnalysisProgressState, float) noexcept override;
         void notifyAudioSourceContentChanged (ARA::ARAAudioSourceHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept override;
         void notifyAudioModificationContentChanged (ARA::ARAAudioModificationHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept override;
         void notifyPlaybackRegionContentChanged (ARA::ARAPlaybackRegionHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept override;
-        void notifyDocumentDataChanged() noexcept override;
 
         std::atomic<float> analysisProgress { 0.0f };
         std::atomic<bool> analysisComplete { false };

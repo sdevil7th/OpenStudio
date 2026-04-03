@@ -80,6 +80,8 @@ get-pip.py
 /thirdparty/ARA_SDK/ARA_Library/html_docs/
 
 # Third-party runtime binaries (downloaded per-machine)
+/thirdparty/asio/
+/thirdparty/asio-*.zip
 /thirdparty/onnxruntime/
 /thirdparty/onnxruntime-*.zip
 /thirdparty/onnxruntime-*.tgz

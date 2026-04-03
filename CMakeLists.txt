@@ -6,6 +6,7 @@ project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
 option(OPENSTUDIO_BUNDLE_STEM_RUNTIME "Bundle the optional stem-separation runtime into app outputs" OFF)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
+option(OPENSTUDIO_REQUIRE_ASIO "Fail configuration when the ASIO SDK is unavailable for a Windows build" OFF)
 
 # Some third-party dependencies still expect CMAKE_BUILD_TYPE to exist even
 # under multi-config generators like Visual Studio. Seed a harmless default
@@ -18,17 +19,33 @@ endif()
 # Phase 20.1: Cross-platform CMake guards
 # ==============================================================================
 
-# Set ASIO SDK path for JUCE (Windows only — required for ASIO support)
+# Set ASIO SDK path for JUCE (Windows only)
 set(OPENSTUDIO_HAS_ASIO_SDK OFF)
 if(WIN32)
-    set(JUCE_ASIOSDK_PATH "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK" CACHE PATH "Path to ASIO SDK")
+    set(_OPENSTUDIO_LOCAL_ASIO_SDK "C:/SDKs/ASIO-SDK_2.3.4_2025-10-15/ASIOSDK")
+    set(_OPENSTUDIO_REPO_ASIO_SDK "${CMAKE_SOURCE_DIR}/thirdparty/asio")
+
+    if(NOT DEFINED JUCE_ASIOSDK_PATH OR JUCE_ASIOSDK_PATH STREQUAL "")
+        if(EXISTS "${_OPENSTUDIO_REPO_ASIO_SDK}/common/iasiodrv.h")
+            set(JUCE_ASIOSDK_PATH "${_OPENSTUDIO_REPO_ASIO_SDK}" CACHE PATH "Path to ASIO SDK" FORCE)
+        else()
+            set(JUCE_ASIOSDK_PATH "${_OPENSTUDIO_LOCAL_ASIO_SDK}" CACHE PATH "Path to ASIO SDK" FORCE)
+        endif()
+    endif()
+
     set(OPENSTUDIO_ASIO_HEADER "${JUCE_ASIOSDK_PATH}/common/iasiodrv.h")
 
     if(EXISTS "${OPENSTUDIO_ASIO_HEADER}")
         set(OPENSTUDIO_HAS_ASIO_SDK ON)
         message(STATUS "ASIO SDK found at ${JUCE_ASIOSDK_PATH}")
     else()
-        message(WARNING "ASIO SDK not found at ${JUCE_ASIOSDK_PATH}; Windows builds will continue with ASIO support disabled.")
+        if(OPENSTUDIO_REQUIRE_ASIO)
+            message(FATAL_ERROR
+                "ASIO SDK not found at ${JUCE_ASIOSDK_PATH}. "
+                "ASIO support is required for this Windows build.")
+        else()
+            message(WARNING "ASIO SDK not found at ${JUCE_ASIOSDK_PATH}; Windows builds will continue with ASIO support disabled.")
+        endif()
     endif()
 endif()
 
@@ -101,9 +118,8 @@ else()
 endif()
 
 # ==============================================================================
-# ARA SDK — Optional ARA 2 plugin hosting (for Melodyne, SpectraLayers, etc.)
-# Clone from: git clone --recursive --branch releases/2.2.0 https://github.com/Celemony/ARA_SDK
-# Place at: thirdparty/ARA_SDK/
+# ARA SDK — Vendored ARA 2.2.0 plugin-hosting SDK
+# OpenStudio's host adapter is intentionally aligned with the vendored tree at thirdparty/ARA_SDK.
 # ==============================================================================
 set(ARA_SDK_ROOT "${CMAKE_SOURCE_DIR}/thirdparty/ARA_SDK")
 if(EXISTS "${ARA_SDK_ROOT}/ARA_API/ARAInterface.h")
