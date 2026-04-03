@@ -1112,4 +1112,16 @@ void ARAHostController::updateMusicalContext (double, int, int) {}
 
 void ARAHostController::setPlaybackRequestHandlers(PlaybackRequestHandlers) {}
 
+float ARAHostController::getAnalysisProgress() const { return 0.0f; }
+
+bool ARAHostController::isAnalysisComplete() const { return false; }
+
+ARAHostController::DebugSnapshot ARAHostController::getDebugSnapshot() const { return {}; }
+
+void ARAHostController::updateTransportDebugState(bool, double) {}
+
+void ARAHostController::notePlaybackStart(double) {}
+
+void ARAHostController::notePlaybackStop(double) {}
+
 #endif // S13_HAS_ARA
