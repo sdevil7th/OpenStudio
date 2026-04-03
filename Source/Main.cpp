@@ -11,6 +11,19 @@
 
 namespace
 {
+juce::File getWritableStartupLogFile()
+{
+    auto logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                    .getChildFile("OpenStudio")
+                    .getChildFile("logs");
+
+    if (logDir.createDirectory())
+        return logDir.getChildFile("OpenStudio_Startup.log");
+
+    return juce::File::getSpecialLocation(juce::File::SpecialLocationType::currentApplicationFile)
+        .getSiblingFile("OpenStudio_Debug.log");
+}
+
 juce::Rectangle<int> rectangleFromVar(const juce::var& value)
 {
     if (auto* obj = value.getDynamicObject())
@@ -51,10 +64,10 @@ public:
     {
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
 
-        auto logFile = juce::File::getSpecialLocation(juce::File::SpecialLocationType::currentApplicationFile)
-                                .getSiblingFile("OpenStudio_Debug.log");
+        auto logFile = getWritableStartupLogFile();
         juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "OpenStudio Startup Log"));
         juce::Logger::writeToLog("Application Initialising...");
+        juce::Logger::writeToLog("Startup log path: " + logFile.getFullPathName());
 
         mixerWindowManager = std::make_unique<MixerWindowManager>(
             [this]()

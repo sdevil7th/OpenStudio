@@ -7,6 +7,9 @@ Use this checklist for every release candidate before publishing installers, man
 - Install `OpenStudio-Setup-x64.exe` on a clean machine or VM.
 - Confirm the installed app launches without a frontend dev server running.
 - Confirm `webui`, `effects`, `scripts`, `models`, and `ffmpeg.exe` are present in the installed app directory.
+- Confirm `%APPDATA%\OpenStudio\logs\OpenStudio_Startup.log` is created on first launch.
+- Confirm the startup log reports `Embedded browser backend supported: Yes`.
+- If startup fails, run `./tools/inspect-installed-windows-app.ps1` on the test machine and archive the generated report.
 - Open a blank project and confirm audio devices enumerate successfully.
 - Create an audio track, arm it, and confirm monitoring works.
 - Import an audio file and confirm waveform peaks appear.

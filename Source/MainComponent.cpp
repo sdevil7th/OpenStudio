@@ -53,14 +53,19 @@ juce::File getExecutableDirectory()
     return juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
 }
 
-juce::File getPackagedFrontendEntryPoint()
+juce::Array<juce::File> getPackagedFrontendCandidates()
 {
     const auto exeDir = getExecutableDirectory();
-    const juce::Array<juce::File> candidates {
+    return {
         exeDir.getChildFile("webui").getChildFile("index.html"),
         exeDir.getParentDirectory().getChildFile("Resources").getChildFile("webui").getChildFile("index.html"),
         exeDir.getChildFile("../../../frontend/dist/index.html")
     };
+}
+
+juce::File getPackagedFrontendEntryPoint()
+{
+    const auto candidates = getPackagedFrontendCandidates();
 
     for (const auto& candidate : candidates)
         if (candidate.existsAsFile())
@@ -68,6 +73,75 @@ juce::File getPackagedFrontendEntryPoint()
 
     return {};
 }
+
+juce::File getWebView2UserDataFolder()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("OpenStudio")
+        .getChildFile("WebView2UserData");
+}
+
+juce::File getStartupLogFile()
+{
+    auto logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                    .getChildFile("OpenStudio")
+                    .getChildFile("logs");
+
+    if (logDir.createDirectory())
+        return logDir.getChildFile("OpenStudio_Startup.log");
+
+    return getExecutableDirectory().getChildFile("OpenStudio_Debug.log");
+}
+
+juce::String describeBrowserBackend(juce::WebBrowserComponent::Options::Backend backend)
+{
+    switch (backend)
+    {
+        case juce::WebBrowserComponent::Options::Backend::defaultBackend: return "defaultBackend";
+        case juce::WebBrowserComponent::Options::Backend::ie: return "ie";
+        case juce::WebBrowserComponent::Options::Backend::webview2: return "webview2";
+    }
+
+    return "unknown";
+}
+
+juce::String describeCandidatePaths()
+{
+    juce::StringArray lines;
+    for (const auto& candidate : getPackagedFrontendCandidates())
+        lines.add(" - " + candidate.getFullPathName());
+    return lines.joinIntoString("\n");
+}
+
+#if JUCE_WINDOWS
+juce::String detectWebView2RuntimeVersion()
+{
+    const juce::Array<juce::File> roots {
+        juce::File("C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application"),
+        juce::File("C:\\Program Files\\Microsoft\\EdgeWebView\\Application")
+    };
+
+    juce::String bestVersion;
+
+    for (const auto& root : roots)
+    {
+        if (!root.isDirectory())
+            continue;
+
+        for (const auto& child : root.findChildFiles(juce::File::findDirectories, false))
+        {
+            const auto version = child.getFileName();
+            if (version.containsOnly("0123456789."))
+            {
+                if (bestVersion.isEmpty() || version.compareNatural(bestVersion) > 0)
+                    bestVersion = version;
+            }
+        }
+    }
+
+    return bestVersion;
+}
+#endif
 
 juce::String getStringProperty(const juce::var& value, const juce::Identifier& property)
 {
@@ -3805,12 +3879,31 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(juce::var(audioEngine.hasAnyActiveARA()));
                     }))
 {
-    // Check if options are supported
+    const auto preferredBackend = getPreferredBrowserBackend();
+    const auto startupLogFile = getStartupLogFile();
+    const auto packagedFrontend = getPackagedFrontendEntryPoint();
+    const auto webViewUserDataDir = getWebView2UserDataFolder();
+
     auto checkOptions = juce::WebBrowserComponent::Options()
-                            .withBackend(getPreferredBrowserBackend());
-                            
-    bool supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
+                            .withBackend(preferredBackend);
+
+    const bool supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
+
+    juce::Logger::writeToLog("=== Embedded UI startup diagnostics ===");
+    juce::Logger::writeToLog("Browser backend: " + describeBrowserBackend(preferredBackend));
     juce::Logger::writeToLog("Embedded browser backend supported: " + juce::String(supported ? "Yes" : "No"));
+    juce::Logger::writeToLog("Startup log file: " + startupLogFile.getFullPathName());
+    juce::Logger::writeToLog("Executable directory: " + getExecutableDirectory().getFullPathName());
+    juce::Logger::writeToLog("Packaged frontend found: " + juce::String(packagedFrontend.existsAsFile() ? "Yes" : "No"));
+    if (packagedFrontend.existsAsFile())
+        juce::Logger::writeToLog("Packaged frontend path: " + packagedFrontend.getFullPathName());
+    else
+        juce::Logger::writeToLog("Packaged frontend candidates:\n" + describeCandidatePaths());
+    juce::Logger::writeToLog("WebView2 user data path: " + webViewUserDataDir.getFullPathName());
+#if JUCE_WINDOWS
+    const auto webView2RuntimeVersion = detectWebView2RuntimeVersion();
+    juce::Logger::writeToLog("Detected WebView2 runtime version: " + (webView2RuntimeVersion.isNotEmpty() ? webView2RuntimeVersion : "not found"));
+#endif
 
     fallbackMessage.setJustificationType(juce::Justification::centred);
     fallbackMessage.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -3825,7 +3918,16 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
     else
     {
         juce::Logger::writeToLog("Embedded browser backend is not available. Falling back to an error screen.");
-        fallbackMessage.setText("OpenStudio could not start its embedded interface on this system.", juce::dontSendNotification);
+        juce::String message = "OpenStudio could not start its embedded interface on this system.";
+#if JUCE_WINDOWS
+        if (webView2RuntimeVersion.isEmpty())
+            message << "\n\nMicrosoft Edge WebView2 Runtime was not detected. Install or repair WebView2 Runtime, then relaunch OpenStudio.";
+        else
+            message << "\n\nOpenStudio selected the WebView2 backend, and WebView2 Runtime " << webView2RuntimeVersion
+                    << " was detected, but JUCE reported the browser backend as unavailable on this machine.";
+#endif
+        message << "\n\nStartup log: " << startupLogFile.getFullPathName();
+        fallbackMessage.setText(message, juce::dontSendNotification);
         addAndMakeVisible(fallbackMessage);
     }
 
@@ -3834,7 +3936,6 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         juce::Logger::writeToLog("Loading from localhost:5173");
         webView.goToURL(appendWindowRoleQuery("http://localhost:5173", windowRole));
     #else
-        auto packagedFrontend = getPackagedFrontendEntryPoint();
         if (packagedFrontend.existsAsFile())
         {
             juce::Logger::writeToLog("Loading packaged frontend from: " + packagedFrontend.getFullPathName());
@@ -3842,7 +3943,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         }
         else
         {
-            auto message = "OpenStudio could not find its packaged frontend.\n\nBuild the React app and ship the `webui` folder with the application.";
+            auto message = "OpenStudio could not find its packaged frontend.\n\nBuild the React app and ship the `webui` folder with the application."
+                           "\n\nChecked paths:\n" + describeCandidatePaths()
+                           + "\n\nStartup log: " + startupLogFile.getFullPathName();
             juce::Logger::writeToLog(message);
             fallbackMessage.setText(message, juce::dontSendNotification);
             addAndMakeVisible(fallbackMessage);
