@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button, Checkbox, Input, NativeSelect } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
 
@@ -67,6 +69,10 @@ export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
   );
 }
 
+function shortcut(actionId: string, fallback: string): string {
+  return getEffectiveActionShortcut(actionId) ?? fallback;
+}
+
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
     <h3 className="text-xs font-semibold uppercase text-daw-text-muted mb-2 mt-3 first:mt-0">
@@ -86,11 +92,33 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 // ========== General Tab ==========
 function GeneralTab() {
-  const snapEnabled = useDAWStore((s) => s.snapEnabled);
-  const gridSize = useDAWStore((s) => s.gridSize);
+  const { snapEnabled, gridSize, playheadStopBehavior } = useDAWStore(useShallow((s) => ({
+    snapEnabled: s.snapEnabled,
+    gridSize: s.gridSize,
+    playheadStopBehavior: s.playheadStopBehavior,
+  })));
 
   return (
     <div>
+      <SectionHeader>Transport</SectionHeader>
+      <Row label="Playhead on Stop">
+        <NativeSelect
+          options={["return-to-start", "stop-in-place"]}
+          value={playheadStopBehavior}
+          onChange={(val) => useDAWStore.getState().setPlayheadStopBehavior(val as any)}
+          formatLabel={(v) => {
+            const labels: Record<string, string> = {
+              "return-to-start": "Return to start position",
+              "stop-in-place": "Stop at current position",
+            };
+            return labels[String(v)] || String(v);
+          }}
+        />
+      </Row>
+      <div className="text-[9px] text-daw-text-muted mb-2 ml-1">
+        With "Stop at current position", pressing Stop twice returns to the start position.
+      </div>
+
       <SectionHeader>Snap & Grid</SectionHeader>
       <Row label="Snap to Grid">
         <Checkbox
@@ -116,7 +144,7 @@ function GeneralTab() {
         <span className="text-xs text-daw-text-muted">Audio</span>
       </Row>
       <Row label="Project Extension">
-        <span className="text-xs text-daw-text-muted">.s13</span>
+        <span className="text-xs text-daw-text-muted">.osproj</span>
       </Row>
     </div>
   );
@@ -124,10 +152,12 @@ function GeneralTab() {
 
 // ========== Editing Tab ==========
 function EditingTab() {
-  const autoCrossfade = useDAWStore((s) => s.autoCrossfade);
-  const defaultCrossfadeLength = useDAWStore((s) => s.defaultCrossfadeLength);
-  const rippleMode = useDAWStore((s) => s.rippleMode);
-  const recordMode = useDAWStore((s) => s.recordMode);
+  const { autoCrossfade, defaultCrossfadeLength, rippleMode, recordMode } = useDAWStore(useShallow((s) => ({
+    autoCrossfade: s.autoCrossfade,
+    defaultCrossfadeLength: s.defaultCrossfadeLength,
+    rippleMode: s.rippleMode,
+    recordMode: s.recordMode,
+  })));
 
   return (
     <div>
@@ -185,8 +215,11 @@ function EditingTab() {
 
 // ========== Display Tab ==========
 function DisplayTab() {
-  const timecodeMode = useDAWStore((s) => s.timecodeMode);
-  const smpteFrameRate = useDAWStore((s) => s.smpteFrameRate);
+  const { timecodeMode, smpteFrameRate, uiFontScale } = useDAWStore(useShallow((s) => ({
+    timecodeMode: s.timecodeMode,
+    smpteFrameRate: s.smpteFrameRate,
+    uiFontScale: s.uiFontScale,
+  })));
 
   return (
     <div>
@@ -213,10 +246,35 @@ function DisplayTab() {
         </Row>
       )}
 
+      <SectionHeader>Accessibility</SectionHeader>
+      <Row label="UI Font Scale">
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={0.75}
+            max={1.5}
+            step={0.05}
+            value={uiFontScale}
+            onChange={(e) => useDAWStore.getState().setUIFontScale(Number.parseFloat(e.target.value))}
+            className="w-24 cursor-pointer accent-blue-600"
+            aria-label="UI Font Scale"
+            aria-valuemin={0.75}
+            aria-valuemax={1.5}
+            aria-valuenow={uiFontScale}
+          />
+          <span className="text-xs text-daw-text-muted w-10 text-right">
+            {Math.round(uiFontScale * 100)}%
+          </span>
+        </div>
+      </Row>
+
       <SectionHeader>Panels</SectionHeader>
       <Row label="Show Mixer on Start">
-        <span className="text-xs text-daw-text-muted">Use Ctrl+M to toggle</span>
+        <span className="text-xs text-daw-text-muted">Use {shortcut("view.toggleMixer", "Ctrl+M")} to toggle</span>
       </Row>
+      <div className="text-[9px] text-daw-text-muted mb-2 ml-1">
+        Keyboard shortcut rebinding is handled in the Keyboard Shortcuts window, not in Preferences.
+      </div>
     </div>
   );
 }
@@ -245,7 +303,9 @@ const ACTION_OPTIONS: Record<string, string[]> = {
 };
 
 function MouseModifierTab() {
-  const mouseModifiers = useDAWStore((s) => s.mouseModifiers);
+  const { mouseModifiers } = useDAWStore(useShallow((s) => ({
+    mouseModifiers: s.mouseModifiers,
+  })));
 
   return (
     <div>
@@ -315,8 +375,10 @@ function MouseModifierTab() {
 
 // ========== Backup Tab ==========
 function BackupTab() {
-  const autoBackupEnabled = useDAWStore((s) => s.autoBackupEnabled);
-  const autoBackupInterval = useDAWStore((s) => s.autoBackupInterval);
+  const { autoBackupEnabled, autoBackupInterval } = useDAWStore(useShallow((s) => ({
+    autoBackupEnabled: s.autoBackupEnabled,
+    autoBackupInterval: s.autoBackupInterval,
+  })));
 
   const intervalMinutes = Math.round(autoBackupInterval / 60000);
 

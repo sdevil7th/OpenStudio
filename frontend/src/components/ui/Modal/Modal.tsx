@@ -81,6 +81,7 @@ export function Modal({
         className="relative z-2000"
         onClose={handleClose}
         static={!closeOnEscape && !closeOnOverlayClick}
+        aria-label={title ? undefined : 'Dialog'}
       >
         {/* Backdrop */}
         <TransitionChild
@@ -130,6 +131,7 @@ export function Modal({
                       size="icon-sm"
                       onClick={onClose}
                       title="Close modal"
+                      aria-label="Close modal"
                     >
                       <X size={16} />
                     </Button>

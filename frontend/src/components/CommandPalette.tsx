@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { getRegisteredActions, ActionDef } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -15,7 +16,9 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const listRef = useRef<HTMLDivElement>(null);
 
   const actions = useMemo(() => getRegisteredActions(), []);
-  const recentActionIds = useDAWStore((state) => state.recentActions);
+  const { recentActionIds } = useDAWStore(useShallow((state) => ({
+    recentActionIds: state.recentActions,
+  })));
 
   const filtered = useMemo(() => {
     if (!query.trim()) {

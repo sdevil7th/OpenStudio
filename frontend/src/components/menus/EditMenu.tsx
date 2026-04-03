@@ -1,5 +1,6 @@
 import { MenuDropdown, MenuItemProps } from "./MenuDropdown";
 import { useDAWStore } from "../../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 
 /**
  * Edit Menu Component
@@ -22,7 +23,23 @@ export function EditMenu() {
     deselectAllTracks,
     deleteSelectedTracks,
     transport,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    canUndo: s.canUndo,
+    canRedo: s.canRedo,
+    undo: s.undo,
+    redo: s.redo,
+    selectedClipId: s.selectedClipId,
+    selectedTrackIds: s.selectedTrackIds,
+    copyClip: s.copyClip,
+    cutClip: s.cutClip,
+    pasteClip: s.pasteClip,
+    deleteClip: s.deleteClip,
+    duplicateClip: s.duplicateClip,
+    selectAllTracks: s.selectAllTracks,
+    deselectAllTracks: s.deselectAllTracks,
+    deleteSelectedTracks: s.deleteSelectedTracks,
+    transport: s.transport,
+  })));
 
   const menuItems: MenuItemProps[] = [
     {

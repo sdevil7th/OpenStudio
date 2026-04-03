@@ -1,6 +1,32 @@
 #include "PlaybackEngine.h"
 #include <cmath>
 
+namespace
+{
+#if JUCE_DEBUG
+constexpr bool kAudioPlaybackDebugLogs = true;
+#else
+constexpr bool kAudioPlaybackDebugLogs = false;
+#endif
+
+static void logAudioPlayback(const juce::String& message)
+{
+    if (kAudioPlaybackDebugLogs)
+        juce::Logger::writeToLog("[audio.playback] " + message);
+}
+
+static float peakForBuffer(const juce::AudioBuffer<float>& buffer, int numSamples)
+{
+    float peak = 0.0f;
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto range = juce::FloatVectorOperations::findMinAndMax(buffer.getReadPointer(ch), numSamples);
+        peak = juce::jmax(peak, juce::jmax(std::abs(range.getStart()), std::abs(range.getEnd())));
+    }
+    return peak;
+}
+}
+
 float PlaybackEngine::applyFadeCurve(float t, int curveType)
 {
     // t is normalized 0.0 to 1.0
@@ -31,12 +57,17 @@ void PlaybackEngine::preloadReader(const juce::File& file)
     juce::String filePath = file.getFullPathName();
     auto it = readers.find(filePath);
     if (it != readers.end() && it->second != nullptr)
+    {
+        readerAccessTimes[filePath] = juce::Time::currentTimeMillis();
         return;  // Already loaded
+    }
 
     std::unique_ptr<juce::AudioFormatReader> newReader(formatManager.createReaderFor(file));
     if (newReader)
     {
         readers[filePath] = std::move(newReader);
+        readerAccessTimes[filePath] = juce::Time::currentTimeMillis();
+        evictOldReaders();
         juce::Logger::writeToLog("PlaybackEngine: Pre-loaded reader for: " + filePath);
     }
 }
@@ -46,12 +77,79 @@ juce::AudioFormatReader* PlaybackEngine::getCachedReader(const juce::File& file)
     // Audio-thread safe: only looks up, never creates readers
     auto it = readers.find(file.getFullPathName());
     if (it != readers.end() && it->second != nullptr)
+    {
+        readerAccessTimes[file.getFullPathName()] = juce::Time::currentTimeMillis();
         return it->second.get();
+    }
     return nullptr;
 }
 
+void PlaybackEngine::evictOldReaders()
+{
+    if ((int)readers.size() <= MAX_CACHED_READERS)
+        return;
+
+    // Evict the oldest 25% by access time
+    int numToEvict = (int)readers.size() / 4;
+    if (numToEvict < 1) numToEvict = 1;
+
+    // Collect entries sorted by access time (oldest first)
+    std::vector<std::pair<juce::int64, juce::String>> entries;
+    for (const auto& [path, accessTime] : readerAccessTimes)
+        entries.push_back({ accessTime, path });
+
+    std::sort(entries.begin(), entries.end());
+
+    for (int i = 0; i < numToEvict && i < (int)entries.size(); ++i)
+    {
+        const auto& path = entries[i].second;
+        readers.erase(path);
+        readerAccessTimes.erase(path);
+    }
+
+    juce::Logger::writeToLog("PlaybackEngine: Evicted " + juce::String(numToEvict) + " old readers");
+}
+
+float PlaybackEngine::interpolateGainEnvelope(const std::vector<GainEnvelopePoint>& points, double time)
+{
+    if (points.empty())
+        return 1.0f;
+
+    // Before first point
+    if (time <= points.front().time)
+        return points.front().gain;
+
+    // After last point
+    if (time >= points.back().time)
+        return points.back().gain;
+
+    // Find surrounding points and interpolate linearly
+    for (size_t i = 0; i + 1 < points.size(); ++i)
+    {
+        if (time >= points[i].time && time < points[i + 1].time)
+        {
+            double t = (time - points[i].time) / (points[i + 1].time - points[i].time);
+            return points[i].gain + static_cast<float>(t) * (points[i + 1].gain - points[i].gain);
+        }
+    }
+
+    return 1.0f;
+}
+
+void PlaybackEngine::setClipGainEnvelope(const juce::String& trackId, const juce::String& clipId,
+                                          const std::vector<GainEnvelopePoint>& points)
+{
+    juce::ScopedLock sl(lock);
+    juce::String key = trackId + "::" + clipId;
+    if (points.empty())
+        gainEnvelopes.erase(key);
+    else
+        gainEnvelopes[key] = points;
+}
+
 void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, double duration, const juce::String& trackId,
-                              double offset, double volumeDB, double fadeIn, double fadeOut)
+                              double offset, double volumeDB, double fadeIn, double fadeOut, const juce::String& clipId,
+                              const juce::File& sourceAudioFile, double sourceOffset)
 {
     juce::ScopedLock sl(lock);
 
@@ -61,10 +159,43 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
         return;
     }
 
-    // Pre-load the reader on the message thread so audio thread never does disk I/O
-    preloadReader(audioFile);
+    juce::File effectiveFile = audioFile;
+    double effectiveOffset = offset;
+    const bool hasActivePitchPreview = clipId.isNotEmpty() && clipPitchPreviews.find(clipId) != clipPitchPreviews.end();
 
-    ClipInfo clip(audioFile, startTime, duration, trackId, offset, volumeDB, fadeIn, fadeOut);
+    // If a live pitch preview is active, always base playback on the original source.
+    // syncClipsWithBackend re-adds clips on every play, and the store's filePath may still
+    // point at an older corrected render. Reusing that here would make the live preview
+    // process already-corrected audio again, compounding pitch/formant on every play cycle.
+    if (hasActivePitchPreview && sourceAudioFile.existsAsFile())
+    {
+        effectiveFile = sourceAudioFile;
+        effectiveOffset = sourceOffset >= 0.0 ? sourceOffset : offset;
+        juce::Logger::writeToLog("PlaybackEngine: Using original source for live preview clip " + clipId
+                                  + " -> " + effectiveFile.getFullPathName());
+    }
+    else
+    {
+        // Check if this clip has a pitch-corrected file from a previous session.
+        // syncClipsWithBackend always re-adds clips with the original filePath from
+        // the frontend store, but the corrected file should be used for playback.
+        auto correctedIt = pitchCorrectedFiles.find(clipId);
+        if (correctedIt != pitchCorrectedFiles.end() && correctedIt->second.existsAsFile())
+        {
+            effectiveFile = correctedIt->second;
+            effectiveOffset = 0.0; // Corrected files always start at sample 0
+            juce::Logger::writeToLog("PlaybackEngine: Using corrected file for clip " + clipId
+                                      + " -> " + effectiveFile.getFullPathName());
+        }
+    }
+
+    // Pre-load the reader on the message thread so audio thread never does disk I/O
+    preloadReader(effectiveFile);
+
+    ClipInfo clip(effectiveFile, startTime, duration, trackId, effectiveOffset, volumeDB, fadeIn, fadeOut);
+    clip.clipId = clipId;
+    clip.originalAudioFile = sourceAudioFile.existsAsFile() ? sourceAudioFile : audioFile;
+    clip.originalOffset = sourceOffset >= 0.0 ? sourceOffset : offset;
     clips.push_back(clip);
 
     juce::Logger::writeToLog("PlaybackEngine: Added clip - Track " + trackId +
@@ -72,6 +203,14 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
                            "s, Duration: " + juce::String(duration) +
                            "s, Offset: " + juce::String(offset) +
                            "s, Volume: " + juce::String(volumeDB) + "dB");
+    logAudioPlayback("addClip track=" + trackId
+        + " clipId=" + clipId
+        + " file=" + effectiveFile.getFullPathName()
+        + " originalFile=" + clip.originalAudioFile.getFullPathName()
+        + " start=" + juce::String(startTime, 3)
+        + " duration=" + juce::String(duration, 3)
+        + " offset=" + juce::String(effectiveOffset, 3)
+        + " totalClips=" + juce::String(static_cast<int>(clips.size())));
 }
 
 void PlaybackEngine::removeClip(const juce::String& trackId, const juce::String& filePath)
@@ -90,18 +229,169 @@ void PlaybackEngine::removeClip(const juce::String& trackId, const juce::String&
     juce::Logger::writeToLog("PlaybackEngine: Removed clip from track " + trackId);
 }
 
+void PlaybackEngine::replaceClipAudioFile(const juce::String& clipId, const juce::File& newFile)
+{
+    if (!newFile.existsAsFile())
+    {
+        juce::Logger::writeToLog("PlaybackEngine::replaceClipAudioFile: file does not exist: " + newFile.getFullPathName());
+        return;
+    }
+
+    juce::ScopedLock sl(lock);
+    for (auto& clip : clips)
+    {
+        if (clip.clipId == clipId)
+        {
+            // Evict old reader so the audio thread stops reading the old file
+            readers.erase(clip.audioFile.getFullPathName());
+            readerAccessTimes.erase(clip.audioFile.getFullPathName());
+            // Swap in the new file. Corrected files start at sample 0, but restoring
+            // the original file should also restore the original trim offset.
+            const bool restoringOriginal = (newFile == clip.originalAudioFile);
+            clip.audioFile = newFile;
+            clip.offset = restoringOriginal ? clip.originalOffset : 0.0;
+            // Pre-load new reader while we still hold the lock (same pattern as addClip)
+            preloadReader(newFile);
+            // Clear any active pitch preview — the corrected audio is now baked
+            // into the file, so the real-time PitchShifter must not double-shift.
+            clipPitchPreviews.erase(clipId);
+            renderedPreviewSegments.erase(clipId);
+            deferredClipSwaps.erase(clipId);
+            // Remember the corrected file so it survives clearAllClips + re-add cycles.
+            if (restoringOriginal)
+                pitchCorrectedFiles.erase(clipId);
+            else
+                pitchCorrectedFiles[clipId] = newFile;
+            juce::Logger::writeToLog("PlaybackEngine: Replaced audio file for clip " + clipId +
+                                     " -> " + newFile.getFullPathName());
+            return;
+        }
+    }
+    juce::Logger::writeToLog("PlaybackEngine::replaceClipAudioFile: clip not found: " + clipId);
+}
+
+void PlaybackEngine::queueDeferredClipAudioFile(const juce::String& clipId, const juce::File& newFile, bool restoringOriginal)
+{
+    if (!newFile.existsAsFile())
+    {
+        juce::Logger::writeToLog("PlaybackEngine::queueDeferredClipAudioFile: file does not exist: " + newFile.getFullPathName());
+        return;
+    }
+
+    juce::ScopedLock sl(lock);
+    deferredClipSwaps[clipId] = { newFile, restoringOriginal };
+    juce::Logger::writeToLog("PlaybackEngine: Deferred audio file swap for clip " + clipId
+        + " -> " + newFile.getFullPathName());
+}
+
+bool PlaybackEngine::commitDeferredClipAudioFile(const juce::String& clipId)
+{
+    juce::File fileToCommit;
+    {
+        juce::ScopedLock sl(lock);
+        auto it = deferredClipSwaps.find(clipId);
+        if (it == deferredClipSwaps.end())
+            return false;
+        fileToCommit = it->second.audioFile;
+    }
+
+    replaceClipAudioFile(clipId, fileToCommit);
+    return true;
+}
+
+int PlaybackEngine::commitAllDeferredClipAudioFiles()
+{
+    std::vector<juce::String> clipIds;
+    {
+        juce::ScopedLock sl(lock);
+        for (const auto& [clipId, _swap] : deferredClipSwaps)
+            clipIds.push_back(clipId);
+    }
+
+    int committed = 0;
+    for (const auto& clipId : clipIds)
+        if (commitDeferredClipAudioFile(clipId))
+            ++committed;
+    return committed;
+}
+
+void PlaybackEngine::setClipRenderedPreviewSegment(const juce::String& clipId,
+                                                   const juce::File& audioFile,
+                                                   double startSec,
+                                                   double endSec)
+{
+    if (!audioFile.existsAsFile())
+    {
+        juce::Logger::writeToLog("PlaybackEngine::setClipRenderedPreviewSegment: file does not exist: " + audioFile.getFullPathName());
+        return;
+    }
+
+    juce::ScopedLock sl(lock);
+    preloadReader(audioFile);
+    auto& segments = renderedPreviewSegments[clipId];
+    bool replaced = false;
+    for (auto& segment : segments)
+    {
+        if (std::abs(segment.startSec - startSec) < 0.001 && std::abs(segment.endSec - endSec) < 0.001)
+        {
+            segment.audioFile = audioFile;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced)
+        segments.push_back({ audioFile, startSec, endSec });
+    std::sort(segments.begin(), segments.end(), [] (const RenderedPreviewSegment& a, const RenderedPreviewSegment& b) {
+        return a.startSec < b.startSec;
+    });
+    juce::Logger::writeToLog("PlaybackEngine: Set rendered preview segment for clip " + clipId
+        + " [" + juce::String(startSec, 3) + ", " + juce::String(endSec, 3) + "]"
+        + " -> " + audioFile.getFullPathName());
+}
+
+void PlaybackEngine::clearClipRenderedPreviewSegments(const juce::String& clipId)
+{
+    juce::ScopedLock sl(lock);
+    renderedPreviewSegments.erase(clipId);
+    juce::Logger::writeToLog("PlaybackEngine: Cleared rendered preview segments for clip " + clipId);
+}
+
+void PlaybackEngine::clearPitchCorrectionFile(const juce::String& clipId)
+{
+    juce::ScopedLock sl(lock);
+    pitchCorrectedFiles.erase(clipId);
+    renderedPreviewSegments.erase(clipId);
+    deferredClipSwaps.erase(clipId);
+    juce::Logger::writeToLog("PlaybackEngine: Cleared pitch correction file for clip " + clipId);
+}
+
 void PlaybackEngine::clearAllClips()
 {
     juce::ScopedLock sl(lock);
+    const int previousClipCount = static_cast<int>(clips.size());
+    const int preservedPreviewCount = static_cast<int>(clipPitchPreviews.size());
+    const int preservedCorrectedCount = static_cast<int>(pitchCorrectedFiles.size());
     clips.clear();
     readers.clear();
-    juce::Logger::writeToLog("PlaybackEngine: Cleared all clips");
+    readerAccessTimes.clear();
+    // NOTE: clipPitchPreviews is NOT cleared here — it must survive sync cycles.
+    // syncClipsWithBackend calls clearAllClips + re-adds clips, and the preview
+    // must persist so the user continues hearing edited notes across play cycles.
+    // Preview is cleared explicitly by: replaceClipAudioFile (WORLD done),
+    // clearClipPitchPreview (editor close), or clearPitchCorrectionFile.
+    lagrangeInterpolatorL.reset();
+    lagrangeInterpolatorR.reset();
+    juce::Logger::writeToLog("PlaybackEngine: Cleared all clips (pitch previews preserved: "
+                              + juce::String(static_cast<int>(clipPitchPreviews.size())) + ")");
+    logAudioPlayback("clearAllClips previousClipCount=" + juce::String(previousClipCount)
+        + " preservedPreviews=" + juce::String(preservedPreviewCount)
+        + " preservedCorrectedFiles=" + juce::String(preservedCorrectedCount));
 }
 
 void PlaybackEngine::clearTrackClips(const juce::String& trackId)
 {
     juce::ScopedLock sl(lock);
-    
+
     clips.erase(
         std::remove_if(clips.begin(), clips.end(),
             [&trackId](const ClipInfo& clip) {
@@ -109,7 +399,10 @@ void PlaybackEngine::clearTrackClips(const juce::String& trackId)
             }),
         clips.end()
     );
-    
+
+    lagrangeInterpolatorL.reset();
+    lagrangeInterpolatorR.reset();
+
     juce::Logger::writeToLog("PlaybackEngine: Cleared clips for track " + trackId);
 }
 
@@ -154,6 +447,91 @@ juce::AudioFormatReader* PlaybackEngine::getReader(const juce::File& file)
     return readerPtr;
 }
 
+// ---- Pitch preview methods ----
+
+void PlaybackEngine::setClipPitchPreview (const juce::String& clipId,
+                                           const ClipPitchPreviewData& preview)
+{
+    juce::ScopedLock sl (lock);
+
+    // If the clip currently has a pitch-corrected file baked in, revert to the
+    // original audio so the real-time preview applies to the UNCORRECTED audio.
+    // Without this, the preview would double-shift: the corrected file already
+    // has the old pitch shift baked in, and the preview would add the new ratio
+    // on top — always increasing pitch regardless of direction.
+    auto corrIt = pitchCorrectedFiles.find (clipId);
+    for (auto& clip : clips)
+    {
+        if (clip.clipId == clipId && clip.originalAudioFile.existsAsFile())
+        {
+            const bool usingOriginalAlready = (clip.audioFile == clip.originalAudioFile)
+                && std::abs (clip.offset - clip.originalOffset) < 0.0005;
+            if (! usingOriginalAlready)
+            {
+                readers.erase (clip.audioFile.getFullPathName());
+                readerAccessTimes.erase (clip.audioFile.getFullPathName());
+                clip.audioFile = clip.originalAudioFile;
+                clip.offset = clip.originalOffset;
+                preloadReader (clip.audioFile);
+                juce::Logger::writeToLog ("PlaybackEngine: Reverted clip " + clipId
+                    + " to original file for preview");
+            }
+            break;
+        }
+    }
+    if (corrIt != pitchCorrectedFiles.end())
+        pitchCorrectedFiles.erase (corrIt);
+
+    auto it = clipPitchPreviews.find (clipId);
+    if (it != clipPitchPreviews.end())
+    {
+        juce::ScopedLock clipSl (it->second->clipLock);
+        it->second->previewData = preview;
+        // Do NOT reset prepared/lastPlaybackTime here — the stretcher must stay
+        // coherent across rolling 250ms preview refreshes. Resetting it causes
+        // the stretcher to emit latency-fill (wrong audio) for ~100ms at every
+        // refresh cycle, producing periodic crackle and word-beginning cutoffs.
+        // Seek detection (|clipTime - lastPlaybackTime| > 0.1s) in fillTrackBuffer
+        // handles genuine playhead jumps without needing a reset here.
+    }
+    else
+    {
+        auto state = std::make_unique<ClipPitchPreviewState>();
+        state->previewData = preview;
+        clipPitchPreviews[clipId] = std::move (state);
+    }
+
+    juce::Logger::writeToLog ("PlaybackEngine: Set preview for clip " + clipId
+                               + " pitchSegments=" + juce::String ((int) preview.pitchSegments.size())
+                               + " globalFormantSt=" + juce::String (preview.globalFormantSemitones, 3)
+                               + " liveFormantSuppressed=" + juce::String (std::abs (preview.globalFormantSemitones) > 0.01f ? "yes" : "no")
+                               + " window=[" + juce::String (preview.previewStartSec, 3)
+                               + "," + juce::String (preview.previewEndSec, 3) + "]");
+}
+
+void PlaybackEngine::clearClipPitchPreview (const juce::String& clipId)
+{
+    juce::ScopedLock sl (lock);
+    clipPitchPreviews.erase (clipId);
+    juce::Logger::writeToLog ("PlaybackEngine: Cleared pitch preview for clip " + clipId);
+}
+
+bool PlaybackEngine::hasClipPitchPreview (const juce::String& clipId) const
+{
+    return clipPitchPreviews.find (clipId) != clipPitchPreviews.end();
+}
+
+float PlaybackEngine::lookupPitchRatio (const std::vector<PitchCorrectionSegment>& segments, double timeInClip)
+{
+    // Binary search could be used for large segment lists, but linear is fine for typical note counts
+    for (const auto& seg : segments)
+    {
+        if (timeInClip >= seg.startTime && timeInClip < seg.endTime)
+            return seg.pitchRatio;
+    }
+    return 1.0f; // No correction at this time position
+}
+
 void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                                      juce::AudioBuffer<float>& buffer,
                                      double currentTime,
@@ -166,11 +544,21 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
     const juce::ScopedTryLock sl(lock);
     if (!sl.isLocked())
     {
+        const int tryLockMiss = tryLockFailureCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((tryLockMiss % 20) == 1)
+            logAudioPlayback("fillTrackBuffer lock miss track=" + trackId
+                + " currentTime=" + juce::String(currentTime, 3)
+                + " count=" + juce::String(tryLockMiss));
         buffer.clear();
         return;
     }
 
     buffer.clear();
+    int overlappingClipCount = 0;
+    int mixedClipCount = 0;
+    static std::atomic<int> fillTrackBufferCallCounter { 0 };
+    const int fillCall = fillTrackBufferCallCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool shouldLogDetailed = (fillCall % 50) == 1;
 
     double windowEnd = currentTime + (numSamples / sampleRate);
 
@@ -185,6 +573,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         // Check if clip overlaps with current time window
         if (currentTime >= clipEndTime || windowEnd <= clip.startTime)
             continue;  // Clip not active in this window
+        ++overlappingClipCount;
 
         // Calculate read position within clip
         double offsetInClip = currentTime - clip.startTime;
@@ -195,16 +584,73 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         }
 
         // Get cached reader — never does disk I/O (readers pre-loaded in addClip)
-        auto* reader = getCachedReader(clip.audioFile);
+        juce::File playbackFile = clip.audioFile;
+        double playbackOffset = clip.offset + offsetInClip;
+        bool usingRenderedPreviewSegment = false;
+        if (clip.clipId.isNotEmpty())
+        {
+            auto segmentIt = renderedPreviewSegments.find(clip.clipId);
+            if (segmentIt != renderedPreviewSegments.end())
+            {
+                const double blockDurationSec = numSamples / sampleRate;
+                for (const auto& segment : segmentIt->second)
+                {
+                    if (offsetInClip >= segment.startSec - 0.0005
+                        && offsetInClip < segment.endSec + 0.0005
+                        && (offsetInClip + blockDurationSec) > segment.startSec)
+                    {
+                        playbackFile = segment.audioFile;
+                        usingRenderedPreviewSegment = true;
+                        // Preview segment files are rendered from their own local zero,
+                        // so map the clip-relative time back into that segment range.
+                        playbackOffset = juce::jmax(0.0, offsetInClip - segment.startSec);
+                        break;
+                    }
+                }
+            }
+        }
+        bool usingCorrectedSource = false;
+        if (!usingRenderedPreviewSegment && clip.clipId.isNotEmpty())
+        {
+            auto correctedIt = pitchCorrectedFiles.find(clip.clipId);
+            if (correctedIt != pitchCorrectedFiles.end()
+                && correctedIt->second.existsAsFile()
+                && playbackFile == correctedIt->second)
+            {
+                usingCorrectedSource = true;
+            }
+        }
+        const bool allowLivePitchPreviewForBlock = !usingRenderedPreviewSegment && !usingCorrectedSource;
+        if (shouldLogDetailed)
+        {
+            logAudioPlayback("fillTrackBuffer overlap track=" + trackId
+                + " clipId=" + clip.clipId
+                + " window=[" + juce::String(currentTime, 3) + "," + juce::String(windowEnd, 3) + "]"
+                + " playbackFile=" + playbackFile.getFullPathName()
+                + " playbackOffset=" + juce::String(playbackOffset, 3)
+                + " sourceType=" + juce::String(usingRenderedPreviewSegment ? "preview_segment"
+                    : (usingCorrectedSource ? "corrected" : "original"))
+                + " livePitchAllowed=" + juce::String(allowLivePitchPreviewForBlock ? "yes" : "no"));
+        }
+
+        auto* reader = getCachedReader(playbackFile);
         if (reader == nullptr)
+        {
+            const int missingReaders = missingReaderCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            logAudioPlayback("fillTrackBuffer missingReader track=" + trackId
+                + " clipId=" + clip.clipId
+                + " file=" + playbackFile.getFullPathName()
+                + " currentTime=" + juce::String(currentTime, 3)
+                + " missingReaderCount=" + juce::String(missingReaders));
             continue;
+        }
 
         // Sample rate conversion ratio (file rate vs device rate)
         double fileSampleRate = reader->sampleRate;
         double ratio = fileSampleRate / sampleRate;  // e.g. 48000/44100 = 1.0884
 
         // Calculate file sample position using the FILE's sample rate
-        juce::int64 fileStartSample = (juce::int64)((offsetInClip + clip.offset) * fileSampleRate);
+        juce::int64 fileStartSample = (juce::int64)(playbackOffset * fileSampleRate);
 
         // How many output samples we can produce for this clip
         int outputSamples = numSamples;
@@ -225,6 +671,15 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
         if (outputSamples <= 0 || fileSamplesToRead <= 0)
             continue;
+        ++mixedClipCount;
+        if (shouldLogDetailed)
+        {
+            logAudioPlayback("fillTrackBuffer readReady track=" + trackId
+                + " clipId=" + clip.clipId
+                + " fileStartSample=" + juce::String(fileStartSample)
+                + " outputSamples=" + juce::String(outputSamples)
+                + " fileSamplesToRead=" + juce::String(fileSamplesToRead));
+        }
 
         // Use pre-allocated buffer (resize only if needed — rare fallback)
         int readerChannels = static_cast<int>(reader->numChannels);
@@ -238,12 +693,139 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
         reader->read(&reusableFileBuffer, 0, fileSamplesToRead, fileStartSample, true, true);
 
+        // ---- Real-time pitch preview: apply PitchShifter if active ----
+        if (clip.clipId.isNotEmpty())
+        {
+            auto previewIt = clipPitchPreviews.find (clip.clipId);
+            if (previewIt != clipPitchPreviews.end() && previewIt->second != nullptr)
+            {
+                juce::ScopedLock clipSl (previewIt->second->clipLock);
+                auto& preview = *previewIt->second;
+                const auto& previewData = preview.previewData;
+                const double clipTime = offsetInClip;
+                const double blockMidTime = offsetInClip + (fileSamplesToRead * 0.5 / fileSampleRate);
+                const bool withinPreviewWindow = blockMidTime >= previewData.previewStartSec
+                    && blockMidTime <= previewData.previewEndSec;
+                const float pitchRatio = lookupPitchRatio (previewData.pitchSegments, blockMidTime);
+                const bool pitchPreviewActive = allowLivePitchPreviewForBlock
+                    && withinPreviewWindow
+                    && std::abs (pitchRatio - 1.0f) > 0.001f;
+
+                if (! pitchPreviewActive)
+                {
+                    preview.lastPlaybackTime = -1.0;
+                }
+                else
+                {
+                    // Prepare stretcher on first use (or after reset)
+                    if (! preview.prepared)
+                    {
+                        preview.stretcher.presetCheaper (readerChannels, static_cast<float> (fileSampleRate));
+                        preview.prepared = true;
+                    }
+
+                    // Re-entering the preview window after a gap (lastPlaybackTime == -1):
+                    // Reset the stretcher so its internal phases align with the current
+                    // audio position. Without this, stale phases from a prior streaming
+                    // position cause phase artifacts that sound "faster" or mis-timed at
+                    // note boundaries. The ~30ms of latency fill that follows the reset is
+                    // brief and far less jarring than the phase-misalignment artifact.
+                    if (preview.lastPlaybackTime < 0.0)
+                    {
+                        preview.stretcher.presetCheaper (readerChannels, static_cast<float> (fileSampleRate));
+                    }
+                    // Detect seeking: if playback time jumped, reinitialize
+                    else if (std::abs (clipTime - preview.lastPlaybackTime) > 0.1)
+                    {
+                        preview.stretcher.presetCheaper (readerChannels, static_cast<float> (fileSampleRate));
+                    }
+                    preview.lastPlaybackTime = clipTime + (fileSamplesToRead / fileSampleRate);
+
+                    preview.stretcher.setTransposeFactor (pitchRatio);
+                    // Match the old stable preview behavior: ordinary pitch edits
+                    // preserve timbre by compensating the pitch-induced formant shift.
+                    preview.stretcher.setFormantFactor (juce::jlimit (0.25f, 4.0f, 1.0f / pitchRatio), true);
+
+                    // Ensure pitch shift work buffer is large enough
+                    if (pitchShiftWorkBuffer.getNumSamples() < fileSamplesToRead)
+                        pitchShiftWorkBuffer.setSize (readerChannels, fileSamplesToRead);
+
+                    std::vector<const float*> inPtrs  (static_cast<size_t> (readerChannels));
+                    std::vector<float*>       outPtrs (static_cast<size_t> (readerChannels));
+                    for (int ch = 0; ch < readerChannels; ++ch)
+                    {
+                        inPtrs[static_cast<size_t> (ch)]  = reusableFileBuffer.getReadPointer (ch);
+                        outPtrs[static_cast<size_t> (ch)] = pitchShiftWorkBuffer.getWritePointer (ch);
+                    }
+
+                    preview.stretcher.process (inPtrs, fileSamplesToRead, outPtrs, fileSamplesToRead);
+
+                    for (int ch = 0; ch < readerChannels; ++ch)
+                        reusableFileBuffer.copyFrom (ch, 0, pitchShiftWorkBuffer, ch, 0, fileSamplesToRead);
+                }
+            }
+        }
+
         // Apply per-clip gain (convert dB to linear)
         float clipGain = juce::Decibels::decibelsToGain(static_cast<float>(clip.volumeDB));
         int fileChannels = readerChannels;
         int outChannels = buffer.getNumChannels();
 
-        // Resample (linear interpolation) + apply gain/fades in one pass
+        // Look up gain envelope for this clip
+        const std::vector<GainEnvelopePoint>* envPoints = nullptr;
+        if (clip.clipId.isNotEmpty())
+        {
+            juce::String envKey = clip.trackId + "::" + clip.clipId;
+            auto envIt = gainEnvelopes.find(envKey);
+            if (envIt != gainEnvelopes.end() && !envIt->second.empty())
+                envPoints = &envIt->second;
+        }
+
+        // Render mode with sample rate conversion: use Lagrange interpolation
+        if (renderMode && ratio != 1.0)
+        {
+            // Use a temporary buffer for Lagrange-resampled output per channel
+            // Process each channel independently
+            int channelsToProcess = std::min(outChannels, fileChannels);
+            for (int ch = 0; ch < channelsToProcess; ++ch)
+            {
+                auto& interpolator = (ch == 0) ? lagrangeInterpolatorL : lagrangeInterpolatorR;
+                const float* inputData = reusableFileBuffer.getReadPointer(ch);
+
+                // Create a temporary output buffer for this channel
+                // We write directly into the output by accumulating sample by sample
+                // Use a small stack buffer for the resampled data
+                std::vector<float> resampledData(static_cast<size_t>(outputSamples));
+                interpolator.process(ratio, inputData, resampledData.data(), outputSamples);
+
+                // Apply fades, gain envelope, and clip gain, then mix into output buffer
+                for (int i = 0; i < outputSamples; ++i)
+                {
+                    float fadeGain = 1.0f;
+                    double sampleTimeInClip = offsetInClip + (i / sampleRate);
+
+                    if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
+                    {
+                        float t = static_cast<float>(sampleTimeInClip / clip.fadeIn);
+                        fadeGain *= applyFadeCurve(t, clip.fadeInCurve);
+                    }
+
+                    double timeFromEnd = clip.duration - sampleTimeInClip;
+                    if (clip.fadeOut > 0.0 && timeFromEnd < clip.fadeOut)
+                    {
+                        float t = static_cast<float>(timeFromEnd / clip.fadeOut);
+                        fadeGain *= applyFadeCurve(t, clip.fadeOutCurve);
+                    }
+
+                    float envGain = envPoints ? interpolateGainEnvelope(*envPoints, sampleTimeInClip) : 1.0f;
+
+                    buffer.addSample(ch, i, resampledData[static_cast<size_t>(i)] * clipGain * fadeGain * envGain);
+                }
+            }
+        }
+        else
+        {
+        // Real-time path: Resample (linear interpolation) + apply gain/fades in one pass
         for (int i = 0; i < outputSamples; ++i)
         {
             // Fractional position in the file buffer for this output sample
@@ -268,7 +850,8 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 fadeGain *= applyFadeCurve(t, clip.fadeOutCurve);
             }
 
-            float totalGain = clipGain * fadeGain;
+            float envGain = envPoints ? interpolateGainEnvelope(*envPoints, sampleTimeInClip) : 1.0f;
+            float totalGain = clipGain * fadeGain * envGain;
 
             // Linear interpolation + gain for each channel
             for (int ch = 0; ch < std::min(outChannels, fileChannels); ++ch)
@@ -279,5 +862,20 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 buffer.addSample(ch, i, sample * totalGain);
             }
         }
+        } // end real-time path
+    }
+
+    const float playbackPeak = peakForBuffer(buffer, numSamples);
+    lastOverlappingClipCount.store(overlappingClipCount, std::memory_order_relaxed);
+    lastMixedClipCount.store(mixedClipCount, std::memory_order_relaxed);
+    lastTrackPlaybackPeak.store(playbackPeak, std::memory_order_relaxed);
+    if (shouldLogDetailed || (overlappingClipCount > 0 && mixedClipCount == 0))
+    {
+        logAudioPlayback("fillTrackBuffer summary track=" + trackId
+            + " overlapping=" + juce::String(overlappingClipCount)
+            + " mixed=" + juce::String(mixedClipCount)
+            + " peak=" + juce::String(playbackPeak, 4)
+            + (overlappingClipCount == 0 ? " noOverlappingClips" : "")
+            + (overlappingClipCount > 0 && mixedClipCount == 0 ? " WARNING_noMixedClips" : ""));
     }
 }

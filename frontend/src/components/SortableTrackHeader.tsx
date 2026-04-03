@@ -1,6 +1,7 @@
 import React from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { ChevronRight, ChevronDown } from "lucide-react";
 import { Track, useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { TrackHeader } from "./TrackHeader";
@@ -10,6 +11,19 @@ import { useContextMenu, MenuItem } from "./ContextMenu";
 interface SortableTrackHeaderProps {
   track: Track;
   children?: React.ReactNode;
+}
+
+/** Compute nesting depth of a track (0 = top-level, 1 = inside one folder, etc.) */
+function getTrackNestingLevel(track: Track, allTracks: Track[]): number {
+  let depth = 0;
+  let current = track;
+  while (current.parentFolderId) {
+    depth++;
+    const parent = allTracks.find((t) => t.id === current.parentFolderId);
+    if (!parent) break;
+    current = parent;
+  }
+  return depth;
 }
 
 export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
@@ -28,29 +42,39 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     removeTrack,
     deleteSelectedTracks,
     updateTrack,
+    duplicateTrack,
     toggleTrackMute,
     toggleTrackSolo,
     toggleTrackArmed,
-    addTrack,
     trackGroups,
     addTrackGroup,
     removeTrackGroup,
     updateTrackGroup,
+    tracks,
+    toggleFolderCollapsed,
+    moveTracksToFolder,
+    removeTrackFromFolder,
   } = useDAWStore(useShallow((s) => ({
     selectedTrackIds: s.selectedTrackIds,
     selectTrack: s.selectTrack,
     removeTrack: s.removeTrack,
     deleteSelectedTracks: s.deleteSelectedTracks,
     updateTrack: s.updateTrack,
+    duplicateTrack: s.duplicateTrack,
     toggleTrackMute: s.toggleTrackMute,
     toggleTrackSolo: s.toggleTrackSolo,
     toggleTrackArmed: s.toggleTrackArmed,
-    addTrack: s.addTrack,
     trackGroups: s.trackGroups,
     addTrackGroup: s.addTrackGroup,
     removeTrackGroup: s.removeTrackGroup,
     updateTrackGroup: s.updateTrackGroup,
+    tracks: s.tracks,
+    toggleFolderCollapsed: s.toggleFolderCollapsed,
+    moveTracksToFolder: s.moveTracksToFolder,
+    removeTrackFromFolder: s.removeTrackFromFolder,
   })));
+
+  const nestingLevel = getTrackNestingLevel(track, tracks);
 
   const isSelected = selectedTrackIds.includes(track.id);
   const { showContextMenu, ContextMenuComponent } = useContextMenu();
@@ -139,6 +163,18 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
                 selectedTrackIds.forEach((id) => updateTrack(id, { color: c.value })),
             })),
           },
+          { divider: true, label: "" },
+          {
+            label: `Move ${count} Tracks to Folder`,
+            submenu: (() => {
+              const folderTracks = tracks.filter((t) => t.isFolder && !selectedTrackIds.includes(t.id));
+              if (folderTracks.length === 0) return [{ label: "(no folders)", disabled: true }];
+              return folderTracks.map((f) => ({
+                label: f.name,
+                onClick: () => moveTracksToFolder(selectedTrackIds, f.id),
+              }));
+            })(),
+          },
         ]
       : [
           {
@@ -148,14 +184,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
           },
           {
             label: "Duplicate Track",
-            onClick: async () => {
-              const newId = crypto.randomUUID();
-              addTrack({
-                id: newId,
-                name: `${track.name} (copy)`,
-                color: track.color,
-              });
-            },
+            onClick: async () => duplicateTrack(track.id),
           },
           { divider: true, label: "" },
           {
@@ -207,6 +236,10 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
             onClick: () => useDAWStore.getState().toggleTrackAutomation(track.id),
           },
           {
+            label: track.spectralView ? "Waveform View" : "Spectral View",
+            onClick: () => useDAWStore.getState().toggleSpectralView(track.id),
+          },
+          {
             label: track.frozen ? "Unfreeze Track" : "Freeze Track",
             onClick: () => {
               const store = useDAWStore.getState();
@@ -247,6 +280,27 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
             label: "Insert Spacer Below",
             onClick: () => useDAWStore.getState().addSpacer(track.id),
           },
+          { divider: true, label: "" },
+          // Folder operations
+          ...(track.parentFolderId
+            ? [{
+                label: "Remove from Folder",
+                onClick: () => removeTrackFromFolder(track.id),
+              }]
+            : []),
+          ...(!track.isFolder
+            ? [{
+                label: "Move to Folder",
+                submenu: (() => {
+                  const folderTracks = tracks.filter((t) => t.isFolder && t.id !== track.id);
+                  if (folderTracks.length === 0) return [{ label: "(no folders)", disabled: true }];
+                  return folderTracks.map((f) => ({
+                    label: f.name,
+                    onClick: () => moveTracksToFolder([track.id], f.id),
+                  }));
+                })(),
+              }]
+            : []),
         ];
 
     showContextMenu(e, menuItems);
@@ -277,6 +331,8 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
       )
     : {};
 
+  const indentPx = nestingLevel * 16;
+
   return (
     <>
       <div
@@ -289,7 +345,35 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
         data-track-id={track.id}
         className={`cursor-grab active:cursor-grabbing ${isSelected ? "shadow-[inset_0_0_0_2px_#3b82f6]" : ""}`}
       >
-        <TrackHeader track={track} isSelected={isSelected} />
+        <div className="flex items-stretch">
+          {/* Indent spacer for nested tracks */}
+          {indentPx > 0 && (
+            <div
+              className="shrink-0 bg-neutral-900 border-r border-neutral-800"
+              style={{ width: indentPx }}
+            />
+          )}
+          {/* Folder collapse/expand chevron */}
+          {track.isFolder && (
+            <button
+              className="shrink-0 w-5 flex items-center justify-center bg-neutral-800 hover:bg-neutral-700 border-r border-neutral-700 text-neutral-400 hover:text-neutral-200 transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleFolderCollapsed(track.id);
+              }}
+              title={track.folderCollapsed ? "Expand folder" : "Collapse folder"}
+              data-no-drag
+              data-no-select
+            >
+              {track.folderCollapsed
+                ? <ChevronRight size={14} />
+                : <ChevronDown size={14} />}
+            </button>
+          )}
+          <div className="flex-1 min-w-0">
+            <TrackHeader track={track} isSelected={isSelected} />
+          </div>
+        </div>
       </div>
       {ContextMenuComponent}
     </>

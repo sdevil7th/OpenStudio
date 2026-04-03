@@ -1,5 +1,6 @@
 import { MapPin, Square, Trash2, Edit2 } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 
 function formatTime(seconds: number): string {
@@ -12,14 +13,19 @@ function formatTime(seconds: number): string {
  * RegionMarkerManager - Lists all markers and regions for navigation and editing
  */
 export function RegionMarkerManager() {
-  const markers = useDAWStore((s) => s.markers);
-  const regions = useDAWStore((s) => s.regions);
-  const seekTo = useDAWStore((s) => s.seekTo);
-  const removeMarker = useDAWStore((s) => s.removeMarker);
-  const removeRegion = useDAWStore((s) => s.removeRegion);
-  const updateMarker = useDAWStore((s) => s.updateMarker);
-  const updateRegion = useDAWStore((s) => s.updateRegion);
-  const setTimeSelection = useDAWStore((s) => s.setTimeSelection);
+  const {
+    markers, regions, seekTo, removeMarker, removeRegion,
+    updateMarker, updateRegion, setTimeSelection,
+  } = useDAWStore(useShallow((s) => ({
+    markers: s.markers,
+    regions: s.regions,
+    seekTo: s.seekTo,
+    removeMarker: s.removeMarker,
+    removeRegion: s.removeRegion,
+    updateMarker: s.updateMarker,
+    updateRegion: s.updateRegion,
+    setTimeSelection: s.setTimeSelection,
+  })));
 
   const sortedMarkers = [...markers].sort((a, b) => a.time - b.time);
   const sortedRegions = [...regions].sort((a, b) => a.startTime - b.startTime);

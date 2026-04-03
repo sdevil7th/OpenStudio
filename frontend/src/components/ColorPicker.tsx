@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 
 interface ColorPickerProps {
@@ -8,7 +10,7 @@ interface ColorPickerProps {
   anchorRef?: React.RefObject<HTMLElement | null>;
 }
 
-// Predefined track colors - users can assign same color to multiple tracks for grouping
+// 16 predefined DAW colors — users can assign same color to multiple tracks for grouping
 export const TRACK_COLORS = [
   { name: "Cyan", value: "#00bcd4" },
   { name: "Blue", value: "#2196f3" },
@@ -16,12 +18,16 @@ export const TRACK_COLORS = [
   { name: "Purple", value: "#9c27b0" },
   { name: "Pink", value: "#e91e63" },
   { name: "Red", value: "#f44336" },
+  { name: "Deep Orange", value: "#ff5722" },
   { name: "Orange", value: "#ff9800" },
+  { name: "Amber", value: "#ffc107" },
   { name: "Yellow", value: "#ffeb3b" },
   { name: "Lime", value: "#cddc39" },
   { name: "Green", value: "#4caf50" },
   { name: "Teal", value: "#009688" },
   { name: "Brown", value: "#795548" },
+  { name: "Blue Grey", value: "#607d8b" },
+  { name: "Grey", value: "#9e9e9e" },
 ];
 
 export function ColorPicker({
@@ -32,6 +38,15 @@ export function ColorPicker({
 }: ColorPickerProps) {
   const popupRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const { recentColors, addRecentColor } = useDAWStore(useShallow((s) => ({
+    recentColors: s.recentColors,
+    addRecentColor: s.addRecentColor,
+  })));
+
+  const handleColorSelect = (color: string) => {
+    addRecentColor(color);
+    onColorChange(color);
+  };
 
   // Position relative to anchor element
   useEffect(() => {
@@ -41,7 +56,7 @@ export function ColorPicker({
       let left = rect.right + 4;
 
       // Ensure popup doesn't go below viewport
-      const popupHeight = 180; // approximate height
+      const popupHeight = 260; // approximate height with recent colors
       if (top + popupHeight > window.innerHeight) {
         top = window.innerHeight - popupHeight - 8;
       }
@@ -99,7 +114,7 @@ export function ColorPicker({
           <Button
             key={color.value}
             variant="ghost"
-            onClick={() => onColorChange(color.value)}
+            onClick={() => handleColorSelect(color.value)}
             className={`w-7 h-7 !p-0 rounded-md transition-all hover:scale-110 hover:ring-2 hover:ring-white/50 ${
               currentColor === color.value ? "ring-2 ring-white scale-110" : ""
             }`}
@@ -108,6 +123,28 @@ export function ColorPicker({
           />
         ))}
       </div>
+
+      {/* Recent Colors */}
+      {recentColors.length > 0 && (
+        <>
+          <div className="text-[10px] text-neutral-500 mt-2.5 mb-1.5 px-1 uppercase tracking-wider">
+            Recent
+          </div>
+          <div className="flex gap-1.5 px-0.5">
+            {recentColors.map((color, i) => (
+              <button
+                key={`${color}-${i}`}
+                onClick={() => handleColorSelect(color)}
+                className={`w-5 h-5 rounded-sm border transition-all hover:scale-110 hover:ring-1 hover:ring-white/50 ${
+                  currentColor === color ? "ring-1 ring-white scale-110 border-white/50" : "border-neutral-600"
+                }`}
+                style={{ backgroundColor: color }}
+                title={color}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

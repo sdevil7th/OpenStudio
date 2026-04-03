@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "AppUpdater.h"
 
 //==============================================================================
 /*
@@ -12,8 +13,27 @@ class MainComponent  : public juce::Component,
                        public juce::Timer
 {
 public:
+    enum class WindowRole
+    {
+        main,
+        mixer
+    };
+
+    struct WindowCallbacks
+    {
+        std::function<void()> requestAppClose;
+        std::function<bool(const juce::var&)> openMixerWindow;
+        std::function<bool()> closeMixerWindow;
+        std::function<juce::var()> getMixerWindowState;
+        std::function<void(const juce::var&)> publishMixerUISnapshot;
+        std::function<juce::var()> getMixerUISnapshot;
+    };
+
     //==============================================================================
-    MainComponent();
+    MainComponent(AudioEngine& audioEngineIn,
+                  AppUpdater& appUpdaterIn,
+                  WindowRole roleIn,
+                  WindowCallbacks callbacksIn = {});
     ~MainComponent() override;
 
     //==============================================================================
@@ -22,12 +42,46 @@ public:
 
     void timerCallback() override;
 
+    static void broadcastEventToAll(const juce::String& eventId, const juce::var& payload = {});
+    static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
+
 private:
+    juce::Rectangle<int> getDesktopWorkAreaForCurrentWindow() const;
+    bool isWindowPseudoMaximized() const;
+    bool toggleDesktopPseudoMaximize();
+    void restoreDesktopWindow(const juce::Rectangle<int>& targetBounds);
+    void startDesktopWindowDrag();
+    void emitFrontendEvent(const juce::String& eventId, const juce::var& payload = {});
+    bool isMainWindow() const;
+
     //==============================================================================
     // Your private member variables go here...
+    AudioEngine& audioEngine;
+    AppUpdater& appUpdater;
+    WindowRole windowRole = WindowRole::main;
+    WindowCallbacks windowCallbacks;
     juce::WebBrowserComponent webView;
-    AudioEngine audioEngine;
+    juce::Label fallbackMessage;
     std::unique_ptr<juce::FileChooser> fileChooser;  // For async file dialogs
+    juce::Rectangle<int> windowRestoreBounds;
+    bool windowPseudoMaximized = false;
+
+    // Async pitch analysis state
+    std::atomic<bool> pitchAnalysisRunning { false };
+    juce::var lastPitchAnalysisResult;  // Cached result for fetch-after-event pattern
+    juce::CriticalSection pitchResultLock;
+
+    // Background thread for pitch correction (1 slot — serialises apply calls)
+    juce::ThreadPool previewSegmentPool { 2 };
+    juce::ThreadPool fullClipHQPool { 1 };
+    juce::CriticalSection pitchCorrectionJobLock;
+    juce::String activePreviewRequestGroup;
+    juce::String activeFullClipRequestGroup;
+    std::atomic<int> previewRenderGeneration { 0 };
+    std::atomic<int> fullClipRenderGeneration { 0 };
+
+    static juce::CriticalSection instanceListLock;
+    static juce::Array<MainComponent*> activeInstances;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

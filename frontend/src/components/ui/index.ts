@@ -1,7 +1,7 @@
 /**
  * UI Component Library
  *
- * Reusable, accessible, and type-safe components for the Studio13-v3 DAW.
+ * Reusable, accessible, and type-safe components for the OpenStudio DAW.
  * Built with Tailwind CSS and Headless UI primitives.
  *
  * @example

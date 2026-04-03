@@ -61,23 +61,37 @@ body {
   flex-direction: column;
 }
 
-/* Scrollbar Styling */
+/* Scrollbar Styling — uses theme-aware CSS custom properties */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: var(--color-daw-dark);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #333;
+  background: var(--color-daw-border-light);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #444;
+  background: var(--color-daw-text-dim);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--color-daw-dark);
+}
+
+/* Recording indicator pulse animation */
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.recording-dot {
+  animation: recording-pulse 1s ease-in-out infinite;
 }
 
 /* Vertical Fader Styling */
@@ -147,10 +161,49 @@ body {
 .workspace {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: stretch;
   min-height: 0; /* Critical: allows flex item to shrink below content size */
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+.workspace-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  background: #121212;
+}
+
+.workspace-sticky-tcp-header {
+  flex-shrink: 0;
+  padding: 2px 6px 3px 6px;
+  border-bottom: 1px solid #2a2a2a;
+  background: #121212;
+}
+
+.workspace-sticky-resize-spacer {
+  width: 6px;
+  flex-shrink: 0;
+  border-bottom: 1px solid #2a2a2a;
+  background: #0f0f0f;
+}
+
+.workspace-sticky-ruler {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 1px solid #2a2a2a;
+  background: #0a0a0a;
+}
+
+.workspace-main-row {
+  display: flex;
+  align-items: stretch;
+  flex: 1 0 auto;
+  min-height: 0;
 }
 
 .track-control-panel {
@@ -158,6 +211,7 @@ body {
   background: #1a1a1a;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .tcp-header {
@@ -185,8 +239,39 @@ body {
 
 .tcp-tracks {
   flex: 1;
+  min-height: 0;
 }
 
 .tcp-master {
   border-top: 1px solid #2a2a2a;
+}
+
+.tcp-master-overlay {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+}
+
+/* Accessibility: Visible focus indicators for keyboard navigation */
+*:focus-visible {
+  outline: 2px solid #0078d4;
+  outline-offset: 2px;
+}
+
+/* Suppress focus ring for mouse/touch interactions */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Panel transition utilities */
+.panel-transition {
+  transition: all 0.2s ease-in-out;
+}
+
+.panel-slide-down {
+  transition: max-height 0.2s ease-in-out, opacity 0.15s ease-in-out;
+}
+
+.panel-fade {
+  transition: opacity 0.15s ease-in-out;
 }

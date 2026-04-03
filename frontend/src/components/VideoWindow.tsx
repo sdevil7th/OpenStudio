@@ -1,14 +1,17 @@
 import { useEffect, useRef, useCallback } from "react";
 import { X, FolderOpen } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { Button } from "./ui";
 
 export function VideoWindow() {
-  const showVideoWindow = useDAWStore((s) => s.showVideoWindow);
-  const videoInfo = useDAWStore((s) => s.videoInfo);
-  const videoFilePath = useDAWStore((s) => s.videoFilePath);
-  const isPlaying = useDAWStore((s) => s.transport.isPlaying);
+  const { showVideoWindow, videoInfo, videoFilePath, isPlaying } = useDAWStore(useShallow((s) => ({
+    showVideoWindow: s.showVideoWindow,
+    videoInfo: s.videoInfo,
+    videoFilePath: s.videoFilePath,
+    isPlaying: s.transport.isPlaying,
+  })));
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRequestRef = useRef<number>(0);

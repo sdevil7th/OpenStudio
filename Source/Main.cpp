@@ -1,78 +1,144 @@
 #include <JuceHeader.h>
+#include "ApplicationLaunchState.h"
+#include "AudioEngine.h"
+#include "AppUpdater.h"
 #include "MainComponent.h"
+#include "MixerWindowManager.h"
 
 #if JUCE_WINDOWS
  #include <dwmapi.h>
 #endif
 
+namespace
+{
+juce::Rectangle<int> rectangleFromVar(const juce::var& value)
+{
+    if (auto* obj = value.getDynamicObject())
+    {
+        return {
+            static_cast<int>(obj->getProperty("x")),
+            static_cast<int>(obj->getProperty("y")),
+            static_cast<int>(obj->getProperty("width")),
+            static_cast<int>(obj->getProperty("height"))
+        };
+    }
+
+    return {};
+}
+
+juce::var rectangleToVar(const juce::Rectangle<int>& bounds)
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("x", bounds.getX());
+    obj->setProperty("y", bounds.getY());
+    obj->setProperty("width", bounds.getWidth());
+    obj->setProperty("height", bounds.getHeight());
+    return juce::var(obj);
+}
+}
+
 //==============================================================================
-class Studio13Application  : public juce::JUCEApplication
+class OpenStudioApplication  : public juce::JUCEApplication
 {
 public:
-    //==============================================================================
-    Studio13Application() {}
+    OpenStudioApplication() = default;
 
     const juce::String getApplicationName() override       { return ProjectInfo::projectName; }
     const juce::String getApplicationVersion() override    { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override             { return true; }
 
-    //==============================================================================
     void initialise (const juce::String& commandLine) override
     {
-        juce::ignoreUnused (commandLine);
-        // Debug Logging
+        OpenStudioLaunchState::setPendingProjectPath(commandLine);
+
         auto logFile = juce::File::getSpecialLocation(juce::File::SpecialLocationType::currentApplicationFile)
-                                .getSiblingFile("Studio13_Debug.log");
-        juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "Studio13 Startup Log"));
+                                .getSiblingFile("OpenStudio_Debug.log");
+        juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "OpenStudio Startup Log"));
         juce::Logger::writeToLog("Application Initialising...");
 
-        // This method is where you should create your mainWindow
-        mainWindow.reset (new MainWindow (getApplicationName()));
-        
+        mixerWindowManager = std::make_unique<MixerWindowManager>(
+            [this]()
+            {
+                return std::make_unique<MainComponent>(audioEngine,
+                                                       appUpdater,
+                                                       MainComponent::WindowRole::mixer,
+                                                       createWindowCallbacks());
+            },
+            [this](const juce::Rectangle<int>& bounds)
+            {
+                handleMixerWindowClosed(bounds);
+            });
+
+        mainWindow = std::make_unique<MainWindow>(getApplicationName(),
+                                                  audioEngine,
+                                                  appUpdater,
+                                                  createWindowCallbacks());
+
+        if (auto* component = mainWindow->getMainComponent())
+            audioEngine.setPluginWindowOwnerComponent(component);
+
+        audioEngine.onPeaksReady = [] (const juce::String& filePath)
+        {
+            auto* data = new juce::DynamicObject();
+            data->setProperty("filePath", filePath);
+            MainComponent::broadcastEventToAll("peaksReady", juce::var(data));
+        };
+
+        appUpdater.setStatusCallback([](const juce::var& status)
+        {
+            MainComponent::broadcastEventToAll("updateStatusChanged", status);
+        });
+
+        audioEngine.setPluginWindowShortcutForwardCallback([](const juce::var& payload)
+        {
+            MainComponent::broadcastEventToAll("nativeGlobalShortcut", payload);
+        });
+
         juce::Logger::writeToLog("MainWindow Created.");
     }
 
     void shutdown() override
     {
         juce::Logger::writeToLog("Application Check-out.");
-        
-        // Add your application's shutdown code here..
 
-        mainWindow = nullptr; // (deletes our window)
-        
+        mixerWindowManager = nullptr;
+        mainWindow = nullptr;
+
         juce::Logger::setCurrentLogger(nullptr);
     }
 
-    //==============================================================================
     void systemRequestedQuit() override
     {
-        // This is called when the app is being asked to quit: you can ignore this
-        // request and let the app carry on running, or call quit() to allow the app to close.
+        if (mixerWindowManager != nullptr)
+            mixerWindowManager->close();
+
         quit();
     }
 
     void anotherInstanceStarted (const juce::String& commandLine) override
     {
-        juce::ignoreUnused (commandLine);
+        OpenStudioLaunchState::setPendingProjectPath(commandLine);
     }
 
-    //==============================================================================
-    /*
-        This class implements the desktop window that contains an instance of
-        our MainComponent class.
-    */
     class MainWindow    : public juce::DocumentWindow,
                           private juce::Timer
     {
     public:
-        MainWindow (juce::String name)
+        MainWindow (juce::String name,
+                    AudioEngine& audioEngine,
+                    AppUpdater& appUpdater,
+                    MainComponent::WindowCallbacks callbacks)
             : DocumentWindow (name,
                               juce::Colours::black,
-                              0)  // No JUCE title bar buttons — custom controls in React
+                              0)
         {
             setUsingNativeTitleBar (false);
             setTitleBarHeight (0);
-            setContentOwned (new MainComponent(), true);
+            setContentOwned (new MainComponent(audioEngine,
+                                               appUpdater,
+                                               MainComponent::WindowRole::main,
+                                               std::move(callbacks)),
+                             true);
 
            #if JUCE_IOS || JUCE_ANDROID
             setFullScreen (true);
@@ -89,34 +155,30 @@ public:
             {
                 auto hwnd = static_cast<HWND> (peer->getNativeHandle());
 
-                // Add native resize frame (WS_THICKFRAME) — drawn outside client area,
-                // no clipping.  Also enables Windows Snap (drag-to-edge tiling).
                 auto style = ::GetWindowLongPtr (hwnd, GWL_STYLE);
                 style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
                 ::SetWindowLongPtr (hwnd, GWL_STYLE, style);
                 ::SetWindowPos (hwnd, nullptr, 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
-                // DWMWA_USE_IMMERSIVE_DARK_MODE (attribute 20) — dark window shadow
                 BOOL useDarkMode = TRUE;
                 ::DwmSetWindowAttribute (hwnd, 20, &useDarkMode, sizeof (useDarkMode));
             }
            #endif
 
-            // WebView2 creates its native control asynchronously (typically
-            // 200-500ms after construction).  We need to force a resize AFTER
-            // the control exists so it picks up the correct window dimensions.
-            // A one-shot timer handles this reliably across platforms.
             startTimer (600);
         }
 
         void closeButtonPressed() override
         {
-            JUCEApplication::getInstance()->systemRequestedQuit();
+            juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
 
-        // Return zero borders so the content fills the full client area.
-        // Native resize is handled by WS_THICKFRAME (outside the client area).
+        MainComponent* getMainComponent() const
+        {
+            return dynamic_cast<MainComponent*>(getContentComponent());
+        }
+
         juce::BorderSize<int> getBorderThickness() const override { return { 0, 0, 0, 0 }; }
         juce::BorderSize<int> getContentComponentBorder() const override { return { 0, 0, 0, 0 }; }
 
@@ -125,10 +187,6 @@ public:
         {
             stopTimer();
 
-            // Force a real resize cycle by nudging the size ±1px.
-            // This triggers WM_SIZE → DocumentWindow::resized() →
-            // MainComponent::resized() → webView.setBounds(), which
-            // now reaches the fully-initialised WebView2 native control.
             auto b = getBounds();
             setBounds (b.withWidth (b.getWidth() + 1));
             setBounds (b);
@@ -138,9 +196,91 @@ public:
     };
 
 private:
+    MainComponent::WindowCallbacks createWindowCallbacks()
+    {
+        MainComponent::WindowCallbacks callbacks;
+        callbacks.requestAppClose = [this]()
+        {
+            systemRequestedQuit();
+        };
+        callbacks.openMixerWindow = [this](const juce::var& bounds)
+        {
+            return openMixerWindow(bounds);
+        };
+        callbacks.closeMixerWindow = [this]()
+        {
+            return closeMixerWindow();
+        };
+        callbacks.getMixerWindowState = [this]()
+        {
+            return getMixerWindowState();
+        };
+        callbacks.publishMixerUISnapshot = [this](const juce::var& snapshot)
+        {
+            publishMixerUISnapshot(snapshot);
+        };
+        callbacks.getMixerUISnapshot = [this]()
+        {
+            return getMixerUISnapshot();
+        };
+        return callbacks;
+    }
+
+    bool openMixerWindow(const juce::var& boundsValue)
+    {
+        if (mixerWindowManager == nullptr)
+            return false;
+
+        return mixerWindowManager->open(rectangleFromVar(boundsValue));
+    }
+
+    bool closeMixerWindow()
+    {
+        if (mixerWindowManager == nullptr)
+            return false;
+
+        return mixerWindowManager->close();
+    }
+
+    juce::var getMixerWindowState() const
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("isOpen", mixerWindowManager != nullptr && mixerWindowManager->isOpen());
+        return juce::var(obj);
+    }
+
+    void publishMixerUISnapshot(const juce::var& snapshot)
+    {
+        {
+            const juce::ScopedLock sl(mixerSnapshotLock);
+            latestMixerUISnapshot = snapshot;
+        }
+
+        MainComponent::broadcastEventToAll("mixerUISync", snapshot);
+    }
+
+    juce::var getMixerUISnapshot() const
+    {
+        const juce::ScopedLock sl(mixerSnapshotLock);
+        return latestMixerUISnapshot;
+    }
+
+    void handleMixerWindowClosed(const juce::Rectangle<int>& bounds)
+    {
+        if (auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr)
+            audioEngine.setPluginWindowOwnerComponent(component);
+
+        auto* payload = new juce::DynamicObject();
+        payload->setProperty("bounds", rectangleToVar(bounds));
+        MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "mixerWindowClosed", juce::var(payload));
+    }
+
+    AudioEngine audioEngine;
+    AppUpdater appUpdater;
     std::unique_ptr<MainWindow> mainWindow;
+    std::unique_ptr<MixerWindowManager> mixerWindowManager;
+    mutable juce::CriticalSection mixerSnapshotLock;
+    juce::var latestMixerUISnapshot;
 };
 
-//==============================================================================
-// This macro generates the main() routine that launches the app.
-START_JUCE_APPLICATION (Studio13Application)
+START_JUCE_APPLICATION (OpenStudioApplication)

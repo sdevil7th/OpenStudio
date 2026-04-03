@@ -12,6 +12,11 @@ PeakCache::~PeakCache()
 
 juce::File PeakCache::getPeakFilePath(const juce::File& audioFile)
 {
+    return audioFile.getSiblingFile(audioFile.getFileName() + ".ospeaks");
+}
+
+juce::File PeakCache::getLegacyPeakFilePath(const juce::File& audioFile)
+{
     return audioFile.getSiblingFile(audioFile.getFileName() + ".s13peaks");
 }
 
@@ -26,6 +31,9 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
 
     // Check disk
     auto peakFile = getPeakFilePath(audioFile);
+    if (!peakFile.existsAsFile())
+        peakFile = getLegacyPeakFilePath(audioFile);
+
     if (!peakFile.existsAsFile())
         return false;
 
@@ -53,6 +61,7 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
 
 juce::var PeakCache::getPeaks(const juce::File& audioFile,
                                int samplesPerPixel,
+                               int startSample,
                                int numPixels) const
 {
     juce::Array<juce::var> peakData;
@@ -75,6 +84,9 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
     if (!loaded)
     {
         auto peakFile = getPeakFilePath(audioFile);
+        if (!peakFile.existsAsFile())
+            peakFile = getLegacyPeakFilePath(audioFile);
+
         if (peakFile.existsAsFile() && loadFromFile(peakFile, audioFile, entry))
         {
             loaded = true;
@@ -100,7 +112,13 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
     if (ratio < 1) ratio = 1;
 
     int numChannels = bestLevel->numChannels;
-    int actualPeaks = std::min(numPixels, bestLevel->numPeaks / std::max(1, ratio));
+
+    // Convert startSample to an index in this mipmap level, clamped to valid range
+    int startPeak = (startSample > 0) ? std::min(startSample / bestLevel->stride, bestLevel->numPeaks - 1) : 0;
+    // remainingPeaks: mipmap-level peaks left after startPeak.
+    // Divide by ratio to get output pixels. (startPeak is in mipmap units, NOT output-pixel units.)
+    int remainingMipmapPeaks = std::max(0, bestLevel->numPeaks - startPeak);
+    int actualPeaks = std::min(numPixels, remainingMipmapPeaks / std::max(1, ratio));
 
     peakData.ensureStorageAllocated(1 + actualPeaks * numChannels * 2);
     peakData.add(juce::var(numChannels));  // Header
@@ -109,7 +127,7 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
 
     for (int pixel = 0; pixel < actualPeaks; ++pixel)
     {
-        int srcStart = pixel * ratio;
+        int srcStart = startPeak + pixel * ratio;
         int srcEnd = std::min(srcStart + ratio, bestLevel->numPeaks);
 
         for (int ch = 0; ch < numChannels; ++ch)
@@ -379,10 +397,24 @@ void PeakCache::generateAsync(const juce::File& audioFile, std::function<void()>
         return;
     }
 
+    // Guard: don't queue duplicate generation jobs for the same file
+    {
+        const juce::ScopedLock sl (pendingLock);
+        auto key = audioFile.getFullPathName();
+        if (pendingGenerations.count(key) > 0)
+            return;  // Already being generated
+        pendingGenerations.insert(key);
+    }
+
     // Queue background generation
     backgroundPool.addJob([this, audioFile, onComplete]()
     {
         generateSync(audioFile);
+
+        {
+            const juce::ScopedLock sl (pendingLock);
+            pendingGenerations.erase(audioFile.getFullPathName());
+        }
 
         if (onComplete)
             juce::MessageManager::callAsync(onComplete);

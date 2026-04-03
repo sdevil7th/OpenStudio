@@ -199,6 +199,119 @@ std::vector<double> AudioAnalyzer::detectTransients(const juce::String& filePath
 }
 
 // =============================================================================
+// Phase 3.12: Strip Silence — Detect Silent Regions
+// =============================================================================
+
+std::vector<AudioAnalyzer::SoundRegion> AudioAnalyzer::detectSilentRegions(
+    const juce::String& filePath,
+    double thresholdDb,
+    double minSilenceMs,
+    double minSoundMs,
+    double preAttackMs,
+    double postReleaseMs)
+{
+    std::vector<SoundRegion> regions;
+
+    juce::File inputFile(filePath);
+    if (!inputFile.existsAsFile())
+        return regions;
+
+    std::unique_ptr<juce::AudioFormatReader> reader(
+        formatManager.createReaderFor(inputFile));
+    if (!reader)
+        return regions;
+
+    auto totalSamples = reader->lengthInSamples;
+    auto sr = reader->sampleRate;
+    int numChannels = (int)reader->numChannels;
+
+    if (totalSamples <= 0 || sr <= 0)
+        return regions;
+
+    // Convert parameters from time to samples
+    float thresholdLinear = juce::Decibels::decibelsToGain((float)thresholdDb);
+    juce::int64 minSilenceSamples = (juce::int64)(minSilenceMs * sr / 1000.0);
+    juce::int64 minSoundSamples = (juce::int64)(minSoundMs * sr / 1000.0);
+    juce::int64 preAttackSamples = (juce::int64)(preAttackMs * sr / 1000.0);
+    juce::int64 postReleaseSamples = (juce::int64)(postReleaseMs * sr / 1000.0);
+
+    // Process in chunks to handle large files
+    const int chunkSize = 65536;
+    juce::AudioBuffer<float> buffer(numChannels, chunkSize);
+
+    bool inSound = false;
+    juce::int64 soundStart = 0;
+    juce::int64 silenceStart = 0;
+
+    for (juce::int64 pos = 0; pos < totalSamples; pos += chunkSize)
+    {
+        int samplesToRead = (int)std::min((juce::int64)chunkSize, totalSamples - pos);
+        reader->read(&buffer, 0, samplesToRead, pos, true, true);
+
+        for (int i = 0; i < samplesToRead; ++i)
+        {
+            // Get peak across all channels
+            float peak = 0.0f;
+            for (int ch = 0; ch < numChannels; ++ch)
+                peak = std::max(peak, std::abs(buffer.getSample(ch, i)));
+
+            bool isAboveThreshold = peak >= thresholdLinear;
+            juce::int64 samplePos = pos + i;
+
+            if (!inSound)
+            {
+                if (isAboveThreshold)
+                {
+                    // Transition to sound
+                    inSound = true;
+                    soundStart = samplePos;
+                    silenceStart = 0;
+                }
+            }
+            else
+            {
+                if (!isAboveThreshold)
+                {
+                    if (silenceStart == 0)
+                        silenceStart = samplePos;
+
+                    // Check if silence duration exceeds minimum
+                    if ((samplePos - silenceStart) >= minSilenceSamples)
+                    {
+                        // End of sound region at silence start
+                        juce::int64 regionStart = std::max((juce::int64)0, soundStart - preAttackSamples);
+                        juce::int64 regionEnd = std::min(totalSamples, silenceStart + postReleaseSamples);
+
+                        if ((regionEnd - regionStart) >= minSoundSamples)
+                            regions.push_back({ regionStart, regionEnd });
+
+                        inSound = false;
+                        silenceStart = 0;
+                    }
+                }
+                else
+                {
+                    // Still in sound — reset silence counter
+                    silenceStart = 0;
+                }
+            }
+        }
+    }
+
+    // Handle trailing sound region
+    if (inSound)
+    {
+        juce::int64 regionStart = std::max((juce::int64)0, soundStart - preAttackSamples);
+        juce::int64 regionEnd = totalSamples;
+
+        if ((regionEnd - regionStart) >= minSoundSamples)
+            regions.push_back({ regionStart, regionEnd });
+    }
+
+    return regions;
+}
+
+// =============================================================================
 // Phase 9D: LUFS Measurement (ITU-R BS.1770-4)
 // =============================================================================
 

@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
 import { EditMenu } from "./menus/EditMenu";
 import { MenuDropdown, MenuItemProps } from "./menus/MenuDropdown";
+import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore, THEME_PRESETS } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 
 /**
@@ -10,6 +12,7 @@ import { nativeBridge } from "../services/NativeBridge";
  * Contains File, Edit, View, Insert, Track, Options, Actions, Help menus
  */
 export function MenuBar() {
+  const shortcut = (actionId: string, fallback: string) => getEffectiveActionShortcut(actionId) ?? fallback;
   const {
     toggleMixer,
     showMixer,
@@ -31,7 +34,28 @@ export function MenuBar() {
     toggleVirtualKeyboard,
     showUndoHistory,
     toggleUndoHistory,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    toggleMixer: s.toggleMixer,
+    showMixer: s.showMixer,
+    showMasterTrackInTCP: s.showMasterTrackInTCP,
+    toggleMasterTrackInTCP: s.toggleMasterTrackInTCP,
+    openSettings: s.openSettings,
+    openProjectSettings: s.openProjectSettings,
+    openRenderModal: s.openRenderModal,
+    newProject: s.newProject,
+    saveProject: s.saveProject,
+    loadProject: s.loadProject,
+    snapEnabled: s.snapEnabled,
+    toggleSnap: s.toggleSnap,
+    gridSize: s.gridSize,
+    setGridSize: s.setGridSize,
+    recentProjects: s.recentProjects,
+    clearRecentProjects: s.clearRecentProjects,
+    showVirtualKeyboard: s.showVirtualKeyboard,
+    toggleVirtualKeyboard: s.toggleVirtualKeyboard,
+    showUndoHistory: s.showUndoHistory,
+    toggleUndoHistory: s.toggleUndoHistory,
+  })));
 
   const [isMaximized, setIsMaximized] = useState(false);
 
@@ -66,6 +90,77 @@ export function MenuBar() {
     setIsMaximized(newState);
   }, []);
 
+  const handleCheckForUpdates = useCallback(async () => {
+    const result = await nativeBridge.checkForUpdates(true);
+
+    if (result?.status === "up-to-date") {
+      useDAWStore.getState().showToast("OpenStudio is already up to date.", "success");
+      return;
+    }
+
+    if (result?.status === "update-available") {
+      const version = result.version || "the latest version";
+      const mandatoryLabel = result.mandatory ? "A required " : "";
+      const isMacUpdate = result.platform === "macos";
+      const notes = typeof result.notes === "string" && result.notes.trim().length > 0
+        ? `\n\nRelease notes:\n${result.notes}`
+        : "";
+      const actionPrompt = isMacUpdate
+        ? "Download and open the DMG now? You may still need to drag the app into Applications and use right-click > Open."
+        : "Download and install it now?";
+
+      const shouldInstall = confirm(
+        `${mandatoryLabel}OpenStudio ${version} update is available.${notes}\n\n${actionPrompt}`,
+      );
+
+      if (!shouldInstall) return;
+
+      const installResult = await nativeBridge.downloadAndInstallUpdate(
+        result.downloadUrl || "",
+        result.version,
+        result.sha256,
+        result.releasePageUrl,
+        result.installerArguments,
+        result.size,
+      );
+
+      if (installResult?.status === "install-started") {
+        useDAWStore.getState().showToast(
+          installResult?.message || "Update downloaded. The installer has been opened.",
+          "success",
+        );
+      } else if (installResult?.status === "release-page-opened") {
+        useDAWStore.getState().showToast(
+          "Opened the release page for the latest update.",
+          "info",
+        );
+      } else {
+        useDAWStore.getState().showToast(
+          installResult?.message || "Update download or installation failed.",
+          "error",
+        );
+      }
+
+      return;
+    }
+
+    useDAWStore.getState().showToast(
+      result?.message || "Could not check for updates.",
+      "error",
+    );
+  }, []);
+
+  const handleAbout = useCallback(async () => {
+    const version = await nativeBridge.getAppVersion();
+    alert(
+      `OpenStudio ${version}\n\n` +
+      "A hybrid DAW with a JUCE C++ backend and React/TypeScript frontend.\n\n" +
+      "Built with:\n  JUCE 8.0 - Audio engine, VST3 hosting\n" +
+      "  React - User interface\n  Konva - Timeline canvas\n  Zustand - State management\n\n" +
+      "github.com/openstudio",
+    );
+  }, []);
+
   // Helper to get just the filename from a full path
   const getFileName = (path: string) => {
     return path.split("\\").pop() || path.split("/").pop() || path;
@@ -75,7 +170,7 @@ export function MenuBar() {
   const fileMenuItems: MenuItemProps[] = [
     {
       label: "New Project",
-      shortcut: "Ctrl+N",
+      shortcut: shortcut("file.new", "Ctrl+N"),
       onClick: () => {
         if (
           confirm(
@@ -88,7 +183,7 @@ export function MenuBar() {
     },
     {
       label: "Open Project...",
-      shortcut: "Ctrl+O",
+      shortcut: shortcut("file.open", "Ctrl+O"),
       onClick: () => {
         loadProject().then((success) => {
           if (!success) console.error("Failed to load project");
@@ -121,7 +216,7 @@ export function MenuBar() {
     },
     {
       label: "Save Project",
-      shortcut: "Ctrl+S",
+      shortcut: shortcut("file.save", "Ctrl+S"),
       onClick: () => {
         saveProject(false).then((success) => {
           if (success) console.log("Project saved successfully");
@@ -130,7 +225,7 @@ export function MenuBar() {
     },
     {
       label: "Save Project As...",
-      shortcut: "Ctrl+Shift+S",
+      shortcut: shortcut("file.saveAs", "Ctrl+Shift+S"),
       onClick: () => {
         saveProject(true).then((success) => {
           if (success) console.log("Project saved as new file");
@@ -144,11 +239,55 @@ export function MenuBar() {
           if (success) console.log("New version saved");
         });
       },
+    },
+    {
+      label: "Save as Template...",
+      onClick: () => {
+        const name = prompt("Template name:");
+        if (name) useDAWStore.getState().saveAsTemplate(name);
+      },
+    },
+    {
+      label: "New from Template...",
+      onClick: () => {
+        const state = useDAWStore.getState();
+        const templates = state.projectTemplates;
+        if (templates.length === 0) {
+          alert("No templates saved yet. Use 'Save as Template' first.");
+          return;
+        }
+        state.toggleProjectTemplates();
+      },
+      submenu: (() => {
+        const templates = useDAWStore.getState().projectTemplates;
+        if (templates.length === 0) return [{ label: "(no templates)", disabled: true }];
+        return [
+          ...templates.map((t, i) => ({
+            label: t.name,
+            onClick: () => {
+              if (confirm(`Load template "${t.name}"? This will replace the current project.`)) {
+                useDAWStore.getState().loadTemplate(i);
+              }
+            },
+          })),
+          {
+            label: "Delete Template...",
+            submenu: templates.map((t, i) => ({
+              label: t.name,
+              onClick: () => {
+                if (confirm(`Delete template "${t.name}"?`)) {
+                  useDAWStore.getState().deleteTemplate(i);
+                }
+              },
+            })),
+          },
+        ];
+      })(),
       dividerAfter: true,
     },
     {
       label: "Close Project",
-      shortcut: "Ctrl+F4",
+      shortcut: shortcut("file.closeProject", "Ctrl+F4"),
       onClick: () => {
         const state = useDAWStore.getState();
         if (state.isModified) {
@@ -165,12 +304,12 @@ export function MenuBar() {
     },
     {
       label: "Project Settings...",
-      shortcut: "Alt+Enter",
+      shortcut: shortcut("file.projectSettings", "Alt+Enter"),
       onClick: openProjectSettings,
     },
     {
       label: "Render...",
-      shortcut: "Ctrl+Alt+R",
+      shortcut: shortcut("file.render", "Ctrl+Alt+R"),
       onClick: openRenderModal,
     },
     {
@@ -208,17 +347,25 @@ export function MenuBar() {
     },
     {
       label: "Open Project (Safe Mode)...",
-      shortcut: "Ctrl+Shift+O",
+      shortcut: shortcut("file.openSafeMode", "Ctrl+Shift+O"),
       onClick: () => {
         useDAWStore.getState().loadProject(undefined, { bypassFX: true }).then((success) => {
           if (success) console.log("Project loaded in Safe Mode (FX bypassed)");
         });
       },
+    },
+    {
+      label: "Archive Session...",
+      onClick: () => { useDAWStore.getState().archiveSession(); },
+    },
+    {
+      label: "Media Pool",
+      onClick: () => useDAWStore.getState().toggleMediaPool(),
       dividerAfter: true,
     },
     {
       label: "Quit",
-      shortcut: "Ctrl+Q",
+      shortcut: shortcut("file.quit", "Ctrl+Q"),
       onClick: () => {
         nativeBridge.closeWindow();
       },
@@ -229,7 +376,7 @@ export function MenuBar() {
   const viewMenuItems: MenuItemProps[] = [
     {
       label: "Show Mixer",
-      shortcut: "Ctrl+M",
+      shortcut: shortcut("view.toggleMixer", "Ctrl+M"),
       onClick: toggleMixer,
       checked: showMixer,
     },
@@ -240,13 +387,13 @@ export function MenuBar() {
     },
     {
       label: "Show Virtual MIDI Keyboard",
-      shortcut: "Alt+B",
+      shortcut: shortcut("view.toggleVirtualKeyboard", "Alt+B"),
       onClick: toggleVirtualKeyboard,
       checked: showVirtualKeyboard,
     },
     {
       label: "Undo History",
-      shortcut: "Ctrl+Alt+Z",
+      shortcut: shortcut("view.toggleUndoHistory", "Ctrl+Alt+Z"),
       onClick: toggleUndoHistory,
       checked: showUndoHistory,
     },
@@ -257,7 +404,7 @@ export function MenuBar() {
     },
     {
       label: "Clip Properties",
-      shortcut: "F2",
+      shortcut: shortcut("view.clipProperties", "F2"),
       onClick: () => useDAWStore.getState().toggleClipProperties(),
       checked: useDAWStore.getState().showClipProperties,
     },
@@ -282,6 +429,16 @@ export function MenuBar() {
       checked: useDAWStore.getState().showMediaExplorer,
     },
     {
+      label: "Crosshair Cursor",
+      onClick: () => useDAWStore.getState().toggleCrosshair(),
+      checked: useDAWStore.getState().showCrosshair,
+    },
+    {
+      label: "Clip Launcher (Session View)",
+      onClick: () => useDAWStore.getState().toggleClipLauncher(),
+      checked: useDAWStore.getState().showClipLauncher,
+    },
+    {
       label: "Free Item Positioning",
       onClick: () => useDAWStore.getState().toggleFreePositioning(),
       checked: useDAWStore.getState().freePositioning,
@@ -299,6 +456,19 @@ export function MenuBar() {
     {
       label: "Toolbar Editor...",
       onClick: () => useDAWStore.getState().toggleToolbarEditor(),
+    },
+    {
+      label: "Metering",
+      submenu: [
+        {
+          label: "Loudness Meter (LUFS)",
+          onClick: () => useDAWStore.getState().toggleLoudnessMeter(),
+        },
+        {
+          label: "Phase Correlation",
+          onClick: () => useDAWStore.getState().togglePhaseCorrelation(),
+        },
+      ],
     },
     {
       label: "Toolbars",
@@ -319,7 +489,7 @@ export function MenuBar() {
     },
     {
       label: "Render...",
-      shortcut: "Ctrl+Alt+R",
+      shortcut: shortcut("file.render", "Ctrl+Alt+R"),
       onClick: openRenderModal,
     },
     {
@@ -329,7 +499,7 @@ export function MenuBar() {
     },
     {
       label: "Zoom In",
-      shortcut: "Ctrl++",
+      shortcut: shortcut("view.zoomIn", "Ctrl++"),
       onClick: () => {
         const { pixelsPerSecond, setZoom } = useDAWStore.getState();
         setZoom(Math.min(pixelsPerSecond * 1.5, 500));
@@ -337,7 +507,7 @@ export function MenuBar() {
     },
     {
       label: "Zoom Out",
-      shortcut: "Ctrl+-",
+      shortcut: shortcut("view.zoomOut", "Ctrl+-"),
       onClick: () => {
         const { pixelsPerSecond, setZoom } = useDAWStore.getState();
         setZoom(Math.max(pixelsPerSecond / 1.5, 10));
@@ -345,7 +515,7 @@ export function MenuBar() {
     },
     {
       label: "Zoom to Fit",
-      shortcut: "Ctrl+0",
+      shortcut: shortcut("view.zoomToFit", "Ctrl+0"),
       onClick: () => {
         useDAWStore.getState().setZoom(50);
       },
@@ -353,13 +523,13 @@ export function MenuBar() {
     },
     {
       label: "Loop Enabled",
-      shortcut: "L",
+      shortcut: shortcut("transport.loop", "L"),
       onClick: () => useDAWStore.getState().toggleLoop(),
       checked: useDAWStore.getState().transport.loopEnabled,
     },
     {
       label: "Set Loop to Selection",
-      shortcut: "Ctrl+L",
+      shortcut: shortcut("view.setLoopToSelection", "Ctrl+L"),
       onClick: () => {
         const { setLoopToSelection, timeSelection } = useDAWStore.getState();
         if (timeSelection) {
@@ -386,22 +556,22 @@ export function MenuBar() {
       submenu: [
         {
           label: "Save Screenset 1",
-          shortcut: "Ctrl+Shift+1",
+          shortcut: shortcut("view.saveScreenset1", "Ctrl+Shift+1"),
           onClick: () => useDAWStore.getState().saveScreenset(0),
         },
         {
           label: "Save Screenset 2",
-          shortcut: "Ctrl+Shift+2",
+          shortcut: shortcut("view.saveScreenset2", "Ctrl+Shift+2"),
           onClick: () => useDAWStore.getState().saveScreenset(1),
         },
         {
           label: "Save Screenset 3",
-          shortcut: "Ctrl+Shift+3",
+          shortcut: shortcut("view.saveScreenset3", "Ctrl+Shift+3"),
           onClick: () => useDAWStore.getState().saveScreenset(2),
         },
         {
           label: "Load Screenset 1",
-          shortcut: "Ctrl+1",
+          shortcut: shortcut("view.loadScreenset1", "Ctrl+1"),
           onClick: () => useDAWStore.getState().loadScreenset(0),
         },
       ],
@@ -462,7 +632,7 @@ export function MenuBar() {
   const insertMenuItems: MenuItemProps[] = [
     {
       label: "Media file...",
-      shortcut: "Insert",
+      shortcut: shortcut("insert.mediaFile", "Insert"),
       onClick: async () => {
         const { selectedTrackIds, tracks, transport, importMedia } =
           useDAWStore.getState();
@@ -498,7 +668,7 @@ export function MenuBar() {
     },
     {
       label: "New Audio Track",
-      shortcut: "Ctrl+T",
+      shortcut: shortcut("insert.audioTrack", "Ctrl+T"),
       onClick: () => {
         const { addTrack, tracks } = useDAWStore.getState();
         addTrack({
@@ -510,7 +680,7 @@ export function MenuBar() {
     },
     {
       label: "New MIDI Track",
-      shortcut: "Ctrl+Shift+T",
+      shortcut: shortcut("insert.midiTrack", "Ctrl+Shift+T"),
       onClick: () => {
         const { addTrack, tracks } = useDAWStore.getState();
         addTrack({
@@ -536,6 +706,21 @@ export function MenuBar() {
         openPluginBrowser(trackId);
       },
       dividerAfter: true,
+    },
+    {
+      label: "New Bus/Group Track",
+      onClick: () => {
+        const { addTrack, tracks } = useDAWStore.getState();
+        addTrack({
+          id: crypto.randomUUID(),
+          name: `Bus ${tracks.filter((t: any) => t.type === "bus").length + 1}`,
+          type: "bus",
+        });
+      },
+    },
+    {
+      label: "Create Bus from Selected Tracks",
+      onClick: () => useDAWStore.getState().createBusFromSelectedTracks(),
     },
     {
       label: "Insert Multiple Tracks...",
@@ -592,7 +777,7 @@ export function MenuBar() {
     },
     {
       label: "Marker at Playhead",
-      shortcut: "M",
+      shortcut: shortcut("insert.marker", "M"),
       onClick: () => {
         const { addMarker, transport } = useDAWStore.getState();
         addMarker(transport.currentTime);
@@ -600,7 +785,7 @@ export function MenuBar() {
     },
     {
       label: "Marker with name...",
-      shortcut: "Shift+M",
+      shortcut: shortcut("insert.markerNamed", "Shift+M"),
       onClick: () => {
         const { addMarker, transport } = useDAWStore.getState();
         const name = prompt("Enter marker name:");
@@ -611,7 +796,7 @@ export function MenuBar() {
     },
     {
       label: "Region from selection",
-      shortcut: "Shift+R",
+      shortcut: shortcut("insert.regionFromSelection", "Shift+R"),
       onClick: () => {
         const { addRegion, timeSelection } = useDAWStore.getState();
         if (timeSelection) {
@@ -729,8 +914,12 @@ export function MenuBar() {
       dividerAfter: true,
     },
     {
+      label: "Timecode / Sync Settings...",
+      onClick: () => useDAWStore.getState().toggleTimecodeSettings(),
+    },
+    {
       label: "Preferences...",
-      shortcut: "Ctrl+,",
+      shortcut: shortcut("options.preferences", "Ctrl+,"),
       onClick: () => useDAWStore.getState().togglePreferences(),
     },
   ];
@@ -738,27 +927,43 @@ export function MenuBar() {
   // Help menu
   const helpMenuItems: MenuItemProps[] = [
     {
+      label: "Getting Started Guide",
+      onClick: () => useDAWStore.getState().toggleGettingStarted(),
+    },
+    {
+      label: "Help Reference",
+      shortcut: shortcut("help.contextualHelp", "F1"),
+      onClick: () => useDAWStore.getState().toggleContextualHelp(),
+      dividerAfter: true,
+    },
+    {
       label: "Keyboard Shortcuts",
-      shortcut: "F1",
       onClick: () => useDAWStore.getState().toggleKeyboardShortcuts(),
     },
     {
-      label: "About Studio13",
+      label: "Check for Updates...",
       onClick: () => {
-        alert(
-          "Studio13 v3\n\n" +
+        void handleCheckForUpdates();
+      },
+    },
+    {
+      label: "Command Palette",
+      shortcut: shortcut("view.commandPalette", "Ctrl+Shift+P"),
+      onClick: () => useDAWStore.getState().toggleCommandPalette(),
+      dividerAfter: true,
+    },
+    {
+      label: "About OpenStudio",
+      onClick: () => {
+        void handleAbout();
+        /*
+          "OpenStudio\n\n" +
           "A hybrid DAW with JUCE C++ backend and React/TypeScript frontend.\n\n" +
           "Built with:\n  JUCE 8.0 — Audio engine, VST3 hosting\n" +
           "  React — User interface\n  Konva — Timeline canvas\n  Zustand — State management\n\n" +
           "github.com/studio13"
-        );
+        */
       },
-      dividerAfter: true,
-    },
-    {
-      label: "Command Palette",
-      shortcut: "Ctrl+Shift+P",
-      onClick: () => useDAWStore.getState().toggleCommandPalette(),
     },
   ];
 
@@ -769,8 +974,8 @@ export function MenuBar() {
       onDoubleClick={handleDoubleClick}
     >
       {/* App icon + Menus (no-drag so clicks work normally) */}
-      <div className="flex items-center shrink-0" data-no-drag>
-        <img src="/icon.svg" alt="Studio13" className="w-4 h-4 mx-2" />
+      <div className="flex items-center shrink-0" data-no-drag role="menubar" aria-label="Main menu">
+        <img src="./icon.svg" alt="OpenStudio" className="w-4 h-4 mx-2" />
         <MenuDropdown label="File" items={fileMenuItems} />
         <EditMenu />
         <MenuDropdown label="View" items={viewMenuItems} />
@@ -783,11 +988,12 @@ export function MenuBar() {
       <div className="flex-1 min-w-0" />
 
       {/* Window controls */}
-      <div className="flex items-center shrink-0 h-full" data-no-drag>
+      <div className="flex items-center shrink-0 h-full" data-no-drag role="group" aria-label="Window controls">
         <button
           onClick={handleMinimize}
           className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
           title="Minimize"
+          aria-label="Minimize window"
         >
           <Minus size={14} />
         </button>
@@ -795,6 +1001,7 @@ export function MenuBar() {
           onClick={handleMaximize}
           className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
           title={isMaximized ? "Restore" : "Maximize"}
+          aria-label={isMaximized ? "Restore window" : "Maximize window"}
         >
           {isMaximized ? <Copy size={12} /> : <Square size={12} />}
         </button>
@@ -802,6 +1009,7 @@ export function MenuBar() {
           onClick={handleClose}
           className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-red-600 hover:text-white transition-colors"
           title="Close"
+          aria-label="Close window"
         >
           <X size={14} />
         </button>

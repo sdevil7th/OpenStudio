@@ -19,7 +19,7 @@ interface PlayheadProps {
  */
 export function Playhead({
   pixelsPerSecond,
-  scrollX,
+  scrollX: _scrollX,
   stageHeight,
   viewportWidth,
   type,

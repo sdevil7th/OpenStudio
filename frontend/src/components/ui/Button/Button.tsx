@@ -111,6 +111,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         onClick={handleClick}
         title={title}
         type="button"
+        aria-pressed={active ? true : undefined}
         {...rest}
       >
         {loading ? (

@@ -3,12 +3,13 @@
 #include <JuceHeader.h>
 #include <memory>
 #include <map>
+#include <set>
 #include <functional>
 
 /**
  * PeakCache — REAPER-inspired multi-resolution peak file system.
  *
- * Generates `.s13peaks` sidecar files alongside audio files containing
+ * Generates `.ospeaks` sidecar files alongside audio files containing
  * pre-computed min/max peak data at multiple resolution levels (mipmaps).
  * This eliminates the need to read audio files for waveform display —
  * scrolling and zooming are instant regardless of file length.
@@ -31,8 +32,11 @@ public:
      *
      * Returns an empty array if no cache exists yet (call generateAsync first).
      */
+    /** startSample: first sample of the audio file to include (0 = from beginning).
+     *  This enables viewport-based fetching — only return peaks for the visible window. */
     juce::var getPeaks(const juce::File& audioFile,
                        int samplesPerPixel,
+                       int startSample,
                        int numPixels) const;
 
     /** Check if a valid, up-to-date cache exists for this audio file. */
@@ -61,7 +65,7 @@ private:
     static constexpr uint32_t MAGIC = 0x53313350;  // "S13P"
     static constexpr uint32_t VERSION = 1;
 
-    // File header structure (written to .s13peaks)
+    // File header structure (written to .ospeaks)
     struct PeakFileHeader
     {
         uint32_t magic;
@@ -93,13 +97,14 @@ private:
         std::vector<MipmapLevel> levels;
     };
 
-    // Get the .s13peaks file path for an audio file
+    // Get the .ospeaks file path for an audio file
     static juce::File getPeakFilePath(const juce::File& audioFile);
+    static juce::File getLegacyPeakFilePath(const juce::File& audioFile);
 
-    // Load peak data from a .s13peaks file into memory
+    // Load peak data from a peak cache file into memory
     bool loadFromFile(const juce::File& peakFile, const juce::File& audioFile, CacheEntry& entry) const;
 
-    // Write peak data to a .s13peaks file
+    // Write peak data to a peak cache file
     static bool writeToFile(const juce::File& peakFile, const CacheEntry& entry,
                             int64_t sourceFileSize, int64_t sourceModTimeMs);
 
@@ -110,8 +115,12 @@ private:
     mutable std::map<juce::String, CacheEntry> memoryCache;
     mutable juce::CriticalSection cacheLock;
 
-    // Background thread for peak generation
-    juce::ThreadPool backgroundPool { 1 };
+    // Track files currently being generated to prevent duplicate jobs
+    std::set<juce::String> pendingGenerations;
+    juce::CriticalSection pendingLock;
+
+    // Background thread pool for concurrent peak generation
+    juce::ThreadPool backgroundPool { juce::jmax(2, juce::SystemStats::getNumCpus() / 2) };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeakCache)
 };

@@ -1,0 +1,100 @@
+# OpenStudio Release Runbook
+
+## What this repo now provides
+
+- Windows installer packaging via `packaging/windows/OpenStudio.iss`
+- macOS DMG packaging via `tools/package-macos-release.sh`
+- Release metadata generation via `tools/generate-release-metadata.ps1`
+- Release metadata validation via `tools/validate-release-metadata.ps1`
+- Published release validation via `tools/validate-published-release.ps1`
+- Runtime bundle validation via `tools/validate-runtime-bundle.ps1`
+- Netlify updater bundle preparation via `tools/prepare-netlify-release-site.ps1`
+- A tag-driven GitHub Actions workflow in `.github/workflows/release.yml`
+- A release QA checklist in `docs/release-smoke-checklist.md`
+
+## Local Windows release flow
+
+If you want one command for the full guarded Windows path, use:
+`./tools/run-release-preflight.ps1 -Version 1.0.0 -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -RepoSlug <org>/<repo>`
+
+1. Build the frontend: `cd frontend && npm ci && npm run build`
+2. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
+3. Build the release target: `cmake --build build-release-windows --config Release --target OpenStudio`
+4. Validate the runtime bundle: `./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath build-release-windows/OpenStudio_artefacts/Release -ExpectedVersion 1.0.0 -EnforceLeanBundle`
+5. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
+   Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
+6. Generate updater metadata:
+   `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe`
+   Optional appcast fields: `-FullReleaseNotesUrl https://openstudio.org.in/releases/1.0.0 -WindowsInstallerArguments "/SP- /NOICONS"`
+7. Validate the generated metadata:
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe`
+8. Prepare the Netlify bundle for updater/download endpoints:
+   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo>`
+9. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
+
+## Local macOS release flow
+
+If you want one command for the guarded macOS path, use:
+`./tools/run-macos-release-preflight.ps1 -Version 1.0.0 -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -RepoSlug <org>/<repo>`
+
+1. Build the frontend: `cd frontend && npm ci && npm run build`
+2. Configure and build the release target with CMake in a clean directory, for example: `cmake -S . -B build-release-macos -DOPENSTUDIO_APP_VERSION="1.0.0" -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
+3. Validate the app bundle: `./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath build-release-macos/<path-to-OpenStudio.app> -ExpectedVersion 1.0.0 -EnforceLeanBundle`
+4. Package the DMG:
+   `./tools/package-macos-release.sh build-release-macos/<path-to-OpenStudio.app> 1.0.0`
+   If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign` and `spctl`. If notarization credentials are present, it also staples and validates the notarized DMG.
+   For the zero-cost v1 path, leave those signing variables unset and ship the unsigned DMG with manual Gatekeeper override instructions on the download page.
+5. Generate updater metadata with the DMG path and URL included.
+   For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 13.0`.
+6. Validate the generated metadata:
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg`
+7. Prepare the Netlify bundle for updater/download endpoints:
+   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo>`
+
+## Netlify files to publish
+
+Upload the generated contents of `dist/netlify-release-site/` to the Netlify project that serves OpenStudio updater/download endpoints.
+
+If `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` are configured in GitHub Actions, the publish job can now deploy that updater bundle to Netlify automatically.
+If you prefer Doppler as the source of truth, add `DOPPLER_TOKEN` to GitHub Actions and the workflow will pull missing release secrets from Doppler before build and publish steps run.
+
+After the GitHub Release and Netlify deploy complete, you can also verify the live endpoints with:
+`./tools/validate-published-release.ps1 -MetadataDir dist/release-metadata -Channel stable -ReleaseSiteUrl https://openstudio.org.in -ValidateRedirects`
+
+The Windows installer now also registers `.osproj` as the primary project extension and keeps `.s13` associated for legacy project open support.
+The default base app no longer bundles the optional stem-separation Python runtime; users install AI Tools later from inside OpenStudio when they need stem separation.
+
+That bundle contains:
+
+- `releases/latest.json`
+- `releases/stable/latest.json`
+- `appcast/windows-stable.xml`
+- `appcast/macos-stable.xml`
+- `OpenStudio-checksums.txt`
+- `_headers`
+- `_redirects`
+- `netlify.toml`
+
+## Secrets expected by GitHub Actions
+
+For the zero-cost v1 release path, only `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` are required. If you want Doppler-backed secret loading, add `DOPPLER_TOKEN` as the single bootstrap secret in GitHub Actions. The signing/notarization secrets below stay optional unless you decide to enable trusted distribution later.
+
+- `MACOS_CODESIGN_IDENTITY`
+- `MACOS_CERTIFICATE_BASE64`
+- `MACOS_CERTIFICATE_PASSWORD`
+- `MACOS_KEYCHAIN_PASSWORD`
+- `APPLE_ID`
+- `APPLE_TEAM_ID`
+- `APPLE_APP_PASSWORD`
+- `WINDOWS_CODESIGN_CERT_BASE64`
+- `WINDOWS_CODESIGN_CERT_PASSWORD`
+- `WINDOWS_CODESIGN_CERT_THUMBPRINT`
+- `WINDOWS_TIMESTAMP_URL`
+- `NETLIFY_AUTH_TOKEN`
+- `NETLIFY_SITE_ID`
+- `DOPPLER_TOKEN`
+
+Optional future additions:
+
+- Sparkle/WinSparkle-specific signature generation
+- Beta channel metadata publishing alongside the stable channel

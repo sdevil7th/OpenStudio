@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Undo2, Redo2, Play } from "lucide-react";
 import { commandManager, Command } from "../store/commands";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 
 /**
@@ -11,7 +12,12 @@ import { Button } from "./ui";
 export function UndoHistoryPanel() {
   const [undoStack, setUndoStack] = useState<Command[]>([]);
   const [redoStack, setRedoStack] = useState<Command[]>([]);
-  const { canUndo, canRedo, undo, redo } = useDAWStore();
+  const { canUndo, canRedo, undo, redo } = useDAWStore(useShallow((s) => ({
+    canUndo: s.canUndo,
+    canRedo: s.canRedo,
+    undo: s.undo,
+    redo: s.redo,
+  })));
 
   // Subscribe to command manager changes
   useEffect(() => {

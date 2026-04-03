@@ -27,12 +27,12 @@ export class ErrorBoundary extends React.Component<
     if (this.state.hasError) {
       return (
         <div className="h-screen w-screen flex flex-col bg-daw-dark text-white">
-          {/* Title bar with window controls — always accessible */}
+          {/* Title bar with window controls - always accessible */}
           <div
             className="flex items-center justify-between h-9 bg-neutral-900 border-b border-neutral-700 shrink-0 select-none"
             style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
           >
-            <div className="px-3 text-xs text-neutral-400">Studio13 — Error</div>
+            <div className="px-3 text-xs text-neutral-400">OpenStudio - Error</div>
             <div
               className="flex items-center h-full"
               style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}

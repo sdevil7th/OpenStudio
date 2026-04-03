@@ -52,6 +52,8 @@ private:
         std::atomic<juce::int64> samplesWritten { 0 };  // Total samples written
         int numChannels = 2;  // Number of channels being recorded
         double sampleRate = 44100.0;
+        int debugLoggedBlocks = 0;
+        int debugWriteLockMissCount = 0;
 
         // Incremental peak table for live waveform display.
         //

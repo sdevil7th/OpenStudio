@@ -1,5 +1,32 @@
 #include "AudioRecorder.h"
 
+namespace
+{
+#if JUCE_DEBUG
+constexpr bool kAudioRecordDebugLogs = true;
+#else
+constexpr bool kAudioRecordDebugLogs = false;
+#endif
+
+static void logAudioRecord(const juce::String& message)
+{
+    if (kAudioRecordDebugLogs)
+        juce::Logger::writeToLog("[audio.record] " + message);
+}
+
+static float peakFromBuffer(const juce::AudioBuffer<float>& buffer, int numSamples)
+{
+    float peak = 0.0f;
+    const int channels = buffer.getNumChannels();
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        auto range = juce::FloatVectorOperations::findMinAndMax(buffer.getReadPointer(ch), numSamples);
+        peak = juce::jmax(peak, juce::jmax(std::abs(range.getStart()), std::abs(range.getEnd())));
+    }
+    return peak;
+}
+}
+
 AudioRecorder::AudioRecorder()
 {
     // Start the background I/O thread for ThreadedWriter
@@ -14,6 +41,10 @@ AudioRecorder::~AudioRecorder()
 
 bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File& file, double sampleRate, int numChannels)
 {
+    logAudioRecord("startRecording track=" + trackId
+        + " file=" + file.getFullPathName()
+        + " sampleRate=" + juce::String(sampleRate, 2)
+        + " channels=" + juce::String(numChannels));
     // Stop any existing recording for this track (brief lock)
     {
         const juce::ScopedLock sl(writerLock);
@@ -89,6 +120,8 @@ bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File
 
     juce::Logger::writeToLog("AudioRecorder: Started recording track " + trackId +
                            " to " + file.getFullPathName());
+    logAudioRecord("startRecording success track=" + trackId
+        + " file=" + file.getFullPathName());
     return true;
 }
 
@@ -99,18 +132,33 @@ void AudioRecorder::writeBlock(const juce::String& trackId, const juce::AudioBuf
     // This is extremely rare and inaudible
     const juce::ScopedTryLock sl(writerLock);
     if (!sl.isLocked())
+    {
+        static std::atomic<int> globalLockMissLogCounter { 0 };
+        const int lockMiss = ++globalLockMissLogCounter;
+        if ((lockMiss % 20) == 1)
+            logAudioRecord("writeBlock lock miss track=" + trackId + " count=" + juce::String(lockMiss));
         return;
+    }
 
     auto it = activeRecordings.find(trackId);
     if (it == activeRecordings.end() || !it->second.isActive.load() || !it->second.threadedWriter)
         return;
 
     auto& state = it->second;
+    const float inputPeak = peakFromBuffer(buffer, numSamples);
 
     // ThreadedWriter::write() is audio-thread safe (lock-free ring buffer internally)
     // It copies data immediately, so buffer pointers don't need to remain valid
     state.threadedWriter->write(buffer.getArrayOfReadPointers(), numSamples);
     state.samplesWritten.fetch_add(numSamples);
+    if (state.debugLoggedBlocks < 5)
+    {
+        ++state.debugLoggedBlocks;
+        logAudioRecord("writeBlock track=" + trackId
+            + " numSamples=" + juce::String(numSamples)
+            + " inputPeak=" + juce::String(inputPeak, 4)
+            + " cumulativeSamples=" + juce::String(static_cast<juce::int64>(state.samplesWritten.load())));
+    }
 
     // Incremental peak accumulation for live waveform display.
     // Cheaper than the old interleaved-copy path: only min/max comparisons,
@@ -218,6 +266,12 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
                 clip.startTime = state.startTime;
                 clip.duration  = state.samplesWritten.load() / currentSampleRate;
                 completedClips.push_back(clip);
+                logAudioRecord("stopAllRecordings pending track=" + trackId
+                    + " file=" + state.outputFile.getFullPathName()
+                    + " startTime=" + juce::String(state.startTime, 3)
+                    + " samplesWritten=" + juce::String(static_cast<juce::int64>(state.samplesWritten.load()))
+                    + " duration=" + juce::String(clip.duration, 3)
+                    + (clip.duration <= 0.0 ? " WARNING_zero_duration" : ""));
 
                 writersToFlush.push_back(std::move(state.threadedWriter));
             }
@@ -234,6 +288,7 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
 
     juce::Logger::writeToLog("AudioRecorder: Stopped all recordings. Completed " +
                              juce::String(completedClips.size()) + " clips.");
+    logAudioRecord("stopAllRecordings completed clipCount=" + juce::String(static_cast<int>(completedClips.size())));
 
     return completedClips;
 }
@@ -266,11 +321,17 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
         return peakData;
 
     // Each table entry covers PEAK_STRIDE samples.
-    // Map the requested samplesPerPixel to a number of entries per pixel.
+    // Use floating-point sample positions to correctly map pixels to peak entries,
+    // avoiding integer division truncation that caused waveform stretching.
+    // Previously, entriesPerPixel = samplesPerPixel / stride (integer division)
+    // would truncate e.g. 441/256 = 1 instead of 1.72, causing each pixel to read
+    // only one entry and covering just 58% of the actual recording at 100 pps.
     const int stride = ActiveRecording::PEAK_STRIDE;
-    const int entriesPerPixel = std::max(1, samplesPerPixel / stride);
-    const int actualPeaks = std::min(numPixels,
-                                     static_cast<int>(tableSize / static_cast<size_t>(entriesPerPixel)));
+
+    // Calculate how many complete pixels the peak table data can cover
+    const double totalSamplesCovered = static_cast<double>(tableSize) * stride;
+    const int maxPixelsFromData = static_cast<int>(totalSamplesCovered / samplesPerPixel);
+    const int actualPeaks = std::min(numPixels, maxPixelsFromData);
 
     if (actualPeaks <= 0)
         return peakData;
@@ -280,17 +341,19 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
 
     for (int pixel = 0; pixel < actualPeaks; ++pixel)
     {
-        const size_t startEntry = static_cast<size_t>(pixel * entriesPerPixel);
-        const int entriesToRead = std::min(entriesPerPixel,
-                                           static_cast<int>(tableSize - startEntry));
+        // Map pixel range to sample range, then to peak table entry range
+        const double pixelStartSample = pixel * static_cast<double>(samplesPerPixel);
+        const double pixelEndSample = pixelStartSample + samplesPerPixel;
+        const size_t firstEntry = static_cast<size_t>(pixelStartSample / stride);
+        const size_t lastEntry = std::min(static_cast<size_t>(pixelEndSample / stride) + 1,
+                                          tableSize);
 
         for (int ch = 0; ch < numChannels; ++ch)
         {
             float minVal = 0.0f, maxVal = 0.0f;
-            for (int e = 0; e < entriesToRead; ++e)
+            for (size_t e = firstEntry; e < lastEntry; ++e)
             {
-                const float* entry = tablePtr + (startEntry + static_cast<size_t>(e))
-                                                * static_cast<size_t>(numChannels * 2);
+                const float* entry = tablePtr + e * static_cast<size_t>(numChannels * 2);
                 const float eMin = entry[ch * 2];
                 const float eMax = entry[ch * 2 + 1];
                 if (eMin < minVal) minVal = eMin;

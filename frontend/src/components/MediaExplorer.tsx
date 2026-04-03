@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/shallow";
 import { Button, Input } from "./ui";
 
 interface FileEntry {
@@ -54,7 +55,12 @@ export function MediaExplorer({ isVisible, onClose }: MediaExplorerProps) {
     setMediaExplorerPath,
     mediaExplorerRecentPaths,
     addMediaExplorerRecentPath,
-  } = useDAWStore();
+  } = useDAWStore(useShallow((s) => ({
+    mediaExplorerPath: s.mediaExplorerPath,
+    setMediaExplorerPath: s.setMediaExplorerPath,
+    mediaExplorerRecentPaths: s.mediaExplorerRecentPaths,
+    addMediaExplorerRecentPath: s.addMediaExplorerRecentPath,
+  })));
 
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);

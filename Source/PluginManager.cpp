@@ -1,26 +1,58 @@
 #include "PluginManager.h"
+#include "S13FXProcessor.h"
+#include "CLAPPluginFormat.h"
+
+namespace
+{
+juce::File getOpenStudioDocumentsDirectory()
+{
+    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return documentsDir.getChildFile("OpenStudio");
+}
+
+juce::File getLegacyStudio13DocumentsDirectory()
+{
+    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return documentsDir.getChildFile("Studio13");
+}
+}
 
 PluginManager::PluginManager()
 {
-    // Add default formats (VST3, AU, etc.)
+    // Add default formats (VST3, LV2, AU, etc.)
     formatManager.addDefaultFormats();
-    
+
+    // Add CLAP hosting (not built into JUCE — custom format)
+    formatManager.addFormat(new CLAPPluginFormat());
+
     // Debug: Log how many formats were added
-    juce::Logger::writeToLog("PluginManager: Constructor - formatManager has " + 
+    juce::Logger::writeToLog("PluginManager: Constructor - formatManager has " +
                            juce::String(formatManager.getNumFormats()) + " formats");
-    
+
     for (int i = 0; i < formatManager.getNumFormats(); ++i)
     {
         auto* format = formatManager.getFormat(i);
         juce::Logger::writeToLog("PluginManager: Format " + juce::String(i) + ": " + format->getName());
     }
-    
-    // Get plugin list file location (Documents/Studio13/PluginList.xml)
-    pluginListFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("PluginList.xml");
-    
+
+    pluginListFile = getOpenStudioDocumentsDirectory().getChildFile("PluginList.xml");
+    auto legacyPluginListFile = getLegacyStudio13DocumentsDirectory().getChildFile("PluginList.xml");
+    if (!pluginListFile.existsAsFile() && legacyPluginListFile.existsAsFile())
+        pluginListFile = legacyPluginListFile;
+
+    blacklistFile = getOpenStudioDocumentsDirectory().getChildFile("PluginBlacklist.txt");
+    auto legacyBlacklistFile = getLegacyStudio13DocumentsDirectory().getChildFile("PluginBlacklist.txt");
+    if (!blacklistFile.existsAsFile() && legacyBlacklistFile.existsAsFile())
+        blacklistFile = legacyBlacklistFile;
+
+    if (blacklistFile.existsAsFile())
+        blacklistFile.readLines(blacklistedPlugins);
+
     // Load existing plugin list if available
     loadPluginList();
+
+    // Ensure user effects directory exists
+    getUserEffectsDirectory().createDirectory();
 }
 
 PluginManager::~PluginManager()
@@ -31,8 +63,8 @@ PluginManager::~PluginManager()
 void PluginManager::scanForPlugins()
 {
     // Create debug log file
-    juce::File debugLog = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("Studio13").getChildFile("plugin_scan_debug.txt");
+    juce::File debugLog = getOpenStudioDocumentsDirectory().getChildFile("plugin_scan_debug.txt");
+    debugLog.getParentDirectory().createDirectory();
     debugLog.deleteFile();
     debugLog.create();
     
@@ -56,7 +88,7 @@ void PluginManager::scanForPlugins()
         // Get default plugin search paths for this format
         juce::FileSearchPath searchPaths = format->getDefaultLocationsToSearch();
         
-        // Add additional common VST3 locations manually
+        // Add additional common plugin locations manually
         if (format->getName().contains("VST3"))
         {
             // Common VST3 locations on Windows
@@ -65,6 +97,22 @@ void PluginManager::scanForPlugins()
             searchPaths.add(juce::File("C:\\Program Files\\VSTPlugins"));
             searchPaths.add(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
                            .getChildFile("VST3"));
+        }
+        else if (format->getName().contains("LV2"))
+        {
+            // Common LV2 locations on Windows
+            searchPaths.add(juce::File("C:\\Program Files\\Common Files\\LV2"));
+            searchPaths.add(juce::File("C:\\Program Files\\LV2"));
+            searchPaths.add(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                           .getChildFile("LV2"));
+            // User home .lv2
+            searchPaths.add(juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                           .getChildFile(".lv2"));
+        }
+        else if (format->getName() == "CLAP")
+        {
+            // Common CLAP locations on Windows
+            searchPaths.add(juce::File("C:\\Program Files\\Common Files\\CLAP"));
         }
         
         writeLog("PluginManager: Search paths: " + searchPaths.toString());
@@ -82,8 +130,8 @@ void PluginManager::scanForPlugins()
                 
                 // List files in this directory
                 juce::Array<juce::File> files;
-                path.findChildFiles(files, juce::File::findFiles, true, "*.vst3");
-                writeLog("PluginManager: Found " + juce::String(files.size()) + " .vst3 files in this path");
+                path.findChildFiles(files, juce::File::findFilesAndDirectories, true, "*.vst3;*.lv2");
+                writeLog("PluginManager: Found " + juce::String(files.size()) + " plugin files in this path");
             }
         }
         
@@ -120,11 +168,14 @@ void PluginManager::scanForPlugins()
     }
     
     writeLog("PluginManager: ========================================");
-    writeLog("PluginManager: SCAN COMPLETE. Total plugins found: " + 
+    writeLog("PluginManager: SCAN COMPLETE. Total plugins found: " +
                            juce::String(knownPluginList.getNumTypes()));
     writeLog("PluginManager: ========================================");
     writeLog("PluginManager: Debug log saved to: " + debugLog.getFullPathName());
     savePluginList();
+
+    // Also scan for S13FX/JSFX scripts
+    scanForS13FX();
 }
 
 juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
@@ -142,6 +193,13 @@ juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
 std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::PluginDescription& description,
                                                                double sampleRate, int blockSize)
 {
+    // Refuse to load blacklisted plugins (previously crashed)
+    if (isPluginBlacklisted(description.fileOrIdentifier))
+    {
+        juce::Logger::writeToLog("PluginManager: Refusing to load blacklisted plugin: " + description.name);
+        return nullptr;
+    }
+
     juce::String errorMessage;
 
     // Clamp block size to at least 512 — ASIO buffers can be as small as 32 samples,
@@ -196,10 +254,12 @@ std::unique_ptr<juce::AudioProcessor> PluginManager::loadPluginFromFile(const ju
 
     // 3. Direct scan — try to load from the file path directly
     juce::File pluginFile(filePath);
-    // Walk up to find the .vst3 bundle directory if we have an inner path
+    // Walk up to find the plugin bundle directory if we have an inner path
     juce::File bundleFile = pluginFile;
     while (bundleFile.getParentDirectory() != bundleFile &&
-           bundleFile.getFileExtension() != ".vst3")
+           bundleFile.getFileExtension() != ".vst3" &&
+           bundleFile.getFileExtension() != ".lv2" &&
+           bundleFile.getFileExtension() != ".clap")
     {
         bundleFile = bundleFile.getParentDirectory();
     }
@@ -246,7 +306,7 @@ void PluginManager::loadPluginList()
         if (auto xml = juce::parseXML(pluginListFile))
         {
             knownPluginList.recreateFromXml(*xml);
-            juce::Logger::writeToLog("PluginManager: Loaded " + juce::String(knownPluginList.getNumTypes()) + 
+            juce::Logger::writeToLog("PluginManager: Loaded " + juce::String(knownPluginList.getNumTypes()) +
                                    " plugins from " + pluginListFile.getFullPathName());
         }
     }
@@ -254,4 +314,140 @@ void PluginManager::loadPluginList()
     {
         juce::Logger::writeToLog("PluginManager: No existing plugin list found");
     }
+}
+
+// ---- S13FX / JSFX scanning ----
+
+juce::File PluginManager::getUserEffectsDirectory()
+{
+    auto openStudioDir = getOpenStudioDocumentsDirectory().getChildFile("Effects");
+    auto legacyDir = getLegacyStudio13DocumentsDirectory().getChildFile("Effects");
+
+    if (!openStudioDir.isDirectory() && legacyDir.isDirectory())
+        return legacyDir;
+
+    return openStudioDir;
+}
+
+juce::File PluginManager::getStockEffectsDirectory()
+{
+    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+        .getParentDirectory();
+
+   #if JUCE_MAC
+    auto bundleResources = exeDir.getParentDirectory().getChildFile("Resources").getChildFile("effects");
+    if (bundleResources.isDirectory())
+        return bundleResources;
+   #endif
+
+    return exeDir.getChildFile("effects");
+}
+
+void PluginManager::scanForS13FX()
+{
+    s13fxList.clear();
+
+    // Scan stock effects (bundled with app)
+    auto stockDir = getStockEffectsDirectory();
+    if (stockDir.isDirectory())
+        scanDirectory(stockDir, true);
+
+    // Scan user effects
+    auto userDir = getUserEffectsDirectory();
+    if (userDir.isDirectory())
+        scanDirectory(userDir, false);
+
+    juce::Logger::writeToLog("PluginManager: Found " + juce::String(s13fxList.size()) + " S13FX/JSFX scripts");
+}
+
+void PluginManager::scanDirectory(const juce::File& dir, bool isStock)
+{
+    juce::Array<juce::File> files;
+    dir.findChildFiles(files, juce::File::findFiles, true, "*.jsfx;*.s13fx");
+
+    for (const auto& file : files)
+    {
+        S13FXInfo info;
+        info.filePath = file.getFullPathName();
+        info.isStock = isStock;
+
+        // Try to extract metadata by loading the script header (first 50 lines)
+        juce::StringArray lines;
+        file.readLines(lines);
+
+        info.name = file.getFileNameWithoutExtension();
+
+        for (int i = 0; i < juce::jmin(lines.size(), 50); ++i)
+        {
+            auto line = lines[i].trim();
+
+            if (line.startsWith("desc:"))
+                info.name = line.fromFirstOccurrenceOf("desc:", false, false).trim();
+            else if (line.startsWith("author:"))
+                info.author = line.fromFirstOccurrenceOf("author:", false, false).trim();
+            else if (line.startsWith("tags:"))
+            {
+                auto tagStr = line.fromFirstOccurrenceOf("tags:", false, false).trim();
+                info.tags.addTokens(tagStr, " ", "");
+            }
+        }
+
+        s13fxList.push_back(std::move(info));
+        juce::Logger::writeToLog("PluginManager: Found S13FX: " + info.name +
+                                 (isStock ? " (stock)" : " (user)"));
+    }
+}
+
+// ---- Plugin crash isolation (blacklist) ----
+
+bool PluginManager::isPluginBlacklisted(const juce::String& pluginId) const
+{
+    return blacklistedPlugins.contains(pluginId);
+}
+
+void PluginManager::blacklistPlugin(const juce::String& pluginId)
+{
+    if (!blacklistedPlugins.contains(pluginId))
+    {
+        blacklistedPlugins.add(pluginId);
+        blacklistFile.getParentDirectory().createDirectory();
+        blacklistFile.replaceWithText(blacklistedPlugins.joinIntoString("\n"));
+        juce::Logger::writeToLog("PluginManager: Blacklisted plugin: " + pluginId);
+    }
+}
+
+void PluginManager::removeFromBlacklist(const juce::String& pluginId)
+{
+    int idx = blacklistedPlugins.indexOf(pluginId);
+    if (idx >= 0)
+    {
+        blacklistedPlugins.remove(idx);
+        blacklistFile.replaceWithText(blacklistedPlugins.joinIntoString("\n"));
+        juce::Logger::writeToLog("PluginManager: Removed from blacklist: " + pluginId);
+    }
+}
+
+juce::StringArray PluginManager::getBlacklistedPlugins() const
+{
+    return blacklistedPlugins;
+}
+
+bool PluginManager::isARAPlugin(const juce::PluginDescription& description) const
+{
+    // ARA plugins are VST3 or AU plugins that expose an ARA factory.
+    // We detect this by loading the plugin and checking for ARA support.
+    // For efficiency, we check the description's hasARAExtension flag
+    // (available since JUCE 7 for scanned plugins).
+    return description.hasARAExtension;
+}
+
+juce::Array<juce::PluginDescription> PluginManager::getARAPlugins() const
+{
+    juce::Array<juce::PluginDescription> araPlugins;
+    for (const auto& desc : knownPluginList.getTypes())
+    {
+        if (desc.hasARAExtension)
+            araPlugins.add(desc);
+    }
+    return araPlugins;
 }

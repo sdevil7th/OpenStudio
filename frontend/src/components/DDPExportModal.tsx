@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
+import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { Modal, Button } from "./ui";
 
@@ -9,18 +10,31 @@ interface DDPExportModalProps {
 }
 
 export function DDPExportModal({ isOpen, onClose }: DDPExportModalProps) {
-  const regions = useDAWStore((s) => s.regions);
+  const { regions } = useDAWStore(useShallow((s) => ({
+    regions: s.regions,
+  })));
   const [isExporting, setIsExporting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [sourceWav, setSourceWav] = useState("");
+  const [catalogNumber, setCatalogNumber] = useState("");
+
+  const handleSelectSource = async () => {
+    const path = await nativeBridge.showOpenDialog("Select Red Book WAV (44.1kHz/16-bit)");
+    if (path) setSourceWav(path);
+  };
 
   const handleExport = async () => {
-    const dir = await nativeBridge.showSaveDialog("Select DDP Output Directory", "ddp");
+    if (!sourceWav) {
+      setResult("Please select a source WAV file first.");
+      return;
+    }
+    const dir = await nativeBridge.showSaveDialog(undefined, "Select DDP Output Directory");
     if (!dir) return;
 
     setIsExporting(true);
     setResult(null);
     try {
-      const success = await useDAWStore.getState().exportDDP(dir);
+      const success = await useDAWStore.getState().exportDDP(sourceWav, dir, catalogNumber || undefined);
       setResult(success ? "DDP export completed successfully!" : "DDP export failed.");
     } catch {
       setResult("DDP export failed with an error.");
@@ -41,6 +55,32 @@ export function DDPExportModal({ isOpen, onClose }: DDPExportModalProps) {
         <div className="text-[10px] text-neutral-400">
           Export a DDP (Disc Description Protocol) image for CD replication.
           Regions in your project are used as CD track markers.
+        </div>
+
+        {/* Source WAV selection */}
+        <div className="bg-neutral-800 rounded border border-neutral-700 p-2">
+          <div className="text-[9px] text-neutral-500 uppercase mb-1">Source WAV (Red Book: 44.1kHz / 16-bit / Stereo)</div>
+          <div className="flex items-center gap-2">
+            <div className="text-[10px] text-neutral-300 flex-1 truncate font-mono">
+              {sourceWav || "No file selected"}
+            </div>
+            <Button variant="default" size="sm" onClick={handleSelectSource}>
+              Browse...
+            </Button>
+          </div>
+        </div>
+
+        {/* Catalog number */}
+        <div className="bg-neutral-800 rounded border border-neutral-700 p-2">
+          <div className="text-[9px] text-neutral-500 uppercase mb-1">UPC/EAN Catalog Number (optional)</div>
+          <input
+            type="text"
+            className="w-full bg-neutral-900 border border-neutral-600 rounded px-2 py-1 text-[10px] text-neutral-300 font-mono"
+            placeholder="e.g. 0123456789012"
+            maxLength={13}
+            value={catalogNumber}
+            onChange={(e) => setCatalogNumber(e.target.value)}
+          />
         </div>
 
         {/* Region summary */}
