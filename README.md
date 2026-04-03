@@ -221,7 +221,7 @@ sequenceDiagram
 - Multi-track audio recording with thread-safe `ThreadedWriter`
 - Sample-rate-aware clip playback with linear interpolation
 - Per-track **Input FX chain** + **Track FX chain** + **Master FX chain**
-- REAPER-inspired **multi-resolution peak cache** (`.ospeaks` sidecar files, with legacy `.s13peaks` support)
+- PRO DAW-inspired **multi-resolution peak cache** (`.ospeaks` sidecar files, with legacy `.s13peaks` support)
 - Offline render/export to WAV, AIFF, FLAC at 16/24/32-bit
 
 ### Plugin Hosting
@@ -253,7 +253,7 @@ sequenceDiagram
 - Clip launcher (Ableton-style grid)
 - Full undo/redo via CommandManager for all data-modifying actions
 - Command palette (`Ctrl+Shift+P`), keyboard shortcuts modal, action registry
-- REAPER theme import/export (`.ReaperTheme` → `.ostheme`, with legacy `.s13theme` import support)
+- PRO DAW theme import/export (`.PRO DAWTheme` → `.ostheme`, with legacy `.s13theme` import support)
 
 ---
 
@@ -268,7 +268,7 @@ sequenceDiagram
 | Stereo Tool | Volume, pan, stereo width |
 | Crusher | Bit-depth and sample-rate reduction |
 | Pitch Corrector | Real-time key/scale-aware auto-tune |
-| JSFX Processor | REAPER-compatible JSFX / Lua scripts |
+| JSFX Processor | PRO DAW-compatible JSFX / Lua scripts |
 
 ---
 
@@ -374,10 +374,10 @@ repo-root/
 - [x] Signalsmith Stretch pitch engine (formant-preserving, native stereo)
 - [x] Real-time auto-tune pitch corrector
 - [x] Polyphonic pitch detection (Basic-Pitch ONNX)
-- [x] REAPER-style multi-resolution peak cache
+- [x] PRO DAW-style multi-resolution peak cache
 - [x] Optional AI stem separation install flow
 - [x] JSFX / Lua `@gfx` rendering
-- [x] REAPER theme import/export
+- [x] PRO DAW theme import/export
 - [x] Offline render (WAV / AIFF / FLAC, 16/24/32-bit)
 - [x] Clip launcher (Ableton-style grid)
 - [x] Automation lanes
