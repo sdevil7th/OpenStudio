@@ -117,22 +117,25 @@ jobs:
       - name: Package Windows installer
         shell: pwsh
         run: |
-          $arguments = @("-Version", $env:VERSION, "-SourceDir", "$env:BUILD_DIR/OpenStudio_artefacts/Release")
+          $arguments = @{
+            Version = $env:VERSION
+            SourceDir = "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          }
 
           if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PATH)) {
-            $arguments += @("-CertificateFile", $env:WINDOWS_CODESIGN_CERT_PATH)
+            $arguments.CertificateFile = $env:WINDOWS_CODESIGN_CERT_PATH
           }
 
           if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PASSWORD)) {
-            $arguments += @("-CertificatePassword", $env:WINDOWS_CODESIGN_CERT_PASSWORD)
+            $arguments.CertificatePassword = $env:WINDOWS_CODESIGN_CERT_PASSWORD
           }
 
           if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_THUMBPRINT)) {
-            $arguments += @("-CertificateThumbprint", $env:WINDOWS_CODESIGN_CERT_THUMBPRINT)
+            $arguments.CertificateThumbprint = $env:WINDOWS_CODESIGN_CERT_THUMBPRINT
           }
 
           if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
-            $arguments += @("-TimestampUrl", $env:WINDOWS_TIMESTAMP_URL)
+            $arguments.TimestampUrl = $env:WINDOWS_TIMESTAMP_URL
           }
 
           ./tools/package-windows-release.ps1 @arguments
