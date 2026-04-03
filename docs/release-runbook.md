@@ -12,6 +12,23 @@
 - A tag-driven GitHub Actions workflow in `.github/workflows/release.yml`
 - A release QA checklist in `docs/release-smoke-checklist.md`
 
+## Preferred public release path
+
+For normal public releases, do not draft a GitHub release manually and do not upload installer assets by hand.
+
+Use this flow instead:
+
+1. Push the release-ready commit(s) to GitHub.
+2. Push a version tag like `v0.0.2`.
+3. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and optionally deploy the Netlify updater bundle.
+4. Verify the published direct-download URLs:
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
+
+The stable filenames are part of the public download contract. The website, metadata, appcasts, and updater flow all assume those exact names.
+
+If a release page shows only GitHub's default source archives, treat that as a failed or bypassed automation run. Fix the workflow run or rerun the tag-based release path instead of changing website filenames.
+
 ## Local Windows release flow
 
 If you want one command for the full guarded Windows path, use:
@@ -60,6 +77,17 @@ If you prefer Doppler as the source of truth, add `DOPPLER_TOKEN` to GitHub Acti
 
 After the GitHub Release and Netlify deploy complete, you can also verify the live endpoints with:
 `./tools/validate-published-release.ps1 -MetadataDir dist/release-metadata -Channel stable -ReleaseSiteUrl https://openstudio.org.in -ValidateRedirects`
+
+## Manual fallback
+
+Use `tools/prepare-public-release.ps1` only when GitHub Actions is unavailable or you need an emergency manual release bundle.
+
+That script is a fallback path for staging:
+- GitHub release assets
+- release metadata
+- Netlify updater bundle
+
+It is not the preferred day-to-day release flow now that the tag-driven GitHub workflow is the source of truth.
 
 The Windows installer now also registers `.osproj` as the primary project extension and keeps `.s13` associated for legacy project open support.
 The default base app no longer bundles the optional stem-separation Python runtime; users install AI Tools later from inside OpenStudio when they need stem separation.

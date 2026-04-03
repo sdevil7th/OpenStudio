@@ -124,10 +124,25 @@ jobs:
 
           ./tools/package-windows-release.ps1 @arguments
 
+      - name: Verify Windows release outputs
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe",
+            "dist/windows/OpenStudio-Setup-x64.exe"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required Windows release file missing: $file"
+            }
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
           path: dist/windows/OpenStudio-Setup-x64.exe
+          if-no-files-found: error
 
   build-macos:
     runs-on: macos-latest
@@ -234,6 +249,11 @@ jobs:
           fi
           ./tools/package-macos-release.sh "$APP_PATH" "$VERSION"
 
+      - name: Verify macOS release outputs
+        shell: bash
+        run: |
+          test -f "dist/macos/OpenStudio-macOS.dmg"
+
       - name: Clean up macOS signing keychain
         if: always() && env.KEYCHAIN_PATH != ''
         shell: bash
@@ -243,6 +263,7 @@ jobs:
         with:
           name: macos-release
           path: dist/macos/OpenStudio-macOS.dmg
+          if-no-files-found: error
 
   publish:
     runs-on: ubuntu-latest
@@ -298,6 +319,20 @@ jobs:
           name: macos-release
           path: dist/macos
 
+      - name: Verify downloaded release assets
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            "dist/windows/OpenStudio-Setup-x64.exe",
+            "dist/macos/OpenStudio-macOS.dmg"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required downloaded release asset missing: $file"
+            }
+          }
+
       - name: Generate checksums and updater metadata
         shell: pwsh
         run: |
@@ -339,6 +374,7 @@ jobs:
         with:
           name: netlify-release-site
           path: dist/netlify-release-site
+          if-no-files-found: error
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -346,6 +382,8 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', github.event.inputs.version) }}
           name: OpenStudio ${{ env.VERSION }}
           body_path: ${{ env.RELEASE_NOTES_FILE }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
           files: |
             dist/windows/OpenStudio-Setup-x64.exe
             dist/macos/OpenStudio-macOS.dmg
