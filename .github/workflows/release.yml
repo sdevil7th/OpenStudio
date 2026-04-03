@@ -20,6 +20,7 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       BUILD_DIR: build-release-windows
+      ONNXRUNTIME_VERSION: 1.24.4
       RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
@@ -68,6 +69,11 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup -y --no-progress
+
+      - name: Install optional ONNX Runtime
+        if: vars.OPENSTUDIO_SETUP_ONNXRUNTIME == 'true'
+        shell: pwsh
+        run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION
 
       - name: Configure CMake
         shell: pwsh

@@ -56,9 +56,33 @@ get-pip.py
 *.keychain
 *.keychain-db
 
-# Third-party SDKs & runtime binaries (downloaded per-machine)
+# Vendored ARA SDK (kept lean even if someone syncs a full upstream checkout)
+/thirdparty/ARA_SDK/ARA_Examples/
+/thirdparty/ARA_SDK/.git/
+/thirdparty/ARA_SDK/.gitignore
+/thirdparty/ARA_SDK/.gitmodules
+/thirdparty/ARA_SDK/install_*.cmake
+/thirdparty/ARA_SDK/ARA_API/.git
+/thirdparty/ARA_SDK/ARA_API/.gitignore
+/thirdparty/ARA_SDK/ARA_API/ARA_API.pdf
+/thirdparty/ARA_SDK/ARA_API/ARA_API_Helpers.cmake
+/thirdparty/ARA_SDK/ARA_API/ARA_Version.cmake
+/thirdparty/ARA_SDK/ARA_API/CMakeLists.txt
+/thirdparty/ARA_SDK/ARA_API/ChangeLog.txt
+/thirdparty/ARA_SDK/ARA_API/README.md
+/thirdparty/ARA_SDK/ARA_Library/.git
+/thirdparty/ARA_SDK/ARA_Library/.gitignore
+/thirdparty/ARA_SDK/ARA_Library/ARA_Library.html
+/thirdparty/ARA_SDK/ARA_Library/ARA_Library.ruleset
+/thirdparty/ARA_SDK/ARA_Library/CMakeLists.txt
+/thirdparty/ARA_SDK/ARA_Library/ChangeLog.txt
+/thirdparty/ARA_SDK/ARA_Library/README.md
+/thirdparty/ARA_SDK/ARA_Library/html_docs/
+
+# Third-party runtime binaries (downloaded per-machine)
 /thirdparty/onnxruntime/
-/thirdparty/ARA_SDK/
+/thirdparty/onnxruntime-*.zip
+/thirdparty/onnxruntime-*.tgz
 
 # ML models (large binary files, downloaded at setup/runtime)
 /resources/models/*.onnx

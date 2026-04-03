@@ -54,6 +54,14 @@ python build.py prod
 
 ---
 
+
+## Simple release trigger
+```bash
+git push origin main
+git tag v0.0.2
+git push origin v0.0.2
+```
+
 ## Comparison with REAPER
 
 | Feature | Studio13 (Hybrid) | REAPER (Native) |

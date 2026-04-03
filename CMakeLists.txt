@@ -5,6 +5,7 @@ set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled in
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
 option(OPENSTUDIO_BUNDLE_STEM_RUNTIME "Bundle the optional stem-separation runtime into app outputs" OFF)
+option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
 
 # Some third-party dependencies still expect CMAKE_BUILD_TYPE to exist even
 # under multi-config generators like Visual Studio. Seed a harmless default
@@ -110,7 +111,14 @@ if(EXISTS "${ARA_SDK_ROOT}/ARA_API/ARAInterface.h")
     message(STATUS "ARA SDK found at ${ARA_SDK_ROOT}")
 else()
     set(HAS_ARA OFF)
-    message(STATUS "ARA SDK not found — ARA plugin hosting disabled")
+    if(OPENSTUDIO_REQUIRE_ARA)
+        message(FATAL_ERROR
+            "ARA SDK not found at ${ARA_SDK_ROOT}. "
+            "ARA support is required for this build. "
+            "Clone or place the ARA SDK at thirdparty/ARA_SDK before configuring.")
+    else()
+        message(WARNING "ARA SDK not found — ARA plugin hosting disabled")
+    endif()
 endif()
 
 # Define the JUCE application
