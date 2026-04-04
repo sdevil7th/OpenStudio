@@ -241,29 +241,24 @@ bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
     return modelsDir.isDirectory() && modelsDir.getChildFile(kStemModelName).existsAsFile();
 }
 
-StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus() const
+StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File& python,
+                                                                const juce::File& script,
+                                                                const juce::File& installerScript,
+                                                                const juce::File& modelsDir,
+                                                                bool runtimeInstalled) const
 {
-    auto status = lastAiToolsStatus;
-    const auto python = findPython();
-    const auto script = findScript();
+    auto status = getCachedAiToolsStatusSnapshot();
 
     status.pythonDetected = python.existsAsFile();
     status.scriptAvailable = script.existsAsFile();
+    status.installerAvailable = installerScript.existsAsFile();
+    status.runtimeInstalled = runtimeInstalled;
+    status.modelInstalled = hasRequiredModel(modelsDir);
     status.helpUrl = kPythonHelpUrl;
-    status.installInProgress = installProcess && installProcess->isRunning();
 
     if (status.installInProgress)
-    {
-        if (status.state.isEmpty() || status.state == "idle")
-            status.state = "installing";
-        if (status.message.isEmpty())
-            status.message = "Installing AI tools...";
         return status;
-    }
 
-    const auto modelsDir = findModelsDir();
-    status.runtimeInstalled = status.pythonDetected && canImportAudioSeparator(python);
-    status.modelInstalled = hasRequiredModel(modelsDir);
     status.available = status.scriptAvailable && status.runtimeInstalled && status.modelInstalled;
 
     if (status.available)
@@ -271,8 +266,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus() const
         status.state = "ready";
         status.progress = 1.0f;
         status.error.clear();
-        if (status.message.isEmpty())
-            status.message = "AI tools are ready.";
+        status.message = "AI tools are ready.";
         return status;
     }
 
@@ -285,13 +279,12 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus() const
         return status;
     }
 
-    if (! status.scriptAvailable)
+    if (! status.installerAvailable)
     {
         status.state = "error";
         status.progress = 0.0f;
         status.message = "The AI tools installer is unavailable in this build.";
-        if (status.error.isEmpty())
-            status.error = "AI tools installer script not found.";
+        status.error = "AI tools installer script not found.";
         return status;
     }
 
@@ -311,12 +304,102 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus() const
     return status;
 }
 
+StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
+{
+    AiToolsStatus status;
+    status.helpUrl = kPythonHelpUrl;
+    status.state = "checking";
+    status.progress = 0.0f;
+    status.available = false;
+    status.pythonDetected = false;
+    status.scriptAvailable = findScript().existsAsFile();
+    status.installerAvailable = findInstallerScript().existsAsFile();
+    status.runtimeInstalled = false;
+    status.modelInstalled = hasRequiredModel(findModelsDir());
+    status.installInProgress = installProcess && installProcess->isRunning();
+    status.message = status.installInProgress ? "Installing AI tools..." : "Checking AI tools...";
+    status.error.clear();
+    return status;
+}
+
+void StemSeparator::updateCachedAiToolsStatus (const std::function<void (AiToolsStatus&)>& updater)
+{
+    const juce::ScopedLock lock (aiToolsStatusLock);
+    updater (lastAiToolsStatus);
+}
+
+StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() const
+{
+    const juce::ScopedLock lock (aiToolsStatusLock);
+    auto status = lastAiToolsStatus;
+    status.installInProgress = installProcess && installProcess->isRunning();
+
+    if (status.installInProgress)
+    {
+        status.available = false;
+
+        if (status.state.isEmpty() || status.state == "idle")
+            status.state = "installing";
+
+        if (status.message.isEmpty())
+            status.message = "Installing AI tools...";
+    }
+
+    status.helpUrl = kPythonHelpUrl;
+    return status;
+}
+
+void StemSeparator::scheduleStatusRefresh()
+{
+    bool shouldLaunch = false;
+
+    {
+        const juce::ScopedLock lock (aiToolsStatusLock);
+
+        if (installProcess && installProcess->isRunning())
+            return;
+
+        if (! initialStatusPrepared)
+        {
+            lastAiToolsStatus = buildInitialAiToolsStatus();
+            initialStatusPrepared = true;
+        }
+
+        if (! statusRefreshInFlight)
+        {
+            statusRefreshInFlight = true;
+            shouldLaunch = true;
+        }
+    }
+
+    if (! shouldLaunch)
+        return;
+
+    std::thread ([this]
+    {
+        auto python = findPython();
+        auto script = findScript();
+        auto installerScript = findInstallerScript();
+        auto modelsDir = findModelsDir();
+        const auto runtimeInstalled = python.existsAsFile() && canImportAudioSeparator (python);
+        auto refreshedStatus = buildAiToolsStatus (python, script, installerScript, modelsDir, runtimeInstalled);
+
+        {
+            const juce::ScopedLock lock (aiToolsStatusLock);
+            lastAiToolsStatus = refreshedStatus;
+            statusRefreshInFlight = false;
+            initialStatusPrepared = true;
+        }
+    }).detach();
+}
+
 juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
 {
     auto obj = std::make_unique<juce::DynamicObject>();
     obj->setProperty("state", status.state);
     obj->setProperty("progress", static_cast<double>(status.progress));
     obj->setProperty("available", status.available);
+    obj->setProperty("installerAvailable", status.installerAvailable);
     obj->setProperty("pythonDetected", status.pythonDetected);
     obj->setProperty("scriptAvailable", status.scriptAvailable);
     obj->setProperty("runtimeInstalled", status.runtimeInstalled);
@@ -331,128 +414,155 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
 juce::var StemSeparator::getAiToolsStatus()
 {
     pollInstallProgress();
-    lastAiToolsStatus = buildAiToolsStatus();
-    return aiToolsStatusToVar(lastAiToolsStatus);
+
+    {
+        const juce::ScopedLock lock (aiToolsStatusLock);
+        if (! initialStatusPrepared)
+        {
+            lastAiToolsStatus = buildInitialAiToolsStatus();
+            initialStatusPrepared = true;
+        }
+    }
+
+    return aiToolsStatusToVar(getCachedAiToolsStatusSnapshot());
+}
+
+juce::var StemSeparator::refreshAiToolsStatus()
+{
+    pollInstallProgress();
+    scheduleStatusRefresh();
+    return aiToolsStatusToVar(getCachedAiToolsStatusSnapshot());
 }
 
 juce::var StemSeparator::installAiTools()
 {
     pollInstallProgress();
-    lastAiToolsStatus = buildAiToolsStatus();
+    scheduleStatusRefresh();
+
+    auto cachedStatus = getCachedAiToolsStatusSnapshot();
 
     auto result = std::make_unique<juce::DynamicObject>();
-    if (lastAiToolsStatus.available)
+    if (cachedStatus.available)
     {
         result->setProperty("started", false);
         result->setProperty("message", "AI tools are already installed.");
-        result->setProperty("status", aiToolsStatusToVar(lastAiToolsStatus));
+        result->setProperty("status", aiToolsStatusToVar(cachedStatus));
         return juce::var(result.release());
     }
 
-    if (installProcess && installProcess->isRunning())
+    if (cachedStatus.installInProgress)
     {
         result->setProperty("started", false);
         result->setProperty("error", "AI tools installation is already running.");
-        result->setProperty("status", aiToolsStatusToVar(lastAiToolsStatus));
+        result->setProperty("status", aiToolsStatusToVar(cachedStatus));
         return juce::var(result.release());
     }
 
-    const auto systemPython = findSystemPython();
-    if (! systemPython.existsAsFile())
+    updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
     {
-        lastAiToolsStatus.state = "pythonMissing";
-        lastAiToolsStatus.progress = 0.0f;
-        lastAiToolsStatus.available = false;
-        lastAiToolsStatus.pythonDetected = false;
-        lastAiToolsStatus.runtimeInstalled = false;
-        lastAiToolsStatus.modelInstalled = false;
-        lastAiToolsStatus.installInProgress = false;
-        lastAiToolsStatus.message = "Python 3.10 or newer is required to install AI Tools.";
-        lastAiToolsStatus.error.clear();
-        lastAiToolsStatus.helpUrl = kPythonHelpUrl;
+        status.state = "checking";
+        status.progress = 0.0f;
+        status.available = false;
+        status.installInProgress = true;
+        status.message = "Preparing AI tools installation...";
+        status.error.clear();
+        status.helpUrl = kPythonHelpUrl;
+    });
 
-        result->setProperty("started", false);
-        result->setProperty("error", lastAiToolsStatus.message);
-        result->setProperty("status", aiToolsStatusToVar(lastAiToolsStatus));
-        return juce::var(result.release());
-    }
-
-    const auto installerScript = findInstallerScript();
-    if (! installerScript.existsAsFile())
+    std::thread ([this]
     {
-        lastAiToolsStatus.state = "error";
-        lastAiToolsStatus.progress = 0.0f;
-        lastAiToolsStatus.available = false;
-        lastAiToolsStatus.installInProgress = false;
-        lastAiToolsStatus.message = "The AI tools installer is unavailable in this build.";
-        lastAiToolsStatus.error = "AI tools installer script not found.";
-        lastAiToolsStatus.helpUrl = kPythonHelpUrl;
+        const auto systemPython = findSystemPython();
+        if (! systemPython.existsAsFile())
+        {
+            updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
+            {
+                status.state = "pythonMissing";
+                status.progress = 0.0f;
+                status.available = false;
+                status.pythonDetected = false;
+                status.runtimeInstalled = false;
+                status.modelInstalled = false;
+                status.installInProgress = false;
+                status.message = "Python 3.10 or newer is required to install AI Tools.";
+                status.error.clear();
+                status.helpUrl = kPythonHelpUrl;
+            });
+            return;
+        }
 
-        result->setProperty("started", false);
-        result->setProperty("error", lastAiToolsStatus.error);
-        result->setProperty("status", aiToolsStatusToVar(lastAiToolsStatus));
-        return juce::var(result.release());
-    }
+        const auto installerScript = findInstallerScript();
+        if (! installerScript.existsAsFile())
+        {
+            updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
+            {
+                status.state = "error";
+                status.progress = 0.0f;
+                status.available = false;
+                status.installerAvailable = false;
+                status.installInProgress = false;
+                status.message = "The AI tools installer is unavailable in this build.";
+                status.error = "AI tools installer script not found.";
+                status.helpUrl = kPythonHelpUrl;
+            });
+            return;
+        }
 
-    const auto runtimeRoot = getUserRuntimeRoot();
-    const auto modelsDir = getUserModelsDir();
-    runtimeRoot.createDirectory();
-    modelsDir.createDirectory();
+        const auto runtimeRoot = getUserRuntimeRoot();
+        const auto modelsDir = getUserModelsDir();
+        runtimeRoot.createDirectory();
+        modelsDir.createDirectory();
 
-    const auto cmd = quoteCommandPart(systemPython.getFullPathName())
-        + " " + quoteCommandPart(installerScript.getFullPathName())
-        + " --runtime-root " + quoteCommandPart(runtimeRoot.getFullPathName())
-        + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
-        + " --model " + quoteCommandPart(kStemModelName);
+        const auto cmd = quoteCommandPart(systemPython.getFullPathName())
+            + " " + quoteCommandPart(installerScript.getFullPathName())
+            + " --runtime-root " + quoteCommandPart(runtimeRoot.getFullPathName())
+            + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
+            + " --model " + quoteCommandPart(kStemModelName);
 
-    installOutputBuffer.clear();
-    lastAiToolsStatus.state = "installing";
-    lastAiToolsStatus.progress = 0.0f;
-    lastAiToolsStatus.available = false;
-    lastAiToolsStatus.installInProgress = true;
-    lastAiToolsStatus.message = "Starting AI tools installation...";
-    lastAiToolsStatus.error.clear();
-    lastAiToolsStatus.helpUrl = kPythonHelpUrl;
+        auto nextInstallProcess = std::make_unique<juce::ChildProcess>();
+        if (! nextInstallProcess->start(cmd))
+        {
+            updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
+            {
+                status.state = "error";
+                status.installInProgress = false;
+                status.message = "Failed to start the AI tools installer.";
+                status.error = "Could not start the AI tools installer process.";
+            });
+            return;
+        }
 
-    installProcess = std::make_unique<juce::ChildProcess>();
-    if (! installProcess->start(cmd))
-    {
-        installProcess.reset();
-        lastAiToolsStatus.state = "error";
-        lastAiToolsStatus.installInProgress = false;
-        lastAiToolsStatus.message = "Failed to start the AI tools installer.";
-        lastAiToolsStatus.error = "Could not start the AI tools installer process.";
-
-        result->setProperty("started", false);
-        result->setProperty("error", lastAiToolsStatus.error);
-        result->setProperty("status", aiToolsStatusToVar(lastAiToolsStatus));
-        return juce::var(result.release());
-    }
+        {
+            const juce::ScopedLock lock (aiToolsStatusLock);
+            installOutputBuffer.clear();
+            installProcess = std::move(nextInstallProcess);
+            lastAiToolsStatus.state = "installing";
+            lastAiToolsStatus.progress = 0.0f;
+            lastAiToolsStatus.available = false;
+            lastAiToolsStatus.installInProgress = true;
+            lastAiToolsStatus.pythonDetected = true;
+            lastAiToolsStatus.installerAvailable = true;
+            lastAiToolsStatus.message = "Starting AI tools installation...";
+            lastAiToolsStatus.error.clear();
+            lastAiToolsStatus.helpUrl = kPythonHelpUrl;
+        }
+    }).detach();
 
     result->setProperty("started", true);
-    result->setProperty("status", aiToolsStatusToVar(lastAiToolsStatus));
+    result->setProperty("status", aiToolsStatusToVar(getCachedAiToolsStatusSnapshot()));
     return juce::var(result.release());
 }
 
 void StemSeparator::pollInstallProgress()
 {
-    if (! installProcess)
-        return;
+    bool shouldRefreshAfterExit = false;
 
-    char buffer[4096];
-    while (installProcess->isRunning())
     {
-        auto bytesRead = installProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
-        if (bytesRead <= 0)
-            break;
+        const juce::ScopedLock lock (aiToolsStatusLock);
+        if (! installProcess)
+            return;
 
-        buffer[bytesRead] = '\0';
-        installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
-    }
-
-    if (! installProcess->isRunning())
-    {
-        for (;;)
+        char buffer[4096];
+        while (installProcess->isRunning())
         {
             auto bytesRead = installProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
             if (bytesRead <= 0)
@@ -461,42 +571,64 @@ void StemSeparator::pollInstallProgress()
             buffer[bytesRead] = '\0';
             installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
         }
-    }
 
-    while (installOutputBuffer.contains("\n"))
-    {
-        const auto lineEnd = installOutputBuffer.indexOfChar('\n');
-        const auto line = installOutputBuffer.substring(0, lineEnd).trim();
-        installOutputBuffer = installOutputBuffer.substring(lineEnd + 1);
-
-        if (line.startsWith("{"))
-            lastAiToolsStatus = parseInstallJsonLine(line);
-    }
-
-    if (! installProcess->isRunning())
-    {
-        const auto exitCode = installProcess->getExitCode();
-        if (installOutputBuffer.trim().startsWith("{"))
-            lastAiToolsStatus = parseInstallJsonLine(installOutputBuffer.trim());
-
-        if (exitCode != 0 && lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
+        if (! installProcess->isRunning())
         {
-            lastAiToolsStatus.state = "error";
-            lastAiToolsStatus.progress = 0.0f;
-            lastAiToolsStatus.error = "AI tools installer exited with code " + juce::String(exitCode) + ".";
-            lastAiToolsStatus.message = "AI tools installation failed.";
+            for (;;)
+            {
+                auto bytesRead = installProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
+                if (bytesRead <= 0)
+                    break;
+
+                buffer[bytesRead] = '\0';
+                installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
+            }
         }
 
-        lastAiToolsStatus.installInProgress = false;
-        installProcess.reset();
-        installOutputBuffer.clear();
-        lastAiToolsStatus = buildAiToolsStatus();
+        while (installOutputBuffer.contains("\n"))
+        {
+            const auto lineEnd = installOutputBuffer.indexOfChar('\n');
+            const auto line = installOutputBuffer.substring(0, lineEnd).trim();
+            installOutputBuffer = installOutputBuffer.substring(lineEnd + 1);
+
+            if (line.startsWith("{"))
+                lastAiToolsStatus = parseInstallJsonLine(line);
+        }
+
+        if (! installProcess->isRunning())
+        {
+            const auto exitCode = installProcess->getExitCode();
+            if (installOutputBuffer.trim().startsWith("{"))
+                lastAiToolsStatus = parseInstallJsonLine(installOutputBuffer.trim());
+
+            if (exitCode != 0 && lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
+            {
+                lastAiToolsStatus.state = "error";
+                lastAiToolsStatus.progress = 0.0f;
+                lastAiToolsStatus.error = "AI tools installer exited with code " + juce::String(exitCode) + ".";
+                lastAiToolsStatus.message = "AI tools installation failed.";
+            }
+
+            if (lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
+            {
+                lastAiToolsStatus.state = "checking";
+                lastAiToolsStatus.message = "Verifying AI tools installation...";
+            }
+
+            lastAiToolsStatus.installInProgress = false;
+            installProcess.reset();
+            installOutputBuffer.clear();
+            shouldRefreshAfterExit = true;
+        }
     }
+
+    if (shouldRefreshAfterExit)
+        scheduleStatusRefresh();
 }
 
 StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::String& line) const
 {
-    auto status = lastAiToolsStatus;
+    auto status = getCachedAiToolsStatusSnapshot();
     const auto json = juce::JSON::parse(line);
     if (! json.isObject())
         return status;
@@ -517,7 +649,7 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
 
 bool StemSeparator::isAvailable() const
 {
-    return buildAiToolsStatus().available;
+    return getCachedAiToolsStatusSnapshot().available;
 }
 
 bool StemSeparator::startSeparation(const juce::File& inputFile,
@@ -532,7 +664,7 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
         return false;
     }
 
-    auto status = buildAiToolsStatus();
+    auto status = getCachedAiToolsStatusSnapshot();
     if (! status.available)
     {
         juce::String errorMessage = status.message;
@@ -694,6 +826,7 @@ void StemSeparator::cancel()
 
 void StemSeparator::cancelAiToolsInstall()
 {
+    const juce::ScopedLock lock (aiToolsStatusLock);
     if (installProcess && installProcess->isRunning())
     {
         installProcess->kill();
@@ -701,13 +834,16 @@ void StemSeparator::cancelAiToolsInstall()
     }
     installProcess.reset();
     installOutputBuffer.clear();
-    lastAiToolsStatus.state = "cancelled";
-    lastAiToolsStatus.progress = 0.0f;
-    lastAiToolsStatus.available = false;
-    lastAiToolsStatus.installInProgress = false;
-    lastAiToolsStatus.message = "AI tools installation was cancelled.";
-    lastAiToolsStatus.error.clear();
-    lastAiToolsStatus.helpUrl = kPythonHelpUrl;
+    updateCachedAiToolsStatus ([] (AiToolsStatus& status)
+    {
+        status.state = "cancelled";
+        status.progress = 0.0f;
+        status.available = false;
+        status.installInProgress = false;
+        status.message = "AI tools installation was cancelled.";
+        status.error.clear();
+        status.helpUrl = kPythonHelpUrl;
+    });
 }
 
 bool StemSeparator::isRunning() const

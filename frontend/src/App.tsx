@@ -262,8 +262,48 @@ function App() {
 
   // Subscribe only to isPlaying to avoid re-rendering App on every time update
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
+  const aiToolsStatus = useDAWStore((state) => state.aiToolsStatus);
+  const refreshAiToolsStatus = useDAWStore((state) => state.refreshAiToolsStatus);
+  const showToast = useDAWStore((state) => state.showToast);
+  const previousAiToolsStateRef = useRef(aiToolsStatus.state);
 
   useEffect(() => startMixerUISync(), []);
+
+  useEffect(() => {
+    void refreshAiToolsStatus(true);
+  }, [refreshAiToolsStatus]);
+
+  useEffect(() => {
+    const shouldPollAiToolsStatus =
+      aiToolsStatus.installInProgress || aiToolsStatus.state === "checking";
+
+    if (!shouldPollAiToolsStatus) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshAiToolsStatus();
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [aiToolsStatus.installInProgress, aiToolsStatus.state, refreshAiToolsStatus]);
+
+  useEffect(() => {
+    const previousState = previousAiToolsStateRef.current;
+    const currentState = aiToolsStatus.state;
+
+    if (previousState !== currentState) {
+      if (currentState === "ready") {
+        showToast("AI tools are ready", "success");
+      } else if (currentState === "error" && aiToolsStatus.error) {
+        showToast(aiToolsStatus.error, "error");
+      } else if (currentState === "cancelled") {
+        showToast("AI tools installation cancelled", "info");
+      }
+    }
+
+    previousAiToolsStateRef.current = currentState;
+  }, [aiToolsStatus.error, aiToolsStatus.state, showToast]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.subscribe("mixerWindowClosed", (data) => {

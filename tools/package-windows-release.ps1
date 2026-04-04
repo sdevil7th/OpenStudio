@@ -60,6 +60,25 @@ function Resolve-SignToolPath {
     throw "signtool.exe was not found. Install the Windows SDK or pass -SignToolPath."
 }
 
+function Resolve-InnoSetupCompilerPath {
+    $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $candidatePaths = @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    if ($candidatePaths.Count -gt 0) {
+        return (Resolve-Path ($candidatePaths | Select-Object -First 1)).Path
+    }
+
+    throw "Inno Setup was not found. Install it first, or run 'winget install JRSoftware.InnoSetup'."
+}
+
 function Invoke-SignFile {
     param(
         [string]$FilePath,
@@ -117,8 +136,16 @@ function Assert-AuthenticodeSignature {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$resolvedSourceDir = (Resolve-Path (Join-Path $repoRoot $SourceDir)).Path
-$resolvedOutputDir = Join-Path $repoRoot $OutputDir
+$resolvedSourceDir = if ([System.IO.Path]::IsPathRooted($SourceDir)) {
+    (Resolve-Path $SourceDir).Path
+} else {
+    (Resolve-Path (Join-Path $repoRoot $SourceDir)).Path
+}
+$resolvedOutputDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
+    $OutputDir
+} else {
+    Join-Path $repoRoot $OutputDir
+}
 $issPath = Join-Path $repoRoot "packaging/windows/OpenStudio.iss"
 
 if (-not (Test-Path (Join-Path $resolvedSourceDir "OpenStudio.exe"))) {
@@ -127,19 +154,7 @@ if (-not (Test-Path (Join-Path $resolvedSourceDir "OpenStudio.exe"))) {
 
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 
-$iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-if (-not $iscc) {
-    $defaultIscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-    if (Test-Path $defaultIscc) {
-        $iscc = Get-Item $defaultIscc
-    }
-}
-
-if (-not $iscc) {
-    throw "Inno Setup was not found. Install it first, or run 'choco install innosetup -y'."
-}
-
-$isccPath = if ($iscc -is [System.Management.Automation.CommandInfo]) { $iscc.Source } else { $iscc.FullName }
+$isccPath = Resolve-InnoSetupCompilerPath
 $appExecutablePath = Join-Path $resolvedSourceDir "OpenStudio.exe"
 $installerPath = Join-Path $resolvedOutputDir "OpenStudio-Setup-x64.exe"
 

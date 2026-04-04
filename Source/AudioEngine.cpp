@@ -8925,6 +8925,11 @@ juce::var AudioEngine::getAiToolsStatus()
     return stemSeparator.getAiToolsStatus();
 }
 
+juce::var AudioEngine::refreshAiToolsStatus()
+{
+    return stemSeparator.refreshAiToolsStatus();
+}
+
 juce::var AudioEngine::installAiTools()
 {
     return stemSeparator.installAiTools();

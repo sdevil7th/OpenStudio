@@ -216,6 +216,7 @@ export interface AiToolsStatus {
     | "cancelled";
   progress: number;
   available: boolean;
+  installerAvailable: boolean;
   pythonDetected: boolean;
   scriptAvailable: boolean;
   runtimeInstalled: boolean;
@@ -1009,6 +1010,7 @@ declare global {
         separateStems?: (trackId: string, clipId: string) => Promise<StemSeparationResult>;
         isStemSeparationAvailable?: () => Promise<boolean>;
         getAiToolsStatus?: () => Promise<AiToolsStatus>;
+        refreshAiToolsStatus?: () => Promise<AiToolsStatus>;
         installAiTools?: () => Promise<InstallAiToolsResponse>;
         separateStemsAsync?: (trackId: string, clipId: string, optionsJSON: string) => Promise<{ started: boolean; error?: string; cached?: boolean }>;
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
@@ -1050,6 +1052,8 @@ declare global {
         getMixerWindowState?: () => Promise<MixerWindowState>;
         publishMixerUISnapshot?: (snapshot: any) => Promise<boolean>;
         getMixerUISnapshot?: () => Promise<any>;
+        reportFrontendStartupState?: (state: string, detail?: string) => Promise<boolean>;
+        getStartupDiagnostics?: () => Promise<any>;
 
         // Event system
         addEventListener?: (
@@ -4092,6 +4096,7 @@ class NativeBridge {
       state: "runtimeMissing",
       progress: 0,
       available: false,
+      installerAvailable: false,
       pythonDetected: false,
       scriptAvailable: false,
       runtimeInstalled: false,
@@ -4100,6 +4105,14 @@ class NativeBridge {
       message: "AI tools are unavailable in the web preview.",
       helpUrl: "https://www.python.org/downloads/",
     };
+  }
+
+  async refreshAiToolsStatus(): Promise<AiToolsStatus> {
+    if (this.isNative && window.__JUCE__?.backend.refreshAiToolsStatus) {
+      return await window.__JUCE__.backend.refreshAiToolsStatus();
+    }
+
+    return this.getAiToolsStatus();
   }
 
   async installAiTools(): Promise<InstallAiToolsResponse> {

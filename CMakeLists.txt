@@ -421,6 +421,8 @@ function(openstudio_copy_runtime_directory source destination_relative_path copy
         add_custom_command(TARGET OpenStudio POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory
                 "${OPENSTUDIO_RUNTIME_ASSET_ROOT}"
+            COMMAND ${CMAKE_COMMAND} -E remove_directory
+                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_relative_path}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${source}"
                 "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_relative_path}"

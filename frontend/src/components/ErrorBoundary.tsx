@@ -7,7 +7,7 @@ interface ErrorBoundaryState {
 }
 
 export class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
+  { children: React.ReactNode; onError?: (error: Error, info: React.ErrorInfo) => void },
   ErrorBoundaryState
 > {
   constructor(props: { children: React.ReactNode }) {
@@ -21,6 +21,7 @@ export class ErrorBoundary extends React.Component<
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error("[ErrorBoundary] Caught render error:", error, info.componentStack);
+    this.props.onError?.(error, info);
   }
 
   render() {

@@ -5,7 +5,17 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vitejs.dev/config/
 export default defineConfig({
   base: './',
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    {
+      name: 'remove-crossorigin-from-production-html',
+      apply: 'build',
+      transformIndexHtml(html: string) {
+        return html.replace(/\s+crossorigin(?=[\s>])/g, '');
+      },
+    },
+  ],
   server: {
     port: 5173,
     strictPort: true,

@@ -465,6 +465,7 @@ public:
     juce::var separateStems(const juce::String& trackId, const juce::String& clipId);
     bool isStemSeparationAvailable() const;
     juce::var getAiToolsStatus();
+    juce::var refreshAiToolsStatus();
     juce::var installAiTools();
     juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
     juce::var getStemSeparationProgress();

@@ -13,10 +13,26 @@ class MainComponent  : public juce::Component,
                        public juce::Timer
 {
 public:
+    enum class StartupMode
+    {
+        normal,
+        safe
+    };
+
     enum class WindowRole
     {
         main,
         mixer
+    };
+
+    enum class FrontendStartupState
+    {
+        idle,
+        navigationStarted,
+        bootStarted,
+        ready,
+        failed,
+        timedOut
     };
 
     struct WindowCallbacks
@@ -32,6 +48,7 @@ public:
     //==============================================================================
     MainComponent(AudioEngine& audioEngineIn,
                   AppUpdater& appUpdaterIn,
+                  StartupMode startupModeIn,
                   WindowRole roleIn,
                   WindowCallbacks callbacksIn = {});
     ~MainComponent() override;
@@ -53,14 +70,24 @@ private:
     void startDesktopWindowDrag();
     void emitFrontendEvent(const juce::String& eventId, const juce::var& payload = {});
     bool isMainWindow() const;
+    void beginFrontendStartupWatchdog(const juce::String& targetUrl);
+    void showStartupOverlay(const juce::String& title, const juce::String& detail);
+    void hideStartupOverlay();
+    void markFrontendStartupReady(const juce::String& detail);
+    void markFrontendStartupFailed(const juce::String& detail);
+    void showStartupFallback(const juce::String& title, const juce::String& detail);
+    juce::var buildStartupDiagnostics() const;
 
     //==============================================================================
     // Your private member variables go here...
     AudioEngine& audioEngine;
     AppUpdater& appUpdater;
+    StartupMode startupMode = StartupMode::normal;
     WindowRole windowRole = WindowRole::main;
     WindowCallbacks windowCallbacks;
+    juce::File webuiDir;
     juce::WebBrowserComponent webView;
+    juce::Label startupStatusMessage;
     juce::Label fallbackMessage;
     std::unique_ptr<juce::FileChooser> fileChooser;  // For async file dialogs
     juce::Rectangle<int> windowRestoreBounds;
@@ -79,6 +106,12 @@ private:
     juce::String activeFullClipRequestGroup;
     std::atomic<int> previewRenderGeneration { 0 };
     std::atomic<int> fullClipRenderGeneration { 0 };
+    FrontendStartupState frontendStartupState = FrontendStartupState::idle;
+    juce::String frontendStartupTargetUrl;
+    juce::String frontendStartupDetail;
+    juce::uint32 frontendStartupNavigationTicks = 0;
+    bool startupFallbackVisible = false;
+    bool startupWatchdogActive = false;
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

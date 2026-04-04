@@ -1,69 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
-import {
-  nativeBridge,
-  type AiToolsStatus,
-  type InstallAiToolsResponse,
-} from "../services/NativeBridge";
-
-const DEFAULT_STATUS: AiToolsStatus = {
-  state: "runtimeMissing",
-  progress: 0,
-  available: false,
-  pythonDetected: false,
-  scriptAvailable: false,
-  runtimeInstalled: false,
-  modelInstalled: false,
-  installInProgress: false,
-  message: "Install AI Tools to enable stem separation.",
-  helpUrl: "https://www.python.org/downloads/",
-};
+import { useEffect } from "react";
+import { nativeBridge } from "../services/NativeBridge";
+import { useDAWStore } from "../store/useDAWStore";
 
 export function useAiToolsStatus() {
-  const [status, setStatus] = useState<AiToolsStatus>(DEFAULT_STATUS);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(async () => {
-    const nextStatus = await nativeBridge.getAiToolsStatus();
-    setStatus(nextStatus);
-    setLoading(false);
-    return nextStatus;
-  }, []);
+  const status = useDAWStore((state) => state.aiToolsStatus);
+  const loading = useDAWStore((state) => state.aiToolsStatusLoading);
+  const refresh = useDAWStore((state) => state.refreshAiToolsStatus);
+  const install = useDAWStore((state) => state.installAiTools);
+  const cancel = useDAWStore((state) => state.cancelAiToolsInstall);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!status.installInProgress) return;
-
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, [refresh, status.installInProgress]);
-
-  const install = useCallback(async (): Promise<InstallAiToolsResponse> => {
-    const result = await nativeBridge.installAiTools();
-    if (result.status) {
-      setStatus(result.status);
-      setLoading(false);
-    } else {
-      await refresh();
+    if (loading) {
+      void refresh(true);
     }
-    return result;
-  }, [refresh]);
+  }, [loading, refresh]);
 
-  const cancel = useCallback(async () => {
-    await nativeBridge.cancelAiToolsInstall();
-    await refresh();
-  }, [refresh]);
-
-  const openHelp = useCallback(async () => {
+  const openHelp = async () => {
     if (status.helpUrl) {
       await nativeBridge.openExternalURL(status.helpUrl);
     }
-  }, [status.helpUrl]);
+  };
 
   return {
     status,

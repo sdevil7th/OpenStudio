@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
-import { useAiToolsStatus } from "../hooks/useAiToolsStatus";
 import {
   Button,
   Checkbox,
@@ -38,6 +37,9 @@ export default function StemSeparationModal() {
     stemSepClipName,
     stemSepClipDuration,
     closeStemSeparation,
+    aiToolsStatus,
+    installAiTools,
+    cancelAiToolsInstall,
   } = useDAWStore(
     useShallow((s) => ({
       showStemSeparation: s.showStemSeparation,
@@ -46,6 +48,9 @@ export default function StemSeparationModal() {
       stemSepClipName: s.stemSepClipName,
       stemSepClipDuration: s.stemSepClipDuration,
       closeStemSeparation: s.closeStemSeparation,
+      aiToolsStatus: s.aiToolsStatus,
+      installAiTools: s.installAiTools,
+      cancelAiToolsInstall: s.cancelAiToolsInstall,
     })),
   );
 
@@ -54,13 +59,6 @@ export default function StemSeparationModal() {
   const [progress, setProgress] = useState<StemSepProgress>({ state: "idle", progress: 0 });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const completedRef = useRef(false);
-  const {
-    status: aiToolsStatus,
-    install: installAiTools,
-    cancel: cancelAiToolsInstall,
-    openHelp,
-    refresh: refreshAiToolsStatus,
-  } = useAiToolsStatus();
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -70,12 +68,6 @@ export default function StemSeparationModal() {
   }, []);
 
   useEffect(() => stopPolling, [stopPolling]);
-
-  useEffect(() => {
-    if (showStemSeparation) {
-      void refreshAiToolsStatus();
-    }
-  }, [refreshAiToolsStatus, showStemSeparation]);
 
   const toggleStem = (stem: string) => {
     setSelectedStems((prev) =>
@@ -202,10 +194,6 @@ export default function StemSeparationModal() {
 
   const handleInstallAiTools = async () => {
     if (aiToolsStatus.installInProgress || aiToolsStatus.available) return;
-    if (aiToolsStatus.state === "pythonMissing") {
-      await openHelp();
-      return;
-    }
 
     await installAiTools();
   };
@@ -218,13 +206,15 @@ export default function StemSeparationModal() {
       setProgress({ state: "idle", progress: 0 });
       return;
     }
+    closeStemSeparation();
+  };
 
-    if (aiToolsStatus.installInProgress) {
-      await cancelAiToolsInstall();
+  const handleCancelInstall = async () => {
+    if (!aiToolsStatus.installInProgress) {
       return;
     }
 
-    closeStemSeparation();
+    await cancelAiToolsInstall();
   };
 
   if (!showStemSeparation) return null;
@@ -284,7 +274,7 @@ export default function StemSeparationModal() {
                   {aiToolsStatus.state === "pythonMissing" ? "Get Python" : "Install AI Tools"}
                 </Button>
                 {aiToolsStatus.state === "pythonMissing" && (
-                  <Button variant="ghost" onClick={() => void openHelp()}>
+                  <Button variant="ghost" onClick={() => void installAiTools()}>
                     Python Download
                   </Button>
                 )}
@@ -345,8 +335,13 @@ export default function StemSeparationModal() {
       </ModalContent>
       <ModalFooter>
         <Button variant="ghost" onClick={() => void handleCancel()}>
-          {separating ? "Cancel" : aiToolsStatus.installInProgress ? "Cancel Install" : "Close"}
+          {separating ? "Cancel" : "Close"}
         </Button>
+        {!separating && aiToolsStatus.installInProgress && (
+          <Button variant="secondary" onClick={() => void handleCancelInstall()}>
+            Cancel Install
+          </Button>
+        )}
         {!separating && progress.state !== "done" && aiToolsStatus.available && (
           <Button
             variant="primary"

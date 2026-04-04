@@ -11,6 +11,22 @@
 
 namespace
 {
+bool commandLineHasFlag(const juce::String& commandLine, const juce::String& flag)
+{
+    if (commandLine.contains(flag))
+        return true;
+
+    juce::StringArray tokens;
+    tokens.addTokens(commandLine, " ", "\"");
+    for (const auto& token : tokens)
+    {
+        if (token.trim().unquoted() == flag)
+            return true;
+    }
+
+    return false;
+}
+
 juce::File getWritableStartupLogFile()
 {
     auto logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -63,17 +79,22 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
+        startupMode = commandLineHasFlag(commandLine, "--ui-safe-mode")
+            ? MainComponent::StartupMode::safe
+            : MainComponent::StartupMode::normal;
 
         auto logFile = getWritableStartupLogFile();
         juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "OpenStudio Startup Log"));
         juce::Logger::writeToLog("Application Initialising...");
         juce::Logger::writeToLog("Startup log path: " + logFile.getFullPathName());
+        juce::Logger::writeToLog("Startup mode: " + juce::String(startupMode == MainComponent::StartupMode::safe ? "safe" : "normal"));
 
         mixerWindowManager = std::make_unique<MixerWindowManager>(
             [this]()
             {
                 return std::make_unique<MainComponent>(audioEngine,
                                                        appUpdater,
+                                                       startupMode,
                                                        MainComponent::WindowRole::mixer,
                                                        createWindowCallbacks());
             },
@@ -85,6 +106,7 @@ public:
         mainWindow = std::make_unique<MainWindow>(getApplicationName(),
                                                   audioEngine,
                                                   appUpdater,
+                                                  startupMode,
                                                   createWindowCallbacks());
 
         if (auto* component = mainWindow->getMainComponent())
@@ -140,6 +162,7 @@ public:
         MainWindow (juce::String name,
                     AudioEngine& audioEngine,
                     AppUpdater& appUpdater,
+                    MainComponent::StartupMode startupMode,
                     MainComponent::WindowCallbacks callbacks)
             : DocumentWindow (name,
                               juce::Colours::black,
@@ -149,6 +172,7 @@ public:
             setTitleBarHeight (0);
             setContentOwned (new MainComponent(audioEngine,
                                                appUpdater,
+                                               startupMode,
                                                MainComponent::WindowRole::main,
                                                std::move(callbacks)),
                              true);
@@ -290,6 +314,7 @@ private:
 
     AudioEngine audioEngine;
     AppUpdater appUpdater;
+    MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<MixerWindowManager> mixerWindowManager;
     mutable juce::CriticalSection mixerSnapshotLock;

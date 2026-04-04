@@ -15,6 +15,8 @@
 
 namespace
 {
+constexpr int kFrontendStartupTimeoutMs = 8000;
+
 #if JUCE_DEBUG
 constexpr bool kPitchEditorFormantDebugLogs = true;
 #else
@@ -113,6 +115,75 @@ juce::String describeCandidatePaths()
     return lines.joinIntoString("\n");
 }
 
+juce::String normaliseResourceRequestPath(const juce::String& requestPath)
+{
+    auto path = requestPath.upToFirstOccurrenceOf("?", false, false)
+                           .upToFirstOccurrenceOf("#", false, false)
+                           .trim();
+
+    while (path.startsWithChar('/'))
+        path = path.substring(1);
+
+    path = juce::URL::removeEscapeChars(path).replaceCharacter('\\', '/');
+
+    if (path.isEmpty())
+        return "index.html";
+
+    return path;
+}
+
+bool isSafeResourceRelativePath(const juce::String& path)
+{
+    if (path.isEmpty())
+        return false;
+
+    if (path.contains(".."))
+        return false;
+
+    if (path.startsWithChar('/'))
+        return false;
+
+    return true;
+}
+
+juce::String getMimeTypeForFrontendFile(const juce::File& file)
+{
+    const auto extension = file.getFileExtension().toLowerCase();
+
+    if (extension == ".html")
+        return "text/html";
+    if (extension == ".js" || extension == ".mjs")
+        return "application/javascript";
+    if (extension == ".css")
+        return "text/css";
+    if (extension == ".json")
+        return "application/json";
+    if (extension == ".svg")
+        return "image/svg+xml";
+    if (extension == ".png")
+        return "image/png";
+    if (extension == ".jpg" || extension == ".jpeg")
+        return "image/jpeg";
+    if (extension == ".gif")
+        return "image/gif";
+    if (extension == ".ico")
+        return "image/x-icon";
+    if (extension == ".webp")
+        return "image/webp";
+    if (extension == ".woff2")
+        return "font/woff2";
+    if (extension == ".woff")
+        return "font/woff";
+    if (extension == ".ttf")
+        return "font/ttf";
+    if (extension == ".otf")
+        return "font/otf";
+    if (extension == ".webmanifest")
+        return "application/manifest+json";
+
+    return "application/octet-stream";
+}
+
 #if JUCE_WINDOWS
 juce::String detectWebView2RuntimeVersion()
 {
@@ -206,10 +277,40 @@ juce::String getWindowRoleQueryValue(MainComponent::WindowRole role)
     return role == MainComponent::WindowRole::mixer ? "mixer" : "main";
 }
 
-juce::String appendWindowRoleQuery(const juce::String& baseUrl, MainComponent::WindowRole role)
+juce::String getStartupModeQueryValue(MainComponent::StartupMode startupMode)
 {
-    const auto separator = baseUrl.containsChar('?') ? "&" : "?";
-    return baseUrl + separator + "window=" + getWindowRoleQueryValue(role);
+    return startupMode == MainComponent::StartupMode::safe ? "safe" : "normal";
+}
+
+juce::String appendFrontendStartupQuery(const juce::String& baseUrl,
+                                        MainComponent::WindowRole role,
+                                        MainComponent::StartupMode startupMode)
+{
+    juce::String url = baseUrl;
+    const auto appendParameter = [&url](const juce::String& key, const juce::String& value)
+    {
+        const auto separator = url.containsChar('?') ? "&" : "?";
+        url << separator << key << "=" << juce::URL::addEscapeChars(value, true);
+    };
+
+    appendParameter("window", getWindowRoleQueryValue(role));
+    appendParameter("startup", getStartupModeQueryValue(startupMode));
+    return url;
+}
+
+juce::String describeFrontendStartupState(MainComponent::FrontendStartupState state)
+{
+    switch (state)
+    {
+        case MainComponent::FrontendStartupState::idle: return "idle";
+        case MainComponent::FrontendStartupState::navigationStarted: return "navigation-started";
+        case MainComponent::FrontendStartupState::bootStarted: return "boot-started";
+        case MainComponent::FrontendStartupState::ready: return "ready";
+        case MainComponent::FrontendStartupState::failed: return "failed";
+        case MainComponent::FrontendStartupState::timedOut: return "timed-out";
+    }
+
+    return "unknown";
 }
 }
 
@@ -219,10 +320,12 @@ juce::Array<MainComponent*> MainComponent::activeInstances;
 //==============================================================================
 MainComponent::MainComponent(AudioEngine& audioEngineIn,
                              AppUpdater& appUpdaterIn,
+                             StartupMode startupModeIn,
                              WindowRole roleIn,
                              WindowCallbacks callbacksIn)
     : audioEngine(audioEngineIn),
       appUpdater(appUpdaterIn),
+      startupMode(startupModeIn),
       windowRole(roleIn),
       windowCallbacks(std::move(callbacksIn)),
       webView (juce::WebBrowserComponent::Options()
@@ -236,9 +339,93 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            .withStatusBarDisabled())
 #endif
                    .withNativeIntegrationEnabled()
-                   .withResourceProvider ([this] (const juce::String& url) -> std::optional<juce::WebBrowserComponent::Resource> {
-                       juce::ignoreUnused(url);
-                       return std::nullopt;
+                   .withResourceProvider ([this] (const juce::String& path) -> std::optional<juce::WebBrowserComponent::Resource> {
+                       const auto requestedPath = path.upToFirstOccurrenceOf("?", false, false)
+                                                     .upToFirstOccurrenceOf("#", false, false);
+
+                       if (requestedPath == "/__openstudio__/startup")
+                       {
+                           const auto requestUrl = juce::URL(juce::WebBrowserComponent::getResourceProviderRoot()
+                                                             + path.fromFirstOccurrenceOf("/", false, false));
+                           juce::String state;
+                           juce::String detail;
+                           const auto& parameterNames = requestUrl.getParameterNames();
+                           const auto& parameterValues = requestUrl.getParameterValues();
+
+                           for (int i = 0; i < parameterNames.size(); ++i)
+                           {
+                               if (parameterNames[i] == "state")
+                                   state = parameterValues[i].trim().toLowerCase();
+                               else if (parameterNames[i] == "detail")
+                                   detail = parameterValues[i];
+                           }
+                           juce::Component::SafePointer<MainComponent> safeThis(this);
+
+                           juce::MessageManager::callAsync([safeThis, state, detail]()
+                           {
+                               if (safeThis == nullptr)
+                                   return;
+
+                               if (state == "boot-started")
+                               {
+                                   safeThis->frontendStartupState = FrontendStartupState::bootStarted;
+                                   safeThis->frontendStartupDetail = detail;
+                                   juce::Logger::writeToLog("Frontend startup state: boot-started" + (detail.isNotEmpty() ? " - " + detail : ""));
+                               }
+                               else if (state == "boot-ready")
+                               {
+                                   safeThis->markFrontendStartupReady(detail);
+                               }
+                               else if (state == "boot-failed")
+                               {
+                                   safeThis->markFrontendStartupFailed(detail.isNotEmpty() ? detail : "The embedded frontend reported a startup failure.");
+                               }
+                           });
+
+                           static constexpr char okResponse[] = "{\"ok\":true}";
+                           const auto* begin = reinterpret_cast<const std::byte*>(okResponse);
+                           return juce::WebBrowserComponent::Resource {
+                               std::vector<std::byte>(begin, begin + sizeof(okResponse) - 1),
+                               "application/json"
+                           };
+                       }
+
+                       if (webuiDir == juce::File{} || ! webuiDir.isDirectory())
+                       {
+                           juce::Logger::writeToLog("Frontend resource request rejected because webuiDir is unavailable: " + path);
+                           return std::nullopt;
+                       }
+
+                       const auto relativePath = normaliseResourceRequestPath(path);
+                       if (! isSafeResourceRelativePath(relativePath))
+                       {
+                           juce::Logger::writeToLog("Frontend resource request rejected for unsafe path: " + path + " -> " + relativePath);
+                           return std::nullopt;
+                       }
+
+                       const auto requestedFile = webuiDir.getChildFile(relativePath);
+                       if (! requestedFile.existsAsFile())
+                       {
+                           juce::Logger::writeToLog("Frontend resource not found: " + relativePath);
+                           return std::nullopt;
+                       }
+
+                       juce::MemoryBlock fileData;
+                       if (! requestedFile.loadFileAsData(fileData))
+                       {
+                           juce::Logger::writeToLog("Frontend resource failed to load: " + requestedFile.getFullPathName());
+                           return std::nullopt;
+                       }
+
+                       const auto mimeType = getMimeTypeForFrontendFile(requestedFile);
+                       if (relativePath == "index.html" || relativePath.endsWith(".js") || relativePath.endsWith(".css"))
+                           juce::Logger::writeToLog("Frontend resource served: " + relativePath + " (" + mimeType + ")");
+
+                       const auto* begin = static_cast<const std::byte*>(fileData.getData());
+                       return juce::WebBrowserComponent::Resource {
+                           std::vector<std::byte>(begin, begin + fileData.getSize()),
+                           mimeType
+                       };
                    })
                    // CRITICAL: Add user script to expose native functions properly
                    .withUserScript(R"(
@@ -308,6 +495,35 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                            completion(false);
                         }
+                   })
+                   .withNativeFunction ("reportFrontendStartupState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       const auto state = args.size() > 0 ? args[0].toString().trim().toLowerCase() : juce::String();
+                       const auto detail = args.size() > 1 ? args[1].toString() : juce::String();
+
+                       if (state == "boot-started")
+                       {
+                           frontendStartupState = FrontendStartupState::bootStarted;
+                           frontendStartupDetail = detail;
+                           juce::Logger::writeToLog("Frontend startup state: boot-started" + (detail.isNotEmpty() ? " - " + detail : ""));
+                       }
+                       else if (state == "boot-ready")
+                       {
+                           markFrontendStartupReady(detail);
+                       }
+                       else if (state == "boot-failed")
+                       {
+                           markFrontendStartupFailed(detail.isNotEmpty() ? detail : "The embedded frontend reported a startup failure.");
+                       }
+                       else
+                       {
+                           juce::Logger::writeToLog("Frontend startup state: unknown value '" + state + "'" + (detail.isNotEmpty() ? " - " + detail : ""));
+                       }
+
+                       completion(true);
+                   })
+                   .withNativeFunction ("getStartupDiagnostics", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       juce::ignoreUnused(args);
+                       completion(buildStartupDiagnostics());
                    })
                    .withNativeFunction ("addTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::String explicitId = "";
@@ -3819,6 +4035,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("getAiToolsStatus", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(audioEngine.getAiToolsStatus());
                     })
+                    .withNativeFunction ("refreshAiToolsStatus", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(audioEngine.refreshAiToolsStatus());
+                    })
                     .withNativeFunction ("installAiTools", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(audioEngine.installAiTools());
                     })
@@ -3891,6 +4110,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
     juce::Logger::writeToLog("=== Embedded UI startup diagnostics ===");
     juce::Logger::writeToLog("Browser backend: " + describeBrowserBackend(preferredBackend));
+    juce::Logger::writeToLog("Frontend startup mode: " + juce::String(startupMode == StartupMode::safe ? "safe" : "normal"));
     juce::Logger::writeToLog("Embedded browser backend supported: " + juce::String(supported ? "Yes" : "No"));
     juce::Logger::writeToLog("Startup log file: " + startupLogFile.getFullPathName());
     juce::Logger::writeToLog("Executable directory: " + getExecutableDirectory().getFullPathName());
@@ -3910,10 +4130,20 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
     fallbackMessage.setColour(juce::Label::backgroundColourId, juce::Colour(0xff111827));
     fallbackMessage.setFont(juce::Font(16.0f));
     fallbackMessage.setText({}, juce::dontSendNotification);
+    fallbackMessage.setVisible(false);
+
+    startupStatusMessage.setJustificationType(juce::Justification::centred);
+    startupStatusMessage.setColour(juce::Label::textColourId, juce::Colours::white);
+    startupStatusMessage.setColour(juce::Label::backgroundColourId, juce::Colour(0xf0111827));
+    startupStatusMessage.setFont(juce::Font(16.0f));
+    startupStatusMessage.setText({}, juce::dontSendNotification);
+    startupStatusMessage.setVisible(false);
+    startupStatusMessage.setInterceptsMouseClicks(false, false);
 
     if (supported)
     {
         addAndMakeVisible (webView);
+        addAndMakeVisible (startupStatusMessage);
     }
     else
     {
@@ -3927,30 +4157,36 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     << " was detected, but JUCE reported the browser backend as unavailable on this machine.";
 #endif
         message << "\n\nStartup log: " << startupLogFile.getFullPathName();
-        fallbackMessage.setText(message, juce::dontSendNotification);
-        addAndMakeVisible(fallbackMessage);
+        showStartupFallback("Embedded browser backend unavailable", message);
     }
 
-    // Development URL (Vite default)
-    #if JUCE_DEBUG
-        juce::Logger::writeToLog("Loading from localhost:5173");
-        webView.goToURL(appendWindowRoleQuery("http://localhost:5173", windowRole));
-    #else
-        if (packagedFrontend.existsAsFile())
-        {
-            juce::Logger::writeToLog("Loading packaged frontend from: " + packagedFrontend.getFullPathName());
-            webView.goToURL(appendWindowRoleQuery(juce::URL(packagedFrontend).toString(true), windowRole));
-        }
-        else
-        {
-            auto message = "OpenStudio could not find its packaged frontend.\n\nBuild the React app and ship the `webui` folder with the application."
-                           "\n\nChecked paths:\n" + describeCandidatePaths()
-                           + "\n\nStartup log: " + startupLogFile.getFullPathName();
-            juce::Logger::writeToLog(message);
-            fallbackMessage.setText(message, juce::dontSendNotification);
-            addAndMakeVisible(fallbackMessage);
-        }
-    #endif
+    if (supported)
+    {
+        // Development URL (Vite default)
+        #if JUCE_DEBUG
+            const auto frontendUrl = appendFrontendStartupQuery("http://localhost:5173", windowRole, startupMode);
+            juce::Logger::writeToLog("Loading from localhost:5173");
+            beginFrontendStartupWatchdog(frontendUrl);
+            webView.goToURL(frontendUrl);
+        #else
+            if (packagedFrontend.existsAsFile())
+            {
+                webuiDir = packagedFrontend.getParentDirectory();
+                juce::Logger::writeToLog("Loading packaged frontend from: " + packagedFrontend.getFullPathName());
+                const auto frontendUrl = appendFrontendStartupQuery(juce::WebBrowserComponent::getResourceProviderRoot() + "index.html", windowRole, startupMode);
+                beginFrontendStartupWatchdog(frontendUrl);
+                webView.goToURL(frontendUrl);
+            }
+            else
+            {
+                auto message = "OpenStudio could not find its packaged frontend.\n\nBuild the React app and ship the `webui` folder with the application."
+                               "\n\nChecked paths:\n" + describeCandidatePaths()
+                               + "\n\nStartup log: " + startupLogFile.getFullPathName();
+                juce::Logger::writeToLog(message);
+                showStartupFallback("Packaged frontend missing", message);
+            }
+        #endif
+    }
 
     setSize (1024, 768);
 
@@ -4043,6 +4279,90 @@ void MainComponent::emitFrontendEvent(const juce::String& eventId, const juce::v
 bool MainComponent::isMainWindow() const
 {
     return windowRole == WindowRole::main;
+}
+
+void MainComponent::beginFrontendStartupWatchdog(const juce::String& targetUrl)
+{
+    frontendStartupTargetUrl = targetUrl;
+    frontendStartupDetail.clear();
+    frontendStartupState = FrontendStartupState::navigationStarted;
+    frontendStartupNavigationTicks = 0;
+    startupFallbackVisible = false;
+    startupWatchdogActive = true;
+    fallbackMessage.setVisible(false);
+    webView.setVisible(true);
+    showStartupOverlay(startupMode == StartupMode::safe ? "Starting OpenStudio Safe Mode..." : "Starting OpenStudio...",
+                       "Preparing the embedded interface.\n\nStartup log: " + getStartupLogFile().getFullPathName());
+    juce::Logger::writeToLog("Frontend startup state: navigation-started - " + targetUrl);
+}
+
+void MainComponent::showStartupOverlay(const juce::String& title, const juce::String& detail)
+{
+    startupStatusMessage.setText(title + "\n\n" + detail, juce::dontSendNotification);
+    startupStatusMessage.setVisible(true);
+    startupStatusMessage.toFront(false);
+    resized();
+}
+
+void MainComponent::hideStartupOverlay()
+{
+    startupStatusMessage.setVisible(false);
+}
+
+void MainComponent::markFrontendStartupReady(const juce::String& detail)
+{
+    if (frontendStartupState == FrontendStartupState::ready)
+        return;
+
+    frontendStartupState = FrontendStartupState::ready;
+    frontendStartupDetail = detail;
+    startupWatchdogActive = false;
+    startupFallbackVisible = false;
+    fallbackMessage.setVisible(false);
+    hideStartupOverlay();
+    webView.setVisible(true);
+    juce::Logger::writeToLog("Frontend startup state: boot-ready" + (detail.isNotEmpty() ? " - " + detail : ""));
+}
+
+void MainComponent::markFrontendStartupFailed(const juce::String& detail)
+{
+    frontendStartupState = FrontendStartupState::failed;
+    frontendStartupDetail = detail;
+    startupWatchdogActive = false;
+    juce::Logger::writeToLog("Frontend startup state: boot-failed" + (detail.isNotEmpty() ? " - " + detail : ""));
+    showStartupFallback("Frontend startup failed",
+                        detail + "\n\nStartup log: " + getStartupLogFile().getFullPathName());
+}
+
+void MainComponent::showStartupFallback(const juce::String& title, const juce::String& detail)
+{
+    startupFallbackVisible = true;
+    hideStartupOverlay();
+    fallbackMessage.setText(title + "\n\n" + detail, juce::dontSendNotification);
+    fallbackMessage.setVisible(true);
+    addAndMakeVisible(fallbackMessage);
+    fallbackMessage.toFront(false);
+    webView.setVisible(false);
+    resized();
+}
+
+juce::var MainComponent::buildStartupDiagnostics() const
+{
+    auto* diagnostics = new juce::DynamicObject();
+    diagnostics->setProperty("windowRole", getWindowRoleQueryValue(windowRole));
+    diagnostics->setProperty("startupMode", getStartupModeQueryValue(startupMode));
+    diagnostics->setProperty("browserBackend", describeBrowserBackend(getPreferredBrowserBackend()));
+    diagnostics->setProperty("startupState", describeFrontendStartupState(frontendStartupState));
+    diagnostics->setProperty("targetUrl", frontendStartupTargetUrl);
+    diagnostics->setProperty("detail", frontendStartupDetail);
+    diagnostics->setProperty("startupLogPath", getStartupLogFile().getFullPathName());
+    diagnostics->setProperty("packagedFrontendPath", getPackagedFrontendEntryPoint().getFullPathName());
+    diagnostics->setProperty("packagedFrontendCandidates", describeCandidatePaths());
+    diagnostics->setProperty("webView2UserDataPath", getWebView2UserDataFolder().getFullPathName());
+#if JUCE_WINDOWS
+    diagnostics->setProperty("webView2RuntimeVersion", detectWebView2RuntimeVersion());
+#endif
+    return juce::var(diagnostics);
 }
 
 juce::Rectangle<int> MainComponent::getDesktopWorkAreaForCurrentWindow() const
@@ -4191,6 +4511,30 @@ void MainComponent::startDesktopWindowDrag()
 //==============================================================================
 void MainComponent::timerCallback()
 {
+    if (startupWatchdogActive && frontendStartupState != FrontendStartupState::ready)
+    {
+        ++frontendStartupNavigationTicks;
+        const auto elapsedMs = static_cast<int>(frontendStartupNavigationTicks * 100);
+        if (elapsedMs >= kFrontendStartupTimeoutMs)
+        {
+            frontendStartupState = FrontendStartupState::timedOut;
+            frontendStartupDetail = "The embedded frontend did not report a ready state within "
+                                    + juce::String(kFrontendStartupTimeoutMs / 1000.0, 1)
+                                    + " seconds.";
+            startupWatchdogActive = false;
+
+            auto detail = frontendStartupDetail
+                        + "\n\nStartup state: " + describeFrontendStartupState(frontendStartupState)
+                        + "\nStartup mode: " + getStartupModeQueryValue(startupMode)
+                        + "\nTarget URL: " + frontendStartupTargetUrl
+                        + "\nStartup log: " + getStartupLogFile().getFullPathName()
+                        + "\n\nTry relaunching OpenStudio with:\nOpenStudio.exe --ui-safe-mode";
+
+            juce::Logger::writeToLog("Frontend startup state: timed-out - " + detail);
+            showStartupFallback("OpenStudio timed out while starting its interface.", detail);
+        }
+    }
+
     // Broadcast transport position to frontend for playhead movement
     {
         double position = audioEngine.getTransportPosition();
@@ -4251,5 +4595,6 @@ void MainComponent::resized()
 {
     auto bounds = getLocalBounds();
     webView.setBounds(bounds);
+    startupStatusMessage.setBounds(bounds.reduced(40));
     fallbackMessage.setBounds(bounds.reduced(40));
 }

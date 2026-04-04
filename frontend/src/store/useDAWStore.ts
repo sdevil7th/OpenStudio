@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge } from "../services/NativeBridge";
+import { nativeBridge, type AiToolsStatus } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import { type GridSize } from "../utils/snapToGrid";
 // automationToBackend moved to store/actions/automation.ts
@@ -73,6 +73,20 @@ function getStoredString(key: string, fallback = ""): string {
     return fallback;
   }
 }
+
+const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
+  state: "checking",
+  progress: 0,
+  available: false,
+  installerAvailable: false,
+  pythonDetected: false,
+  scriptAvailable: false,
+  runtimeInstalled: false,
+  modelInstalled: false,
+  installInProgress: false,
+  message: "Checking AI tools...",
+  helpUrl: "https://www.python.org/downloads/",
+};
 
 // ============================================
 // Type Definitions
@@ -649,6 +663,8 @@ interface DAWState {
   stemSepClipId: string | null;
   stemSepClipName: string;
   stemSepClipDuration: number;
+  aiToolsStatus: AiToolsStatus;
+  aiToolsStatusLoading: boolean;
 
   // Script Console
   showScriptConsole: boolean;
@@ -1216,6 +1232,10 @@ interface DAWActions {
   toggleScriptConsole: () => void;
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
+  reopenStemSeparation: () => void;
+  refreshAiToolsStatus: (force?: boolean) => Promise<AiToolsStatus>;
+  installAiTools: () => Promise<void>;
+  cancelAiToolsInstall: () => Promise<void>;
   completeStemSeparation: (sourceTrackId: string, sourceClipId: string, clipName: string,
     stemFiles: Array<{ name: string; filePath: string; duration?: number; sampleRate?: number }>,
     sourceClipStartTime: number) => void;
@@ -1828,6 +1848,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     stemSepClipId: null,
     stemSepClipName: "",
     stemSepClipDuration: 0,
+    aiToolsStatus: DEFAULT_AI_TOOLS_STATUS,
+    aiToolsStatusLoading: true,
     showPianoRoll: false,
     pianoRollTrackId: null,
     pianoRollClipId: null,
@@ -2072,6 +2094,81 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showToast: (message, type = "info") => {
       set({ toastMessage: message, toastType: type, toastVisible: true });
       setTimeout(() => set({ toastVisible: false }), 3000);
+    },
+    refreshAiToolsStatus: async (force = false) => {
+      const currentStatus = get().aiToolsStatus;
+      set({ aiToolsStatusLoading: true });
+
+      try {
+        const nextStatus = force
+          ? await nativeBridge.refreshAiToolsStatus()
+          : await nativeBridge.getAiToolsStatus();
+
+        set({ aiToolsStatus: nextStatus, aiToolsStatusLoading: false });
+        return nextStatus;
+      } catch (error) {
+        const fallbackStatus: AiToolsStatus = {
+          ...currentStatus,
+          state: "error",
+          installInProgress: false,
+          message: "Failed to refresh AI tools status.",
+          error: error instanceof Error ? error.message : String(error),
+        };
+        set({ aiToolsStatus: fallbackStatus, aiToolsStatusLoading: false });
+        return fallbackStatus;
+      }
+    },
+    installAiTools: async () => {
+      const currentStatus = get().aiToolsStatus;
+      if (currentStatus.installInProgress || currentStatus.available) return;
+
+      if (currentStatus.state === "pythonMissing") {
+        if (currentStatus.helpUrl) {
+          await nativeBridge.openExternalURL(currentStatus.helpUrl);
+        }
+        return;
+      }
+
+      set({
+        aiToolsStatus: {
+          ...currentStatus,
+          state: "checking",
+          installInProgress: true,
+          available: false,
+          error: undefined,
+          message: "Preparing AI tools installation...",
+        },
+      });
+
+      try {
+        const result = await nativeBridge.installAiTools();
+        if (result.status) {
+          set({ aiToolsStatus: result.status, aiToolsStatusLoading: false });
+        } else {
+          await get().refreshAiToolsStatus(true);
+        }
+
+        if (!result.started && result.error) {
+          get().showToast(result.error, "error");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        set({
+          aiToolsStatus: {
+            ...get().aiToolsStatus,
+            state: "error",
+            installInProgress: false,
+            message: "AI tools installation failed.",
+            error: message,
+          },
+          aiToolsStatusLoading: false,
+        });
+        get().showToast(message, "error");
+      }
+    },
+    cancelAiToolsInstall: async () => {
+      await nativeBridge.cancelAiToolsInstall();
+      await get().refreshAiToolsStatus(true);
     },
 
 

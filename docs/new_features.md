@@ -12,7 +12,6 @@
 | VST3 Hosting | Done | Full scanning, loading, parameter control, editor windows |
 | CLAP Hosting | Partial | CLAPPluginFormat class exists, scan paths configured, loading incomplete |
 | LV2 Hosting | Prepared | Code paths exist, JUCE 8 has LV2 support, not compiled in |
-| REAPER Compatibility | Not Started | Architecture inspired by REAPER but no API/format compatibility |
 
 ---
 

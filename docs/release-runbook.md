@@ -18,11 +18,14 @@ For normal public releases, do not draft a GitHub release manually and do not up
 
 Use this flow instead:
 
-1. Push the release-ready commit(s) to GitHub.
-2. Wait for `.github/workflows/verify.yml` to pass on that commit.
-3. Push a version tag like `v0.0.2`.
-4. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and optionally deploy the Netlify updater bundle.
-5. Verify the published direct-download URLs:
+1. Run the local Windows RC gate first:
+   `./tools/run-windows-rc.ps1 -Version 1.0.0`
+2. Confirm the installed Windows app launches visibly in both normal mode and `--ui-safe-mode`, and `%APPDATA%\OpenStudio\logs\OpenStudio_Startup.log` records `Frontend startup state: boot-ready`.
+3. Push the release-ready commit(s) to GitHub.
+4. Wait for `.github/workflows/verify.yml` to pass on that commit.
+5. Push a version tag like `v0.0.2`.
+6. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and optionally deploy the Netlify updater bundle.
+7. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
 
@@ -43,6 +46,15 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - To include ONNX Runtime in the Windows GitHub Actions build, set the repository variable `OPENSTUDIO_SETUP_ONNXRUNTIME=true`.
 
 ## Local Windows release flow
+
+The local Windows RC gate is now the required no-surprises check before any push/tag for release:
+`./tools/run-windows-rc.ps1 -Version 1.0.0`
+
+That script intentionally stops before GitHub release publication, metadata generation, or Netlify deployment. Use it to prove that:
+- the Release bundle is complete
+- the installer packages locally
+- the installed app starts visibly on Windows
+- safe startup mode works when needed
 
 If you want one command for the full guarded Windows path, use:
 `./tools/run-release-preflight.ps1 -Version 1.0.0 -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -RepoSlug <org>/<repo>`

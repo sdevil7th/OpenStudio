@@ -49,6 +49,38 @@ function Get-RecentOpenStudioEvents {
     }
 }
 
+function Get-StartupSummary {
+    param([string]$Path)
+
+    $summary = [ordered]@{
+        BackendSupported = ""
+        FrontendState = ""
+        StartupMode = ""
+        StartupLog = ""
+        TargetUrl = ""
+    }
+
+    if (-not (Test-Path $Path)) {
+        return $summary
+    }
+
+    foreach ($line in Get-Content $Path) {
+        if ($line -match '^Embedded browser backend supported:\s*(.+)$') {
+            $summary.BackendSupported = $Matches[1]
+        } elseif ($line -match '^Frontend startup state:\s*(.+)$') {
+            $summary.FrontendState = $Matches[1]
+        } elseif ($line -match '^Frontend startup mode:\s*(.+)$') {
+            $summary.StartupMode = $Matches[1]
+        } elseif ($line -match '^Startup log file:\s*(.+)$') {
+            $summary.StartupLog = $Matches[1]
+        } elseif ($line -match '^Frontend startup state: navigation-started -\s*(.+)$') {
+            $summary.TargetUrl = $Matches[1]
+        }
+    }
+
+    return $summary
+}
+
 $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("OpenStudio installed app diagnostics")
 $lines.Add("Generated: $(Get-Date -Format o)")
@@ -72,8 +104,18 @@ $lines.Add("Detected WebView2 runtime versions: $(if ($wvVersions) { $wvVersions
 $lines.Add("")
 
 if (Test-Path $startupLog) {
+    $startupSummary = Get-StartupSummary -Path $startupLog
+    $lines.Add("Startup summary:")
+    $lines.Add("  Backend supported: $($startupSummary.BackendSupported)")
+    $lines.Add("  Frontend state: $($startupSummary.FrontendState)")
+    $lines.Add("  Startup mode: $($startupSummary.StartupMode)")
+    $lines.Add("  Target URL: $($startupSummary.TargetUrl)")
+    $lines.Add("")
     $lines.Add("Startup log tail:")
-    $lines.AddRange((Get-Content $startupLog | Select-Object -Last 80))
+    $startupLogLines = Get-Content $startupLog | Select-Object -Last 80
+    foreach ($line in $startupLogLines) {
+        $lines.Add([string]$line)
+    }
     Copy-Item $startupLog (Join-Path $OutputDir "OpenStudio_Startup.log") -Force
     $lines.Add("")
 }
@@ -91,6 +133,10 @@ if ($events.Count -gt 0) {
         $lines.Add($event.Message)
     }
 }
+
+$lines.Add("")
+$lines.Add("Safe startup relaunch:")
+$lines.Add("  `"$InstallDir\OpenStudio.exe`" --ui-safe-mode")
 
 Set-Content -Path $reportPath -Value $lines -Encoding UTF8
 Write-Host "Diagnostic report written to $reportPath"

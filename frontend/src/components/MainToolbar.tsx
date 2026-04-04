@@ -20,7 +20,6 @@ import { getActionShortcut, getActionShortcutScopeLabel } from "../store/actionR
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
-import { useAiToolsStatus } from "../hooks/useAiToolsStatus";
 
 interface MainToolbarProps {
   onOpenSettings: () => void;
@@ -33,7 +32,6 @@ export function MainToolbar({
   onToggleMixer,
   showMixer,
 }: MainToolbarProps) {
-  const { status: aiToolsStatus, install, openHelp } = useAiToolsStatus();
   const mixerShortcut = getActionShortcut("view.toggleMixer") ?? "Ctrl+M";
   const loopShortcut = getActionShortcut("transport.loop") ?? "L";
   const recordShortcut = getActionShortcut("transport.record") ?? "Ctrl+R";
@@ -66,6 +64,9 @@ export function MainToolbar({
     toggleSplitTool,
     toggleMuteTool,
     showPitchEditor,
+    aiToolsStatus,
+    installAiTools,
+    reopenStemSeparation,
   } = useDAWStore(
     useShallow((s) => ({
       isPlaying: s.transport.isPlaying,
@@ -89,6 +90,9 @@ export function MainToolbar({
       toggleSplitTool: s.toggleSplitTool,
       toggleMuteTool: s.toggleMuteTool,
       showPitchEditor: s.showPitchEditor,
+      aiToolsStatus: s.aiToolsStatus,
+      installAiTools: s.installAiTools,
+      reopenStemSeparation: s.reopenStemSeparation,
     })),
   );
 
@@ -105,16 +109,16 @@ export function MainToolbar({
   const hasArmedTracks = tracks.some((t) => t.armed);
 
   const handleAiToolsClick = async () => {
-    if (aiToolsStatus.installInProgress || aiToolsStatus.available) {
+    if (aiToolsStatus.installInProgress) {
+      reopenStemSeparation();
       return;
     }
 
-    if (aiToolsStatus.state === "pythonMissing") {
-      await openHelp();
+    if (aiToolsStatus.available) {
       return;
     }
 
-    await install();
+    await installAiTools();
   };
 
   const aiToolsTitle = aiToolsStatus.available
@@ -124,6 +128,14 @@ export function MainToolbar({
       : aiToolsStatus.state === "pythonMissing"
         ? "Install Python, then retry AI Tools"
         : "Install AI Tools";
+
+  const aiButtonProgress = Math.max(0, Math.min(1, aiToolsStatus.progress || 0));
+  const aiButtonHaloStyle = aiToolsStatus.installInProgress
+    ? {
+        boxShadow: `0 0 0 2px rgba(34, 197, 94, ${0.35 + aiButtonProgress * 0.3}), inset 0 0 0 1px rgba(255,255,255,0.08)`,
+        borderColor: "rgba(74, 222, 128, 0.95)",
+      }
+    : undefined;
 
   return (
     <div
@@ -323,6 +335,7 @@ export function MainToolbar({
           onClick={() => void handleAiToolsClick()}
           title={aiToolsTitle}
           aria-label="AI Tools"
+          style={aiButtonHaloStyle}
         >
           <Cpu size={16} />
         </Button>

@@ -25,6 +25,7 @@ public:
         juce::String state { "idle" };
         float progress = 0.0f;
         bool available = false;
+        bool installerAvailable = false;
         bool pythonDetected = false;
         bool scriptAvailable = false;
         bool runtimeInstalled = false;
@@ -40,6 +41,9 @@ public:
 
     /** Return a detailed AI tools status object for the UI. */
     juce::var getAiToolsStatus();
+
+    /** Schedule a background AI tools status refresh and return the current cached status. */
+    juce::var refreshAiToolsStatus();
 
     /** Start installing the optional AI tools into the user's app-data directory. */
     juce::var installAiTools();
@@ -125,8 +129,24 @@ private:
     /** Poll a running AI tools install and refresh the cached status. */
     void pollInstallProgress();
 
-    /** Build the current AI tools status object. */
-    AiToolsStatus buildAiToolsStatus() const;
+    /** Build the current AI tools status object using already-resolved values. */
+    AiToolsStatus buildAiToolsStatus (const juce::File& python,
+                                      const juce::File& script,
+                                      const juce::File& installerScript,
+                                      const juce::File& modelsDir,
+                                      bool runtimeInstalled) const;
+
+    /** Build an initial lightweight snapshot without expensive runtime probing. */
+    AiToolsStatus buildInitialAiToolsStatus() const;
+
+    /** Schedule a background refresh if one is not already running. */
+    void scheduleStatusRefresh();
+
+    /** Update the cached AI tools status under lock. */
+    void updateCachedAiToolsStatus (const std::function<void (AiToolsStatus&)>& updater);
+
+    /** Return the cached AI tools status with install progress folded in. */
+    AiToolsStatus getCachedAiToolsStatusSnapshot() const;
 
     /** Parse a JSON line from the child process stdout. */
     SeparationProgress parseJsonLine (const juce::String& line) const;
@@ -143,6 +163,9 @@ private:
     juce::String installOutputBuffer;
     SeparationProgress lastProgress;
     mutable AiToolsStatus lastAiToolsStatus;
+    mutable juce::CriticalSection aiToolsStatusLock;
+    mutable bool statusRefreshInFlight = false;
+    mutable bool initialStatusPrepared = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StemSeparator)
 };
