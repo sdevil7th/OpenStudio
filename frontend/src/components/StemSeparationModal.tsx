@@ -266,14 +266,18 @@ export default function StemSeparationModal() {
               )}
 
               <div className="flex gap-2">
-                <Button
-                  variant="primary"
-                  onClick={() => void handleInstallAiTools()}
-                  disabled={aiToolsStatus.installInProgress}
-                >
-                  {aiToolsStatus.state === "pythonMissing" ? "Get Python" : "Install AI Tools"}
+                  <Button
+                    variant="primary"
+                    onClick={() => void handleInstallAiTools()}
+                    disabled={aiToolsStatus.installInProgress}
+                  >
+                    {aiToolsStatus.requiresExternalPython
+                      ? aiToolsStatus.state === "pythonMissing"
+                        ? "Get Python"
+                        : "Install AI Tools"
+                      : "Prepare AI Tools"}
                   </Button>
-                  {aiToolsStatus.state === "pythonMissing" && (
+                  {(aiToolsStatus.state === "pythonMissing" || aiToolsStatus.state === "error") && (
                     <Button variant="ghost" onClick={() => void installAiTools()}>
                       Open Setup Guide
                     </Button>

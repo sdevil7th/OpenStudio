@@ -84,8 +84,9 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   runtimeInstalled: false,
   modelInstalled: false,
   installInProgress: false,
+  requiresExternalPython: false,
   message: "Checking AI tools...",
-  helpUrl: "https://www.python.org/downloads/",
+  installSource: "bundledRuntime",
 };
 
 // ============================================

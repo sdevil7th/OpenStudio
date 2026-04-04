@@ -45,7 +45,7 @@ jobs:
             "-DOPENSTUDIO_APP_VERSION=$env:VERSION" `
             "-DJUCE_ASIOSDK_PATH=$env:GITHUB_WORKSPACE/$env:ASIO_SDK_DIR" `
             "-DOPENSTUDIO_REQUIRE_ASIO=ON" `
-            "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" `
+            "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON" `
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
       - name: Build OpenStudio
@@ -54,7 +54,7 @@ jobs:
 
       - name: Validate Windows runtime bundle
         shell: pwsh
-        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
+        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -ExpectBundledStemRuntime
 
       - name: Run Windows startup self-test
         shell: pwsh
@@ -94,7 +94,7 @@ jobs:
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DOPENSTUDIO_APP_VERSION="$VERSION" \
-            -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF \
+            -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
       - name: Build OpenStudio
@@ -113,7 +113,7 @@ jobs:
 
       - name: Validate macOS runtime bundle
         shell: bash
-        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$APP_BUNDLE" -ExpectedVersion "$VERSION" -EnforceLeanBundle
+        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$APP_BUNDLE" -ExpectedVersion "$VERSION" -ExpectBundledStemRuntime
 
       - name: Run macOS startup self-test
         shell: bash

@@ -4,24 +4,27 @@ namespace
 {
 constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
 constexpr auto kPythonHelpUrl = "https://www.python.org/downloads/";
+constexpr auto kInstallSourceBundledRuntime = "bundledRuntime";
+constexpr auto kInstallSourceExternalPython = "externalPython";
 
 juce::String makePythonImportCommand()
 {
     return "-c \"import audio_separator.separator; print('ok')\"";
 }
 
-juce::String getInstallPythonName()
-{
-   #if JUCE_WINDOWS
-    return "python.exe";
-   #else
-    return "python3";
-   #endif
-}
-
 juce::String quoteCommandPart(const juce::String& value)
 {
     return value.quoted();
+}
+
+bool isAiToolsTerminalState (const juce::String& state)
+{
+    return state == "ready"
+        || state == "error"
+        || state == "cancelled"
+        || state == "pythonMissing"
+        || state == "runtimeMissing"
+        || state == "modelMissing";
 }
 }
 
@@ -58,6 +61,11 @@ juce::File StemSeparator::getUserRuntimeRoot() const
 juce::File StemSeparator::getUserModelsDir() const
 {
     return getUserDataRoot().getChildFile("models");
+}
+
+juce::File StemSeparator::getAiToolsInstallLogFile() const
+{
+    return getUserDataRoot().getChildFile("logs").getChildFile("AiToolsInstall.log");
 }
 
 juce::File StemSeparator::findSystemPython() const
@@ -116,37 +124,54 @@ juce::File StemSeparator::findSystemPython() const
     return {};
 }
 
-juce::File StemSeparator::findPython() const
+juce::File StemSeparator::findPythonInRuntimeRoot (const juce::File& runtimeRoot) const
 {
-    const auto userRuntime = getUserRuntimeRoot();
+    if (! runtimeRoot.isDirectory())
+        return {};
+
 #if JUCE_WINDOWS
-    auto python = userRuntime.getChildFile("Scripts/python.exe");
-#else
-    auto python = userRuntime.getChildFile("bin/python3");
+    auto python = runtimeRoot.getChildFile("python.exe");
     if (! python.existsAsFile())
-        python = userRuntime.getChildFile("bin/python");
+        python = runtimeRoot.getChildFile("Scripts/python.exe");
+#else
+    auto python = runtimeRoot.getChildFile("python3");
+    if (! python.existsAsFile())
+        python = runtimeRoot.getChildFile("bin/python3");
+    if (! python.existsAsFile())
+        python = runtimeRoot.getChildFile("bin/python");
 #endif
+
     if (python.existsAsFile())
         return python;
 
+    return {};
+}
+
+juce::File StemSeparator::findBundledRuntimeRoot() const
+{
     const auto appDir = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
-    auto bundled = appDir.getChildFile("../../../tools/python/" + getInstallPythonName());
-    if (bundled.existsAsFile())
-        return bundled;
 
-    bundled = appDir.getChildFile("python/" + getInstallPythonName());
-    if (bundled.existsAsFile())
-        return bundled;
-
+    for (const auto& candidate : {
+            appDir.getChildFile("../../../tools/python"),
+            appDir.getChildFile("python")
 #if JUCE_MAC
-    const auto resourcesDir = appDir.getParentDirectory().getChildFile("Resources");
-    bundled = resourcesDir.getChildFile("python/python3");
-    if (bundled.existsAsFile())
-        return bundled;
+            , appDir.getParentDirectory().getChildFile("Resources").getChildFile("python")
 #endif
+        })
+    {
+        if (findPythonInRuntimeRoot(candidate).existsAsFile())
+            return candidate;
+    }
 
-    if (auto systemPython = findSystemPython(); systemPython.existsAsFile())
-        return systemPython;
+    return {};
+}
+
+juce::File StemSeparator::findPython() const
+{
+    const auto userRuntime = getUserRuntimeRoot();
+    auto python = findPythonInRuntimeRoot(userRuntime);
+    if (python.existsAsFile())
+        return python;
 
     return {};
 }
@@ -241,20 +266,24 @@ bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
     return modelsDir.isDirectory() && modelsDir.getChildFile(kStemModelName).existsAsFile();
 }
 
-StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File& python,
+StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File& systemPython,
+                                                                const juce::File& bundledRuntimeRoot,
                                                                 const juce::File& script,
                                                                 const juce::File& installerScript,
-                                                                const juce::File& modelsDir,
-                                                                bool runtimeInstalled) const
+                                                                bool runtimeInstalled,
+                                                                bool modelInstalled) const
 {
     auto status = getCachedAiToolsStatusSnapshot();
 
-    status.pythonDetected = python.existsAsFile();
+    status.pythonDetected = systemPython.existsAsFile();
     status.scriptAvailable = script.existsAsFile();
     status.installerAvailable = installerScript.existsAsFile();
     status.runtimeInstalled = runtimeInstalled;
-    status.modelInstalled = hasRequiredModel(modelsDir);
-    status.helpUrl = kPythonHelpUrl;
+    status.modelInstalled = modelInstalled;
+    status.requiresExternalPython = ! bundledRuntimeRoot.isDirectory();
+    status.installSource = status.requiresExternalPython ? kInstallSourceExternalPython : kInstallSourceBundledRuntime;
+    status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
+    status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
 
     if (status.installInProgress)
         return status;
@@ -266,16 +295,8 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.state = "ready";
         status.progress = 1.0f;
         status.error.clear();
+        status.errorCode.clear();
         status.message = "AI tools are ready.";
-        return status;
-    }
-
-    if (! status.pythonDetected)
-    {
-        status.state = "pythonMissing";
-        status.progress = 0.0f;
-        status.message = "Install Python 3.10 or newer, then retry AI Tools installation.";
-        status.error.clear();
         return status;
     }
 
@@ -285,15 +306,29 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.progress = 0.0f;
         status.message = "The AI tools installer is unavailable in this build.";
         status.error = "AI tools installer script not found.";
+        status.errorCode = "installer_unavailable";
         return status;
     }
 
     if (! status.runtimeInstalled)
     {
+        if (status.requiresExternalPython && ! status.pythonDetected)
+        {
+            status.state = "pythonMissing";
+            status.progress = 0.0f;
+            status.message = "Python 3.10 or newer is required for this build before AI tools can be installed.";
+            status.error.clear();
+            status.errorCode = "python_missing";
+            return status;
+        }
+
         status.state = "runtimeMissing";
         status.progress = 0.0f;
-        status.message = "Install AI Tools to enable stem separation.";
+        status.message = status.requiresExternalPython
+            ? "Install AI Tools to create the local stem-separation runtime."
+            : "Install AI Tools to prepare the built-in stem-separation runtime.";
         status.error.clear();
+        status.errorCode.clear();
         return status;
     }
 
@@ -301,13 +336,17 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
     status.progress = 0.0f;
     status.message = "Install AI Tools to download the stem separation model.";
     status.error.clear();
+    status.errorCode.clear();
     return status;
 }
 
 StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
 {
     AiToolsStatus status;
-    status.helpUrl = kPythonHelpUrl;
+    const auto bundledRuntimeRoot = findBundledRuntimeRoot();
+    status.requiresExternalPython = ! bundledRuntimeRoot.isDirectory();
+    status.installSource = status.requiresExternalPython ? kInstallSourceExternalPython : kInstallSourceBundledRuntime;
+    status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     status.state = "checking";
     status.progress = 0.0f;
     status.available = false;
@@ -315,10 +354,12 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
     status.scriptAvailable = findScript().existsAsFile();
     status.installerAvailable = findInstallerScript().existsAsFile();
     status.runtimeInstalled = false;
-    status.modelInstalled = hasRequiredModel(findModelsDir());
+    status.modelInstalled = hasRequiredModel(getUserModelsDir());
     status.installInProgress = installProcess && installProcess->isRunning();
     status.message = status.installInProgress ? "Installing AI tools..." : "Checking AI tools...";
     status.error.clear();
+    status.errorCode.clear();
+    status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
     return status;
 }
 
@@ -345,7 +386,8 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
             status.message = "Installing AI tools...";
     }
 
-    status.helpUrl = kPythonHelpUrl;
+    if (status.requiresExternalPython && status.helpUrl.isEmpty())
+        status.helpUrl = kPythonHelpUrl;
     return status;
 }
 
@@ -377,12 +419,14 @@ void StemSeparator::scheduleStatusRefresh()
 
     std::thread ([this]
     {
-        auto python = findPython();
+        auto installedPython = findPython();
+        auto systemPython = findSystemPython();
+        auto bundledRuntimeRoot = findBundledRuntimeRoot();
         auto script = findScript();
         auto installerScript = findInstallerScript();
-        auto modelsDir = findModelsDir();
-        const auto runtimeInstalled = python.existsAsFile() && canImportAudioSeparator (python);
-        auto refreshedStatus = buildAiToolsStatus (python, script, installerScript, modelsDir, runtimeInstalled);
+        const auto modelInstalled = hasRequiredModel(getUserModelsDir());
+        const auto runtimeInstalled = installedPython.existsAsFile() && canImportAudioSeparator (installedPython);
+        auto refreshedStatus = buildAiToolsStatus (systemPython, bundledRuntimeRoot, script, installerScript, runtimeInstalled, modelInstalled);
 
         {
             const juce::ScopedLock lock (aiToolsStatusLock);
@@ -405,9 +449,13 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("runtimeInstalled", status.runtimeInstalled);
     obj->setProperty("modelInstalled", status.modelInstalled);
     obj->setProperty("installInProgress", status.installInProgress);
+    obj->setProperty("requiresExternalPython", status.requiresExternalPython);
     obj->setProperty("message", status.message);
     obj->setProperty("error", status.error);
+    obj->setProperty("errorCode", status.errorCode);
+    obj->setProperty("detailLogPath", status.detailLogPath);
     obj->setProperty("helpUrl", status.helpUrl);
+    obj->setProperty("installSource", status.installSource);
     return juce::var(obj.release());
 }
 
@@ -460,37 +508,36 @@ juce::var StemSeparator::installAiTools()
 
     updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
     {
+        const auto bundledRuntimeRoot = findBundledRuntimeRoot();
+        status.requiresExternalPython = ! bundledRuntimeRoot.isDirectory();
+        status.installSource = status.requiresExternalPython ? kInstallSourceExternalPython : kInstallSourceBundledRuntime;
         status.state = "checking";
         status.progress = 0.0f;
         status.available = false;
         status.installInProgress = true;
         status.message = "Preparing AI tools installation...";
         status.error.clear();
-        status.helpUrl = kPythonHelpUrl;
+        status.errorCode.clear();
+        status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
+        status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     });
 
     std::thread ([this]
     {
-        const auto systemPython = findSystemPython();
-        if (! systemPython.existsAsFile())
-        {
-            updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
-            {
-                status.state = "pythonMissing";
-                status.progress = 0.0f;
-                status.available = false;
-                status.pythonDetected = false;
-                status.runtimeInstalled = false;
-                status.modelInstalled = false;
-                status.installInProgress = false;
-                status.message = "Python 3.10 or newer is required to install AI Tools.";
-                status.error.clear();
-                status.helpUrl = kPythonHelpUrl;
-            });
-            return;
-        }
-
         const auto installerScript = findInstallerScript();
+        const auto bundledRuntimeRoot = findBundledRuntimeRoot();
+        const auto bundledPython = findPythonInRuntimeRoot(bundledRuntimeRoot);
+        const auto systemPython = findSystemPython();
+        const auto logFile = getAiToolsInstallLogFile();
+        const auto runtimeRoot = getUserRuntimeRoot();
+        const auto modelsDir = getUserModelsDir();
+        runtimeRoot.createDirectory();
+        modelsDir.createDirectory();
+        logFile.getParentDirectory().createDirectory();
+
+        const auto usingBundledRuntime = bundledRuntimeRoot.isDirectory() && bundledPython.existsAsFile();
+        const auto bootstrapPython = usingBundledRuntime ? bundledPython : systemPython;
+
         if (! installerScript.existsAsFile())
         {
             updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
@@ -502,21 +549,48 @@ juce::var StemSeparator::installAiTools()
                 status.installInProgress = false;
                 status.message = "The AI tools installer is unavailable in this build.";
                 status.error = "AI tools installer script not found.";
+                status.errorCode = "installer_unavailable";
+                status.detailLogPath = logFile.getFullPathName();
+                status.requiresExternalPython = ! usingBundledRuntime;
+                status.installSource = usingBundledRuntime ? kInstallSourceBundledRuntime : kInstallSourceExternalPython;
+                status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
+            });
+            return;
+        }
+
+        if (! bootstrapPython.existsAsFile())
+        {
+            updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
+            {
+                status.state = "pythonMissing";
+                status.progress = 0.0f;
+                status.available = false;
+                status.pythonDetected = false;
+                status.runtimeInstalled = false;
+                status.modelInstalled = false;
+                status.installInProgress = false;
+                status.message = "Python 3.10 or newer is required for this build before AI Tools can be installed.";
+                status.error.clear();
+                status.errorCode = "python_missing";
+                status.detailLogPath = logFile.getFullPathName();
+                status.requiresExternalPython = true;
+                status.installSource = kInstallSourceExternalPython;
                 status.helpUrl = kPythonHelpUrl;
             });
             return;
         }
 
-        const auto runtimeRoot = getUserRuntimeRoot();
-        const auto modelsDir = getUserModelsDir();
-        runtimeRoot.createDirectory();
-        modelsDir.createDirectory();
-
-        const auto cmd = quoteCommandPart(systemPython.getFullPathName())
+        auto cmd = quoteCommandPart(bootstrapPython.getFullPathName())
             + " " + quoteCommandPart(installerScript.getFullPathName())
             + " --runtime-root " + quoteCommandPart(runtimeRoot.getFullPathName())
             + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
-            + " --model " + quoteCommandPart(kStemModelName);
+            + " --model " + quoteCommandPart(kStemModelName)
+            + " --log-path " + quoteCommandPart(logFile.getFullPathName());
+
+        if (usingBundledRuntime)
+            cmd += " --seed-runtime " + quoteCommandPart(bundledRuntimeRoot.getFullPathName());
+        else
+            cmd += " --bootstrap-with " + quoteCommandPart(systemPython.getFullPathName());
 
         auto nextInstallProcess = std::make_unique<juce::ChildProcess>();
         if (! nextInstallProcess->start(cmd))
@@ -524,9 +598,16 @@ juce::var StemSeparator::installAiTools()
             updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
             {
                 status.state = "error";
+                status.progress = 0.0f;
+                status.available = false;
                 status.installInProgress = false;
                 status.message = "Failed to start the AI tools installer.";
                 status.error = "Could not start the AI tools installer process.";
+                status.errorCode = "installer_launch_failed";
+                status.detailLogPath = logFile.getFullPathName();
+                status.requiresExternalPython = ! usingBundledRuntime;
+                status.installSource = usingBundledRuntime ? kInstallSourceBundledRuntime : kInstallSourceExternalPython;
+                status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
             });
             return;
         }
@@ -535,15 +616,21 @@ juce::var StemSeparator::installAiTools()
             const juce::ScopedLock lock (aiToolsStatusLock);
             installOutputBuffer.clear();
             installProcess = std::move(nextInstallProcess);
-            lastAiToolsStatus.state = "installing";
+            lastAiToolsStatus.state = usingBundledRuntime ? "copying_runtime" : "creating_venv";
             lastAiToolsStatus.progress = 0.0f;
             lastAiToolsStatus.available = false;
             lastAiToolsStatus.installInProgress = true;
-            lastAiToolsStatus.pythonDetected = true;
+            lastAiToolsStatus.pythonDetected = systemPython.existsAsFile();
             lastAiToolsStatus.installerAvailable = true;
-            lastAiToolsStatus.message = "Starting AI tools installation...";
+            lastAiToolsStatus.requiresExternalPython = ! usingBundledRuntime;
+            lastAiToolsStatus.installSource = usingBundledRuntime ? kInstallSourceBundledRuntime : kInstallSourceExternalPython;
+            lastAiToolsStatus.detailLogPath = logFile.getFullPathName();
+            lastAiToolsStatus.message = usingBundledRuntime
+                ? "Preparing the built-in AI tools runtime..."
+                : "Starting AI tools installation...";
             lastAiToolsStatus.error.clear();
-            lastAiToolsStatus.helpUrl = kPythonHelpUrl;
+            lastAiToolsStatus.errorCode.clear();
+            lastAiToolsStatus.helpUrl = lastAiToolsStatus.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
         }
     }).detach();
 
@@ -606,6 +693,7 @@ void StemSeparator::pollInstallProgress()
                 lastAiToolsStatus.state = "error";
                 lastAiToolsStatus.progress = 0.0f;
                 lastAiToolsStatus.error = "AI tools installer exited with code " + juce::String(exitCode) + ".";
+                lastAiToolsStatus.errorCode = "installer_exit_nonzero";
                 lastAiToolsStatus.message = "AI tools installation failed.";
             }
 
@@ -641,9 +729,28 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.message = json["message"].toString();
     if (json.hasProperty("error"))
         status.error = json["error"].toString();
+    if (json.hasProperty("errorCode"))
+        status.errorCode = json["errorCode"].toString();
+    if (json.hasProperty("detailLogPath"))
+        status.detailLogPath = json["detailLogPath"].toString();
+    if (json.hasProperty("installSource"))
+        status.installSource = json["installSource"].toString();
+    if (json.hasProperty("requiresExternalPython"))
+        status.requiresExternalPython = static_cast<bool>(json["requiresExternalPython"]);
+    if (json.hasProperty("pythonDetected"))
+        status.pythonDetected = static_cast<bool>(json["pythonDetected"]);
+    if (json.hasProperty("runtimeInstalled"))
+        status.runtimeInstalled = static_cast<bool>(json["runtimeInstalled"]);
+    if (json.hasProperty("modelInstalled"))
+        status.modelInstalled = static_cast<bool>(json["modelInstalled"]);
+    if (json.hasProperty("available"))
+        status.available = static_cast<bool>(json["available"]);
 
-    status.installInProgress = (status.state != "ready" && status.state != "error" && status.state != "cancelled");
-    status.helpUrl = kPythonHelpUrl;
+    status.installInProgress = ! isAiToolsTerminalState(status.state);
+    if (status.requiresExternalPython && status.helpUrl.isEmpty())
+        status.helpUrl = kPythonHelpUrl;
+    else if (! status.requiresExternalPython)
+        status.helpUrl.clear();
     return status;
 }
 
@@ -826,14 +933,17 @@ void StemSeparator::cancel()
 
 void StemSeparator::cancelAiToolsInstall()
 {
-    const juce::ScopedLock lock (aiToolsStatusLock);
-    if (installProcess && installProcess->isRunning())
     {
-        installProcess->kill();
-        juce::Logger::writeToLog("StemSeparator: AI tools install cancelled.");
+        const juce::ScopedLock lock (aiToolsStatusLock);
+        if (installProcess && installProcess->isRunning())
+        {
+            installProcess->kill();
+            juce::Logger::writeToLog("StemSeparator: AI tools install cancelled.");
+        }
+        installProcess.reset();
+        installOutputBuffer.clear();
     }
-    installProcess.reset();
-    installOutputBuffer.clear();
+
     updateCachedAiToolsStatus ([] (AiToolsStatus& status)
     {
         status.state = "cancelled";
@@ -842,7 +952,11 @@ void StemSeparator::cancelAiToolsInstall()
         status.installInProgress = false;
         status.message = "AI tools installation was cancelled.";
         status.error.clear();
-        status.helpUrl = kPythonHelpUrl;
+        status.errorCode.clear();
+        if (status.requiresExternalPython)
+            status.helpUrl = kPythonHelpUrl;
+        else
+            status.helpUrl.clear();
     });
 }
 

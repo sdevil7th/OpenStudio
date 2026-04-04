@@ -95,7 +95,7 @@ jobs:
             "-DOPENSTUDIO_UPDATE_CHANNEL_VALUE=stable" `
             "-DJUCE_ASIOSDK_PATH=$env:GITHUB_WORKSPACE/$env:ASIO_SDK_DIR" `
             "-DOPENSTUDIO_REQUIRE_ASIO=ON" `
-            "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" `
+            "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON" `
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
       - name: Build OpenStudio
@@ -104,7 +104,7 @@ jobs:
 
       - name: Validate Windows runtime bundle
         shell: pwsh
-        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
+        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -ExpectBundledStemRuntime
 
       - name: Prepare Windows signing certificate
         shell: pwsh
@@ -241,7 +241,7 @@ jobs:
             -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="$RELEASE_SITE_URL/appcast/macos-stable.xml" \
             -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="$RELEASE_SITE_URL/download" \
             -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
-            -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF \
+            -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
       - name: Build OpenStudio
@@ -256,7 +256,7 @@ jobs:
             throw "OpenStudio.app was not found in the build output."
           }
 
-          ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath $appPath.FullName -ExpectedVersion $env:VERSION -EnforceLeanBundle
+          ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath $appPath.FullName -ExpectedVersion $env:VERSION -ExpectBundledStemRuntime
 
       - name: Package macOS DMG
         shell: bash

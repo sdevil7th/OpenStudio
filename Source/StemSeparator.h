@@ -31,9 +31,13 @@ public:
         bool runtimeInstalled = false;
         bool modelInstalled = false;
         bool installInProgress = false;
+        bool requiresExternalPython = false;
         juce::String message;
         juce::String error;
+        juce::String errorCode;
+        juce::String detailLogPath;
         juce::String helpUrl;
+        juce::String installSource { "bundledRuntime" };
     };
 
     /** Check if Python environment and audio-separator are available. */
@@ -105,11 +109,17 @@ private:
     /** Get the preferred models directory under user app-data. */
     juce::File getUserModelsDir() const;
 
-    /** Find the Python executable (bundled or system). */
+    /** Find the prepared user-runtime Python executable. */
     juce::File findPython() const;
 
     /** Find a user-managed Python interpreter suitable for bootstrapping installs. */
     juce::File findSystemPython() const;
+
+    /** Find the bundled AI runtime seed directory if present. */
+    juce::File findBundledRuntimeRoot() const;
+
+    /** Resolve a Python executable from a runtime root. */
+    juce::File findPythonInRuntimeRoot (const juce::File& runtimeRoot) const;
 
     /** Find the stem_separator.py script. */
     juce::File findScript() const;
@@ -119,6 +129,9 @@ private:
 
     /** Find the models directory. */
     juce::File findModelsDir() const;
+
+    /** Find the install log file used by the AI tools bootstrapper. */
+    juce::File getAiToolsInstallLogFile() const;
 
     /** Return true if the given Python can import audio_separator. */
     bool canImportAudioSeparator (const juce::File& python) const;
@@ -130,11 +143,12 @@ private:
     void pollInstallProgress();
 
     /** Build the current AI tools status object using already-resolved values. */
-    AiToolsStatus buildAiToolsStatus (const juce::File& python,
+    AiToolsStatus buildAiToolsStatus (const juce::File& systemPython,
+                                      const juce::File& bundledRuntimeRoot,
                                       const juce::File& script,
                                       const juce::File& installerScript,
-                                      const juce::File& modelsDir,
-                                      bool runtimeInstalled) const;
+                                      bool runtimeInstalled,
+                                      bool modelInstalled) const;
 
     /** Build an initial lightweight snapshot without expensive runtime probing. */
     AiToolsStatus buildInitialAiToolsStatus() const;

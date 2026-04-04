@@ -203,29 +203,36 @@ export interface MixerUISnapshotEnvelope<T = any> {
 }
 
 export interface AiToolsStatus {
-  state:
-    | "idle"
-    | "installing"
-    | "checking"
-    | "creating_venv"
-    | "pythonMissing"
-    | "runtimeMissing"
-    | "modelMissing"
-    | "ready"
-    | "error"
+    state:
+      | "idle"
+      | "installing"
+      | "checking"
+      | "creating_venv"
+      | "copying_runtime"
+      | "verifying_runtime"
+      | "downloading_model"
+      | "pythonMissing"
+      | "runtimeMissing"
+      | "modelMissing"
+      | "ready"
+      | "error"
     | "cancelled";
   progress: number;
   available: boolean;
   installerAvailable: boolean;
   pythonDetected: boolean;
-  scriptAvailable: boolean;
-  runtimeInstalled: boolean;
-  modelInstalled: boolean;
-  installInProgress: boolean;
-  message?: string;
-  error?: string;
-  helpUrl?: string;
-}
+    scriptAvailable: boolean;
+    runtimeInstalled: boolean;
+    modelInstalled: boolean;
+    installInProgress: boolean;
+    requiresExternalPython: boolean;
+    message?: string;
+    error?: string;
+    errorCode?: string;
+    detailLogPath?: string;
+    helpUrl?: string;
+    installSource?: "bundledRuntime" | "externalPython" | "none";
+  }
 
 export interface InstallAiToolsResponse {
   started: boolean;
@@ -4092,19 +4099,20 @@ class NativeBridge {
       return await window.__JUCE__.backend.getAiToolsStatus();
     }
 
-    return {
-      state: "runtimeMissing",
-      progress: 0,
-      available: false,
-      installerAvailable: false,
-      pythonDetected: false,
-      scriptAvailable: false,
-      runtimeInstalled: false,
-      modelInstalled: false,
-      installInProgress: false,
-      message: "AI tools are unavailable in the web preview.",
-      helpUrl: "https://www.python.org/downloads/",
-    };
+      return {
+        state: "runtimeMissing",
+        progress: 0,
+        available: false,
+        installerAvailable: false,
+        pythonDetected: false,
+        scriptAvailable: false,
+        runtimeInstalled: false,
+        modelInstalled: false,
+        installInProgress: false,
+        requiresExternalPython: false,
+        message: "AI tools are unavailable in the web preview.",
+        installSource: "none",
+      };
   }
 
   async refreshAiToolsStatus(): Promise<AiToolsStatus> {

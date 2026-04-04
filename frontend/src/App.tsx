@@ -272,6 +272,7 @@ function App() {
   const openAiToolsSetup = useDAWStore((state) => state.openAiToolsSetup);
   const showToast = useDAWStore((state) => state.showToast);
   const previousAiToolsStateRef = useRef(aiToolsStatus.state);
+  const previousAiToolsInstallInProgressRef = useRef(aiToolsStatus.installInProgress);
 
   useEffect(() => startMixerUISync(), []);
 
@@ -296,22 +297,39 @@ function App() {
 
   useEffect(() => {
     const previousState = previousAiToolsStateRef.current;
+    const previousInstallInProgress = previousAiToolsInstallInProgressRef.current;
     const currentState = aiToolsStatus.state;
+    const installAttemptStates = new Set([
+      "checking",
+      "installing",
+      "creating_venv",
+      "copying_runtime",
+      "verifying_runtime",
+      "downloading_model",
+    ]);
+    const wasInstallAttempt = previousInstallInProgress || installAttemptStates.has(previousState);
 
     if (previousState !== currentState) {
       if (currentState === "ready") {
         showToast("AI tools are ready", "success");
       } else if (currentState === "error" && aiToolsStatus.error) {
         showToast(aiToolsStatus.error, "error");
+        if (wasInstallAttempt) {
+          openAiToolsSetup();
+        }
       } else if (currentState === "cancelled") {
         showToast("AI tools installation cancelled", "info");
-      } else if (currentState === "pythonMissing") {
+        if (wasInstallAttempt) {
+          openAiToolsSetup();
+        }
+      } else if (currentState === "pythonMissing" && wasInstallAttempt) {
         openAiToolsSetup();
       }
     }
 
     previousAiToolsStateRef.current = currentState;
-  }, [aiToolsStatus.error, aiToolsStatus.state, openAiToolsSetup, showToast]);
+    previousAiToolsInstallInProgressRef.current = aiToolsStatus.installInProgress;
+  }, [aiToolsStatus.error, aiToolsStatus.installInProgress, aiToolsStatus.state, openAiToolsSetup, showToast]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.subscribe("mixerWindowClosed", (data) => {

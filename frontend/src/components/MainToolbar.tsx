@@ -132,9 +132,13 @@ export function MainToolbar({
     ? "AI Tools Ready"
     : aiToolsStatus.installInProgress
       ? aiToolsStatus.message || "Installing AI Tools..."
-      : aiToolsStatus.state === "pythonMissing"
-        ? "Install Python, then retry AI Tools"
-        : "Install AI Tools";
+      : aiToolsStatus.requiresExternalPython
+        ? aiToolsStatus.state === "pythonMissing"
+          ? "Install Python, then retry AI Tools"
+          : "Install AI Tools with Python"
+        : aiToolsStatus.state === "modelMissing"
+          ? "Download the AI model to finish setup"
+          : "Prepare built-in AI Tools";
 
   const aiButtonProgress = Math.max(0, Math.min(1, aiToolsStatus.progress || 0));
   const aiButtonHaloStyle = aiToolsStatus.installInProgress
