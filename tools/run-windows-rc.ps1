@@ -60,6 +60,9 @@ $installerPath = Join-Path $resolvedWindowsOutputDir "OpenStudio-Setup-x64.exe"
 $installedExePath = Join-Path $InstallDir "OpenStudio.exe"
 $startupLogPath = Join-Path $env:APPDATA "OpenStudio\logs\OpenStudio_Startup.log"
 $asioHeaderPath = Join-Path $repoRoot "thirdparty\asio\common\iasiodrv.h"
+$windowsPrereqsDir = Join-Path $repoRoot "thirdparty\windows-prereqs"
+$webView2Bootstrapper = Join-Path $windowsPrereqsDir "MicrosoftEdgeWebView2Setup.exe"
+$vcRedistInstaller = Join-Path $windowsPrereqsDir "vc_redist.x64.exe"
 
 function Get-StartupLogContent {
     param(
@@ -172,6 +175,16 @@ if (-not $SkipASIOSetup -and -not (Test-Path $asioHeaderPath)) {
 
 if (-not (Test-Path $asioHeaderPath)) {
     throw "ASIO SDK header was not found at '$asioHeaderPath'. Run tools/setup-asio-sdk.ps1 or pass -SkipASIOSetup only if you intentionally do not need parity with the Windows release path."
+}
+
+if ((-not (Test-Path $webView2Bootstrapper)) -or (-not (Test-Path $vcRedistInstaller))) {
+    Invoke-Step "Installing Windows prerequisite installers into thirdparty/windows-prereqs" {
+        & (Join-Path $repoRoot "tools/setup-windows-prereqs.ps1")
+    }
+}
+
+if ((-not (Test-Path $webView2Bootstrapper)) -or (-not (Test-Path $vcRedistInstaller))) {
+    throw "Windows prerequisite installers are missing. Expected '$webView2Bootstrapper' and '$vcRedistInstaller'."
 }
 
 if ($SetupONNXRuntime) {

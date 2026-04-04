@@ -75,7 +75,12 @@ private:
     void hideStartupOverlay();
     void markFrontendStartupReady(const juce::String& detail);
     void markFrontendStartupFailed(const juce::String& detail);
-    void showStartupFallback(const juce::String& title, const juce::String& detail);
+    void showStartupFallback(const juce::String& title, const juce::String& detail, bool allowRepair = false);
+    void hideStartupFallbackActions();
+    void updateStartupFallbackActions();
+    void openStartupLogFolder();
+    void relaunchApplication(StartupMode targetMode);
+    void repairWindowsPrerequisites();
     juce::var buildStartupDiagnostics() const;
 
     //==============================================================================
@@ -89,6 +94,10 @@ private:
     juce::WebBrowserComponent webView;
     juce::Label startupStatusMessage;
     juce::Label fallbackMessage;
+    juce::TextButton startupRetryButton { "Retry" };
+    juce::TextButton startupOpenLogButton { "Open Log Folder" };
+    juce::TextButton startupSafeModeButton { "Launch Safe Mode" };
+    juce::TextButton startupRepairButton { "Repair Prerequisites" };
     std::unique_ptr<juce::FileChooser> fileChooser;  // For async file dialogs
     juce::Rectangle<int> windowRestoreBounds;
     bool windowPseudoMaximized = false;
@@ -112,6 +121,7 @@ private:
     juce::uint32 frontendStartupNavigationTicks = 0;
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
+    bool startupRepairAvailable = false;
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

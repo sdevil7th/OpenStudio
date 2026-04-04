@@ -14,6 +14,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $startupLog = Join-Path $env:APPDATA "OpenStudio\logs\OpenStudio_Startup.log"
 $legacyStartupLog = Join-Path $InstallDir "OpenStudio_Debug.log"
 $webView2UserData = Join-Path $env:APPDATA "OpenStudio\WebView2UserData"
+$windowsPrereqsDir = Join-Path $InstallDir "prereqs\windows"
 $reportPath = Join-Path $OutputDir "installed-app-report.txt"
 
 function Get-WebView2RuntimeVersions {
@@ -46,6 +47,29 @@ function Get-RecentOpenStudioEvents {
             Select-Object -First 10 TimeGenerated, Source, EventID, Message
     } catch {
         return @()
+    }
+}
+
+function Get-VCRedistStatus {
+    $registryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    if (-not (Test-Path $registryPath)) {
+        return @{
+            Installed = $false
+            Version = ""
+        }
+    }
+
+    try {
+        $properties = Get-ItemProperty -Path $registryPath
+        return @{
+            Installed = ($properties.Installed -eq 1)
+            Version = [string]($properties.Version ?? "")
+        }
+    } catch {
+        return @{
+            Installed = $false
+            Version = ""
+        }
     }
 }
 
@@ -97,10 +121,16 @@ $lines.Add("Startup log (legacy): $legacyStartupLog")
 $lines.Add("Legacy startup log exists: $(Test-Path $legacyStartupLog)")
 $lines.Add("WebView2 user data dir: $webView2UserData")
 $lines.Add("WebView2 user data exists: $(Test-Path $webView2UserData)")
+$lines.Add("Windows prerequisite installer dir: $windowsPrereqsDir")
+$lines.Add("WebView2 bootstrapper present: $(Test-Path (Join-Path $windowsPrereqsDir 'MicrosoftEdgeWebView2Setup.exe'))")
+$lines.Add("VC++ redistributable installer present: $(Test-Path (Join-Path $windowsPrereqsDir 'vc_redist.x64.exe'))")
 $lines.Add("")
 
 $wvVersions = Get-WebView2RuntimeVersions
 $lines.Add("Detected WebView2 runtime versions: $(if ($wvVersions) { $wvVersions -join ', ' } else { 'none' })")
+$vcRedist = Get-VCRedistStatus
+$lines.Add("VC++ redistributable installed: $($vcRedist.Installed)")
+$lines.Add("VC++ redistributable version: $(if ($vcRedist.Version) { $vcRedist.Version } else { 'unknown' })")
 $lines.Add("")
 
 if (Test-Path $startupLog) {

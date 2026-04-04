@@ -264,6 +264,8 @@ function App() {
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
   const aiToolsStatus = useDAWStore((state) => state.aiToolsStatus);
   const refreshAiToolsStatus = useDAWStore((state) => state.refreshAiToolsStatus);
+  const reopenStemSeparation = useDAWStore((state) => state.reopenStemSeparation);
+  const cancelAiToolsInstall = useDAWStore((state) => state.cancelAiToolsInstall);
   const showToast = useDAWStore((state) => state.showToast);
   const previousAiToolsStateRef = useRef(aiToolsStatus.state);
 
@@ -299,6 +301,8 @@ function App() {
         showToast(aiToolsStatus.error, "error");
       } else if (currentState === "cancelled") {
         showToast("AI tools installation cancelled", "info");
+      } else if (currentState === "pythonMissing") {
+        showToast("Python 3.10 or newer is required for AI tools.", "info");
       }
     }
 
@@ -1552,6 +1556,59 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* AI Tools Background Install Popup */}
+      {!showStemSeparation &&
+        (aiToolsStatus.installInProgress || aiToolsStatus.state === "checking") && (
+          <div className="fixed bottom-32 right-6 z-[10001] w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-daw-accent/40 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur-md">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-white">AI tools are installing</p>
+                <p className="mt-1 text-xs text-neutral-300">
+                  OpenStudio is downloading and preparing optional AI tooling in the
+                  background. You can keep working while this finishes.
+                </p>
+              </div>
+              <div className="h-3 w-3 rounded-full bg-daw-accent shadow-[0_0_16px_rgba(59,130,246,0.9)] animate-pulse" />
+            </div>
+
+            <div className="mt-4">
+              <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+                <div
+                  className="h-full rounded-full bg-daw-accent transition-all duration-300"
+                  style={{ width: `${Math.max(6, Math.min(aiToolsStatus.progress ?? 8, 100))}%` }}
+                />
+              </div>
+              <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
+                <span>{aiToolsStatus.message || "Preparing optional AI tools..."}</span>
+                <span>{Math.round(aiToolsStatus.progress ?? 0)}%</span>
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  reopenStemSeparation();
+                }}
+                className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs font-medium text-neutral-200 transition-colors hover:border-neutral-500 hover:bg-neutral-800"
+              >
+                View details
+              </button>
+              {aiToolsStatus.installInProgress && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void cancelAiToolsInstall();
+                  }}
+                  className="rounded-lg bg-daw-accent px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-daw-accent/90"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
       {/* Toast Notification */}
       {toastVisible && (

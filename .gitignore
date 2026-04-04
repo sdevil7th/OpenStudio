@@ -82,6 +82,8 @@ get-pip.py
 # Third-party runtime binaries (downloaded per-machine)
 /thirdparty/asio/
 /thirdparty/asio-*.zip
+/thirdparty/windows-prereqs/
+/thirdparty/windows-prereqs-*.zip
 /thirdparty/onnxruntime/
 /thirdparty/onnxruntime-*.zip
 /thirdparty/onnxruntime-*.tgz

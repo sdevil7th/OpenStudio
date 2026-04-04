@@ -71,6 +71,10 @@ jobs:
         shell: pwsh
         run: choco install innosetup -y --no-progress
 
+      - name: Install Windows prerequisite installers
+        shell: pwsh
+        run: ./tools/setup-windows-prereqs.ps1
+
       - name: Install ASIO SDK
         shell: pwsh
         run: ./tools/setup-asio-sdk.ps1 -Destination $env:ASIO_SDK_DIR

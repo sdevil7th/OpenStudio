@@ -147,9 +147,29 @@ $resolvedOutputDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
     Join-Path $repoRoot $OutputDir
 }
 $issPath = Join-Path $repoRoot "packaging/windows/OpenStudio.iss"
+$windowsPrereqsDir = Join-Path $repoRoot "thirdparty/windows-prereqs"
+$webView2Bootstrapper = Join-Path $windowsPrereqsDir "MicrosoftEdgeWebView2Setup.exe"
+$vcRedistInstaller = Join-Path $windowsPrereqsDir "vc_redist.x64.exe"
+$bundleWindowsPrereqsDir = Join-Path $resolvedSourceDir "prereqs/windows"
 
 if (-not (Test-Path (Join-Path $resolvedSourceDir "OpenStudio.exe"))) {
     throw "OpenStudio.exe was not found in '$resolvedSourceDir'. Build the Release target first."
+}
+
+if ((-not (Test-Path $webView2Bootstrapper)) -or (-not (Test-Path $vcRedistInstaller))) {
+    Write-Host "Windows prerequisite installers were not found. Fetching them now..."
+    & (Join-Path $repoRoot "tools/setup-windows-prereqs.ps1")
+}
+
+if ((-not (Test-Path $webView2Bootstrapper)) -or (-not (Test-Path $vcRedistInstaller))) {
+    throw "Windows prerequisite installers are missing. Expected '$webView2Bootstrapper' and '$vcRedistInstaller'."
+}
+
+if ((-not (Test-Path (Join-Path $bundleWindowsPrereqsDir "MicrosoftEdgeWebView2Setup.exe"))) -or
+    (-not (Test-Path (Join-Path $bundleWindowsPrereqsDir "vc_redist.x64.exe")))) {
+    New-Item -ItemType Directory -Force -Path $bundleWindowsPrereqsDir | Out-Null
+    Copy-Item -LiteralPath $webView2Bootstrapper -Destination (Join-Path $bundleWindowsPrereqsDir "MicrosoftEdgeWebView2Setup.exe") -Force
+    Copy-Item -LiteralPath $vcRedistInstaller -Destination (Join-Path $bundleWindowsPrereqsDir "vc_redist.x64.exe") -Force
 }
 
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null

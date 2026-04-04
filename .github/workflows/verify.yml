@@ -34,6 +34,10 @@ jobs:
         shell: pwsh
         run: ./tools/setup-asio-sdk.ps1 -Destination $env:ASIO_SDK_DIR
 
+      - name: Install Windows prerequisite installers
+        shell: pwsh
+        run: ./tools/setup-windows-prereqs.ps1
+
       - name: Configure CMake
         shell: pwsh
         run: |
@@ -47,6 +51,10 @@ jobs:
       - name: Build OpenStudio
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
+
+      - name: Validate Windows runtime bundle
+        shell: pwsh
+        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
   verify-macos:
     runs-on: macos-14

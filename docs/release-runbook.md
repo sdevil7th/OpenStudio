@@ -4,6 +4,7 @@
 
 - Windows installer packaging via `packaging/windows/OpenStudio.iss`
 - macOS DMG packaging via `tools/package-macos-release.sh`
+- A runtime dependency contract in `docs/runtime-dependency-contract.md`
 - Release metadata generation via `tools/generate-release-metadata.ps1`
 - Release metadata validation via `tools/validate-release-metadata.ps1`
 - Published release validation via `tools/validate-published-release.ps1`
@@ -38,12 +39,25 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - `thirdparty/ARA_SDK` is vendored in the repo, pinned to the OpenStudio ARA host integration, and required for normal builds.
 - `thirdparty/asio` stays out of git and is generated locally or in CI when Windows builds require ASIO.
 - `thirdparty/onnxruntime` stays out of git and is generated locally when needed.
+- `thirdparty/windows-prereqs` stays out of git and is generated locally or in CI when Windows installer builds need pinned WebView2 and VC++ prerequisite installers.
 - Official Windows CI and release builds provision ASIO explicitly and fail early if the SDK is unavailable.
+- Official Windows CI and release builds also provision the pinned Windows prerequisite installers used by the installer recovery flow.
 - To install the pinned optional ONNX Runtime package locally, run:
   `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
 - To install the pinned ASIO SDK locally, run:
   `powershell -ExecutionPolicy Bypass -File tools/setup-asio-sdk.ps1`
+- To install the pinned Windows prerequisite installers locally, run:
+  `powershell -ExecutionPolicy Bypass -File tools/setup-windows-prereqs.ps1`
 - To include ONNX Runtime in the Windows GitHub Actions build, set the repository variable `OPENSTUDIO_SETUP_ONNXRUNTIME=true`.
+
+## Dependency contract
+
+OpenStudio now follows the policy documented in `docs/runtime-dependency-contract.md`.
+
+- Hard launch prerequisites may block launch and must be provisioned or diagnosed clearly.
+- Shipped runtime assets must be present in every packaged runtime bundle.
+- Optional feature prerequisites, including Python for AI tools, must never block base app launch.
+- AI tools setup runs in the background and surfaces progress through the toolbar AI button plus a lightweight in-app popup.
 
 ## Local Windows release flow
 
@@ -53,8 +67,11 @@ The local Windows RC gate is now the required no-surprises check before any push
 That script intentionally stops before GitHub release publication, metadata generation, or Netlify deployment. Use it to prove that:
 - the Release bundle is complete
 - the installer packages locally
+- Windows prerequisite installers are staged
 - the installed app starts visibly on Windows
 - safe startup mode works when needed
+- the startup doctor logs a successful frontend boot
+- the base app still launches without optional AI tooling/Python installed
 
 If you want one command for the full guarded Windows path, use:
 `./tools/run-release-preflight.ps1 -Version 1.0.0 -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -RepoSlug <org>/<repo>`
@@ -65,6 +82,7 @@ If you want one command for the full guarded Windows path, use:
 4. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DJUCE_ASIOSDK_PATH=thirdparty/asio" "-DOPENSTUDIO_REQUIRE_ASIO=ON" "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
 5. Build the release target: `cmake --build build-release-windows --config Release --target OpenStudio`
 6. Validate the runtime bundle: `./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath build-release-windows/OpenStudio_artefacts/Release -ExpectedVersion 1.0.0 -EnforceLeanBundle`
+   This now also validates staged Windows prerequisite installers when they are part of the runtime contract.
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
 8. Generate updater metadata:

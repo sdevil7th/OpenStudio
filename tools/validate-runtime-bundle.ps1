@@ -171,6 +171,17 @@ if ($Platform -eq "windows") {
     if (Test-SourceExists -RepoRoot $repoRoot -RelativePath "tools/ffmpeg.exe") {
         Assert-Exists -Path (Join-Path $runtimeRoot "ffmpeg.exe") -Description "bundled ffmpeg executable"
     }
+
+    $windowsPrerequisiteEntries = @(
+        @{ Source = "thirdparty/windows-prereqs/MicrosoftEdgeWebView2Setup.exe"; Target = "prereqs/windows/MicrosoftEdgeWebView2Setup.exe"; Description = "WebView2 prerequisite bootstrapper" },
+        @{ Source = "thirdparty/windows-prereqs/vc_redist.x64.exe"; Target = "prereqs/windows/vc_redist.x64.exe"; Description = "VC++ redistributable installer" }
+    )
+
+    foreach ($entry in $windowsPrerequisiteEntries) {
+        if (Test-SourceExists -RepoRoot $repoRoot -RelativePath $entry.Source) {
+            Assert-Exists -Path (Join-Path $runtimeRoot $entry.Target) -Description $entry.Description
+        }
+    }
 } else {
     if (Test-SourceExists -RepoRoot $repoRoot -RelativePath "tools/ffmpeg") {
         Assert-Exists -Path (Join-Path $runtimeRoot "ffmpeg") -Description "bundled ffmpeg binary"

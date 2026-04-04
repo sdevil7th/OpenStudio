@@ -10,12 +10,15 @@ Use this checklist for every release candidate before publishing installers, man
 ## Windows
 
 - Install `OpenStudio-Setup-x64.exe` on a clean machine or VM.
+- Confirm the installer provisions or repairs WebView2 Runtime and VC++ Redistributable before offering `Launch OpenStudio`.
 - Confirm the installed app launches without a frontend dev server running.
 - Confirm the installed app does not show a full black window.
 - Confirm `webui`, `effects`, `scripts`, `models`, and `ffmpeg.exe` are present in the installed app directory.
+- Confirm `prereqs/windows/MicrosoftEdgeWebView2Setup.exe` and `prereqs/windows/vc_redist.x64.exe` are present in the installed app directory.
 - Confirm `%APPDATA%\OpenStudio\logs\OpenStudio_Startup.log` is created on first launch.
 - Confirm the startup log reports `Embedded browser backend supported: Yes`.
 - Confirm the startup log records `Frontend startup state: boot-ready`.
+- Confirm the startup log reports required runtime assets present.
 - Confirm `OpenStudio.exe --ui-safe-mode` renders the safe startup UI visibly.
 - If startup fails, run `./tools/inspect-installed-windows-app.ps1` on the test machine and archive the generated report.
 - Open a blank project and confirm audio devices enumerate successfully.
@@ -28,6 +31,11 @@ Use this checklist for every release candidate before publishing installers, man
 - Confirm the base install does not include a bundled `python/` runtime folder.
 - Open Stem Separation and confirm it shows the `Install AI Tools` CTA when the optional runtime is missing.
 - Click the toolbar AI Tools button beside Settings and confirm it opens the same install/help path.
+- Click the toolbar AI Tools button on a clean machine and confirm:
+  - a lightweight popup appears immediately
+  - progress appears around the toolbar AI button
+  - the main app stays responsive while optional dependencies download/install in the background
+  - closing the stem modal does not cancel the background job
 - Run a short export and confirm the output file is written.
 - Trigger `Check for Updates...` and confirm the manifest request succeeds.
 - Validate update behavior from the previous public version to the candidate build.
@@ -38,13 +46,16 @@ Use this checklist for every release candidate before publishing installers, man
 - Install the `.dmg` output on a clean machine.
 - Confirm the app launches offline without a frontend dev server.
 - Confirm runtime assets are bundled inside the app resources.
+- Confirm the startup log reports the packaged frontend and required runtime assets as present.
 - Confirm the unsigned DMG mounts and the app launches after the documented Gatekeeper override flow (`right-click > Open`, then allow in Privacy & Security if needed).
+- If startup is forced to fail, confirm the startup doctor/fallback identifies the failure branch and shows the log/safe-mode recovery path.
 - Open a blank project and confirm audio device setup works.
 - Import audio, edit, and export a short render.
 - Save a new `.osproj` project and reopen it manually from Finder.
 - Open a legacy `.s13` project and confirm it loads.
 - Confirm the base app bundle does not include a bundled `python/` runtime folder.
 - Open Stem Separation and confirm it offers `Install AI Tools` when the optional runtime is missing.
+- Click the toolbar AI Tools button and confirm the optional setup stays in the background with visible toolbar progress and no UI freeze.
 - Trigger `Check for Updates...` and confirm the stable manifest request succeeds.
 - Validate update behavior from the previous public version to the candidate build.
 

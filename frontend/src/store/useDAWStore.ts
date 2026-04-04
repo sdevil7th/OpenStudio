@@ -2129,6 +2129,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         return;
       }
 
+      get().showToast("AI tools are being installed in the background.", "info");
+
       set({
         aiToolsStatus: {
           ...currentStatus,

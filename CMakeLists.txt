@@ -442,6 +442,17 @@ if(WIN32)
     else()
         message(WARNING "tools/ffmpeg.exe not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
     endif()
+
+    set(OPENSTUDIO_WINDOWS_PREREQS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/windows-prereqs")
+    if(EXISTS "${OPENSTUDIO_WINDOWS_PREREQS_DIR}")
+        openstudio_copy_runtime_directory(
+            "${OPENSTUDIO_WINDOWS_PREREQS_DIR}"
+            "prereqs/windows"
+            "Copying Windows prerequisite installers to output directory"
+        )
+    else()
+        message(WARNING "thirdparty/windows-prereqs not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-windows-prereqs.ps1")
+    endif()
 elseif(APPLE OR UNIX)
     # On macOS/Linux, look for ffmpeg in the tools directory (no .exe extension)
     set(FFMPEG_BIN "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg")
