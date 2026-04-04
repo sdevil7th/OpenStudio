@@ -11,7 +11,7 @@ These are required for the base app shell to start successfully.
 - Windows: Microsoft Edge WebView2 Runtime
 - Windows: Microsoft Visual C++ x64 Redistributable
 - macOS: supported macOS version and working system WebKit backend
-- Both platforms: packaged frontend entrypoint and required shipped runtime assets
+- Both platforms: packaged frontend entrypoint and the web assets required by the shell
 
 If a hard prerequisite is missing or unusable:
 
@@ -19,9 +19,9 @@ If a hard prerequisite is missing or unusable:
 - the startup doctor must log the exact failure branch
 - the user must get an actionable recovery path
 
-## Shipped Runtime Assets
+## Bundled Feature Assets
 
-These are bundled with OpenStudio and must be present in the installed/runtime bundle.
+These are bundled with OpenStudio and should be present in the installed/runtime bundle, but they must not block the base shell from launching.
 
 - `webui/index.html`
 - `effects/`
@@ -29,10 +29,10 @@ These are bundled with OpenStudio and must be present in the installed/runtime b
 - `models/basic_pitch_nmp.onnx`
 - `ffmpeg` / `ffmpeg.exe`
 
-If any shipped runtime asset is missing:
+If a bundled feature asset is missing:
 
-- startup must fail safely
-- the startup doctor must identify the missing asset
+- startup must still succeed
+- the affected feature surface must identify the missing asset
 - release validation must fail
 
 ## Optional Feature Prerequisites
@@ -56,12 +56,12 @@ If an optional dependency is missing:
 ### Windows
 
 - The installer owns hard launch prerequisites.
-- The packaged app stages Windows prerequisite installers in `prereqs/windows`.
+- The packaged app stages offline Windows prerequisite installers in `prereqs/windows`.
 - The startup doctor must distinguish:
   - WebView2 not installed
   - WebView2 installed but unusable
   - VC++ redistributable missing
-  - shipped runtime asset missing
+  - shell asset missing
 
 ### macOS
 

@@ -27,6 +27,25 @@ bool commandLineHasFlag(const juce::String& commandLine, const juce::String& fla
     return false;
 }
 
+juce::String getCommandLineOptionValue(const juce::String& commandLine, const juce::String& option)
+{
+    const auto optionIndex = commandLine.indexOf(option);
+    if (optionIndex < 0)
+        return {};
+
+    auto remainder = commandLine.substring(optionIndex + option.length()).trimStart();
+    if (remainder.isEmpty())
+        return {};
+
+    if (remainder.startsWithChar('"'))
+    {
+        remainder = remainder.substring(1);
+        return remainder.upToFirstOccurrenceOf("\"", false, false);
+    }
+
+    return remainder.upToFirstOccurrenceOf(" ", false, false);
+}
+
 juce::File getWritableStartupLogFile()
 {
     auto logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -79,6 +98,8 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
+        const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
+        const auto startupSelfTestReportPath = getCommandLineOptionValue(commandLine, "--report");
         startupMode = commandLineHasFlag(commandLine, "--ui-safe-mode")
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
@@ -88,6 +109,19 @@ public:
         juce::Logger::writeToLog("Application Initialising...");
         juce::Logger::writeToLog("Startup log path: " + logFile.getFullPathName());
         juce::Logger::writeToLog("Startup mode: " + juce::String(startupMode == MainComponent::StartupMode::safe ? "safe" : "normal"));
+
+        if (startupSelfTestMode)
+        {
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath)
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_StartupSelfTest.txt");
+
+            const auto success = MainComponent::writeStartupSelfTestReport(reportFile);
+            juce::Logger::writeToLog("Startup self-test completed with result: " + juce::String(success ? "PASS" : "FAIL"));
+            setApplicationReturnValue(success ? 0 : 1);
+            quit();
+            return;
+        }
 
         mixerWindowManager = std::make_unique<MixerWindowManager>(
             [this]()

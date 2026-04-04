@@ -14,7 +14,7 @@
 #ifndef OutputDir
   #define OutputDir "..\..\dist\windows"
 #endif
-#define WebView2Bootstrapper "MicrosoftEdgeWebView2Setup.exe"
+#define WebView2Bootstrapper "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 #define VCRedistInstaller "vc_redist.x64.exe"
 
 [Setup]
@@ -68,51 +68,18 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 [Code]
 var
   CanLaunchInstalledAppValue: Boolean;
+  StartupSelfTestReportPath: string;
 
-function HasVersionedSubdirectory(const RootPath: string): Boolean;
-var
-  FindRec: TFindRec;
+procedure SetInstallStatus(const StatusText, DetailText: string);
 begin
-  Result := False;
-
-  if not DirExists(RootPath) then
-    exit;
-
-  if FindFirst(AddBackslash(RootPath) + '*', FindRec) then
-  begin
-    try
-      repeat
-        if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
-           (FindRec.Name <> '.') and
-           (FindRec.Name <> '..') then
-        begin
-          Result := True;
-          exit;
-        end;
-      until not FindNext(FindRec);
-    finally
-      FindClose(FindRec);
-    end;
-  end;
+  WizardForm.StatusLabel.Caption := StatusText;
+  WizardForm.FilenameLabel.Caption := DetailText;
+  WizardForm.StatusLabel.Update;
+  WizardForm.FilenameLabel.Update;
+  WizardForm.Repaint;
 end;
 
-function IsWebView2RuntimeInstalled(): Boolean;
-begin
-  Result :=
-    HasVersionedSubdirectory(ExpandConstant('{commonpf32}\Microsoft\EdgeWebView\Application')) or
-    HasVersionedSubdirectory(ExpandConstant('{commonpf64}\Microsoft\EdgeWebView\Application'));
-end;
-
-function IsVCRedistInstalled(): Boolean;
-var
-  Installed: Cardinal;
-begin
-  Result :=
-    RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Installed', Installed) and
-    (Installed = 1);
-end;
-
-function ValidateInstalledRuntimePayload(): Boolean;
+function ValidateInstalledShellPayload(): Boolean;
 var
   MissingItems: string;
 begin
@@ -122,20 +89,12 @@ begin
     MissingItems := MissingItems + #13#10 + ' - OpenStudio.exe';
   if not FileExists(ExpandConstant('{app}\webui\index.html')) then
     MissingItems := MissingItems + #13#10 + ' - webui\index.html';
-  if not DirExists(ExpandConstant('{app}\effects')) then
-    MissingItems := MissingItems + #13#10 + ' - effects';
-  if not DirExists(ExpandConstant('{app}\scripts')) then
-    MissingItems := MissingItems + #13#10 + ' - scripts';
-  if not FileExists(ExpandConstant('{app}\models\basic_pitch_nmp.onnx')) then
-    MissingItems := MissingItems + #13#10 + ' - models\basic_pitch_nmp.onnx';
-  if not FileExists(ExpandConstant('{app}\ffmpeg.exe')) then
-    MissingItems := MissingItems + #13#10 + ' - ffmpeg.exe';
 
   Result := MissingItems = '';
 
   if not Result then
     MsgBox(
-      'OpenStudio installed, but required runtime files are missing:' + MissingItems + #13#10#13#10 +
+      'OpenStudio installed, but required shell files are missing:' + MissingItems + #13#10#13#10 +
       'Please reinstall OpenStudio or rebuild the installer before launching it.',
       mbCriticalError,
       MB_OK
@@ -168,7 +127,7 @@ begin
   Result := ResultCode = 0;
 end;
 
-procedure InstallMissingPrerequisites();
+procedure InstallOrRepairPrerequisites();
 var
   WebView2InstallerPath: string;
   VCRedistInstallerPath: string;
@@ -176,58 +135,81 @@ begin
   WebView2InstallerPath := ExpandConstant('{app}\prereqs\windows\{#WebView2Bootstrapper}');
   VCRedistInstallerPath := ExpandConstant('{app}\prereqs\windows\{#VCRedistInstaller}');
 
-  if not IsVCRedistInstalled() then
-  begin
-    if not RunPrerequisiteInstaller(VCRedistInstallerPath, '/install /quiet /norestart', 'Microsoft Visual C++ Redistributable') then
-    begin
-      CanLaunchInstalledAppValue := False;
-      MsgBox(
-        'OpenStudio could not install the Microsoft Visual C++ Redistributable automatically.' + #13#10#13#10 +
-        'Please repair or install it manually, then relaunch OpenStudio.',
-        mbCriticalError,
-        MB_OK
-      );
-      exit;
-    end;
-  end;
-
-  if not IsWebView2RuntimeInstalled() then
-  begin
-    if not RunPrerequisiteInstaller(WebView2InstallerPath, '/silent /install', 'Microsoft Edge WebView2 Runtime') then
-    begin
-      CanLaunchInstalledAppValue := False;
-      MsgBox(
-        'OpenStudio could not install the Microsoft Edge WebView2 Runtime automatically.' + #13#10#13#10 +
-        'Please install or repair WebView2 Runtime manually, then relaunch OpenStudio.',
-        mbCriticalError,
-        MB_OK
-      );
-      exit;
-    end;
-  end;
-
-  if not IsVCRedistInstalled() then
+  SetInstallStatus('Installing runtime dependencies...', 'Repairing Microsoft Visual C++ Redistributable');
+  if not RunPrerequisiteInstaller(VCRedistInstallerPath, '/install /passive /norestart', 'Microsoft Visual C++ Redistributable') then
   begin
     CanLaunchInstalledAppValue := False;
     MsgBox(
-      'The Microsoft Visual C++ Redistributable still appears to be missing after installation.' + #13#10#13#10 +
-      'OpenStudio will not be launched automatically.',
+      'OpenStudio could not install or repair the Microsoft Visual C++ Redistributable automatically.' + #13#10#13#10 +
+      'Please repair or install it manually, then relaunch OpenStudio.',
       mbCriticalError,
       MB_OK
     );
     exit;
   end;
 
-  if not IsWebView2RuntimeInstalled() then
+  SetInstallStatus('Installing runtime dependencies...', 'Repairing Microsoft Edge WebView2 Runtime');
+  if not RunPrerequisiteInstaller(WebView2InstallerPath, '/silent /install', 'Microsoft Edge WebView2 Runtime') then
   begin
     CanLaunchInstalledAppValue := False;
     MsgBox(
-      'The Microsoft Edge WebView2 Runtime still appears to be missing after installation.' + #13#10#13#10 +
+      'OpenStudio could not install or repair the Microsoft Edge WebView2 Runtime automatically.' + #13#10#13#10 +
+      'Please install or repair WebView2 Runtime manually, then relaunch OpenStudio.',
+      mbCriticalError,
+      MB_OK
+    );
+  end;
+end;
+
+function RunStartupSelfTest(): Boolean;
+var
+  ResultCode: Integer;
+  SelfTestExecutable: string;
+  SelfTestArguments: string;
+  ReportText: AnsiString;
+begin
+  SelfTestExecutable := ExpandConstant('{app}\{#MyAppExeName}');
+  StartupSelfTestReportPath := ExpandConstant('{tmp}\OpenStudio_StartupSelfTest.txt');
+  DeleteFile(StartupSelfTestReportPath);
+
+  SelfTestArguments := '--startup-self-test --report "' + StartupSelfTestReportPath + '"';
+
+  SetInstallStatus('Validating shell startup...', 'Running OpenStudio startup self-test');
+
+  if not Exec(SelfTestExecutable, SelfTestArguments, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    CanLaunchInstalledAppValue := False;
+    MsgBox('OpenStudio could not start its shell self-test executable.', mbCriticalError, MB_OK);
+    Result := False;
+    exit;
+  end;
+
+  Result := ResultCode = 0;
+  if Result then
+    exit;
+
+  CanLaunchInstalledAppValue := False;
+  ReportText := '';
+  if FileExists(StartupSelfTestReportPath) then
+    LoadStringFromFile(StartupSelfTestReportPath, ReportText);
+
+  if ReportText <> '' then
+  begin
+    MsgBox(
+      'OpenStudio shell validation failed after installation:' + #13#10#13#10 + ReportText + #13#10#13#10 +
       'OpenStudio will not be launched automatically.',
       mbCriticalError,
       MB_OK
     );
-    exit;
+  end
+  else
+  begin
+    MsgBox(
+      'OpenStudio shell validation failed after installation and no self-test report was written.' + #13#10#13#10 +
+      'OpenStudio will not be launched automatically.',
+      mbCriticalError,
+      MB_OK
+    );
   end;
 end;
 
@@ -242,9 +224,15 @@ begin
     exit;
 
   CanLaunchInstalledAppValue := True;
-  InstallMissingPrerequisites();
+  SetInstallStatus('Validating installed shell files...', 'Checking OpenStudio executable and packaged frontend');
 
-  if CanLaunchInstalledAppValue and (not ValidateInstalledRuntimePayload()) then
+  if CanLaunchInstalledAppValue and (not ValidateInstalledShellPayload()) then
+    CanLaunchInstalledAppValue := False;
+
+  if CanLaunchInstalledAppValue then
+    InstallOrRepairPrerequisites();
+
+  if CanLaunchInstalledAppValue and (not RunStartupSelfTest()) then
     CanLaunchInstalledAppValue := False;
 end;
 

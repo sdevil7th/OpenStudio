@@ -157,6 +157,22 @@ Invoke-Step "Validating macOS runtime bundle" {
     & (Join-Path $repoRoot "tools/validate-runtime-bundle.ps1") @arguments
 }
 
+Invoke-Step "Running macOS startup shell self-test" {
+    $reportPath = Join-Path ([System.IO.Path]::GetTempPath()) "OpenStudio_StartupSelfTest.txt"
+    if (Test-Path $reportPath) {
+        Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
+    }
+
+    & (Join-Path $appBundlePath "Contents/MacOS/OpenStudio") --startup-self-test --report $reportPath
+    if ($LASTEXITCODE -ne 0) {
+        if (Test-Path $reportPath) {
+            Get-Content -LiteralPath $reportPath
+        }
+
+        throw "macOS startup self-test failed."
+    }
+}
+
 Invoke-Step "Packaging macOS DMG" {
     chmod +x (Join-Path $repoRoot "tools/package-macos-release.sh")
     & (Join-Path $repoRoot "tools/package-macos-release.sh") $appBundlePath $Version $resolvedMacOutputDir

@@ -35,6 +35,13 @@ public:
         timedOut
     };
 
+    enum class StartupRepairAction
+    {
+        none,
+        installation,
+        dependencies
+    };
+
     struct WindowCallbacks
     {
         std::function<void()> requestAppClose;
@@ -61,6 +68,8 @@ public:
 
     static void broadcastEventToAll(const juce::String& eventId, const juce::var& payload = {});
     static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
+    static juce::var buildStartupSelfTestReport();
+    static bool writeStartupSelfTestReport(const juce::File& reportFile);
 
 private:
     juce::Rectangle<int> getDesktopWorkAreaForCurrentWindow() const;
@@ -80,6 +89,7 @@ private:
     void updateStartupFallbackActions();
     void openStartupLogFolder();
     void relaunchApplication(StartupMode targetMode);
+    void repairInstalledApplication();
     void repairWindowsPrerequisites();
     juce::var buildStartupDiagnostics() const;
 
@@ -97,7 +107,7 @@ private:
     juce::TextButton startupRetryButton { "Retry" };
     juce::TextButton startupOpenLogButton { "Open Log Folder" };
     juce::TextButton startupSafeModeButton { "Launch Safe Mode" };
-    juce::TextButton startupRepairButton { "Repair Prerequisites" };
+    juce::TextButton startupRepairButton { "Repair" };
     std::unique_ptr<juce::FileChooser> fileChooser;  // For async file dialogs
     juce::Rectangle<int> windowRestoreBounds;
     bool windowPseudoMaximized = false;
@@ -121,7 +131,7 @@ private:
     juce::uint32 frontendStartupNavigationTicks = 0;
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
-    bool startupRepairAvailable = false;
+    StartupRepairAction startupRepairAction = StartupRepairAction::none;
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

@@ -55,7 +55,8 @@ If a release page shows only GitHub's default source archives, treat that as a f
 OpenStudio now follows the policy documented in `docs/runtime-dependency-contract.md`.
 
 - Hard launch prerequisites may block launch and must be provisioned or diagnosed clearly.
-- Shipped runtime assets must be present in every packaged runtime bundle.
+- Shell-critical startup assets must be present in every packaged runtime bundle.
+- Bundled feature assets such as `basic_pitch_nmp.onnx` are validated for packaging quality but must not block base app launch.
 - Optional feature prerequisites, including Python for AI tools, must never block base app launch.
 - AI tools setup runs in the background and surfaces progress through the toolbar AI button plus a lightweight in-app popup.
 
@@ -68,6 +69,7 @@ That script intentionally stops before GitHub release publication, metadata gene
 - the Release bundle is complete
 - the installer packages locally
 - Windows prerequisite installers are staged
+- the bundled app passes `--startup-self-test`
 - the installed app starts visibly on Windows
 - safe startup mode works when needed
 - the startup doctor logs a successful frontend boot

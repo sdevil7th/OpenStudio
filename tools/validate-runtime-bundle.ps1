@@ -133,15 +133,25 @@ switch ($Platform) {
     }
 }
 
-$requiredRuntimeEntries = @(
+$shellCriticalRuntimeEntries = @(
     @{ Source = "frontend/dist/index.html"; Target = "webui/index.html"; Description = "packaged frontend entry point" },
+    @{ Source = "frontend/dist/assets"; Target = "webui/assets"; Description = "packaged frontend assets" }
+)
+
+$bundledFeatureEntries = @(
     @{ Source = "effects"; Target = "effects"; Description = "stock effects bundle" },
     @{ Source = "scripts"; Target = "scripts"; Description = "stock scripts bundle" },
-    @{ Source = "resources/models/basic_pitch_nmp.onnx"; Target = "models/basic_pitch_nmp.onnx"; Description = "core pitch model" },
+    @{ Source = "resources/models/basic_pitch_nmp.onnx"; Target = "models/basic_pitch_nmp.onnx"; Description = "polyphonic pitch model" },
     @{ Source = "tools/install_ai_tools.py"; Target = "scripts/install_ai_tools.py"; Description = "AI tools installer script" }
 )
 
-foreach ($entry in $requiredRuntimeEntries) {
+foreach ($entry in $shellCriticalRuntimeEntries) {
+    if (Test-SourceExists -RepoRoot $repoRoot -RelativePath $entry.Source) {
+        Assert-Exists -Path (Join-Path $runtimeRoot $entry.Target) -Description $entry.Description
+    }
+}
+
+foreach ($entry in $bundledFeatureEntries) {
     if (Test-SourceExists -RepoRoot $repoRoot -RelativePath $entry.Source) {
         Assert-Exists -Path (Join-Path $runtimeRoot $entry.Target) -Description $entry.Description
     }
@@ -173,7 +183,7 @@ if ($Platform -eq "windows") {
     }
 
     $windowsPrerequisiteEntries = @(
-        @{ Source = "thirdparty/windows-prereqs/MicrosoftEdgeWebView2Setup.exe"; Target = "prereqs/windows/MicrosoftEdgeWebView2Setup.exe"; Description = "WebView2 prerequisite bootstrapper" },
+        @{ Source = "thirdparty/windows-prereqs/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Target = "prereqs/windows/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Description = "WebView2 standalone installer" },
         @{ Source = "thirdparty/windows-prereqs/vc_redist.x64.exe"; Target = "prereqs/windows/vc_redist.x64.exe"; Description = "VC++ redistributable installer" }
     )
 

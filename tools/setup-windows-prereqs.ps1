@@ -17,9 +17,9 @@ $resolvedDestination = if ([System.IO.Path]::IsPathRooted($Destination)) {
 
 $downloads = @(
     @{
-        Name = "WebView2 Evergreen Bootstrapper"
-        FileName = "MicrosoftEdgeWebView2Setup.exe"
-        Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+        Name = "WebView2 Evergreen Standalone Installer (x64)"
+        FileName = "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+        Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124701"
     },
     @{
         Name = "Visual C++ x64 Redistributable"

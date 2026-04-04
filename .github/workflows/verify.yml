@@ -56,6 +56,18 @@ jobs:
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
+      - name: Run Windows startup self-test
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_StartupSelfTest.txt"
+          & "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe" --startup-self-test --report $report
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $report) {
+              Get-Content $report
+            }
+            throw "Windows startup self-test failed."
+          }
+
   verify-macos:
     runs-on: macos-14
     env:
@@ -88,3 +100,29 @@ jobs:
       - name: Build OpenStudio
         shell: bash
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Find app bundle
+        shell: bash
+        run: |
+          APP_BUNDLE="$(find "$BUILD_DIR" -name OpenStudio.app -type d -print -quit)"
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "OpenStudio.app not found under $BUILD_DIR" >&2
+            exit 1
+          fi
+          echo "APP_BUNDLE=$APP_BUNDLE" >> "$GITHUB_ENV"
+
+      - name: Validate macOS runtime bundle
+        shell: bash
+        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$APP_BUNDLE" -ExpectedVersion "$VERSION" -EnforceLeanBundle
+
+      - name: Run macOS startup self-test
+        shell: bash
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_StartupSelfTest.txt"
+          "$APP_BUNDLE/Contents/MacOS/OpenStudio" --startup-self-test --report "$REPORT"
+          if [ $? -ne 0 ]; then
+            if [ -f "$REPORT" ]; then
+              cat "$REPORT"
+            fi
+            exit 1
+          fi

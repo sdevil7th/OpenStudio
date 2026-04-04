@@ -122,7 +122,7 @@ $lines.Add("Legacy startup log exists: $(Test-Path $legacyStartupLog)")
 $lines.Add("WebView2 user data dir: $webView2UserData")
 $lines.Add("WebView2 user data exists: $(Test-Path $webView2UserData)")
 $lines.Add("Windows prerequisite installer dir: $windowsPrereqsDir")
-$lines.Add("WebView2 bootstrapper present: $(Test-Path (Join-Path $windowsPrereqsDir 'MicrosoftEdgeWebView2Setup.exe'))")
+$lines.Add("WebView2 standalone installer present: $(Test-Path (Join-Path $windowsPrereqsDir 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'))")
 $lines.Add("VC++ redistributable installer present: $(Test-Path (Join-Path $windowsPrereqsDir 'vc_redist.x64.exe'))")
 $lines.Add("")
 

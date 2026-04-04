@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <regex>
 
 #if JUCE_WINDOWS
  #ifndef NOMINMAX
@@ -132,7 +133,22 @@ struct RuntimeAssetCheck
     juce::File path;
 };
 
-juce::Array<RuntimeAssetCheck> getRequiredRuntimeAssetChecks()
+juce::File getPackagedFrontendRoot()
+{
+    const auto entryPoint = getPackagedFrontendEntryPoint();
+    return entryPoint.existsAsFile() ? entryPoint.getParentDirectory() : juce::File();
+}
+
+juce::Array<RuntimeAssetCheck> getShellCriticalRuntimeAssetChecks()
+{
+    const auto runtimeRoot = getRuntimeAssetRoot();
+    juce::Array<RuntimeAssetCheck> checks;
+
+    checks.add({ "packaged frontend entry point", runtimeRoot.getChildFile("webui").getChildFile("index.html") });
+    return checks;
+}
+
+juce::Array<RuntimeAssetCheck> getBundledFeatureAssetChecks()
 {
     const auto runtimeRoot = getRuntimeAssetRoot();
     juce::Array<RuntimeAssetCheck> checks;
@@ -143,7 +159,6 @@ juce::Array<RuntimeAssetCheck> getRequiredRuntimeAssetChecks()
     const auto ffmpegName = "ffmpeg";
    #endif
 
-    checks.add({ "packaged frontend entry point", runtimeRoot.getChildFile("webui").getChildFile("index.html") });
     checks.add({ "bundled effects directory", runtimeRoot.getChildFile("effects") });
     checks.add({ "bundled scripts directory", runtimeRoot.getChildFile("scripts") });
     checks.add({ "core pitch model", runtimeRoot.getChildFile("models").getChildFile("basic_pitch_nmp.onnx") });
@@ -152,11 +167,11 @@ juce::Array<RuntimeAssetCheck> getRequiredRuntimeAssetChecks()
     return checks;
 }
 
-juce::StringArray getMissingRequiredRuntimeAssets()
+juce::StringArray getMissingRuntimeAssets(const juce::Array<RuntimeAssetCheck>& checks)
 {
     juce::StringArray missingAssets;
 
-    for (const auto& check : getRequiredRuntimeAssetChecks())
+    for (const auto& check : checks)
     {
         const bool exists = check.path.isDirectory() || check.path.existsAsFile();
         if (! exists)
@@ -164,6 +179,81 @@ juce::StringArray getMissingRequiredRuntimeAssets()
     }
 
     return missingAssets;
+}
+
+juce::String normaliseFrontendAssetPath(const juce::String& assetPath)
+{
+    auto path = assetPath.upToFirstOccurrenceOf("?", false, false)
+                         .upToFirstOccurrenceOf("#", false, false)
+                         .trim();
+
+    if (path.startsWithIgnoreCase("http://")
+        || path.startsWithIgnoreCase("https://")
+        || path.startsWithIgnoreCase("data:")
+        || path.startsWithIgnoreCase("javascript:")
+        || path.startsWithIgnoreCase("mailto:")
+        || path.startsWithChar('#'))
+    {
+        return {};
+    }
+
+    while (path.startsWithChar('/'))
+        path = path.substring(1);
+
+    if (path.startsWithIgnoreCase("./"))
+        path = path.substring(2);
+
+    return path;
+}
+
+juce::StringArray getMissingPackagedFrontendAssets()
+{
+    juce::StringArray missingAssets;
+    const auto frontendEntryPoint = getPackagedFrontendEntryPoint();
+    const auto frontendRoot = getPackagedFrontendRoot();
+
+    if (! frontendEntryPoint.existsAsFile() || ! frontendRoot.isDirectory())
+        return missingAssets;
+
+    const auto html = frontendEntryPoint.loadFileAsString();
+    const std::regex assetPattern(R"((?:src|href)\s*=\s*["']([^"'#][^"']*)["'])", std::regex::icase);
+    const auto htmlText = html.toStdString();
+    std::sregex_iterator begin(htmlText.begin(), htmlText.end(), assetPattern), end;
+    juce::StringArray referencedAssets;
+
+    for (auto it = begin; it != end; ++it)
+    {
+        const auto normalised = normaliseFrontendAssetPath(juce::String((*it)[1].str()));
+        if (normalised.isNotEmpty())
+            referencedAssets.addIfNotAlreadyThere(normalised);
+    }
+
+    for (const auto& referencedAsset : referencedAssets)
+    {
+        if (referencedAsset == "index.html")
+            continue;
+
+        const auto candidate = frontendRoot.getChildFile(referencedAsset);
+        if (! candidate.existsAsFile() && ! candidate.isDirectory())
+            missingAssets.add("frontend asset " + referencedAsset + " -> " + candidate.getFullPathName());
+    }
+
+    return missingAssets;
+}
+
+juce::StringArray getMissingShellRuntimeAssets()
+{
+    auto missingAssets = getMissingRuntimeAssets(getShellCriticalRuntimeAssetChecks());
+
+    for (const auto& missingAsset : getMissingPackagedFrontendAssets())
+        missingAssets.addIfNotAlreadyThere(missingAsset);
+
+    return missingAssets;
+}
+
+juce::StringArray getMissingBundledFeatureAssets()
+{
+    return getMissingRuntimeAssets(getBundledFeatureAssetChecks());
 }
 
 juce::String normaliseResourceRequestPath(const juce::String& requestPath)
@@ -303,7 +393,7 @@ juce::File getWindowsPrerequisiteInstallerDirectory()
 bool canRepairWindowsPrerequisites()
 {
     const auto prereqDir = getWindowsPrerequisiteInstallerDirectory();
-    return prereqDir.getChildFile("MicrosoftEdgeWebView2Setup.exe").existsAsFile()
+    return prereqDir.getChildFile("MicrosoftEdgeWebView2RuntimeInstallerX64.exe").existsAsFile()
         || prereqDir.getChildFile("vc_redist.x64.exe").existsAsFile();
 }
 #endif
@@ -319,12 +409,14 @@ juce::String getStringProperty(const juce::var& value, const juce::Identifier& p
 struct StartupDependencyStatus
 {
     bool packagedFrontendPresent = false;
-    bool requiredRuntimeAssetsPresent = true;
+    bool shellRuntimeAssetsPresent = true;
+    bool featureRuntimeAssetsPresent = true;
     bool browserBackendSupported = false;
     bool repairAvailable = false;
     juce::String packagedFrontendPath;
     juce::String browserBackend;
-    juce::StringArray missingRuntimeAssets;
+    juce::StringArray missingShellRuntimeAssets;
+    juce::StringArray missingFeatureRuntimeAssets;
 #if JUCE_WINDOWS
     juce::String webView2RuntimeVersion;
     bool vcRedistInstalled = false;
@@ -339,8 +431,10 @@ StartupDependencyStatus evaluateStartupDependencies(bool browserBackendSupported
     status.packagedFrontendPresent = getPackagedFrontendEntryPoint().existsAsFile();
     status.packagedFrontendPath = getPackagedFrontendEntryPoint().getFullPathName();
     status.browserBackend = describeBrowserBackend(getPreferredBrowserBackend());
-    status.missingRuntimeAssets = getMissingRequiredRuntimeAssets();
-    status.requiredRuntimeAssetsPresent = status.missingRuntimeAssets.isEmpty();
+    status.missingShellRuntimeAssets = getMissingShellRuntimeAssets();
+    status.shellRuntimeAssetsPresent = status.missingShellRuntimeAssets.isEmpty();
+    status.missingFeatureRuntimeAssets = getMissingBundledFeatureAssets();
+    status.featureRuntimeAssetsPresent = status.missingFeatureRuntimeAssets.isEmpty();
 
 #if JUCE_WINDOWS
     status.webView2RuntimeVersion = detectWebView2RuntimeVersion();
@@ -449,10 +543,132 @@ juce::String describeFrontendStartupState(MainComponent::FrontendStartupState st
 
     return "unknown";
 }
+
+juce::String determineStartupFailureCategory(const StartupDependencyStatus& dependencyStatus)
+{
+    if (! dependencyStatus.shellRuntimeAssetsPresent)
+        return dependencyStatus.packagedFrontendPresent ? "shell-assets-missing" : "packaged-frontend-missing";
+
+#if JUCE_WINDOWS
+    if (! dependencyStatus.browserBackendSupported)
+    {
+        if (! dependencyStatus.vcRedistInstalled)
+            return "vc-redist-missing";
+
+        if (dependencyStatus.webView2RuntimeVersion.isEmpty())
+            return "webview2-runtime-missing";
+
+        return "webview2-backend-unusable";
+    }
+#else
+    if (! dependencyStatus.browserBackendSupported)
+        return "macos-backend-unavailable";
+#endif
+
+    return "ready";
+}
+
+juce::String buildStartupFailureSummary(const StartupDependencyStatus& dependencyStatus)
+{
+    const auto failureCategory = determineStartupFailureCategory(dependencyStatus);
+
+    if (failureCategory == "packaged-frontend-missing")
+        return "Packaged frontend is missing.";
+
+    if (failureCategory == "shell-assets-missing")
+        return "Required shell assets are missing.";
+
+#if JUCE_WINDOWS
+    if (failureCategory == "vc-redist-missing")
+        return "Microsoft Visual C++ Redistributable is missing.";
+
+    if (failureCategory == "webview2-runtime-missing")
+        return "Microsoft Edge WebView2 Runtime is missing.";
+
+    if (failureCategory == "webview2-backend-unusable")
+        return "WebView2 Runtime was detected, but JUCE still reports the backend as unavailable.";
+#else
+    if (failureCategory == "macos-backend-unavailable")
+        return "The system browser backend is unavailable on this macOS installation.";
+#endif
+
+    return "OpenStudio shell startup self-test passed.";
+}
+
+juce::String buildStartupSelfTestText(const StartupDependencyStatus& dependencyStatus)
+{
+    juce::StringArray lines;
+    lines.add("OpenStudio Startup Self-Test");
+    lines.add("shellReady=" + juce::String(determineStartupFailureCategory(dependencyStatus) == "ready" ? "true" : "false"));
+    lines.add("failureCategory=" + determineStartupFailureCategory(dependencyStatus));
+    lines.add("summary=" + buildStartupFailureSummary(dependencyStatus));
+    lines.add("browserBackend=" + dependencyStatus.browserBackend);
+    lines.add("browserBackendSupported=" + juce::String(dependencyStatus.browserBackendSupported ? "true" : "false"));
+    lines.add("packagedFrontendPresent=" + juce::String(dependencyStatus.packagedFrontendPresent ? "true" : "false"));
+    lines.add("packagedFrontendPath=" + dependencyStatus.packagedFrontendPath);
+    lines.add("shellRuntimeAssetsPresent=" + juce::String(dependencyStatus.shellRuntimeAssetsPresent ? "true" : "false"));
+    lines.add("missingShellRuntimeAssets=" + dependencyStatus.missingShellRuntimeAssets.joinIntoString(" | "));
+    lines.add("featureRuntimeAssetsPresent=" + juce::String(dependencyStatus.featureRuntimeAssetsPresent ? "true" : "false"));
+    lines.add("missingFeatureRuntimeAssets=" + dependencyStatus.missingFeatureRuntimeAssets.joinIntoString(" | "));
+    lines.add("startupLogPath=" + getStartupLogFile().getFullPathName());
+#if JUCE_WINDOWS
+    lines.add("webView2RuntimeVersion=" + dependencyStatus.webView2RuntimeVersion);
+    lines.add("vcRedistInstalled=" + juce::String(dependencyStatus.vcRedistInstalled ? "true" : "false"));
+    lines.add("vcRedistVersion=" + dependencyStatus.vcRedistVersion);
+    lines.add("prerequisiteRepairAvailable=" + juce::String(dependencyStatus.repairAvailable ? "true" : "false"));
+#endif
+    return lines.joinIntoString("\n");
+}
 }
 
 juce::CriticalSection MainComponent::instanceListLock;
 juce::Array<MainComponent*> MainComponent::activeInstances;
+
+juce::var MainComponent::buildStartupSelfTestReport()
+{
+    const auto preferredBackend = getPreferredBrowserBackend();
+    const auto supported = juce::WebBrowserComponent::areOptionsSupported(
+        juce::WebBrowserComponent::Options().withBackend(preferredBackend));
+    const auto dependencyStatus = evaluateStartupDependencies(supported);
+
+    auto* report = new juce::DynamicObject();
+    report->setProperty("shellReady", determineStartupFailureCategory(dependencyStatus) == "ready");
+    report->setProperty("failureCategory", determineStartupFailureCategory(dependencyStatus));
+    report->setProperty("summary", buildStartupFailureSummary(dependencyStatus));
+    report->setProperty("browserBackend", dependencyStatus.browserBackend);
+    report->setProperty("browserBackendSupported", dependencyStatus.browserBackendSupported);
+    report->setProperty("packagedFrontendPresent", dependencyStatus.packagedFrontendPresent);
+    report->setProperty("packagedFrontendPath", dependencyStatus.packagedFrontendPath);
+    report->setProperty("shellRuntimeAssetsPresent", dependencyStatus.shellRuntimeAssetsPresent);
+    report->setProperty("missingShellRuntimeAssets", dependencyStatus.missingShellRuntimeAssets.joinIntoString("\n"));
+    report->setProperty("featureRuntimeAssetsPresent", dependencyStatus.featureRuntimeAssetsPresent);
+    report->setProperty("missingFeatureRuntimeAssets", dependencyStatus.missingFeatureRuntimeAssets.joinIntoString("\n"));
+    report->setProperty("startupLogPath", getStartupLogFile().getFullPathName());
+#if JUCE_WINDOWS
+    report->setProperty("webView2RuntimeVersion", dependencyStatus.webView2RuntimeVersion);
+    report->setProperty("vcRedistInstalled", dependencyStatus.vcRedistInstalled);
+    report->setProperty("vcRedistVersion", dependencyStatus.vcRedistVersion);
+    report->setProperty("prerequisiteRepairAvailable", dependencyStatus.repairAvailable);
+#endif
+    report->setProperty("textReport", buildStartupSelfTestText(dependencyStatus));
+    return juce::var(report);
+}
+
+bool MainComponent::writeStartupSelfTestReport(const juce::File& reportFile)
+{
+    const auto report = buildStartupSelfTestReport();
+    const auto textReport = getStringProperty(report, "textReport");
+
+    if (reportFile != juce::File())
+    {
+        reportFile.getParentDirectory().createDirectory();
+        reportFile.replaceWithText(textReport);
+    }
+
+    juce::Logger::writeToLog("=== Startup self-test ===");
+    juce::Logger::writeToLog(textReport);
+    return static_cast<bool>(report.getProperty("shellReady", false));
+}
 
 //==============================================================================
 MainComponent::MainComponent(AudioEngine& audioEngineIn,
@@ -4257,9 +4473,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         juce::Logger::writeToLog("Packaged frontend path: " + packagedFrontend.getFullPathName());
     else
         juce::Logger::writeToLog("Packaged frontend candidates:\n" + describeCandidatePaths());
-    juce::Logger::writeToLog("Required runtime assets present: " + juce::String(dependencyStatus.requiredRuntimeAssetsPresent ? "Yes" : "No"));
-    if (! dependencyStatus.requiredRuntimeAssetsPresent)
-        juce::Logger::writeToLog("Missing required runtime assets:\n" + formatMissingRuntimeAssets(dependencyStatus.missingRuntimeAssets));
+    juce::Logger::writeToLog("Shell runtime assets present: " + juce::String(dependencyStatus.shellRuntimeAssetsPresent ? "Yes" : "No"));
+    if (! dependencyStatus.shellRuntimeAssetsPresent)
+        juce::Logger::writeToLog("Missing shell runtime assets:\n" + formatMissingRuntimeAssets(dependencyStatus.missingShellRuntimeAssets));
+    juce::Logger::writeToLog("Bundled feature assets present: " + juce::String(dependencyStatus.featureRuntimeAssetsPresent ? "Yes" : "No"));
+    if (! dependencyStatus.featureRuntimeAssetsPresent)
+        juce::Logger::writeToLog("Missing bundled feature assets:\n" + formatMissingRuntimeAssets(dependencyStatus.missingFeatureRuntimeAssets));
     juce::Logger::writeToLog("WebView2 user data path: " + webViewUserDataDir.getFullPathName());
 #if JUCE_WINDOWS
     const auto webView2RuntimeVersion = detectWebView2RuntimeVersion();
@@ -4302,20 +4521,27 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
     startupRetryButton.onClick = [this]() { relaunchApplication(startupMode); };
     startupOpenLogButton.onClick = [this]() { openStartupLogFolder(); };
     startupSafeModeButton.onClick = [this]() { relaunchApplication(StartupMode::safe); };
-    startupRepairButton.onClick = [this]() { repairWindowsPrerequisites(); };
+    startupRepairButton.onClick = [this]()
+    {
+        if (startupRepairAction == StartupRepairAction::installation)
+            repairInstalledApplication();
+        else if (startupRepairAction == StartupRepairAction::dependencies)
+            repairWindowsPrerequisites();
+    };
 
-    if (supported && dependencyStatus.requiredRuntimeAssetsPresent)
+    if (supported && dependencyStatus.shellRuntimeAssetsPresent)
     {
         addAndMakeVisible (webView);
         addAndMakeVisible (startupStatusMessage);
     }
-    else if (! dependencyStatus.requiredRuntimeAssetsPresent)
+    else if (! dependencyStatus.shellRuntimeAssetsPresent)
     {
-        auto message = "OpenStudio is missing required runtime assets and cannot start safely."
-                       "\n\nMissing items:\n" + formatMissingRuntimeAssets(dependencyStatus.missingRuntimeAssets)
+        auto message = "OpenStudio is missing required shell files and cannot start safely."
+                       "\n\nMissing items:\n" + formatMissingRuntimeAssets(dependencyStatus.missingShellRuntimeAssets)
                        + "\n\nStartup log: " + startupLogFile.getFullPathName();
-        juce::Logger::writeToLog("Required runtime assets are missing. Falling back to recovery screen.");
-        showStartupFallback("Required runtime assets missing", message, dependencyStatus.repairAvailable);
+        juce::Logger::writeToLog("Shell runtime assets are missing. Falling back to recovery screen.");
+        startupRepairAction = StartupRepairAction::installation;
+        showStartupFallback("Required shell assets missing", message, true);
     }
     else
     {
@@ -4331,14 +4557,16 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         else
             message << "\n\nOpenStudio selected the WebView2 backend, and WebView2 Runtime " << webView2RuntimeVersion
                     << " was detected, but JUCE reported the browser backend as unavailable on this machine.";
+        startupRepairAction = dependencyStatus.repairAvailable ? StartupRepairAction::dependencies : StartupRepairAction::none;
 #else
         message << "\n\nOpenStudio could not access the system browser backend on this macOS installation.";
+        startupRepairAction = StartupRepairAction::none;
 #endif
         message << "\n\nStartup log: " << startupLogFile.getFullPathName();
-        showStartupFallback("Embedded browser backend unavailable", message, dependencyStatus.repairAvailable);
+        showStartupFallback("Embedded browser backend unavailable", message, startupRepairAction != StartupRepairAction::none);
     }
 
-    if (supported && dependencyStatus.requiredRuntimeAssetsPresent)
+    if (supported && dependencyStatus.shellRuntimeAssetsPresent)
     {
         // Development URL (Vite default)
         #if JUCE_DEBUG
@@ -4361,7 +4589,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                "\n\nChecked paths:\n" + describeCandidatePaths()
                                + "\n\nStartup log: " + startupLogFile.getFullPathName();
                 juce::Logger::writeToLog(message);
-                showStartupFallback("Packaged frontend missing", message);
+                startupRepairAction = StartupRepairAction::installation;
+                showStartupFallback("Packaged frontend missing", message, true);
             }
         #endif
     }
@@ -4502,7 +4731,7 @@ void MainComponent::markFrontendStartupReady(const juce::String& detail)
     frontendStartupDetail = detail;
     startupWatchdogActive = false;
     startupFallbackVisible = false;
-    startupRepairAvailable = false;
+    startupRepairAction = StartupRepairAction::none;
     fallbackMessage.setVisible(false);
     hideStartupFallbackActions();
     hideStartupOverlay();
@@ -4518,13 +4747,14 @@ void MainComponent::markFrontendStartupFailed(const juce::String& detail)
     juce::Logger::writeToLog("Frontend startup state: boot-failed" + (detail.isNotEmpty() ? " - " + detail : ""));
     showStartupFallback("Frontend startup failed",
                         detail + "\n\nStartup log: " + getStartupLogFile().getFullPathName(),
-                        startupRepairAvailable);
+                        startupRepairAction != StartupRepairAction::none);
 }
 
 void MainComponent::showStartupFallback(const juce::String& title, const juce::String& detail, bool allowRepair)
 {
     startupFallbackVisible = true;
-    startupRepairAvailable = allowRepair;
+    if (! allowRepair)
+        startupRepairAction = StartupRepairAction::none;
     hideStartupOverlay();
     fallbackMessage.setText(title + "\n\n" + detail, juce::dontSendNotification);
     fallbackMessage.setVisible(true);
@@ -4554,11 +4784,13 @@ void MainComponent::updateStartupFallbackActions()
     startupRetryButton.setVisible(true);
     startupOpenLogButton.setVisible(true);
     startupSafeModeButton.setVisible(startupMode != StartupMode::safe);
-#if JUCE_WINDOWS
-    startupRepairButton.setVisible(startupRepairAvailable);
-#else
-    startupRepairButton.setVisible(false);
-#endif
+    startupRepairButton.setVisible(startupRepairAction != StartupRepairAction::none);
+    if (startupRepairAction == StartupRepairAction::installation)
+        startupRepairButton.setButtonText("Repair Installation");
+    else if (startupRepairAction == StartupRepairAction::dependencies)
+        startupRepairButton.setButtonText("Repair Dependencies");
+    else
+        startupRepairButton.setButtonText("Repair");
     resized();
 }
 
@@ -4588,11 +4820,33 @@ void MainComponent::relaunchApplication(StartupMode targetMode)
     }
 }
 
+void MainComponent::repairInstalledApplication()
+{
+#if JUCE_WINDOWS
+    const auto localInstaller = getExecutableDirectory().getChildFile("OpenStudio-Setup-x64.exe");
+    if (localInstaller.existsAsFile() && localInstaller.startAsProcess())
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "Repair Installation",
+            "OpenStudio launched the local installer in repair mode.\n\nComplete the installer, then relaunch OpenStudio."
+        );
+        return;
+    }
+#endif
+
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::WarningIcon,
+        "Repair Installation",
+        "OpenStudio is missing shell files. Re-run the latest OpenStudio installer to repair the installation, then relaunch the app."
+    );
+}
+
 void MainComponent::repairWindowsPrerequisites()
 {
 #if JUCE_WINDOWS
     const auto prereqDir = getWindowsPrerequisiteInstallerDirectory();
-    const auto webView2Installer = prereqDir.getChildFile("MicrosoftEdgeWebView2Setup.exe");
+    const auto webView2Installer = prereqDir.getChildFile("MicrosoftEdgeWebView2RuntimeInstallerX64.exe");
     const auto vcRedistInstaller = prereqDir.getChildFile("vc_redist.x64.exe");
 
     auto launchedInstallers = juce::StringArray();
@@ -4623,7 +4877,7 @@ void MainComponent::repairWindowsPrerequisites()
             + "\n\nComplete any prompts, then click Retry."
     );
 #else
-    juce::ignoreUnused(startupRepairAvailable);
+    juce::ignoreUnused(startupRepairAction);
 #endif
 }
 
@@ -4633,6 +4887,7 @@ juce::var MainComponent::buildStartupDiagnostics() const
         juce::WebBrowserComponent::areOptionsSupported(
             juce::WebBrowserComponent::Options().withBackend(getPreferredBrowserBackend())));
     auto* diagnostics = new juce::DynamicObject();
+    const auto selfTestReport = buildStartupSelfTestReport();
     diagnostics->setProperty("windowRole", getWindowRoleQueryValue(windowRole));
     diagnostics->setProperty("startupMode", getStartupModeQueryValue(startupMode));
     diagnostics->setProperty("browserBackend", describeBrowserBackend(getPreferredBrowserBackend()));
@@ -4643,9 +4898,12 @@ juce::var MainComponent::buildStartupDiagnostics() const
     diagnostics->setProperty("packagedFrontendPath", getPackagedFrontendEntryPoint().getFullPathName());
     diagnostics->setProperty("packagedFrontendCandidates", describeCandidatePaths());
     diagnostics->setProperty("packagedFrontendPresent", dependencyStatus.packagedFrontendPresent);
-    diagnostics->setProperty("requiredRuntimeAssetsPresent", dependencyStatus.requiredRuntimeAssetsPresent);
-    diagnostics->setProperty("missingRuntimeAssets", dependencyStatus.missingRuntimeAssets.joinIntoString("\n"));
+    diagnostics->setProperty("shellRuntimeAssetsPresent", dependencyStatus.shellRuntimeAssetsPresent);
+    diagnostics->setProperty("missingShellRuntimeAssets", dependencyStatus.missingShellRuntimeAssets.joinIntoString("\n"));
+    diagnostics->setProperty("featureRuntimeAssetsPresent", dependencyStatus.featureRuntimeAssetsPresent);
+    diagnostics->setProperty("missingFeatureRuntimeAssets", dependencyStatus.missingFeatureRuntimeAssets.joinIntoString("\n"));
     diagnostics->setProperty("prerequisiteRepairAvailable", dependencyStatus.repairAvailable);
+    diagnostics->setProperty("startupSelfTest", selfTestReport);
     diagnostics->setProperty("webView2UserDataPath", getWebView2UserDataFolder().getFullPathName());
 #if JUCE_WINDOWS
     diagnostics->setProperty("webView2RuntimeVersion", detectWebView2RuntimeVersion());
@@ -4821,7 +5079,7 @@ void MainComponent::timerCallback()
                         + "\n\nTry relaunching OpenStudio in safe mode.";
 
             juce::Logger::writeToLog("Frontend startup state: timed-out - " + detail);
-            showStartupFallback("OpenStudio timed out while starting its interface.", detail, startupRepairAvailable);
+            showStartupFallback("OpenStudio timed out while starting its interface.", detail, startupRepairAction != StartupRepairAction::none);
         }
     }
 

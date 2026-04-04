@@ -11,14 +11,16 @@ Use this checklist for every release candidate before publishing installers, man
 
 - Install `OpenStudio-Setup-x64.exe` on a clean machine or VM.
 - Confirm the installer provisions or repairs WebView2 Runtime and VC++ Redistributable before offering `Launch OpenStudio`.
+- Confirm the installer shows which step it is on while copying files, installing VC++, installing WebView2, and validating shell startup.
 - Confirm the installed app launches without a frontend dev server running.
 - Confirm the installed app does not show a full black window.
 - Confirm `webui`, `effects`, `scripts`, `models`, and `ffmpeg.exe` are present in the installed app directory.
-- Confirm `prereqs/windows/MicrosoftEdgeWebView2Setup.exe` and `prereqs/windows/vc_redist.x64.exe` are present in the installed app directory.
+- Confirm `prereqs/windows/MicrosoftEdgeWebView2RuntimeInstallerX64.exe` and `prereqs/windows/vc_redist.x64.exe` are present in the installed app directory.
 - Confirm `%APPDATA%\OpenStudio\logs\OpenStudio_Startup.log` is created on first launch.
 - Confirm the startup log reports `Embedded browser backend supported: Yes`.
+- Confirm the startup self-test passes before launch is offered.
 - Confirm the startup log records `Frontend startup state: boot-ready`.
-- Confirm the startup log reports required runtime assets present.
+- Confirm a missing `basic_pitch_nmp.onnx` model does not block the base app shell from launching.
 - Confirm `OpenStudio.exe --ui-safe-mode` renders the safe startup UI visibly.
 - If startup fails, run `./tools/inspect-installed-windows-app.ps1` on the test machine and archive the generated report.
 - Open a blank project and confirm audio devices enumerate successfully.
@@ -46,7 +48,8 @@ Use this checklist for every release candidate before publishing installers, man
 - Install the `.dmg` output on a clean machine.
 - Confirm the app launches offline without a frontend dev server.
 - Confirm runtime assets are bundled inside the app resources.
-- Confirm the startup log reports the packaged frontend and required runtime assets as present.
+- Confirm the app bundle startup self-test passes.
+- Confirm the startup log reports the packaged frontend and shell-critical startup assets as present.
 - Confirm the unsigned DMG mounts and the app launches after the documented Gatekeeper override flow (`right-click > Open`, then allow in Privacy & Security if needed).
 - If startup is forced to fail, confirm the startup doctor/fallback identifies the failure branch and shows the log/safe-mode recovery path.
 - Open a blank project and confirm audio device setup works.

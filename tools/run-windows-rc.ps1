@@ -59,9 +59,10 @@ $generatedWindowsResourceLibrary = Join-Path $resolvedBuildDir "OpenStudio_rc_li
 $installerPath = Join-Path $resolvedWindowsOutputDir "OpenStudio-Setup-x64.exe"
 $installedExePath = Join-Path $InstallDir "OpenStudio.exe"
 $startupLogPath = Join-Path $env:APPDATA "OpenStudio\logs\OpenStudio_Startup.log"
+$startupSelfTestReportPath = Join-Path $env:TEMP "OpenStudio_StartupSelfTest.txt"
 $asioHeaderPath = Join-Path $repoRoot "thirdparty\asio\common\iasiodrv.h"
 $windowsPrereqsDir = Join-Path $repoRoot "thirdparty\windows-prereqs"
-$webView2Bootstrapper = Join-Path $windowsPrereqsDir "MicrosoftEdgeWebView2Setup.exe"
+$webView2Bootstrapper = Join-Path $windowsPrereqsDir "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 $vcRedistInstaller = Join-Path $windowsPrereqsDir "vc_redist.x64.exe"
 
 function Get-StartupLogContent {
@@ -89,6 +90,23 @@ function Test-LogContainsLine {
     )
 
     return [regex]::IsMatch($Content, $Pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
+}
+
+function Invoke-StartupSelfTest {
+    param(
+        [string]$ExePath,
+        [string]$ReportPath
+    )
+
+    if (Test-Path $ReportPath) {
+        Remove-Item -LiteralPath $ReportPath -Force -ErrorAction SilentlyContinue
+    }
+
+    & $ExePath --startup-self-test --report $ReportPath
+    if ($LASTEXITCODE -ne 0) {
+        $reportContent = if (Test-Path $ReportPath) { Get-Content -LiteralPath $ReportPath -Raw } else { "No self-test report was written." }
+        throw "Startup self-test failed for '$ExePath'.`n$reportContent"
+    }
 }
 
 function Invoke-InstalledLaunchValidation {
@@ -232,6 +250,10 @@ Invoke-Step "Validating Windows runtime bundle" {
         -BundlePath $windowsBundleDir `
         -ExpectedVersion $Version `
         -EnforceLeanBundle
+}
+
+Invoke-Step "Running startup shell self-test on release bundle" {
+    Invoke-StartupSelfTest -ExePath (Join-Path $windowsBundleDir "OpenStudio.exe") -ReportPath $startupSelfTestReportPath
 }
 
 Invoke-Step "Packaging local Windows installer" {
