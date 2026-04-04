@@ -67,6 +67,7 @@ export function MainToolbar({
     aiToolsStatus,
     installAiTools,
     reopenStemSeparation,
+    openAiToolsSetup,
   } = useDAWStore(
     useShallow((s) => ({
       isPlaying: s.transport.isPlaying,
@@ -93,6 +94,7 @@ export function MainToolbar({
       aiToolsStatus: s.aiToolsStatus,
       installAiTools: s.installAiTools,
       reopenStemSeparation: s.reopenStemSeparation,
+      openAiToolsSetup: s.openAiToolsSetup,
     })),
   );
 
@@ -115,6 +117,11 @@ export function MainToolbar({
     }
 
     if (aiToolsStatus.available) {
+      return;
+    }
+
+    if (aiToolsStatus.state === "pythonMissing" || aiToolsStatus.state === "error") {
+      openAiToolsSetup();
       return;
     }
 

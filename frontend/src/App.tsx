@@ -72,6 +72,7 @@ const TimecodeSettingsPanel = React.lazy(() => import("./components/TimecodeSett
 const HelpOverlay = React.lazy(() => import("./components/HelpOverlay").then(m => ({ default: m.HelpOverlay })));
 const GettingStartedGuide = React.lazy(() => import("./components/GettingStartedGuide").then(m => ({ default: m.GettingStartedGuide })));
 const StemSeparationModal = React.lazy(() => import("./components/StemSeparationModal"));
+const AiToolsSetupModal = React.lazy(() => import("./components/AiToolsSetupModal"));
 import {
   DndContext,
   DragOverlay,
@@ -153,6 +154,7 @@ function App() {
     masterAutomationLanes,
     showMasterAutomation,
     showStemSeparation,
+    showAiToolsSetup,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
@@ -220,6 +222,7 @@ function App() {
       masterAutomationLanes: state.masterAutomationLanes,
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
+      showAiToolsSetup: state.showAiToolsSetup,
     }))
   );
 
@@ -266,6 +269,7 @@ function App() {
   const refreshAiToolsStatus = useDAWStore((state) => state.refreshAiToolsStatus);
   const reopenStemSeparation = useDAWStore((state) => state.reopenStemSeparation);
   const cancelAiToolsInstall = useDAWStore((state) => state.cancelAiToolsInstall);
+  const openAiToolsSetup = useDAWStore((state) => state.openAiToolsSetup);
   const showToast = useDAWStore((state) => state.showToast);
   const previousAiToolsStateRef = useRef(aiToolsStatus.state);
 
@@ -302,12 +306,12 @@ function App() {
       } else if (currentState === "cancelled") {
         showToast("AI tools installation cancelled", "info");
       } else if (currentState === "pythonMissing") {
-        showToast("Python 3.10 or newer is required for AI tools.", "info");
+        openAiToolsSetup();
       }
     }
 
     previousAiToolsStateRef.current = currentState;
-  }, [aiToolsStatus.error, aiToolsStatus.state, showToast]);
+  }, [aiToolsStatus.error, aiToolsStatus.state, openAiToolsSetup, showToast]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.subscribe("mixerWindowClosed", (data) => {
@@ -1451,6 +1455,13 @@ function App() {
       {showEnvelopeManager && envelopeManagerTrackId && (
         <Suspense fallback={null}>
           <EnvelopeManagerModal />
+        </Suspense>
+      )}
+
+      {/* AI Tools Setup Modal */}
+      {showAiToolsSetup && (
+        <Suspense fallback={null}>
+          <AiToolsSetupModal />
         </Suspense>
       )}
 

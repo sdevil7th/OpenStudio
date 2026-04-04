@@ -657,6 +657,9 @@ interface DAWState {
   // Accessibility: UI font scaling (0.75 - 1.5, default 1.0)
   uiFontScale: number;
 
+  // AI Tools Setup Modal
+  showAiToolsSetup: boolean;
+
   // Stem Separation Modal
   showStemSeparation: boolean;
   stemSepTrackId: string | null;
@@ -1230,6 +1233,8 @@ interface DAWActions {
   toggleGettingStarted: () => void;
   togglePreferences: () => void;
   toggleScriptConsole: () => void;
+  openAiToolsSetup: () => void;
+  closeAiToolsSetup: () => void;
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
   reopenStemSeparation: () => void;
@@ -1843,6 +1848,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showCommandPalette: false,
     showRegionMarkerManager: false,
     showScriptConsole: false,
+    showAiToolsSetup: false,
     showStemSeparation: false,
     stemSepTrackId: null,
     stemSepClipId: null,
@@ -2119,15 +2125,13 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       }
     },
     installAiTools: async () => {
-      const currentStatus = get().aiToolsStatus;
-      if (currentStatus.installInProgress || currentStatus.available) return;
+        const currentStatus = get().aiToolsStatus;
+        if (currentStatus.installInProgress || currentStatus.available) return;
 
-      if (currentStatus.state === "pythonMissing") {
-        if (currentStatus.helpUrl) {
-          await nativeBridge.openExternalURL(currentStatus.helpUrl);
+        if (currentStatus.state === "pythonMissing") {
+          get().openAiToolsSetup();
+          return;
         }
-        return;
-      }
 
       get().showToast("AI tools are being installed in the background.", "info");
 

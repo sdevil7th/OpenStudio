@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 
 export function useAiToolsStatus() {
@@ -8,6 +7,7 @@ export function useAiToolsStatus() {
   const refresh = useDAWStore((state) => state.refreshAiToolsStatus);
   const install = useDAWStore((state) => state.installAiTools);
   const cancel = useDAWStore((state) => state.cancelAiToolsInstall);
+  const openAiToolsSetup = useDAWStore((state) => state.openAiToolsSetup);
 
   useEffect(() => {
     if (loading) {
@@ -16,9 +16,7 @@ export function useAiToolsStatus() {
   }, [loading, refresh]);
 
   const openHelp = async () => {
-    if (status.helpUrl) {
-      await nativeBridge.openExternalURL(status.helpUrl);
-    }
+    openAiToolsSetup();
   };
 
   return {
