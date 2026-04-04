@@ -26,6 +26,8 @@ from pathlib import Path
 
 REQUIREMENT_SPEC = "audio-separator[cpu]==0.41.1"
 DEFAULT_MODEL_NAME = "BS-Roformer-SW.ckpt"
+FALLBACK_MIN_PYTHON = (3, 10)
+FALLBACK_MAX_PYTHON_EXCLUSIVE = (3, 14)
 
 LOG_PATH: Path | None = None
 
@@ -227,6 +229,10 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
     return runtime_python
 
 
+def format_supported_python_range() -> str:
+    return "Python 3.10 through 3.13"
+
+
 def download_model(runtime_python: Path, models_dir: Path, model_name: str, *, install_source: str, requires_external_python: bool, python_detected: bool) -> Path:
     emit(
         "downloading_model",
@@ -298,6 +304,7 @@ def main() -> None:
         install_source = "bundledRuntime"
         requires_external_python = False
         python_detected = False
+        build_runtime_mode = "bundled"
         copy_seed_runtime(seed_runtime, runtime_root)
         runtime_python = resolve_runtime_python(runtime_root)
         verify_runtime(
@@ -310,25 +317,28 @@ def main() -> None:
         install_source = "externalPython"
         requires_external_python = True
         python_detected = bootstrap_python is not None and bootstrap_python.exists()
+        build_runtime_mode = "unbundled-dev"
 
         if bootstrap_python is None or not bootstrap_python.exists():
             fail(
-                "Python 3.10 or newer is required for this build before AI tools can be installed.",
+                f"{format_supported_python_range()} is required for this dev build before AI tools can be installed.",
                 state="pythonMissing",
                 error_code="python_missing",
                 installSource=install_source,
                 requiresExternalPython=requires_external_python,
                 pythonDetected=False,
+                buildRuntimeMode=build_runtime_mode,
             )
 
-        if sys.version_info < (3, 10):
+        if sys.version_info < FALLBACK_MIN_PYTHON or sys.version_info >= FALLBACK_MAX_PYTHON_EXCLUSIVE:
             fail(
-                "Python 3.10 or newer is required for OpenStudio AI Tools.",
+                f"This dev fallback only supports {format_supported_python_range()}. Reinstall a proper release build or use a supported Python version.",
                 state="pythonMissing",
-                error_code="python_missing",
+                error_code="unsupported_python_version",
                 installSource=install_source,
                 requiresExternalPython=requires_external_python,
                 pythonDetected=True,
+                buildRuntimeMode=build_runtime_mode,
             )
 
         emit(
@@ -338,6 +348,7 @@ def main() -> None:
             installSource=install_source,
             requiresExternalPython=requires_external_python,
             pythonDetected=True,
+            buildRuntimeMode=build_runtime_mode,
         )
         runtime_python = bootstrap_runtime(runtime_root, bootstrap_python)
         verify_runtime(
@@ -369,6 +380,7 @@ def main() -> None:
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
     )
 
 

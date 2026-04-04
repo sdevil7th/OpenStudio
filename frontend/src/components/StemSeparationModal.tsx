@@ -271,7 +271,9 @@ export default function StemSeparationModal() {
                     onClick={() => void handleInstallAiTools()}
                     disabled={aiToolsStatus.installInProgress}
                   >
-                    {aiToolsStatus.requiresExternalPython
+                    {aiToolsStatus.buildRuntimeMode === "bundled"
+                      ? "Prepare AI Tools"
+                      : aiToolsStatus.requiresExternalPython
                       ? aiToolsStatus.state === "pythonMissing"
                         ? "Get Python"
                         : "Install AI Tools"

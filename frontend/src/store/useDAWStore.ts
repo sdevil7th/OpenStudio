@@ -87,6 +87,7 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   requiresExternalPython: false,
   message: "Checking AI tools...",
   installSource: "bundledRuntime",
+  buildRuntimeMode: "bundled",
 };
 
 // ============================================

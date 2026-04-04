@@ -132,13 +132,17 @@ export function MainToolbar({
     ? "AI Tools Ready"
     : aiToolsStatus.installInProgress
       ? aiToolsStatus.message || "Installing AI Tools..."
+      : aiToolsStatus.buildRuntimeMode === "bundled"
+        ? aiToolsStatus.state === "error"
+          ? "Repair bundled AI Tools setup"
+          : aiToolsStatus.state === "modelMissing"
+            ? "Download the AI model to finish setup"
+            : "Prepare built-in AI Tools"
       : aiToolsStatus.requiresExternalPython
         ? aiToolsStatus.state === "pythonMissing"
-          ? "Install Python, then retry AI Tools"
+          ? "Install Python 3.10 to 3.13, then retry AI Tools"
           : "Install AI Tools with Python"
-        : aiToolsStatus.state === "modelMissing"
-          ? "Download the AI model to finish setup"
-          : "Prepare built-in AI Tools";
+        : "Prepare AI Tools";
 
   const aiButtonProgress = Math.max(0, Math.min(1, aiToolsStatus.progress || 0));
   const aiButtonHaloStyle = aiToolsStatus.installInProgress

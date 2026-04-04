@@ -38,6 +38,7 @@ public:
         juce::String detailLogPath;
         juce::String helpUrl;
         juce::String installSource { "bundledRuntime" };
+        juce::String buildRuntimeMode { "unbundled-dev" };
     };
 
     /** Check if Python environment and audio-separator are available. */
@@ -117,6 +118,9 @@ private:
 
     /** Find the bundled AI runtime seed directory if present. */
     juce::File findBundledRuntimeRoot() const;
+
+    /** Return true when this build is expected to ship a seeded AI runtime. */
+    bool isBundledRuntimeBuild() const;
 
     /** Resolve a Python executable from a runtime root. */
     juce::File findPythonInRuntimeRoot (const juce::File& runtimeRoot) const;

@@ -232,6 +232,7 @@ export interface AiToolsStatus {
     detailLogPath?: string;
     helpUrl?: string;
     installSource?: "bundledRuntime" | "externalPython" | "none";
+    buildRuntimeMode?: "bundled" | "unbundled-dev";
   }
 
 export interface InstallAiToolsResponse {
@@ -4112,6 +4113,7 @@ class NativeBridge {
         requiresExternalPython: false,
         message: "AI tools are unavailable in the web preview.",
         installSource: "none",
+        buildRuntimeMode: "bundled",
       };
   }
 

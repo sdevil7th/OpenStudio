@@ -52,9 +52,13 @@ export default function AiToolsSetupModal() {
   const isPythonMissing = aiToolsStatus.state === "pythonMissing";
   const hasInstallError = aiToolsStatus.state === "error" || aiToolsStatus.state === "cancelled";
   const requiresExternalPython = aiToolsStatus.requiresExternalPython;
-  const isBundledFlow = aiToolsStatus.installSource === "bundledRuntime" && !requiresExternalPython;
+  const buildRuntimeMode = aiToolsStatus.buildRuntimeMode ?? "bundled";
+  const isBundledFlow =
+    buildRuntimeMode === "bundled" || (aiToolsStatus.installSource === "bundledRuntime" && !requiresExternalPython);
   const isModelFailure = aiToolsStatus.errorCode === "model_download_failed";
+  const isBundledRuntimeMissing = aiToolsStatus.errorCode === "bundled_runtime_missing";
   const isBundledRuntimeFailure =
+    isBundledRuntimeMissing ||
     aiToolsStatus.errorCode === "runtime_seed_missing" ||
     aiToolsStatus.errorCode === "runtime_copy_failed" ||
     aiToolsStatus.errorCode === "runtime_verification_failed";
@@ -72,10 +76,12 @@ export default function AiToolsSetupModal() {
 
   const recommendationText = isBundledFlow
     ? "This build already includes the AI runtime. OpenStudio should prepare it automatically in the background and then download the stem model."
-    : "This build needs Python 3.10 or newer on your machine first. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically.";
+    : "This dev build needs Python 3.10 through 3.13 on your machine first. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically.";
 
   const retryGuidance = isModelFailure
     ? "The runtime is already in place. Retry after checking your internet connection, VPN, firewall, or antivirus if the download keeps failing."
+    : isBundledRuntimeMissing
+      ? "This release is missing files that should have been bundled inside OpenStudio. Reinstall from a fresh installer. If the same message appears again, share the install log with support."
     : isBundledFlow
       ? "Retry from this window to let OpenStudio prepare the built-in AI runtime again. If the same error comes back, open the install log location for details."
       : aiToolsStatus.pythonDetected
@@ -120,8 +126,8 @@ export default function AiToolsSetupModal() {
             <div className="rounded border border-yellow-600/40 bg-yellow-950/30 p-3 space-y-2">
               <p className="text-sm font-semibold text-yellow-400">Python is required</p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
-                OpenStudio could not find Python 3.10 or newer on this machine. Python is needed
-                for this build before AI Tools can be installed.
+                OpenStudio could not find a supported Python version on this machine. This dev
+                build needs Python 3.10 through 3.13 before AI Tools can be installed.
               </p>
             </div>
           ) : hasInstallError ? (
@@ -130,6 +136,8 @@ export default function AiToolsSetupModal() {
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 {isModelFailure
                   ? "OpenStudio prepared the AI runtime, but the stem model download did not complete."
+                  : isBundledRuntimeMissing
+                    ? "This installed release is missing its built-in AI runtime, so AI Tools cannot be prepared on this machine."
                   : isBundledRuntimeFailure
                     ? "OpenStudio could not prepare the built-in AI tools runtime on this machine."
                     : "OpenStudio could not finish the AI tools setup."}
@@ -143,6 +151,12 @@ export default function AiToolsSetupModal() {
                 Install source:{" "}
                 <span className="text-daw-text">
                   {isBundledFlow ? "Built-in OpenStudio runtime" : "External Python bootstrap"}
+                </span>
+              </p>
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Build mode:{" "}
+                <span className="text-daw-text">
+                  {buildRuntimeMode === "bundled" ? "Bundled release runtime" : "Unbundled dev runtime"}
                 </span>
               </p>
               {requiresExternalPython ? (
@@ -173,7 +187,7 @@ export default function AiToolsSetupModal() {
                     <Step number={1}>
                       Click <span className="text-daw-text font-medium">Download Python</span> below.
                       Your browser will open the official Python website. Download the latest{" "}
-                      <span className="text-daw-text font-medium">Python 3.x</span> installer for{" "}
+                      <span className="text-daw-text font-medium">Python 3.10, 3.11, 3.12, or 3.13</span> installer for{" "}
                       <span className="text-daw-text font-medium">Windows 64-bit</span>.
                     </Step>
                     <Step number={2}>
@@ -193,9 +207,9 @@ export default function AiToolsSetupModal() {
                       <span className="text-daw-text font-medium">Retry After Python Install</span>.
                     </Step>
                     <Step number={5}>
-                      If OpenStudio still says Python is missing, rerun the installer and make sure
-                      the <span className="text-yellow-400 font-semibold">Add to PATH</span> box was
-                      enabled.
+                      Avoid Python 3.14 or newer for this dev fallback path. If OpenStudio still says
+                      Python is missing, rerun the installer and make sure the{" "}
+                      <span className="text-yellow-400 font-semibold">Add to PATH</span> box was enabled.
                     </Step>
                   </>
                 ) : (
@@ -203,7 +217,7 @@ export default function AiToolsSetupModal() {
                     <Step number={1}>
                       Click <span className="text-daw-text font-medium">Download Python</span> below.
                       This opens the official Python website. Download the latest{" "}
-                      <span className="text-daw-text font-medium">Python 3.x</span> installer for
+                      <span className="text-daw-text font-medium">Python 3.10, 3.11, 3.12, or 3.13</span> installer for
                       macOS.
                     </Step>
                     <Step number={2}>
@@ -216,7 +230,7 @@ export default function AiToolsSetupModal() {
                     </Step>
                     <Step number={4}>
                       Advanced option: if you already use Homebrew, you can install Python from
-                      Terminal with <CodeSnip>brew install python3</CodeSnip>, then restart
+                      Terminal with <CodeSnip>brew install python@3.13</CodeSnip>, then restart
                       OpenStudio and retry from this window.
                     </Step>
                     <Step number={5}>
@@ -245,13 +259,19 @@ export default function AiToolsSetupModal() {
                 <Step number={3}>
                   If the error mentions the model download, check your internet connection and retry.
                 </Step>
-                <Step number={4}>
-                  If setup keeps failing, use <span className="text-daw-text font-medium">Open Install Log</span>{" "}
-                  to inspect the detailed log location before retrying again.
-                </Step>
-              </div>
-            </div>
-          )}
+                    <Step number={4}>
+                      If setup keeps failing, use <span className="text-daw-text font-medium">Open Install Log</span>{" "}
+                      to inspect the detailed log location before retrying again.
+                    </Step>
+                    {isBundledRuntimeMissing ? (
+                      <Step number={5}>
+                        If this message says the built-in runtime is missing, do not install Python.
+                        Reinstall OpenStudio from a freshly rebuilt installer instead.
+                      </Step>
+                    ) : null}
+                  </div>
+                </div>
+              )}
 
           <div className="border-t border-neutral-800 pt-3 space-y-2">
             <p className="text-xs text-daw-text-secondary leading-relaxed">

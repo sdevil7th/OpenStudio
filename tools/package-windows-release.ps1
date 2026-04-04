@@ -172,6 +172,12 @@ if ((-not (Test-Path (Join-Path $bundleWindowsPrereqsDir "MicrosoftEdgeWebView2R
     Copy-Item -LiteralPath $vcRedistInstaller -Destination (Join-Path $bundleWindowsPrereqsDir "vc_redist.x64.exe") -Force
 }
 
+& (Join-Path $repoRoot "tools/validate-runtime-bundle.ps1") `
+    -Platform windows `
+    -BundlePath $resolvedSourceDir `
+    -ExpectedVersion $Version `
+    -ExpectBundledStemRuntime
+
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 
 $isccPath = Resolve-InnoSetupCompilerPath

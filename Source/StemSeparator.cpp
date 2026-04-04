@@ -6,6 +6,8 @@ constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
 constexpr auto kPythonHelpUrl = "https://www.python.org/downloads/";
 constexpr auto kInstallSourceBundledRuntime = "bundledRuntime";
 constexpr auto kInstallSourceExternalPython = "externalPython";
+constexpr auto kBuildRuntimeModeBundled = "bundled";
+constexpr auto kBuildRuntimeModeUnbundledDev = "unbundled-dev";
 
 juce::String makePythonImportCommand()
 {
@@ -266,6 +268,15 @@ bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
     return modelsDir.isDirectory() && modelsDir.getChildFile(kStemModelName).existsAsFile();
 }
 
+bool StemSeparator::isBundledRuntimeBuild() const
+{
+#if OPENSTUDIO_BUNDLE_STEM_RUNTIME
+    return true;
+#else
+    return false;
+#endif
+}
+
 StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File& systemPython,
                                                                 const juce::File& bundledRuntimeRoot,
                                                                 const juce::File& script,
@@ -274,14 +285,19 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
                                                                 bool modelInstalled) const
 {
     auto status = getCachedAiToolsStatusSnapshot();
+    const auto bundledBuild = isBundledRuntimeBuild();
+    const auto bundledRuntimeAvailable = bundledRuntimeRoot.isDirectory()
+        && findPythonInRuntimeRoot(bundledRuntimeRoot).existsAsFile();
 
     status.pythonDetected = systemPython.existsAsFile();
     status.scriptAvailable = script.existsAsFile();
     status.installerAvailable = installerScript.existsAsFile();
     status.runtimeInstalled = runtimeInstalled;
     status.modelInstalled = modelInstalled;
-    status.requiresExternalPython = ! bundledRuntimeRoot.isDirectory();
-    status.installSource = status.requiresExternalPython ? kInstallSourceExternalPython : kInstallSourceBundledRuntime;
+    status.buildRuntimeMode = bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
+    status.requiresExternalPython = ! bundledRuntimeAvailable && ! bundledBuild;
+    status.installSource = (bundledBuild || bundledRuntimeAvailable) ? juce::String(kInstallSourceBundledRuntime)
+                                                                     : juce::String(kInstallSourceExternalPython);
     status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
 
@@ -310,13 +326,23 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         return status;
     }
 
+    if (bundledBuild && ! bundledRuntimeAvailable)
+    {
+        status.state = "error";
+        status.progress = 0.0f;
+        status.message = "This release is missing its built-in AI runtime. Reinstall OpenStudio or contact support.";
+        status.error = "OpenStudio could not find its built-in AI tools runtime in this installed build.";
+        status.errorCode = "bundled_runtime_missing";
+        return status;
+    }
+
     if (! status.runtimeInstalled)
     {
         if (status.requiresExternalPython && ! status.pythonDetected)
         {
             status.state = "pythonMissing";
             status.progress = 0.0f;
-            status.message = "Python 3.10 or newer is required for this build before AI tools can be installed.";
+            status.message = "Python 3.10 through 3.13 is required for this dev build before AI tools can be installed.";
             status.error.clear();
             status.errorCode = "python_missing";
             return status;
@@ -344,8 +370,13 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
 {
     AiToolsStatus status;
     const auto bundledRuntimeRoot = findBundledRuntimeRoot();
-    status.requiresExternalPython = ! bundledRuntimeRoot.isDirectory();
-    status.installSource = status.requiresExternalPython ? kInstallSourceExternalPython : kInstallSourceBundledRuntime;
+    const auto bundledBuild = isBundledRuntimeBuild();
+    const auto bundledRuntimeAvailable = bundledRuntimeRoot.isDirectory()
+        && findPythonInRuntimeRoot(bundledRuntimeRoot).existsAsFile();
+    status.buildRuntimeMode = bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
+    status.requiresExternalPython = ! bundledRuntimeAvailable && ! bundledBuild;
+    status.installSource = (bundledBuild || bundledRuntimeAvailable) ? kInstallSourceBundledRuntime
+                                                                     : kInstallSourceExternalPython;
     status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     status.state = "checking";
     status.progress = 0.0f;
@@ -456,6 +487,7 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("detailLogPath", status.detailLogPath);
     obj->setProperty("helpUrl", status.helpUrl);
     obj->setProperty("installSource", status.installSource);
+    obj->setProperty("buildRuntimeMode", status.buildRuntimeMode);
     return juce::var(obj.release());
 }
 
@@ -509,8 +541,13 @@ juce::var StemSeparator::installAiTools()
     updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
     {
         const auto bundledRuntimeRoot = findBundledRuntimeRoot();
-        status.requiresExternalPython = ! bundledRuntimeRoot.isDirectory();
-        status.installSource = status.requiresExternalPython ? kInstallSourceExternalPython : kInstallSourceBundledRuntime;
+        const auto bundledBuild = isBundledRuntimeBuild();
+        const auto bundledRuntimeAvailable = bundledRuntimeRoot.isDirectory()
+            && findPythonInRuntimeRoot(bundledRuntimeRoot).existsAsFile();
+        status.buildRuntimeMode = bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
+        status.requiresExternalPython = ! bundledRuntimeAvailable && ! bundledBuild;
+        status.installSource = (bundledBuild || bundledRuntimeAvailable) ? kInstallSourceBundledRuntime
+                                                                         : kInstallSourceExternalPython;
         status.state = "checking";
         status.progress = 0.0f;
         status.available = false;
@@ -531,12 +568,18 @@ juce::var StemSeparator::installAiTools()
         const auto logFile = getAiToolsInstallLogFile();
         const auto runtimeRoot = getUserRuntimeRoot();
         const auto modelsDir = getUserModelsDir();
+        const auto bundledBuild = isBundledRuntimeBuild();
         runtimeRoot.createDirectory();
         modelsDir.createDirectory();
         logFile.getParentDirectory().createDirectory();
 
         const auto usingBundledRuntime = bundledRuntimeRoot.isDirectory() && bundledPython.existsAsFile();
         const auto bootstrapPython = usingBundledRuntime ? bundledPython : systemPython;
+
+        juce::Logger::writeToLog("StemSeparator: AI runtime mode=" + juce::String(bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev)
+            + " bundledRuntimeRoot=" + bundledRuntimeRoot.getFullPathName()
+            + " bundledRuntimeAvailable=" + juce::String(usingBundledRuntime ? "Yes" : "No")
+            + " systemPython=" + systemPython.getFullPathName());
 
         if (! installerScript.existsAsFile())
         {
@@ -551,9 +594,34 @@ juce::var StemSeparator::installAiTools()
                 status.error = "AI tools installer script not found.";
                 status.errorCode = "installer_unavailable";
                 status.detailLogPath = logFile.getFullPathName();
-                status.requiresExternalPython = ! usingBundledRuntime;
-                status.installSource = usingBundledRuntime ? kInstallSourceBundledRuntime : kInstallSourceExternalPython;
+                status.buildRuntimeMode = bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
+                status.requiresExternalPython = ! usingBundledRuntime && ! bundledBuild;
+                status.installSource = (bundledBuild || usingBundledRuntime) ? kInstallSourceBundledRuntime
+                                                                             : kInstallSourceExternalPython;
                 status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
+            });
+            return;
+        }
+
+        if (bundledBuild && ! usingBundledRuntime)
+        {
+            updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
+            {
+                status.state = "error";
+                status.progress = 0.0f;
+                status.available = false;
+                status.pythonDetected = false;
+                status.runtimeInstalled = false;
+                status.modelInstalled = false;
+                status.installInProgress = false;
+                status.message = "This release is missing its built-in AI runtime. Reinstall OpenStudio or contact support.";
+                status.error = "OpenStudio could not find its built-in AI tools runtime in this installed build.";
+                status.errorCode = "bundled_runtime_missing";
+                status.detailLogPath = logFile.getFullPathName();
+                status.buildRuntimeMode = kBuildRuntimeModeBundled;
+                status.requiresExternalPython = false;
+                status.installSource = kInstallSourceBundledRuntime;
+                status.helpUrl.clear();
             });
             return;
         }
@@ -569,10 +637,11 @@ juce::var StemSeparator::installAiTools()
                 status.runtimeInstalled = false;
                 status.modelInstalled = false;
                 status.installInProgress = false;
-                status.message = "Python 3.10 or newer is required for this build before AI Tools can be installed.";
+                status.message = "Python 3.10 through 3.13 is required for this dev build before AI Tools can be installed.";
                 status.error.clear();
                 status.errorCode = "python_missing";
                 status.detailLogPath = logFile.getFullPathName();
+                status.buildRuntimeMode = kBuildRuntimeModeUnbundledDev;
                 status.requiresExternalPython = true;
                 status.installSource = kInstallSourceExternalPython;
                 status.helpUrl = kPythonHelpUrl;
@@ -605,8 +674,10 @@ juce::var StemSeparator::installAiTools()
                 status.error = "Could not start the AI tools installer process.";
                 status.errorCode = "installer_launch_failed";
                 status.detailLogPath = logFile.getFullPathName();
-                status.requiresExternalPython = ! usingBundledRuntime;
-                status.installSource = usingBundledRuntime ? kInstallSourceBundledRuntime : kInstallSourceExternalPython;
+                status.buildRuntimeMode = bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
+                status.requiresExternalPython = ! usingBundledRuntime && ! bundledBuild;
+                status.installSource = (bundledBuild || usingBundledRuntime) ? kInstallSourceBundledRuntime
+                                                                             : kInstallSourceExternalPython;
                 status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
             });
             return;
@@ -622,8 +693,10 @@ juce::var StemSeparator::installAiTools()
             lastAiToolsStatus.installInProgress = true;
             lastAiToolsStatus.pythonDetected = systemPython.existsAsFile();
             lastAiToolsStatus.installerAvailable = true;
-            lastAiToolsStatus.requiresExternalPython = ! usingBundledRuntime;
-            lastAiToolsStatus.installSource = usingBundledRuntime ? kInstallSourceBundledRuntime : kInstallSourceExternalPython;
+            lastAiToolsStatus.buildRuntimeMode = bundledBuild ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
+            lastAiToolsStatus.requiresExternalPython = ! usingBundledRuntime && ! bundledBuild;
+            lastAiToolsStatus.installSource = (bundledBuild || usingBundledRuntime) ? kInstallSourceBundledRuntime
+                                                                                     : kInstallSourceExternalPython;
             lastAiToolsStatus.detailLogPath = logFile.getFullPathName();
             lastAiToolsStatus.message = usingBundledRuntime
                 ? "Preparing the built-in AI tools runtime..."
@@ -735,6 +808,8 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.detailLogPath = json["detailLogPath"].toString();
     if (json.hasProperty("installSource"))
         status.installSource = json["installSource"].toString();
+    if (json.hasProperty("buildRuntimeMode"))
+        status.buildRuntimeMode = json["buildRuntimeMode"].toString();
     if (json.hasProperty("requiresExternalPython"))
         status.requiresExternalPython = static_cast<bool>(json["requiresExternalPython"]);
     if (json.hasProperty("pythonDetected"))
@@ -751,6 +826,9 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.helpUrl = kPythonHelpUrl;
     else if (! status.requiresExternalPython)
         status.helpUrl.clear();
+
+    if (status.buildRuntimeMode.isEmpty())
+        status.buildRuntimeMode = isBundledRuntimeBuild() ? kBuildRuntimeModeBundled : kBuildRuntimeModeUnbundledDev;
     return status;
 }
 
@@ -776,7 +854,7 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
     {
         juce::String errorMessage = status.message;
         if (status.state == "pythonMissing")
-            errorMessage = "Python 3.10 or newer is required before installing AI Tools.";
+            errorMessage = "Python 3.10 through 3.13 is required before installing AI Tools in this dev build.";
         else if (status.state == "runtimeMissing" || status.state == "modelMissing")
             errorMessage = "Install AI Tools before using stem separation.";
         else if (status.state == "error" && status.error.isNotEmpty())
