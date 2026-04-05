@@ -7,10 +7,10 @@
 - A runtime dependency contract in `docs/runtime-dependency-contract.md`
 - Release metadata generation via `tools/generate-release-metadata.ps1`
 - Release metadata validation via `tools/validate-release-metadata.ps1`
+- Release publish-asset staging via `tools/prepare-release-publish-assets.ps1`
 - Published release validation via `tools/validate-published-release.ps1`
 - Runtime bundle validation via `tools/validate-runtime-bundle.ps1`
 - AI runtime archive packaging via `tools/package-ai-runtime.ps1`
-- Netlify updater bundle preparation via `tools/prepare-netlify-release-site.ps1`
 - A tag-driven GitHub Actions workflow in `.github/workflows/release.yml`
 - A release QA checklist in `docs/release-smoke-checklist.md`
 
@@ -26,14 +26,15 @@ Use this flow instead:
 3. Push the release-ready commit(s) to GitHub.
 4. Wait for `.github/workflows/verify.yml` to pass on that commit.
 5. Push a version tag like `v0.0.2`.
-6. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and optionally deploy the Netlify updater bundle.
+6. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and then trigger the website repo so it can publish the public metadata and redirects.
 7. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip`
+8. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
-The stable filenames are part of the public download contract. The website, metadata, appcasts, and updater flow all assume those exact names.
+The stable installer/runtime filenames are part of the public download contract. The website repo is now the only publisher of public metadata and redirects.
 
 If a release page shows only GitHub's default source archives, treat that as a failed or bypassed automation run. Fix the workflow run or rerun the tag-based release path instead of changing website filenames.
 
@@ -98,8 +99,8 @@ If you want one command for the full guarded Windows path, use:
    Optional appcast fields: `-FullReleaseNotesUrl https://openstudio.org.in/releases/1.0.0 -WindowsInstallerArguments "/SP- /NOICONS"`
 10. Validate the generated metadata:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip`
-11. Prepare the Netlify bundle for updater/download endpoints:
-   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo> -WindowsAiRuntimeDownloadUrl https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
+11. Stage the uniquely named GitHub Release metadata assets:
+   `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
 12. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
 
 ## Local macOS release flow
@@ -120,18 +121,24 @@ If you want one command for the guarded macOS path, use:
    For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 13.0`.
 7. Validate the generated metadata:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip`
-8. Prepare the Netlify bundle for updater/download endpoints:
-   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo> -MacAiRuntimeDownloadUrl https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip`
+8. Stage the uniquely named GitHub Release metadata assets:
+   `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
 
-## Netlify files to publish
+## GitHub Release metadata assets
 
-Upload the generated contents of `dist/netlify-release-site/` to the Netlify project that serves OpenStudio updater/download endpoints.
+The desktop release workflow now uploads uniquely named metadata assets to GitHub Releases so the website repo can fetch them without basename collisions.
 
-If `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` are configured in GitHub Actions, the publish job can now deploy that updater bundle to Netlify automatically.
-If you prefer Doppler as the source of truth, add `DOPPLER_TOKEN` to GitHub Actions and the workflow will pull missing release secrets from Doppler before build and publish steps run.
+That publish-asset set contains:
 
-After the GitHub Release and Netlify deploy complete, you can also verify the live endpoints with:
-`./tools/validate-published-release.ps1 -MetadataDir dist/release-metadata -Channel stable -ReleaseSiteUrl https://openstudio.org.in -ValidateRedirects`
+- `OpenStudio-release-latest.json`
+- `OpenStudio-release-stable-latest.json`
+- `OpenStudio-ai-runtime-latest.json`
+- `OpenStudio-ai-runtime-stable-latest.json`
+- `OpenStudio-appcast-windows-stable.xml`
+- `OpenStudio-appcast-macos-stable.xml`
+- `OpenStudio-checksums.txt`
+
+The website repo should fetch those assets after the desktop release publishes, place them into its deploy-input area, and then deploy `openstudio.org.in`.
 
 ## Manual fallback
 
@@ -140,29 +147,17 @@ Use `tools/prepare-public-release.ps1` only when GitHub Actions is unavailable o
 That script is a fallback path for staging:
 - GitHub release assets
 - release metadata
-- Netlify updater bundle
+- uniquely named website publish assets
+- website deploy-input metadata
 
 It is not the preferred day-to-day release flow now that the tag-driven GitHub workflow is the source of truth.
 
 The Windows installer now also registers `.osproj` as the primary project extension and keeps `.s13` associated for legacy project open support.
 The default base app no longer bundles the optional stem-separation Python runtime; users install AI Tools later from inside OpenStudio when they need stem separation.
 
-That bundle contains:
-
-- `releases/latest.json`
-- `releases/stable/latest.json`
-- `releases/ai-runtime/latest.json`
-- `releases/ai-runtime/stable/latest.json`
-- `appcast/windows-stable.xml`
-- `appcast/macos-stable.xml`
-- `OpenStudio-checksums.txt`
-- `_headers`
-- `_redirects`
-- `netlify.toml`
-
 ## Secrets expected by GitHub Actions
 
-For the zero-cost v1 release path, only `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` are required. If you want Doppler-backed secret loading, add `DOPPLER_TOKEN` as the single bootstrap secret in GitHub Actions. The signing/notarization secrets below stay optional unless you decide to enable trusted distribution later.
+For the current release path, the only non-signing secret required for public metadata publishing is the cross-repo website dispatch token. If you want Doppler-backed secret loading, add `DOPPLER_TOKEN` as the single bootstrap secret in GitHub Actions. The signing/notarization secrets below stay optional unless you decide to enable trusted distribution later.
 
 - `MACOS_CODESIGN_IDENTITY`
 - `MACOS_CERTIFICATE_BASE64`
@@ -175,8 +170,7 @@ For the zero-cost v1 release path, only `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_I
 - `WINDOWS_CODESIGN_CERT_PASSWORD`
 - `WINDOWS_CODESIGN_CERT_THUMBPRINT`
 - `WINDOWS_TIMESTAMP_URL`
-- `NETLIFY_AUTH_TOKEN`
-- `NETLIFY_SITE_ID`
+- `OPENSTUDIO_WEBSITE_DISPATCH_TOKEN`
 - `DOPPLER_TOKEN`
 
 Optional repository variables:
@@ -184,6 +178,11 @@ Optional repository variables:
 - `OPENSTUDIO_AI_RUNTIME_VERSION`
 - `OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT`
 - `OPENSTUDIO_MACOS_AI_RUNTIME_ROOT`
+- `OPENSTUDIO_WEBSITE_REPO`
+- `OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE`
+
+The default website repo target is `sdevil7th/OpenStudioWebsite`.
+The default dispatch event type is `openstudio_release_published`.
 
 GitHub-hosted Windows releases no longer require a pre-existing committed `tools/python`
 tree. The release workflow now uses `actions/setup-python` with Python 3.12 on

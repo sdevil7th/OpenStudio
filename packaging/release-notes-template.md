@@ -8,7 +8,7 @@
 
 ## Known Issues
 - macOS v1 ships as an unsigned DMG. Users may need to right-click `OpenStudio.app` and choose **Open**, then allow it in **System Settings > Privacy & Security**.
-- The optional AI Tools runtime for stem separation is not bundled in the base app. Users install it later from inside OpenStudio and need Python 3.10+ available first.
+- The optional AI Tools runtime for stem separation is not bundled in the base app. OpenStudio downloads its managed AI runtime on first use, so the first install can take time and depends on network availability.
 - Document any other launch-day limitations here.
 
 ## Upgrade Notes

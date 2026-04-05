@@ -399,10 +399,9 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       RELEASE_NOTES_FILE: ${{ github.event.inputs.release_notes_file || 'packaging/release-notes-template.md' }}
-      RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
-      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
+      WEBSITE_DISPATCH_EVENT_TYPE: ${{ vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE != '' && vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE || 'openstudio_release_published' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -422,12 +421,6 @@ jobs:
 
             "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Normalize version
         shell: bash
@@ -507,21 +500,12 @@ jobs:
             -WindowsAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
             -MacAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip"
 
-      - name: Prepare Netlify updater bundle
+      - name: Prepare uniquely named release metadata assets
         shell: pwsh
         run: |
-          ./tools/prepare-netlify-release-site.ps1 `
+          ./tools/prepare-release-publish-assets.ps1 `
             -MetadataDir "dist/release-metadata" `
-            -OutputDir "dist/netlify-release-site" `
-            -RepoSlug "${{ github.repository }}" `
-            -WindowsAiRuntimeDownloadUrl "https://github.com/${{ github.repository }}/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip" `
-            -MacAiRuntimeDownloadUrl "https://github.com/${{ github.repository }}/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: netlify-release-site
-          path: dist/netlify-release-site
-          if-no-files-found: error
+            -OutputDir "dist/release-publish-assets"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -536,25 +520,29 @@ jobs:
             dist/macos/OpenStudio-macOS.dmg
             dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip
             dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip
-            dist/release-metadata/OpenStudio-checksums.txt
-            dist/release-metadata/releases/latest.json
-            dist/release-metadata/releases/stable/latest.json
-            dist/release-metadata/releases/ai-runtime/latest.json
-            dist/release-metadata/releases/ai-runtime/stable/latest.json
-            dist/release-metadata/appcast/windows-stable.xml
-            dist/release-metadata/appcast/macos-stable.xml
+            dist/release-publish-assets/OpenStudio-checksums.txt
+            dist/release-publish-assets/OpenStudio-release-latest.json
+            dist/release-publish-assets/OpenStudio-release-stable-latest.json
+            dist/release-publish-assets/OpenStudio-ai-runtime-latest.json
+            dist/release-publish-assets/OpenStudio-ai-runtime-stable-latest.json
+            dist/release-publish-assets/OpenStudio-appcast-windows-stable.xml
+            dist/release-publish-assets/OpenStudio-appcast-macos-stable.xml
 
-      - name: Deploy updater metadata to Netlify
-        if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
+      - name: Verify website dispatch configuration
         shell: bash
-        run: npx netlify-cli deploy --dir dist/netlify-release-site --site "$NETLIFY_SITE_ID" --prod
-
-      - name: Validate published release endpoints
-        if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
-        shell: pwsh
+        env:
+          WEBSITE_DISPATCH_TOKEN: ${{ secrets.OPENSTUDIO_WEBSITE_DISPATCH_TOKEN }}
         run: |
-          ./tools/validate-published-release.ps1 `
-            -MetadataDir "dist/release-metadata" `
-            -Channel stable `
-            -ReleaseSiteUrl $env:RELEASE_SITE_URL `
-            -ValidateRedirects
+          if [ -z "$WEBSITE_DISPATCH_TOKEN" ]; then
+            echo "OPENSTUDIO_WEBSITE_DISPATCH_TOKEN is required so the website repo can publish release metadata." >&2
+            exit 1
+          fi
+
+      - name: Trigger website release publish
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.OPENSTUDIO_WEBSITE_DISPATCH_TOKEN }}
+          repository: ${{ env.WEBSITE_REPO }}
+          event-type: ${{ env.WEBSITE_DISPATCH_EVENT_TYPE }}
+          client-payload: >-
+            {"tag":"${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', github.event.inputs.version) }}","channel":"stable","desktopRepo":"${{ github.repository }}"}

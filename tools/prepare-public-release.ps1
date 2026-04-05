@@ -356,12 +356,14 @@ $resolvedNetlifyDir = Resolve-RepoPath $NetlifyOutputDir
 $resolvedBundleRoot = Join-RepoPath $BundleOutputDir
 $bundleAssetsDir = Join-Path $resolvedBundleRoot "github-release-assets"
 $bundleMetadataDir = Join-Path $resolvedBundleRoot "release-metadata"
+$bundlePublishAssetsDir = Join-Path $resolvedBundleRoot "release-publish-assets"
 $bundleNetlifyDir = Join-Path $resolvedBundleRoot "netlify-release-site"
 
 Write-Step "Staging upload-ready release bundle"
 Remove-Item -LiteralPath $resolvedBundleRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $bundleAssetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $bundleMetadataDir | Out-Null
+New-Item -ItemType Directory -Force -Path $bundlePublishAssetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $bundleNetlifyDir | Out-Null
 
 Copy-Item -LiteralPath $resolvedWindowsInstallerPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-Setup-x64.exe") -Force
@@ -373,6 +375,9 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
     Copy-Item -LiteralPath $resolvedMacAiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-macos-universal.zip") -Force
 }
 Copy-Item -Path (Join-Path $resolvedMetadataDir "*") -Destination $bundleMetadataDir -Recurse -Force
+& (Join-RepoPath "tools/prepare-release-publish-assets.ps1") `
+    -MetadataDir $MetadataOutputDir `
+    -OutputDir $bundlePublishAssetsDir
 Copy-Item -Path (Join-Path $resolvedNetlifyDir "*") -Destination $bundleNetlifyDir -Recurse -Force
 
 $nextSteps = @(
@@ -396,15 +401,19 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
 
 $nextSteps += @(
     "",
-    "Netlify release bundle:",
+    "Website publish assets:",
+    "  $bundlePublishAssetsDir",
+    "",
+    "Netlify preview bundle (local/manual only):",
     "  $bundleNetlifyDir",
     "",
     "Suggested next steps:",
     "  1. Preferred: push tag $tag to $RepoSlug and let the Release workflow publish the assets.",
     "  2. Fallback only: upload the files from github-release-assets manually.",
-    "  3. Deploy or sync the contents of netlify-release-site if you use the updater metadata bundle.",
-    "  4. Test the GitHub release download URLs.",
-    "  5. Then verify https://openstudio.org.in/download/windows/latest and /download/macos/latest."
+    "  3. Let the website repo fetch the uniquely named files from release-publish-assets or the GitHub Release.",
+    "  4. Use netlify-release-site only for local/manual preview of redirect behavior.",
+    "  5. Test the GitHub release download URLs.",
+    "  6. Then verify the website-owned metadata and redirect URLs on openstudio.org.in."
 )
 Set-Content -Path (Join-Path $resolvedBundleRoot "NEXT-STEPS.txt") -Value ($nextSteps -join [Environment]::NewLine)
 
@@ -412,5 +421,6 @@ Write-Host ""
 Write-Host "Release bundle ready."
 Write-Host "GitHub assets:  $bundleAssetsDir"
 Write-Host "Metadata:       $bundleMetadataDir"
+Write-Host "Publish assets: $bundlePublishAssetsDir"
 Write-Host "Netlify bundle: $bundleNetlifyDir"
 Write-Host "Next steps:     $(Join-Path $resolvedBundleRoot 'NEXT-STEPS.txt')"
