@@ -23,7 +23,8 @@ jobs:
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
-      WINDOWS_AI_RUNTIME_ROOT: ${{ vars.OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT != '' && vars.OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT || 'tools/python' }}
+      WINDOWS_AI_RUNTIME_ROOT: ${{ vars.OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT }}
+      WINDOWS_AI_RUNTIME_PYTHON_VERSION: '3.12'
       RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
@@ -64,12 +65,40 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.WINDOWS_AI_RUNTIME_PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tools/ai-runtime-requirements.txt
+
       - name: Build frontend
         shell: pwsh
         run: |
           cd frontend
           npm ci
           npm run build
+
+      - name: Prepare Windows AI runtime
+        shell: pwsh
+        run: |
+          $runtimeRoot = $env:WINDOWS_AI_RUNTIME_ROOT
+          if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
+            $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-windows"
+          }
+
+          $pythonCommand = Get-Command python
+          if (-not $pythonCommand) {
+            throw "actions/setup-python did not make 'python' available on PATH."
+          }
+
+          ./tools/prepare-ai-runtime.ps1 `
+            -Platform windows `
+            -RuntimeRoot $runtimeRoot `
+            -PythonExecutable $pythonCommand.Source `
+            -RequirementsFile "tools/ai-runtime-requirements.txt" `
+            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION
+
+          "WINDOWS_AI_RUNTIME_ROOT=$runtimeRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install Inno Setup
         shell: pwsh

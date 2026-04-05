@@ -90,8 +90,9 @@ If you want one command for the full guarded Windows path, use:
    This now also validates staged Windows prerequisite installers when they are part of the runtime contract.
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
-8. Package the Windows AI runtime archive:
-   `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot tools/python -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -ExpectedRuntimeVersion 1.0.0`
+8. Prepare and package the Windows AI runtime archive:
+   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -PythonExecutable python -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0`
+   `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -ExpectedRuntimeVersion 1.0.0`
 9. Generate updater metadata:
    `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -WindowsAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-AI-Runtime-windows-x64.zip -AiRuntimeVersion 1.0.0`
    Optional appcast fields: `-FullReleaseNotesUrl https://openstudio.org.in/releases/1.0.0 -WindowsInstallerArguments "/SP- /NOICONS"`
@@ -183,6 +184,12 @@ Optional repository variables:
 - `OPENSTUDIO_AI_RUNTIME_VERSION`
 - `OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT`
 - `OPENSTUDIO_MACOS_AI_RUNTIME_ROOT`
+
+GitHub-hosted Windows releases no longer require a pre-existing committed `tools/python`
+tree. The release workflow now uses `actions/setup-python` with Python 3.12 on
+`windows-latest` and prepares a fresh AI runtime automatically before packaging it. Set
+`OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT` only if you want the workflow to reuse or overwrite a
+specific runner-local path.
 
 GitHub-hosted macOS releases no longer require a pre-existing committed `tools/python-macos`
 tree. The release workflow now uses `actions/setup-python` with Python 3.10 on `macos-14`
