@@ -36,7 +36,24 @@ if (Test-Path $resolvedOutputPath) {
     Remove-Item -LiteralPath $resolvedOutputPath -Force
 }
 
-Compress-Archive -Path (Join-Path $resolvedRuntimeRoot "*") -DestinationPath $resolvedOutputPath -CompressionLevel Optimal
+if ($Platform -eq "macos") {
+    $parentDir = Split-Path -Parent $resolvedRuntimeRoot
+    $runtimeName = Split-Path -Leaf $resolvedRuntimeRoot
+
+    Push-Location $parentDir
+    try {
+        & /usr/bin/ditto -c -k --sequesterRsrc --keepParent $runtimeName $resolvedOutputPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native macOS runtime archive packaging failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+else {
+    Compress-Archive -Path (Join-Path $resolvedRuntimeRoot "*") -DestinationPath $resolvedOutputPath -CompressionLevel Optimal
+}
 
 & (Join-Path $PSScriptRoot "validate-ai-runtime-package.ps1") `
     -Platform $Platform `

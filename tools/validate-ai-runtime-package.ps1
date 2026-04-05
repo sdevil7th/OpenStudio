@@ -57,7 +57,15 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("OpenStudio-AIRuntime-"
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 
 try {
-    Expand-Archive -Path $resolvedArchive -DestinationPath $tempRoot -Force
+    if ($Platform -eq "macos") {
+        & /usr/bin/ditto -x -k $resolvedArchive $tempRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native macOS runtime archive extraction failed with exit code $LASTEXITCODE."
+        }
+    }
+    else {
+        Expand-Archive -Path $resolvedArchive -DestinationPath $tempRoot -Force
+    }
 
     $runtimeRoot = $tempRoot
     $pythonExe = Resolve-PythonExecutable -Root $runtimeRoot
