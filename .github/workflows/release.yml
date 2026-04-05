@@ -194,7 +194,7 @@ jobs:
       BUILD_DIR: build-release-macos
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       MACOS_AI_RUNTIME_ROOT: ${{ vars.OPENSTUDIO_MACOS_AI_RUNTIME_ROOT }}
-      MACOS_AI_RUNTIME_PYTHON_VERSION: '3.12'
+      MACOS_AI_RUNTIME_PYTHON_VERSION: '3.10'
       RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}

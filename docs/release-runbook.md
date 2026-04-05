@@ -185,8 +185,12 @@ Optional repository variables:
 - `OPENSTUDIO_MACOS_AI_RUNTIME_ROOT`
 
 GitHub-hosted macOS releases no longer require a pre-existing committed `tools/python-macos`
-tree. The release workflow now uses `actions/setup-python` with Python 3.12 on `macos-14`
-and prepares a fresh AI runtime automatically before packaging it. Set
+tree. The release workflow now uses `actions/setup-python` with Python 3.10 on `macos-14`
+and prepares a fresh AI runtime automatically before packaging it. Python 3.10 is pinned
+there intentionally because the current `audio-separator` macOS dependency chain still
+resolves through `diffq` wheels that are available for macOS CPython 3.10, while newer
+macOS interpreters do not currently provide a compatible all-wheel path for the release
+runtime-preparation step. Set
 `OPENSTUDIO_MACOS_AI_RUNTIME_ROOT` only if you want the workflow to reuse or overwrite a
 specific runner-local path.
 
