@@ -53,7 +53,7 @@ juce::WebBrowserComponent::Options::Backend getPreferredBrowserBackend()
 
 juce::File getExecutableDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
 }
 
 juce::File getRuntimeAssetRoot()

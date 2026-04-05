@@ -36,6 +36,11 @@ juce::String sanitiseArchiveEntryName (juce::String name)
         name = name.substring(1);
     return name;
 }
+
+juce::File getApplicationRuntimeDirectory()
+{
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+}
 }
 
 StemSeparator::StemSeparator() = default;
@@ -194,7 +199,7 @@ juce::File StemSeparator::findPython() const
 
 juce::File StemSeparator::findScript() const
 {
-    auto appDir = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
+    auto appDir = getApplicationRuntimeDirectory();
 
     auto script = appDir.getChildFile("../../../tools/stem_separator.py");
     if (script.existsAsFile())
@@ -216,7 +221,7 @@ juce::File StemSeparator::findScript() const
 
 juce::File StemSeparator::findInstallerScript() const
 {
-    auto appDir = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
+    auto appDir = getApplicationRuntimeDirectory();
 
     auto script = appDir.getChildFile("../../../tools/install_ai_tools.py");
     if (script.existsAsFile())
@@ -242,7 +247,7 @@ juce::File StemSeparator::findModelsDir() const
     if (hasRequiredModel(userModelsDir))
         return userModelsDir;
 
-    auto appDir = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
+    auto appDir = getApplicationRuntimeDirectory();
 
     auto modelsDir = appDir.getChildFile("../../../resources/models");
     if (hasRequiredModel(modelsDir))
@@ -512,43 +517,52 @@ bool StemSeparator::downloadFileWithProgress (const juce::URL& url,
     const auto tempFile = targetFile.getSiblingFile(targetFile.getFileName() + ".part");
     tempFile.deleteFile();
 
-    juce::FileOutputStream output(tempFile);
-    if (! output.openedOk())
-    {
-        error = "Could not create the AI runtime download file.";
-        return false;
-    }
-
     const auto totalLength = input->getTotalLength();
     juce::HeapBlock<char> buffer(64 * 1024);
     juce::int64 downloaded = 0;
 
-    while (! input->isExhausted())
     {
-        if (aiToolsCancelRequested.load())
+        juce::FileOutputStream output(tempFile);
+        if (! output.openedOk())
         {
-            error = "AI tools installation was cancelled.";
-            output.flush();
-            tempFile.deleteFile();
+            error = "Could not create the AI runtime download file.";
             return false;
         }
 
-        const auto bytesRead = input->read(buffer.getData(), 64 * 1024);
-        if (bytesRead <= 0)
-            break;
+        while (! input->isExhausted())
+        {
+            if (aiToolsCancelRequested.load())
+            {
+                error = "AI tools installation was cancelled.";
+                output.flush();
+                tempFile.deleteFile();
+                return false;
+            }
 
-        output.write(buffer.getData(), bytesRead);
-        downloaded += static_cast<juce::int64>(bytesRead);
+            const auto bytesRead = input->read(buffer.getData(), 64 * 1024);
+            if (bytesRead <= 0)
+                break;
 
-        float progress = 0.0f;
-        if (totalLength > 0)
-            progress = juce::jlimit(0.0f, 1.0f, static_cast<float>(downloaded) / static_cast<float>(totalLength));
+            output.write(buffer.getData(), bytesRead);
+            downloaded += static_cast<juce::int64>(bytesRead);
 
-        progressCallback(progress, downloaded, totalLength);
+            float progress = 0.0f;
+            if (totalLength > 0)
+                progress = juce::jlimit(0.0f, 1.0f, static_cast<float>(downloaded) / static_cast<float>(totalLength));
+
+            progressCallback(progress, downloaded, totalLength);
+        }
+
+        output.flush();
     }
 
-    output.flush();
-    targetFile.deleteFile();
+    if (targetFile.existsAsFile() && ! targetFile.deleteFile())
+    {
+        error = "OpenStudio could not replace the previous AI runtime download.";
+        tempFile.deleteFile();
+        return false;
+    }
+
     if (! tempFile.moveFileTo(targetFile))
     {
         error = "Could not move the downloaded AI runtime into place.";

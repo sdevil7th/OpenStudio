@@ -43,6 +43,11 @@ juce::File getPreferredAppDataDirectory()
     return openStudioDir;
 }
 
+juce::File getApplicationRuntimeDirectory()
+{
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+}
+
 juce::File getPreferredApplicationDataDirectory()
 {
     auto openStudioDir = getOpenStudioApplicationDataDirectory();
@@ -4374,7 +4379,7 @@ void AudioEngine::closeAllPluginWindows()
 
 static juce::File getPresetsDir(const juce::String& pluginName)
 {
-    auto appDir = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
+    auto appDir = getApplicationRuntimeDirectory();
     return appDir.getChildFile("presets").getChildFile(pluginName.replace(" ", "_"));
 }
 
@@ -8658,7 +8663,7 @@ juce::var AudioEngine::analyzePolyphonic(const juce::String& trackId, const juce
     if (! polyModelLoadAttempted)
     {
         polyModelLoadAttempted = true;
-        auto exeDir = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getParentDirectory();
+        auto exeDir = getApplicationRuntimeDirectory();
         auto modelFile = exeDir.getChildFile("models").getChildFile("basic_pitch_nmp.onnx");
         if (! modelFile.existsAsFile())
         {
