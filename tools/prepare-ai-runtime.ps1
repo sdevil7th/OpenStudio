@@ -85,6 +85,41 @@ function Invoke-LoggedStep {
     }
 }
 
+function Get-PipInstallArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("windows", "macos")]
+        [string]$TargetPlatform,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RequirementsPath
+    )
+
+    $onlyBinaryPackages = switch ($TargetPlatform) {
+        "windows" { "diffq-fixed" }
+        "macos"   { "diffq" }
+        default   { "" }
+    }
+
+    $arguments = @(
+        "-m",
+        "pip",
+        "install",
+        "--prefer-binary"
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($onlyBinaryPackages)) {
+        $arguments += @("--only-binary", $onlyBinaryPackages)
+    }
+
+    $arguments += @(
+        "-r",
+        $RequirementsPath
+    )
+
+    return $arguments
+}
+
 function Test-RuntimeImport {
     param(
         [Parameter(Mandatory = $true)]
@@ -147,15 +182,10 @@ Invoke-LoggedStep -Description "Upgrading Python packaging tools inside AI runti
     "wheel"
 )
 
-Invoke-LoggedStep -Description "Installing AI runtime requirements" -Command @(
-    $runtimePython,
-    "-m",
-    "pip",
-    "install",
-    "--only-binary=:all:",
-    "-r",
-    $resolvedRequirementsFile
-)
+$pipInstallArguments = @($runtimePython)
+$pipInstallArguments += Get-PipInstallArguments -TargetPlatform $Platform -RequirementsPath $resolvedRequirementsFile
+
+Invoke-LoggedStep -Description "Installing AI runtime requirements" -Command $pipInstallArguments
 
 Invoke-LoggedStep -Description "Verifying AI runtime import" -Command @(
     $runtimePython,
