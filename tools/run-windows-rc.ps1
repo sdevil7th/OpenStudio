@@ -216,7 +216,7 @@ Invoke-Step "Configuring Windows RC build" {
         "-DOPENSTUDIO_APP_VERSION=$Version" `
         "-DJUCE_ASIOSDK_PATH=thirdparty/asio" `
         "-DOPENSTUDIO_REQUIRE_ASIO=ON" `
-        "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON" `
+        "-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF" `
         -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
     if ($LASTEXITCODE -ne 0) {
         throw "CMake configure failed."
@@ -249,7 +249,7 @@ Invoke-Step "Validating Windows runtime bundle" {
         -Platform windows `
         -BundlePath $windowsBundleDir `
         -ExpectedVersion $Version `
-        -ExpectBundledStemRuntime
+        -EnforceLeanBundle
 }
 
 Invoke-Step "Running startup shell self-test on release bundle" {

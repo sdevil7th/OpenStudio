@@ -37,8 +37,8 @@ public:
         juce::String errorCode;
         juce::String detailLogPath;
         juce::String helpUrl;
-        juce::String installSource { "bundledRuntime" };
-        juce::String buildRuntimeMode { "unbundled-dev" };
+        juce::String installSource { "downloadedRuntime" };
+        juce::String buildRuntimeMode { "downloaded-runtime" };
     };
 
     /** Check if Python environment and audio-separator are available. */
@@ -116,11 +116,8 @@ private:
     /** Find a user-managed Python interpreter suitable for bootstrapping installs. */
     juce::File findSystemPython() const;
 
-    /** Find the bundled AI runtime seed directory if present. */
-    juce::File findBundledRuntimeRoot() const;
-
-    /** Return true when this build is expected to ship a seeded AI runtime. */
-    bool isBundledRuntimeBuild() const;
+    /** Return true when this build is allowed to use external Python fallback. */
+    bool isExternalPythonFallbackEnabled() const;
 
     /** Resolve a Python executable from a runtime root. */
     juce::File findPythonInRuntimeRoot (const juce::File& runtimeRoot) const;
@@ -137,6 +134,15 @@ private:
     /** Find the install log file used by the AI tools bootstrapper. */
     juce::File getAiToolsInstallLogFile() const;
 
+    /** Find the downloads directory used for AI runtime archives. */
+    juce::File getAiRuntimeDownloadsDir() const;
+
+    /** Return the runtime manifest URL compiled into this build. */
+    juce::String getAiRuntimeManifestUrl() const;
+
+    /** Return the current platform key used inside AI runtime metadata. */
+    juce::String getAiRuntimePlatformKey() const;
+
     /** Return true if the given Python can import audio_separator. */
     bool canImportAudioSeparator (const juce::File& python) const;
 
@@ -148,7 +154,6 @@ private:
 
     /** Build the current AI tools status object using already-resolved values. */
     AiToolsStatus buildAiToolsStatus (const juce::File& systemPython,
-                                      const juce::File& bundledRuntimeRoot,
                                       const juce::File& script,
                                       const juce::File& installerScript,
                                       bool runtimeInstalled,
@@ -172,6 +177,21 @@ private:
     /** Parse a JSON line from the installer child process stdout. */
     AiToolsStatus parseInstallJsonLine (const juce::String& line) const;
 
+    /** Append a line to the AI tools install log. */
+    void appendAiToolsLogLine (const juce::String& line) const;
+
+    /** Download a file with cancellation and progress reporting. */
+    bool downloadFileWithProgress (const juce::URL& url,
+                                   const juce::File& targetFile,
+                                   const std::function<void (float, juce::int64, juce::int64)>& progressCallback,
+                                   juce::String& error) const;
+
+    /** Verify a file hash against the expected SHA-256. */
+    bool verifyFileSha256 (const juce::File& file, const juce::String& expectedSha256, juce::String& error) const;
+
+    /** Extract a runtime ZIP archive into the user runtime directory. */
+    bool extractRuntimeArchive (const juce::File& archiveFile, const juce::File& destinationRoot, juce::String& error) const;
+
     /** Serialize AI tools status to juce::var for the native bridge. */
     static juce::var aiToolsStatusToVar (const AiToolsStatus& status);
 
@@ -184,6 +204,8 @@ private:
     mutable juce::CriticalSection aiToolsStatusLock;
     mutable bool statusRefreshInFlight = false;
     mutable bool initialStatusPrepared = false;
+    std::atomic<bool> aiToolsInstallWorkInProgress { false };
+    std::atomic<bool> aiToolsCancelRequested { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StemSeparator)
 };

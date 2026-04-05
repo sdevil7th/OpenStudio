@@ -176,7 +176,7 @@ if ((-not (Test-Path (Join-Path $bundleWindowsPrereqsDir "MicrosoftEdgeWebView2R
     -Platform windows `
     -BundlePath $resolvedSourceDir `
     -ExpectedVersion $Version `
-    -ExpectBundledStemRuntime
+    -EnforceLeanBundle
 
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 

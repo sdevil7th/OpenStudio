@@ -132,12 +132,12 @@ export function MainToolbar({
     ? "AI Tools Ready"
     : aiToolsStatus.installInProgress
       ? aiToolsStatus.message || "Installing AI Tools..."
-      : aiToolsStatus.buildRuntimeMode === "bundled"
+      : aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
         ? aiToolsStatus.state === "error"
-          ? "Repair bundled AI Tools setup"
+          ? "Repair AI Tools runtime download"
           : aiToolsStatus.state === "modelMissing"
             ? "Download the AI model to finish setup"
-            : "Prepare built-in AI Tools"
+            : "Download AI Tools runtime"
       : aiToolsStatus.requiresExternalPython
         ? aiToolsStatus.state === "pythonMissing"
           ? "Install Python 3.10 to 3.13, then retry AI Tools"

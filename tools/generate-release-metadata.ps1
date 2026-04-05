@@ -34,9 +34,22 @@ param(
     [string]$MacAssetPath = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$MacAssetUrl = ""
+    [string]$MacAssetUrl = "",
 
-    ,
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsAiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacAiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$AiRuntimeVersion = "",
 
     [Parameter(Mandatory = $false)]
     [string]$MacEdSignature = "",
@@ -97,11 +110,15 @@ $resolvedOutputDir = Join-Path $repoRoot $OutputDir
 $appcastDir = Join-Path $resolvedOutputDir "appcast"
 $releaseDir = Join-Path $resolvedOutputDir "releases"
 $channelReleaseDir = Join-Path $releaseDir $Channel
+$aiRuntimeDir = Join-Path $releaseDir "ai-runtime"
+$channelAiRuntimeDir = Join-Path $aiRuntimeDir $Channel
 
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 New-Item -ItemType Directory -Force -Path $appcastDir | Out-Null
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $channelReleaseDir | Out-Null
+New-Item -ItemType Directory -Force -Path $aiRuntimeDir | Out-Null
+New-Item -ItemType Directory -Force -Path $channelAiRuntimeDir | Out-Null
 
 if ([string]::IsNullOrWhiteSpace($PublishedAt)) {
     $PublishedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -127,6 +144,8 @@ if (-not [string]::IsNullOrWhiteSpace($MacMinimumSystemVersion)) {
 
 $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAssetUrl -AdditionalProperties $windowsAdditional
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
+$windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
+$macosAiRuntime = Get-AssetMetadata -AssetPath $MacAiRuntimeAssetPath -AssetUrl $MacAiRuntimeAssetUrl
 
 $manifest = [ordered]@{
     schemaVersion = $SchemaVersion
@@ -152,10 +171,29 @@ if ($macos) { $manifest.platforms.macos = $macos }
 $checksums = @()
 if ($windows) { $checksums += "{0}  {1}" -f $windows.sha256, $windows.fileName }
 if ($macos) { $checksums += "{0}  {1}" -f $macos.sha256, $macos.fileName }
+if ($windowsAiRuntime) { $checksums += "{0}  {1}" -f $windowsAiRuntime.sha256, $windowsAiRuntime.fileName }
+if ($macosAiRuntime) { $checksums += "{0}  {1}" -f $macosAiRuntime.sha256, $macosAiRuntime.fileName }
 
 Set-Content -Path (Join-Path $resolvedOutputDir "OpenStudio-checksums.txt") -Value ($checksums -join [Environment]::NewLine)
 Set-Content -Path (Join-Path $releaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
 Set-Content -Path (Join-Path $channelReleaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
+
+if (($windowsAiRuntime -or $macosAiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
+    $aiRuntimeManifest = [ordered]@{
+        schemaVersion = $SchemaVersion
+        channel = $Channel
+        appVersion = $Version
+        runtimeVersion = $AiRuntimeVersion
+        publishedAt = $PublishedAt
+        platforms = [ordered]@{}
+    }
+
+    if ($windowsAiRuntime) { $aiRuntimeManifest.platforms.windows = $windowsAiRuntime }
+    if ($macosAiRuntime) { $aiRuntimeManifest.platforms.macos = $macosAiRuntime }
+
+    Set-Content -Path (Join-Path $aiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 6)
+    Set-Content -Path (Join-Path $channelAiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 6)
+}
 
 if ($windows) {
     $windowsPubDate = [DateTime]::Parse($PublishedAt).ToUniversalTime().ToString("r")

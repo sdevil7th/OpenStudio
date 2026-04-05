@@ -4,7 +4,7 @@ set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled in
 
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
-option(OPENSTUDIO_BUNDLE_STEM_RUNTIME "Bundle the optional stem-separation runtime into app outputs" OFF)
+option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
 option(OPENSTUDIO_REQUIRE_ASIO "Fail configuration when the ASIO SDK is unavailable for a Windows build" OFF)
 
@@ -272,6 +272,7 @@ else()
 endif()
 
 set(OPENSTUDIO_UPDATE_APPCAST_URL_VALUE "${_OPENSTUDIO_DEFAULT_APPCAST_URL}" CACHE STRING "Updater appcast URL compiled into OpenStudio")
+set(OPENSTUDIO_AI_RUNTIME_MANIFEST_URL_VALUE "https://openstudio.org.in/releases/ai-runtime/stable/latest.json" CACHE STRING "AI runtime manifest URL compiled into OpenStudio")
 
 # Common definitions (all platforms)
 target_compile_definitions(OpenStudio PRIVATE
@@ -285,7 +286,8 @@ target_compile_definitions(OpenStudio PRIVATE
     OPENSTUDIO_UPDATE_APPCAST_URL="${OPENSTUDIO_UPDATE_APPCAST_URL_VALUE}"
     OPENSTUDIO_RELEASES_PAGE_URL="${OPENSTUDIO_RELEASES_PAGE_URL_VALUE}"
     OPENSTUDIO_UPDATE_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}"
-    OPENSTUDIO_BUNDLE_STEM_RUNTIME=$<IF:$<BOOL:${OPENSTUDIO_BUNDLE_STEM_RUNTIME}>,1,0>
+    OPENSTUDIO_AI_RUNTIME_MANIFEST_URL="${OPENSTUDIO_AI_RUNTIME_MANIFEST_URL_VALUE}"
+    OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=$<IF:$<BOOL:${OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK}>,1,0>
 )
 
 if(WIN32)
@@ -432,6 +434,22 @@ function(openstudio_copy_runtime_directory source destination_relative_path copy
     endif()
 endfunction()
 
+function(openstudio_remove_runtime_path destination_relative_path remove_comment)
+    add_custom_command(TARGET OpenStudio POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+            "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_relative_path}"
+        COMMENT "${remove_comment}"
+    )
+endfunction()
+
+function(openstudio_remove_runtime_file destination_relative_path remove_comment)
+    add_custom_command(TARGET OpenStudio POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_relative_path}"
+        COMMENT "${remove_comment}"
+    )
+endfunction()
+
 if(WIN32)
     set(FFMPEG_EXE "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg.exe")
     if(EXISTS "${FFMPEG_EXE}")
@@ -512,25 +530,6 @@ foreach(OPENSTUDIO_CORE_MODEL_FILE IN LISTS OPENSTUDIO_CORE_MODEL_FILES)
     endif()
 endforeach()
 
-if(OPENSTUDIO_BUNDLE_STEM_RUNTIME)
-    set(OPENSTUDIO_STEM_MODEL_FILES
-        "BS-Roformer-SW.ckpt"
-        "BS-Roformer-SW.yaml"
-        "download_checks.json"
-    )
-
-    foreach(OPENSTUDIO_STEM_MODEL_FILE IN LISTS OPENSTUDIO_STEM_MODEL_FILES)
-        set(OPENSTUDIO_STEM_MODEL_PATH "${OPENSTUDIO_MODELS_DIR}/${OPENSTUDIO_STEM_MODEL_FILE}")
-        if(EXISTS "${OPENSTUDIO_STEM_MODEL_PATH}")
-            openstudio_copy_runtime_file(
-                "${OPENSTUDIO_STEM_MODEL_PATH}"
-                "models/${OPENSTUDIO_STEM_MODEL_FILE}"
-                "Copying bundled stem model asset ${OPENSTUDIO_STEM_MODEL_FILE} to output directory"
-            )
-        endif()
-    endforeach()
-endif()
-
 # Copy stem separator Python script to output directory
 set(STEM_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stem_separator.py")
 if(EXISTS "${STEM_SCRIPT}")
@@ -550,15 +549,23 @@ if(EXISTS "${STEM_INSTALLER_SCRIPT}")
     )
 endif()
 
-# Copy bundled Python runtime only when explicitly requested
-set(BUNDLED_PYTHON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/python")
-if(OPENSTUDIO_BUNDLE_STEM_RUNTIME AND EXISTS "${BUNDLED_PYTHON_DIR}")
-    openstudio_copy_runtime_directory(
-        "${BUNDLED_PYTHON_DIR}"
-        "python"
-        "Copying bundled Python runtime to output directory"
-    )
-endif()
+# Remove legacy bundled AI runtime artifacts from reused build directories.
+openstudio_remove_runtime_path(
+    "python"
+    "Removing legacy bundled Python runtime from output directory"
+)
+openstudio_remove_runtime_file(
+    "models/BS-Roformer-SW.ckpt"
+    "Removing legacy bundled stem model checkpoint from output directory"
+)
+openstudio_remove_runtime_file(
+    "models/BS-Roformer-SW.yaml"
+    "Removing legacy bundled stem model manifest from output directory"
+)
+openstudio_remove_runtime_file(
+    "models/download_checks.json"
+    "Removing legacy bundled stem model download manifest from output directory"
+)
 
 # Copy packaged frontend assets for release/offline builds
 set(FRONTEND_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/frontend/dist")

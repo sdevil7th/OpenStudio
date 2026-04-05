@@ -212,12 +212,28 @@ $remotePaths = @(
     "OpenStudio-checksums.txt"
 )
 
+$localAiRuntimeRootManifestPath = Join-Path $resolvedMetadataDir "releases/ai-runtime/latest.json"
+$localAiRuntimeChannelManifestPath = Join-Path $resolvedMetadataDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)
+$hasAiRuntimeMetadata = (Test-Path $localAiRuntimeRootManifestPath) -and (Test-Path $localAiRuntimeChannelManifestPath)
+
+if ($hasAiRuntimeMetadata) {
+    $remotePaths += @(
+        "releases/ai-runtime/latest.json",
+        "releases/ai-runtime/$Channel/latest.json"
+    )
+}
+
 $expectedCacheControl = @{
     "releases/latest.json" = "no-store"
     "releases/$Channel/latest.json" = "no-store"
     "appcast/windows-$Channel.xml" = "no-store"
     "appcast/macos-$Channel.xml" = "no-store"
     "OpenStudio-checksums.txt" = "max-age=300"
+}
+
+if ($hasAiRuntimeMetadata) {
+    $expectedCacheControl["releases/ai-runtime/latest.json"] = "no-store"
+    $expectedCacheControl["releases/ai-runtime/$Channel/latest.json"] = "no-store"
 }
 
 $tempRelativeDir = Join-Path "dist" ("remote-release-validation-" + [guid]::NewGuid().ToString("N"))
@@ -257,6 +273,16 @@ try {
     $remoteChecksums = (Get-Content (Join-Path $tempDir "OpenStudio-checksums.txt") -Raw).Trim()
     Assert-True ($localChecksums -eq $remoteChecksums) "Remote OpenStudio-checksums.txt does not match local metadata."
 
+    if ($hasAiRuntimeMetadata) {
+        $localAiRuntimeRootJson = Get-Content $localAiRuntimeRootManifestPath -Raw
+        $remoteAiRuntimeRootJson = Get-Content (Join-Path $tempDir "releases/ai-runtime/latest.json") -Raw
+        Assert-True ((Normalize-JsonText $localAiRuntimeRootJson) -eq (Normalize-JsonText $remoteAiRuntimeRootJson)) "Remote AI runtime releases/latest.json does not match local metadata."
+
+        $localAiRuntimeChannelJson = Get-Content $localAiRuntimeChannelManifestPath -Raw
+        $remoteAiRuntimeChannelJson = Get-Content (Join-Path $tempDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)) -Raw
+        Assert-True ((Normalize-JsonText $localAiRuntimeChannelJson) -eq (Normalize-JsonText $remoteAiRuntimeChannelJson)) "Remote AI runtime channel latest.json does not match local metadata."
+    }
+
     Compare-AppcastText `
         -ExpectedText (Get-Content (Join-Path $resolvedMetadataDir ("appcast/windows-{0}.xml" -f $Channel)) -Raw) `
         -ActualText (Get-Content (Join-Path $tempDir ("appcast/windows-{0}.xml" -f $Channel)) -Raw) `
@@ -275,9 +301,23 @@ try {
         Test-UrlReachable -Url $remoteManifest.platforms.macos.url
     }
 
+    if ($hasAiRuntimeMetadata) {
+        $remoteAiRuntimeManifest = Get-Content (Join-Path $tempDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)) -Raw | ConvertFrom-Json
+        if ($remoteAiRuntimeManifest.platforms.windows.url) {
+            Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.windows.url
+        }
+        if ($remoteAiRuntimeManifest.platforms.macos.url) {
+            Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.macos.url
+        }
+    }
+
     if ($ValidateRedirects) {
         Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/windows/latest")
         Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/macos/latest")
+        if ($hasAiRuntimeMetadata) {
+            Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/latest")
+            Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/macos/latest")
+        }
     }
 
     Write-Host "Published release validation passed for channel '$Channel' at $releaseSiteBaseUrl."

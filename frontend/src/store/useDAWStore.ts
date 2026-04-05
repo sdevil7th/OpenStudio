@@ -86,8 +86,8 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   installInProgress: false,
   requiresExternalPython: false,
   message: "Checking AI tools...",
-  installSource: "bundledRuntime",
-  buildRuntimeMode: "bundled",
+  installSource: "downloadedRuntime",
+  buildRuntimeMode: "downloaded-runtime",
 };
 
 // ============================================
@@ -2140,11 +2140,17 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set({
         aiToolsStatus: {
           ...currentStatus,
-          state: "checking",
+          state:
+            currentStatus.buildRuntimeMode === "downloaded-runtime"
+              ? "fetching_runtime_manifest"
+              : "checking",
           installInProgress: true,
           available: false,
           error: undefined,
-          message: "Preparing AI tools installation...",
+          message:
+            currentStatus.buildRuntimeMode === "downloaded-runtime"
+              ? "Checking OpenStudio AI runtime downloads..."
+              : "Preparing AI tools installation...",
         },
       });
 

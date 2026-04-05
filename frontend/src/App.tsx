@@ -301,9 +301,12 @@ function App() {
     const currentState = aiToolsStatus.state;
     const installAttemptStates = new Set([
       "checking",
+      "fetching_runtime_manifest",
+      "downloading_runtime",
+      "verifying_runtime_archive",
+      "extracting_runtime",
       "installing",
       "creating_venv",
-      "copying_runtime",
       "verifying_runtime",
       "downloading_model",
     ]);
@@ -1592,10 +1595,15 @@ function App() {
           <div className="fixed bottom-32 right-6 z-[10001] w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-daw-accent/40 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur-md">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold text-white">AI tools are installing</p>
+                <p className="text-sm font-semibold text-white">
+                  {aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
+                    ? "AI tools are downloading"
+                    : "AI tools are installing"}
+                </p>
                 <p className="mt-1 text-xs text-neutral-300">
-                  OpenStudio is downloading and preparing optional AI tooling in the
-                  background. You can keep working while this finishes.
+                  {aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
+                    ? "OpenStudio is downloading and preparing its AI runtime in the background. This is a one-time setup and the app will stay usable while it runs."
+                    : "OpenStudio is preparing optional AI tooling in the background. You can keep working while this finishes."}
                 </p>
               </div>
               <div className="h-3 w-3 rounded-full bg-daw-accent shadow-[0_0_16px_rgba(59,130,246,0.9)] animate-pulse" />
@@ -1605,12 +1613,12 @@ function App() {
               <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
                 <div
                   className="h-full rounded-full bg-daw-accent transition-all duration-300"
-                  style={{ width: `${Math.max(6, Math.min(aiToolsStatus.progress ?? 8, 100))}%` }}
+                  style={{ width: `${Math.max(6, Math.min((aiToolsStatus.progress ?? 0) * 100, 100))}%` }}
                 />
               </div>
               <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
                 <span>{aiToolsStatus.message || "Preparing optional AI tools..."}</span>
-                <span>{Math.round(aiToolsStatus.progress ?? 0)}%</span>
+                <span>{Math.round((aiToolsStatus.progress ?? 0) * 100)}%</span>
               </div>
             </div>
 

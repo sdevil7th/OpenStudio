@@ -122,7 +122,7 @@ Invoke-Step "Configuring OpenStudio release build" {
         "-DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE=$CompiledAppcastUrl" `
         "-DOPENSTUDIO_RELEASES_PAGE_URL_VALUE=$ReleasePageUrl" `
         "-DOPENSTUDIO_UPDATE_CHANNEL_VALUE=$Channel" `
-        "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON" `
+        "-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF" `
         -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
     if ($LASTEXITCODE -ne 0) {
         throw "CMake configure failed."
@@ -151,7 +151,7 @@ Invoke-Step "Validating macOS runtime bundle" {
         "-Platform", "macos",
         "-BundlePath", $appBundlePath,
         "-ExpectedVersion", $Version,
-        "-ExpectBundledStemRuntime"
+        "-EnforceLeanBundle"
     )
 
     & (Join-Path $repoRoot "tools/validate-runtime-bundle.ps1") @arguments

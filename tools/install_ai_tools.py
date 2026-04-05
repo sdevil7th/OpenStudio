@@ -2,22 +2,19 @@
 """
 OpenStudio AI Tools installer.
 
-For release builds, this script copies a bundled Python runtime seed into the
-user runtime directory, verifies that audio-separator can be imported, and
-downloads the required BS-RoFormer model into the user's model cache.
+Release builds prepare the AI runtime outside this script by downloading a
+versioned OpenStudio-managed runtime archive, verifying it, and extracting it
+into the user's OpenStudio data directory. This helper then verifies the
+prepared runtime and downloads the required model.
 
-For dev or unbundled builds, it can fall back to bootstrapping a fresh virtual
-environment from an external Python interpreter.
-
-Progress is emitted as JSON lines on stdout so the native app can surface
-friendly installer states inside the UI.
+Dev or intentionally unbundled builds may still bootstrap a fresh runtime from
+an external Python interpreter.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -76,8 +73,9 @@ def resolve_runtime_python(runtime_root: Path) -> Path:
     fail(
         f"Could not find a Python executable inside {runtime_root}.",
         error_code="runtime_verification_failed",
-        installSource="bundledRuntime",
+        installSource="downloadedRuntime",
         requiresExternalPython=False,
+        buildRuntimeMode="downloaded-runtime",
     )
     raise AssertionError("unreachable")
 
@@ -102,6 +100,7 @@ def run_step(
     requires_external_python: bool,
     error_code: str,
     python_detected: bool,
+    build_runtime_mode: str,
     cwd: Path | None = None,
 ) -> None:
     emit(
@@ -111,6 +110,7 @@ def run_step(
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
     )
     result = subprocess.run(
         command,
@@ -130,56 +130,28 @@ def run_step(
             installSource=install_source,
             requiresExternalPython=requires_external_python,
             pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
         )
 
 
-def copy_seed_runtime(seed_runtime: Path, runtime_root: Path) -> None:
-    if not seed_runtime.exists():
-        fail(
-            "OpenStudio could not find its bundled AI tools runtime.",
-            error_code="runtime_seed_missing",
-            installSource="bundledRuntime",
-            requiresExternalPython=False,
-        )
-
-    emit(
-        "copying_runtime",
-        0.15,
-        message="Copying the built-in AI tools runtime",
-        installSource="bundledRuntime",
-        requiresExternalPython=False,
-        pythonDetected=False,
-    )
-    write_log(f"Copying bundled runtime from {seed_runtime} to {runtime_root}")
-    try:
-        if runtime_root.exists():
-            shutil.rmtree(runtime_root)
-        shutil.copytree(seed_runtime, runtime_root)
-    except Exception as exc:  # pragma: no cover - defensive filesystem branch
-        write_log(f"Runtime copy failed: {exc}")
-        fail(
-            "OpenStudio could not prepare the built-in AI tools runtime.",
-            progress=0.15,
-            error_code="runtime_copy_failed",
-            installSource="bundledRuntime",
-            requiresExternalPython=False,
-        )
-
-
-def verify_runtime(runtime_python: Path, *, install_source: str, requires_external_python: bool, python_detected: bool) -> None:
+def verify_runtime(
+    runtime_python: Path,
+    *,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> None:
     run_step(
-        [
-            str(runtime_python),
-            "-c",
-            "import audio_separator.separator; print('ok')",
-        ],
+        [str(runtime_python), "-c", "import audio_separator.separator; print('ok')"],
         state="verifying_runtime",
-        progress=0.45,
+        progress=0.65,
         description="Verifying the AI tools runtime",
         install_source=install_source,
         requires_external_python=requires_external_python,
         error_code="runtime_verification_failed",
         python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
     )
 
 
@@ -187,6 +159,7 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
     install_source = "externalPython"
     requires_external_python = True
     python_detected = True
+    build_runtime_mode = "unbundled-dev"
 
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
@@ -200,6 +173,7 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
         requires_external_python=requires_external_python,
         error_code="dependency_bootstrap_failed",
         python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
     )
 
     runtime_python = resolve_runtime_python(runtime_root)
@@ -213,17 +187,19 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
         requires_external_python=requires_external_python,
         error_code="dependency_bootstrap_failed",
         python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
     )
 
     run_step(
         [str(runtime_python), "-m", "pip", "install", REQUIREMENT_SPEC],
         state="installing",
-        progress=0.65,
+        progress=0.55,
         description="Installing stem separation packages",
         install_source=install_source,
         requires_external_python=requires_external_python,
         error_code="dependency_bootstrap_failed",
         python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
     )
 
     return runtime_python
@@ -233,14 +209,24 @@ def format_supported_python_range() -> str:
     return "Python 3.10 through 3.13"
 
 
-def download_model(runtime_python: Path, models_dir: Path, model_name: str, *, install_source: str, requires_external_python: bool, python_detected: bool) -> Path:
+def download_model(
+    runtime_python: Path,
+    models_dir: Path,
+    model_name: str,
+    *,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> Path:
     emit(
         "downloading_model",
-        0.8,
+        0.82,
         message="Downloading the stem separation model",
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
     )
     model_bootstrap = (
         "from audio_separator.separator import Separator; "
@@ -249,12 +235,13 @@ def download_model(runtime_python: Path, models_dir: Path, model_name: str, *, i
     run_step(
         [str(runtime_python), "-c", model_bootstrap],
         state="downloading_model",
-        progress=0.9,
+        progress=0.92,
         description="Downloading the stem separation model",
         install_source=install_source,
         requires_external_python=requires_external_python,
         error_code="model_download_failed",
         python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
     )
 
     model_path = models_dir / model_name
@@ -266,6 +253,7 @@ def download_model(runtime_python: Path, models_dir: Path, model_name: str, *, i
             installSource=install_source,
             requiresExternalPython=requires_external_python,
             pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
         )
     return model_path
 
@@ -277,14 +265,13 @@ def main() -> None:
     parser.add_argument("--runtime-root", required=True, help="Directory for the prepared AI runtime")
     parser.add_argument("--models-dir", required=True, help="Directory where stem-separation models should be stored")
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME, help="Stem-separation model filename")
-    parser.add_argument("--seed-runtime", help="Directory containing the bundled AI runtime seed")
-    parser.add_argument("--bootstrap-with", help="Python executable to use for fallback bootstrapping")
+    parser.add_argument("--bootstrap-with", help="Python executable to use for dev fallback bootstrapping")
+    parser.add_argument("--verify-existing-runtime", action="store_true", help="Verify the already-prepared OpenStudio runtime and download the model")
     parser.add_argument("--log-path", help="Detailed installer log file path")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).expanduser().resolve()
     models_dir = Path(args.models_dir).expanduser().resolve()
-    seed_runtime = Path(args.seed_runtime).expanduser().resolve() if args.seed_runtime else None
     bootstrap_python = Path(args.bootstrap_with).expanduser().resolve() if args.bootstrap_with else None
     LOG_PATH = Path(args.log_path).expanduser().resolve() if args.log_path else None
 
@@ -300,18 +287,18 @@ def main() -> None:
     runtime_root.parent.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    if seed_runtime and seed_runtime.exists():
-        install_source = "bundledRuntime"
+    if args.verify_existing_runtime:
+        install_source = "downloadedRuntime"
         requires_external_python = False
         python_detected = False
-        build_runtime_mode = "bundled"
-        copy_seed_runtime(seed_runtime, runtime_root)
+        build_runtime_mode = "downloaded-runtime"
         runtime_python = resolve_runtime_python(runtime_root)
         verify_runtime(
             runtime_python,
             install_source=install_source,
             requires_external_python=requires_external_python,
             python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
         )
     else:
         install_source = "externalPython"
@@ -356,6 +343,7 @@ def main() -> None:
             install_source=install_source,
             requires_external_python=requires_external_python,
             python_detected=True,
+            build_runtime_mode=build_runtime_mode,
         )
 
     model_path = download_model(
@@ -365,6 +353,7 @@ def main() -> None:
         install_source=install_source,
         requires_external_python=requires_external_python,
         python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
     )
 
     emit(

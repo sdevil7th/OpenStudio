@@ -10,10 +10,7 @@ param(
     [string]$ExpectedVersion = "",
 
     [Parameter(Mandatory = $false)]
-    [switch]$EnforceLeanBundle,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$ExpectBundledStemRuntime
+    [switch]$EnforceLeanBundle
 )
 
 $ErrorActionPreference = "Stop"
@@ -151,65 +148,26 @@ foreach ($entry in $shellCriticalRuntimeEntries) {
     }
 }
 
-function Resolve-BundledRuntimePython {
-    param(
-        [string]$RuntimeRoot
-    )
-
-    $candidates = @(
-        (Join-Path $RuntimeRoot "python.exe"),
-        (Join-Path $RuntimeRoot "python"),
-        (Join-Path $RuntimeRoot "Scripts\python.exe"),
-        (Join-Path $RuntimeRoot "Scripts\python"),
-        (Join-Path $RuntimeRoot "bin\python3"),
-        (Join-Path $RuntimeRoot "bin\python")
-    )
-
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            return $candidate
-        }
-    }
-
-    return $null
-}
-
 foreach ($entry in $bundledFeatureEntries) {
     if (Test-SourceExists -RepoRoot $repoRoot -RelativePath $entry.Source) {
         Assert-Exists -Path (Join-Path $runtimeRoot $entry.Target) -Description $entry.Description
     }
 }
 
-$optionalStemRuntimeEntries = @(
+$leanBundleExclusions = @(
     @{ Source = "tools/python"; Target = "python"; Description = "bundled Python runtime" },
     @{ Source = "resources/models/BS-Roformer-SW.ckpt"; Target = "models/BS-Roformer-SW.ckpt"; Description = "bundled stem model checkpoint" },
     @{ Source = "resources/models/BS-Roformer-SW.yaml"; Target = "models/BS-Roformer-SW.yaml"; Description = "bundled stem model manifest" },
     @{ Source = "resources/models/download_checks.json"; Target = "models/download_checks.json"; Description = "bundled stem model download manifest" }
 )
 
-foreach ($entry in $optionalStemRuntimeEntries) {
-    if (-not (Test-SourceExists -RepoRoot $repoRoot -RelativePath $entry.Source)) {
-        continue
-    }
+if ($EnforceLeanBundle) {
+    foreach ($entry in $leanBundleExclusions) {
+        if (-not (Test-SourceExists -RepoRoot $repoRoot -RelativePath $entry.Source)) {
+            continue
+        }
 
-    $targetPath = Join-Path $runtimeRoot $entry.Target
-    if ($ExpectBundledStemRuntime) {
-        Assert-Exists -Path $targetPath -Description $entry.Description
-    } elseif ($EnforceLeanBundle) {
-        Assert-NotExists -Path $targetPath -Description $entry.Description
-    }
-}
-
-if ($ExpectBundledStemRuntime) {
-    $bundledRuntimeRoot = Join-Path $runtimeRoot "python"
-    $bundledRuntimePython = Resolve-BundledRuntimePython -RuntimeRoot $bundledRuntimeRoot
-    if (-not $bundledRuntimePython) {
-        throw "Bundled stem runtime Python executable was not found under '$bundledRuntimeRoot'."
-    }
-
-    & $bundledRuntimePython -c "import audio_separator.separator; print('ok')"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Bundled stem runtime import check failed for '$bundledRuntimePython'."
+        Assert-NotExists -Path (Join-Path $runtimeRoot $entry.Target) -Description $entry.Description
     }
 }
 

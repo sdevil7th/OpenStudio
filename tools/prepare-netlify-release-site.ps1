@@ -12,7 +12,13 @@ param(
     [string]$WindowsDownloadUrl = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$MacDownloadUrl = ""
+    [string]$MacDownloadUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsAiRuntimeDownloadUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacAiRuntimeDownloadUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,11 +56,34 @@ Copy-Item -Path (Join-Path $netlifyTemplateDir "_headers") -Destination (Join-Pa
 
 $resolvedWindowsDownloadUrl = Resolve-DownloadUrl -ProvidedUrl $WindowsDownloadUrl -RepoSlug $RepoSlug -FileName "OpenStudio-Setup-x64.exe"
 $resolvedMacDownloadUrl = Resolve-DownloadUrl -ProvidedUrl $MacDownloadUrl -RepoSlug $RepoSlug -FileName "OpenStudio-macOS.dmg"
+$resolvedWindowsAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeDownloadUrl)) {
+    $WindowsAiRuntimeDownloadUrl
+} elseif (-not [string]::IsNullOrWhiteSpace($RepoSlug)) {
+    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip"
+} else {
+    ""
+}
+$resolvedMacAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($MacAiRuntimeDownloadUrl)) {
+    $MacAiRuntimeDownloadUrl
+} elseif (-not [string]::IsNullOrWhiteSpace($RepoSlug)) {
+    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip"
+} else {
+    ""
+}
 
 $redirects = @(
     "/download/windows/latest  $resolvedWindowsDownloadUrl  302",
     "/download/macos/latest    $resolvedMacDownloadUrl  302"
 )
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeDownloadUrl)) {
+    $redirects += "/download/ai-runtime/windows/latest  $resolvedWindowsAiRuntimeDownloadUrl  302"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeDownloadUrl)) {
+    $redirects += "/download/ai-runtime/macos/latest    $resolvedMacAiRuntimeDownloadUrl  302"
+}
+
 Set-Content -Path (Join-Path $resolvedOutputDir "_redirects") -Value ($redirects -join [Environment]::NewLine)
 
 $netlifyToml = @"
@@ -73,6 +102,29 @@ $netlifyToml = @"
   status = 302
   force = true
 "@
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeDownloadUrl)) {
+    $netlifyToml += @"
+
+[[redirects]]
+  from = "/download/ai-runtime/windows/latest"
+  to = "$resolvedWindowsAiRuntimeDownloadUrl"
+  status = 302
+  force = true
+"@
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeDownloadUrl)) {
+    $netlifyToml += @"
+
+[[redirects]]
+  from = "/download/ai-runtime/macos/latest"
+  to = "$resolvedMacAiRuntimeDownloadUrl"
+  status = 302
+  force = true
+"@
+}
+
 Set-Content -Path (Join-Path $resolvedOutputDir "netlify.toml") -Value $netlifyToml
 
 Write-Host "Netlify release bundle prepared at $resolvedOutputDir"

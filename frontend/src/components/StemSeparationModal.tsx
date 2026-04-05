@@ -40,6 +40,7 @@ export default function StemSeparationModal() {
     aiToolsStatus,
     installAiTools,
     cancelAiToolsInstall,
+    openAiToolsSetup,
   } = useDAWStore(
     useShallow((s) => ({
       showStemSeparation: s.showStemSeparation,
@@ -51,6 +52,7 @@ export default function StemSeparationModal() {
       aiToolsStatus: s.aiToolsStatus,
       installAiTools: s.installAiTools,
       cancelAiToolsInstall: s.cancelAiToolsInstall,
+      openAiToolsSetup: s.openAiToolsSetup,
     })),
   );
 
@@ -271,16 +273,18 @@ export default function StemSeparationModal() {
                     onClick={() => void handleInstallAiTools()}
                     disabled={aiToolsStatus.installInProgress}
                   >
-                    {aiToolsStatus.buildRuntimeMode === "bundled"
-                      ? "Prepare AI Tools"
+                    {aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
+                      ? aiToolsStatus.state === "modelMissing"
+                        ? "Finish AI Tools Setup"
+                        : "Download AI Tools"
                       : aiToolsStatus.requiresExternalPython
                       ? aiToolsStatus.state === "pythonMissing"
                         ? "Get Python"
                         : "Install AI Tools"
-                      : "Prepare AI Tools"}
+                      : "Install AI Tools"}
                   </Button>
                   {(aiToolsStatus.state === "pythonMissing" || aiToolsStatus.state === "error") && (
-                    <Button variant="ghost" onClick={() => void installAiTools()}>
+                    <Button variant="ghost" onClick={() => void openAiToolsSetup()}>
                       Open Setup Guide
                     </Button>
                   )}

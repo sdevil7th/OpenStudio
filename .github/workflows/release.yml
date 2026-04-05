@@ -22,6 +22,8 @@ jobs:
       BUILD_DIR: build-release-windows
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
+      AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
+      WINDOWS_AI_RUNTIME_ROOT: ${{ vars.OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT != '' && vars.OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT || 'tools/python' }}
       RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
@@ -53,6 +55,8 @@ jobs:
         run: |
           $version = "${env:VERSION}" -replace '^v', ''
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $aiRuntimeVersion = "${env:AI_RUNTIME_VERSION}" -replace '^v', ''
+          "AI_RUNTIME_VERSION=$aiRuntimeVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - uses: actions/setup-node@v5
         with:
@@ -95,7 +99,7 @@ jobs:
             "-DOPENSTUDIO_UPDATE_CHANNEL_VALUE=stable" `
             "-DJUCE_ASIOSDK_PATH=$env:GITHUB_WORKSPACE/$env:ASIO_SDK_DIR" `
             "-DOPENSTUDIO_REQUIRE_ASIO=ON" `
-            "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON" `
+            "-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF" `
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
       - name: Build OpenStudio
@@ -104,7 +108,7 @@ jobs:
 
       - name: Validate Windows runtime bundle
         shell: pwsh
-        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -ExpectBundledStemRuntime
+        run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
       - name: Prepare Windows signing certificate
         shell: pwsh
@@ -158,6 +162,25 @@ jobs:
             }
           }
 
+      - name: Package Windows AI runtime
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:WINDOWS_AI_RUNTIME_ROOT)) {
+            throw "Windows AI runtime root was not found at '$env:WINDOWS_AI_RUNTIME_ROOT'."
+          }
+
+          ./tools/package-ai-runtime.ps1 `
+            -Platform windows `
+            -RuntimeRoot $env:WINDOWS_AI_RUNTIME_ROOT `
+            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
+            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-ai-runtime
+          path: dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
@@ -169,6 +192,9 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       BUILD_DIR: build-release-macos
+      AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
+      MACOS_AI_RUNTIME_ROOT: ${{ vars.OPENSTUDIO_MACOS_AI_RUNTIME_ROOT }}
+      MACOS_AI_RUNTIME_PYTHON_VERSION: '3.12'
       RELEASE_SITE_URL: https://openstudio.org.in
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
@@ -200,7 +226,9 @@ jobs:
 
       - name: Normalize version
         shell: bash
-        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+        run: |
+          echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+          echo "AI_RUNTIME_VERSION=${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
         with:
@@ -208,12 +236,40 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.MACOS_AI_RUNTIME_PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tools/ai-runtime-requirements.txt
+
       - name: Build frontend
         shell: bash
         run: |
           cd frontend
           npm ci
           npm run build
+
+      - name: Prepare macOS AI runtime
+        shell: pwsh
+        run: |
+          $runtimeRoot = $env:MACOS_AI_RUNTIME_ROOT
+          if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
+            $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-macos"
+          }
+
+          $pythonCommand = Get-Command python
+          if (-not $pythonCommand) {
+            throw "actions/setup-python did not make 'python' available on PATH."
+          }
+
+          ./tools/prepare-ai-runtime.ps1 `
+            -Platform macos `
+            -RuntimeRoot $runtimeRoot `
+            -PythonExecutable $pythonCommand.Source `
+            -RequirementsFile "tools/ai-runtime-requirements.txt" `
+            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION
+
+          "MACOS_AI_RUNTIME_ROOT=$runtimeRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Prepare macOS signing certificate
         if: env.MACOS_CERTIFICATE_BASE64 != ''
@@ -241,7 +297,7 @@ jobs:
             -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="$RELEASE_SITE_URL/appcast/macos-stable.xml" \
             -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="$RELEASE_SITE_URL/download" \
             -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
-            -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=ON \
+            -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
       - name: Build OpenStudio
@@ -256,7 +312,7 @@ jobs:
             throw "OpenStudio.app was not found in the build output."
           }
 
-          ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath $appPath.FullName -ExpectedVersion $env:VERSION -ExpectBundledStemRuntime
+          ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath $appPath.FullName -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
       - name: Package macOS DMG
         shell: bash
@@ -274,10 +330,29 @@ jobs:
         run: |
           test -f "dist/macos/OpenStudio-macOS.dmg"
 
+      - name: Package macOS AI runtime
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:MACOS_AI_RUNTIME_ROOT)) {
+            throw "macOS AI runtime root was not found at '$env:MACOS_AI_RUNTIME_ROOT'."
+          }
+
+          ./tools/package-ai-runtime.ps1 `
+            -Platform macos `
+            -RuntimeRoot $env:MACOS_AI_RUNTIME_ROOT `
+            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip" `
+            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION
+
       - name: Clean up macOS signing keychain
         if: always() && env.KEYCHAIN_PATH != ''
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-ai-runtime
+          path: dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
@@ -339,12 +414,24 @@ jobs:
           name: macos-release
           path: dist/macos
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-ai-runtime
+          path: dist/ai-runtime
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-ai-runtime
+          path: dist/ai-runtime
+
       - name: Verify downloaded release assets
         shell: pwsh
         run: |
           $requiredFiles = @(
             "dist/windows/OpenStudio-Setup-x64.exe",
-            "dist/macos/OpenStudio-macOS.dmg"
+            "dist/macos/OpenStudio-macOS.dmg",
+            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip",
+            "dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip"
           )
 
           foreach ($file in $requiredFiles) {
@@ -361,6 +448,8 @@ jobs:
           $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
           $windowsUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-Setup-x64.exe"
           $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
+          $windowsAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-AI-Runtime-windows-x64.zip"
+          $macosAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-AI-Runtime-macos-universal.zip"
           ./tools/generate-release-metadata.ps1 `
             -Version $env:VERSION `
             -Channel stable `
@@ -371,7 +460,12 @@ jobs:
             -WindowsAssetUrl $windowsUrl `
             -WindowsInstallerArguments "/SP- /NOICONS" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
-            -MacAssetUrl $macosUrl
+            -MacAssetUrl $macosUrl `
+            -WindowsAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
+            -WindowsAiRuntimeAssetUrl $windowsAiRuntimeUrl `
+            -MacAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip" `
+            -MacAiRuntimeAssetUrl $macosAiRuntimeUrl `
+            -AiRuntimeVersion $env:VERSION
 
       - name: Validate release metadata
         shell: pwsh
@@ -380,7 +474,9 @@ jobs:
             -MetadataDir "dist/release-metadata" `
             -Channel stable `
             -WindowsAssetPath "dist/windows/OpenStudio-Setup-x64.exe" `
-            -MacAssetPath "dist/macos/OpenStudio-macOS.dmg"
+            -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
+            -WindowsAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
+            -MacAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip"
 
       - name: Prepare Netlify updater bundle
         shell: pwsh
@@ -388,7 +484,9 @@ jobs:
           ./tools/prepare-netlify-release-site.ps1 `
             -MetadataDir "dist/release-metadata" `
             -OutputDir "dist/netlify-release-site" `
-            -RepoSlug "${{ github.repository }}"
+            -RepoSlug "${{ github.repository }}" `
+            -WindowsAiRuntimeDownloadUrl "https://github.com/${{ github.repository }}/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip" `
+            -MacAiRuntimeDownloadUrl "https://github.com/${{ github.repository }}/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -407,9 +505,13 @@ jobs:
           files: |
             dist/windows/OpenStudio-Setup-x64.exe
             dist/macos/OpenStudio-macOS.dmg
+            dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip
+            dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip
             dist/release-metadata/OpenStudio-checksums.txt
             dist/release-metadata/releases/latest.json
             dist/release-metadata/releases/stable/latest.json
+            dist/release-metadata/releases/ai-runtime/latest.json
+            dist/release-metadata/releases/ai-runtime/stable/latest.json
             dist/release-metadata/appcast/windows-stable.xml
             dist/release-metadata/appcast/macos-stable.xml
 

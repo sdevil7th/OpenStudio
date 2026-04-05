@@ -52,38 +52,44 @@ export default function AiToolsSetupModal() {
   const isPythonMissing = aiToolsStatus.state === "pythonMissing";
   const hasInstallError = aiToolsStatus.state === "error" || aiToolsStatus.state === "cancelled";
   const requiresExternalPython = aiToolsStatus.requiresExternalPython;
-  const buildRuntimeMode = aiToolsStatus.buildRuntimeMode ?? "bundled";
-  const isBundledFlow =
-    buildRuntimeMode === "bundled" || (aiToolsStatus.installSource === "bundledRuntime" && !requiresExternalPython);
+  const buildRuntimeMode = aiToolsStatus.buildRuntimeMode ?? "downloaded-runtime";
+  const isDownloadedRuntimeFlow =
+    buildRuntimeMode === "downloaded-runtime" ||
+    (aiToolsStatus.installSource === "downloadedRuntime" && !requiresExternalPython);
   const isModelFailure = aiToolsStatus.errorCode === "model_download_failed";
-  const isBundledRuntimeMissing = aiToolsStatus.errorCode === "bundled_runtime_missing";
-  const isBundledRuntimeFailure =
-    isBundledRuntimeMissing ||
-    aiToolsStatus.errorCode === "runtime_seed_missing" ||
-    aiToolsStatus.errorCode === "runtime_copy_failed" ||
+  const isRuntimeManifestFailure =
+    aiToolsStatus.errorCode === "runtime_manifest_missing" ||
+    aiToolsStatus.errorCode === "runtime_manifest_unavailable" ||
+    aiToolsStatus.errorCode === "runtime_manifest_invalid";
+  const isRuntimeArchiveFailure =
+    aiToolsStatus.errorCode === "runtime_download_failed" ||
+    aiToolsStatus.errorCode === "runtime_checksum_failed" ||
+    aiToolsStatus.errorCode === "runtime_extraction_failed" ||
     aiToolsStatus.errorCode === "runtime_verification_failed";
   const installLogPath = aiToolsStatus.detailLogPath;
 
   const errorTitle = isModelFailure
     ? "Model download needs attention"
-    : isBundledRuntimeFailure
-      ? "Built-in AI runtime setup failed"
+    : isRuntimeManifestFailure
+      ? "AI runtime download info is unavailable"
+      : isRuntimeArchiveFailure
+        ? "AI runtime setup failed"
       : aiToolsStatus.state === "cancelled"
         ? "AI tools setup was cancelled"
         : requiresExternalPython
           ? "AI tools setup needs Python help"
           : "AI tools setup needs attention";
 
-  const recommendationText = isBundledFlow
-    ? "This build already includes the AI runtime. OpenStudio should prepare it automatically in the background and then download the stem model."
+  const recommendationText = isDownloadedRuntimeFlow
+    ? "This release downloads the OpenStudio AI runtime the first time you use AI Tools, verifies it, and then downloads the stem model. You can keep using the app while that setup runs."
     : "This dev build needs Python 3.10 through 3.13 on your machine first. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically.";
 
   const retryGuidance = isModelFailure
     ? "The runtime is already in place. Retry after checking your internet connection, VPN, firewall, or antivirus if the download keeps failing."
-    : isBundledRuntimeMissing
-      ? "This release is missing files that should have been bundled inside OpenStudio. Reinstall from a fresh installer. If the same message appears again, share the install log with support."
-    : isBundledFlow
-      ? "Retry from this window to let OpenStudio prepare the built-in AI runtime again. If the same error comes back, open the install log location for details."
+    : isRuntimeManifestFailure
+      ? "Retry once in case the release metadata service was temporarily unavailable. If the same message appears again, OpenStudio may not be able to reach the published AI runtime metadata from this machine."
+    : isDownloadedRuntimeFlow
+      ? "Retry from this window to let OpenStudio download and prepare the managed AI runtime again. If the same error comes back, open the install log location for details."
       : aiToolsStatus.pythonDetected
         ? "Python was detected, so you can usually retry from this window. If the same error comes back, restart OpenStudio and reopen this setup window before trying again."
         : "OpenStudio could not confirm a usable Python installation yet. Install Python first, restart OpenStudio, then reopen this setup window and retry.";
@@ -117,7 +123,7 @@ export default function AiToolsSetupModal() {
 
           <div className="rounded border border-neutral-800 bg-neutral-950/60 p-3 space-y-1">
             <p className="text-sm font-medium text-daw-text">
-              {isBundledFlow ? "Built-in runtime setup" : "Python-based setup"}
+              {isDownloadedRuntimeFlow ? "OpenStudio-managed runtime setup" : "Python-based setup"}
             </p>
             <p className="text-xs text-daw-text-secondary leading-relaxed">{recommendationText}</p>
           </div>
@@ -136,10 +142,10 @@ export default function AiToolsSetupModal() {
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 {isModelFailure
                   ? "OpenStudio prepared the AI runtime, but the stem model download did not complete."
-                  : isBundledRuntimeMissing
-                    ? "This installed release is missing its built-in AI runtime, so AI Tools cannot be prepared on this machine."
-                  : isBundledRuntimeFailure
-                    ? "OpenStudio could not prepare the built-in AI tools runtime on this machine."
+                  : isRuntimeManifestFailure
+                    ? "OpenStudio could not fetch the published AI runtime metadata needed for this setup."
+                  : isRuntimeArchiveFailure
+                    ? "OpenStudio could not download, verify, or extract its managed AI runtime on this machine."
                     : "OpenStudio could not finish the AI tools setup."}
               </p>
               {aiToolsStatus.error ? (
@@ -150,13 +156,13 @@ export default function AiToolsSetupModal() {
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 Install source:{" "}
                 <span className="text-daw-text">
-                  {isBundledFlow ? "Built-in OpenStudio runtime" : "External Python bootstrap"}
+                  {isDownloadedRuntimeFlow ? "Downloaded OpenStudio runtime" : "External Python bootstrap"}
                 </span>
               </p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 Build mode:{" "}
                 <span className="text-daw-text">
-                  {buildRuntimeMode === "bundled" ? "Bundled release runtime" : "Unbundled dev runtime"}
+                  {buildRuntimeMode === "downloaded-runtime" ? "Downloaded runtime release build" : "Unbundled dev runtime"}
                 </span>
               </p>
               {requiresExternalPython ? (
@@ -244,34 +250,33 @@ export default function AiToolsSetupModal() {
           ) : (
             <div className="space-y-1">
               <p className="text-xs font-medium text-daw-text-secondary uppercase tracking-wide">
-                Built-in setup steps
+                Runtime download steps
               </p>
               <div className="space-y-3 pt-1">
                 <Step number={1}>
                   Click <span className="text-daw-text font-medium">Retry Install</span> below.
-                  OpenStudio will copy its built-in AI runtime into your user profile in the
-                  background.
+                  OpenStudio will download its AI runtime in the background, verify it, and then
+                  prepare it inside your user profile.
                 </Step>
                 <Step number={2}>
                   Keep OpenStudio open while setup runs. The progress halo around the{" "}
                   <CodeSnip>AI</CodeSnip> toolbar button shows that work is still happening.
                 </Step>
                 <Step number={3}>
-                  If the error mentions the model download, check your internet connection and retry.
+                  If the error mentions the runtime download, checksum, or extraction, retry once
+                  and then open the install log if it fails again.
                 </Step>
-                    <Step number={4}>
-                      If setup keeps failing, use <span className="text-daw-text font-medium">Open Install Log</span>{" "}
-                      to inspect the detailed log location before retrying again.
-                    </Step>
-                    {isBundledRuntimeMissing ? (
-                      <Step number={5}>
-                        If this message says the built-in runtime is missing, do not install Python.
-                        Reinstall OpenStudio from a freshly rebuilt installer instead.
-                      </Step>
-                    ) : null}
-                  </div>
-                </div>
-              )}
+                <Step number={4}>
+                  If the message specifically mentions the model download, the runtime is already
+                  prepared and you usually only need to retry with a working internet connection.
+                </Step>
+                <Step number={5}>
+                  If setup keeps failing, use <span className="text-daw-text font-medium">Open Install Log</span>{" "}
+                  to inspect the detailed log location before retrying again.
+                </Step>
+              </div>
+            </div>
+          )}
 
           <div className="border-t border-neutral-800 pt-3 space-y-2">
             <p className="text-xs text-daw-text-secondary leading-relaxed">

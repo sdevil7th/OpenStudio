@@ -207,8 +207,11 @@ export interface AiToolsStatus {
       | "idle"
       | "installing"
       | "checking"
+      | "fetching_runtime_manifest"
+      | "downloading_runtime"
+      | "verifying_runtime_archive"
+      | "extracting_runtime"
       | "creating_venv"
-      | "copying_runtime"
       | "verifying_runtime"
       | "downloading_model"
       | "pythonMissing"
@@ -231,8 +234,8 @@ export interface AiToolsStatus {
     errorCode?: string;
     detailLogPath?: string;
     helpUrl?: string;
-    installSource?: "bundledRuntime" | "externalPython" | "none";
-    buildRuntimeMode?: "bundled" | "unbundled-dev";
+    installSource?: "downloadedRuntime" | "externalPython" | "none";
+    buildRuntimeMode?: "downloaded-runtime" | "unbundled-dev";
   }
 
 export interface InstallAiToolsResponse {
@@ -4113,7 +4116,7 @@ class NativeBridge {
         requiresExternalPython: false,
         message: "AI tools are unavailable in the web preview.",
         installSource: "none",
-        buildRuntimeMode: "bundled",
+        buildRuntimeMode: "downloaded-runtime",
       };
   }
 

@@ -9,6 +9,7 @@
 - Release metadata validation via `tools/validate-release-metadata.ps1`
 - Published release validation via `tools/validate-published-release.ps1`
 - Runtime bundle validation via `tools/validate-runtime-bundle.ps1`
+- AI runtime archive packaging via `tools/package-ai-runtime.ps1`
 - Netlify updater bundle preparation via `tools/prepare-netlify-release-site.ps1`
 - A tag-driven GitHub Actions workflow in `.github/workflows/release.yml`
 - A release QA checklist in `docs/release-smoke-checklist.md`
@@ -29,6 +30,8 @@ Use this flow instead:
 7. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip`
 
 The stable filenames are part of the public download contract. The website, metadata, appcasts, and updater flow all assume those exact names.
 
@@ -81,20 +84,22 @@ If you want one command for the full guarded Windows path, use:
 1. Build the frontend: `cd frontend && npm ci && npm run build`
 2. Install the ASIO SDK when you want parity with the official Windows release path: `powershell -ExecutionPolicy Bypass -File tools/setup-asio-sdk.ps1`
 3. Optional: install ONNX Runtime for polyphonic pitch detection: `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
-4. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DJUCE_ASIOSDK_PATH=thirdparty/asio" "-DOPENSTUDIO_REQUIRE_ASIO=ON" "-DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
+4. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DJUCE_ASIOSDK_PATH=thirdparty/asio" "-DOPENSTUDIO_REQUIRE_ASIO=ON" "-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
 5. Build the release target: `cmake --build build-release-windows --config Release --target OpenStudio`
 6. Validate the runtime bundle: `./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath build-release-windows/OpenStudio_artefacts/Release -ExpectedVersion 1.0.0 -EnforceLeanBundle`
    This now also validates staged Windows prerequisite installers when they are part of the runtime contract.
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
-8. Generate updater metadata:
-   `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe`
+8. Package the Windows AI runtime archive:
+   `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot tools/python -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -ExpectedRuntimeVersion 1.0.0`
+9. Generate updater metadata:
+   `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -WindowsAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-AI-Runtime-windows-x64.zip -AiRuntimeVersion 1.0.0`
    Optional appcast fields: `-FullReleaseNotesUrl https://openstudio.org.in/releases/1.0.0 -WindowsInstallerArguments "/SP- /NOICONS"`
-9. Validate the generated metadata:
-   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe`
-10. Prepare the Netlify bundle for updater/download endpoints:
-   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo>`
-11. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
+10. Validate the generated metadata:
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip`
+11. Prepare the Netlify bundle for updater/download endpoints:
+   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo> -WindowsAiRuntimeDownloadUrl https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
+12. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
 
 ## Local macOS release flow
 
@@ -102,18 +107,20 @@ If you want one command for the guarded macOS path, use:
 `./tools/run-macos-release-preflight.ps1 -Version 1.0.0 -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -RepoSlug <org>/<repo>`
 
 1. Build the frontend: `cd frontend && npm ci && npm run build`
-2. Configure and build the release target with CMake in a clean directory, for example: `cmake -S . -B build-release-macos -DOPENSTUDIO_APP_VERSION="1.0.0" -DOPENSTUDIO_BUNDLE_STEM_RUNTIME=OFF -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
+2. Configure and build the release target with CMake in a clean directory, for example: `cmake -S . -B build-release-macos -DOPENSTUDIO_APP_VERSION="1.0.0" -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
 3. Validate the app bundle: `./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath build-release-macos/<path-to-OpenStudio.app> -ExpectedVersion 1.0.0 -EnforceLeanBundle`
 4. Package the DMG:
    `./tools/package-macos-release.sh build-release-macos/<path-to-OpenStudio.app> 1.0.0`
    If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign` and `spctl`. If notarization credentials are present, it also staples and validates the notarized DMG.
    For the zero-cost v1 path, leave those signing variables unset and ship the unsigned DMG with manual Gatekeeper override instructions on the download page.
-5. Generate updater metadata with the DMG path and URL included.
+5. Package the macOS AI runtime archive from your prepared macOS runtime root:
+   `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot <macos-runtime-root> -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip -ExpectedRuntimeVersion 1.0.0`
+6. Generate updater metadata with the DMG path and URL included.
    For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 13.0`.
-6. Validate the generated metadata:
-   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg`
-7. Prepare the Netlify bundle for updater/download endpoints:
-   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo>`
+7. Validate the generated metadata:
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip`
+8. Prepare the Netlify bundle for updater/download endpoints:
+   `./tools/prepare-netlify-release-site.ps1 -MetadataDir dist/release-metadata -OutputDir dist/netlify-release-site -RepoSlug <org>/<repo> -MacAiRuntimeDownloadUrl https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip`
 
 ## Netlify files to publish
 
@@ -143,6 +150,8 @@ That bundle contains:
 
 - `releases/latest.json`
 - `releases/stable/latest.json`
+- `releases/ai-runtime/latest.json`
+- `releases/ai-runtime/stable/latest.json`
 - `appcast/windows-stable.xml`
 - `appcast/macos-stable.xml`
 - `OpenStudio-checksums.txt`
@@ -168,6 +177,18 @@ For the zero-cost v1 release path, only `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_I
 - `NETLIFY_AUTH_TOKEN`
 - `NETLIFY_SITE_ID`
 - `DOPPLER_TOKEN`
+
+Optional repository variables:
+
+- `OPENSTUDIO_AI_RUNTIME_VERSION`
+- `OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT`
+- `OPENSTUDIO_MACOS_AI_RUNTIME_ROOT`
+
+GitHub-hosted macOS releases no longer require a pre-existing committed `tools/python-macos`
+tree. The release workflow now uses `actions/setup-python` with Python 3.12 on `macos-14`
+and prepares a fresh AI runtime automatically before packaging it. Set
+`OPENSTUDIO_MACOS_AI_RUNTIME_ROOT` only if you want the workflow to reuse or overwrite a
+specific runner-local path.
 
 Optional future additions:
 

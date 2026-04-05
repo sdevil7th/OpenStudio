@@ -43,6 +43,21 @@ param(
     [string]$MacAssetPath = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsAiRuntimeRoot = "tools/python",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacAiRuntimeRoot = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$AiRuntimeVersion = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$MinimumSupportedVersion = "",
 
     [Parameter(Mandatory = $false)]
@@ -161,8 +176,16 @@ if ([string]::IsNullOrWhiteSpace($BundleOutputDir)) {
 
 $windowsAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-Setup-x64.exe"
 $macAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-macOS.dmg"
+$windowsAiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-AI-Runtime-windows-x64.zip"
+$macAiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-AI-Runtime-macos-universal.zip"
 
 $resolvedWindowsInstallerPath = ""
+$resolvedWindowsAiRuntimeAssetPath = ""
+$resolvedMacAiRuntimeAssetPath = ""
+
+if ([string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
+    $AiRuntimeVersion = $normalizedVersion
+}
 
 if (-not $SkipWindowsBuild) {
     Write-Step "Running guarded Windows release build"
@@ -227,49 +250,106 @@ $resolvedMacAssetPath = Resolve-OptionalAsset -ProvidedPath $MacAssetPath -Candi
 Assert-FileExists -PathValue $resolvedWindowsInstallerPath -Label "Windows installer"
 Assert-FileExists -PathValue $resolvedMacAssetPath -Label "macOS DMG"
 
-Write-Step "Generating release metadata with Windows and macOS assets"
-$generateMetadataScript = Join-RepoPath "tools/generate-release-metadata.ps1"
-if (-not [string]::IsNullOrWhiteSpace($MinimumSupportedVersion)) {
-    & $generateMetadataScript `
-        -Version $normalizedVersion `
-        -Channel $Channel `
-        -ReleasePageUrl $ReleasePageUrl `
-        -OutputDir $MetadataOutputDir `
-        -NotesFile $NotesFile `
-        -WindowsAssetPath $resolvedWindowsInstallerPath `
-        -WindowsAssetUrl $windowsAssetUrl `
-        -MacAssetPath $resolvedMacAssetPath `
-        -MacAssetUrl $macAssetUrl `
-        -WindowsInstallerArguments $WindowsInstallerArguments `
-        -FullReleaseNotesUrl $FullReleaseNotesUrl `
-        -MinimumSupportedVersion $MinimumSupportedVersion
-} else {
-    & $generateMetadataScript `
-        -Version $normalizedVersion `
-        -Channel $Channel `
-        -ReleasePageUrl $ReleasePageUrl `
-        -OutputDir $MetadataOutputDir `
-        -NotesFile $NotesFile `
-        -WindowsAssetPath $resolvedWindowsInstallerPath `
-        -WindowsAssetUrl $windowsAssetUrl `
-        -MacAssetPath $resolvedMacAssetPath `
-        -MacAssetUrl $macAssetUrl `
-        -WindowsInstallerArguments $WindowsInstallerArguments `
-        -FullReleaseNotesUrl $FullReleaseNotesUrl
+if (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeAssetPath)) {
+    $resolvedWindowsAiRuntimeAssetPath = Resolve-OptionalAsset -ProvidedPath $WindowsAiRuntimeAssetPath -Candidates @() -Label "Windows AI runtime archive"
+} elseif (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeRoot)) {
+    $windowsAiRuntimeRootPath = Join-RepoPath $WindowsAiRuntimeRoot
+    if (Test-Path $windowsAiRuntimeRootPath) {
+        Write-Step "Packaging Windows AI runtime archive"
+        $resolvedWindowsAiRuntimeAssetPath = Join-RepoPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip"
+        & (Join-RepoPath "tools/package-ai-runtime.ps1") `
+            -Platform windows `
+            -RuntimeRoot $windowsAiRuntimeRootPath `
+            -OutputPath $resolvedWindowsAiRuntimeAssetPath `
+            -ExpectedRuntimeVersion $AiRuntimeVersion
+    }
 }
 
+if (-not [string]::IsNullOrWhiteSpace($MacAiRuntimeAssetPath)) {
+    $resolvedMacAiRuntimeAssetPath = Resolve-OptionalAsset -ProvidedPath $MacAiRuntimeAssetPath -Candidates @() -Label "macOS AI runtime archive"
+} elseif (-not [string]::IsNullOrWhiteSpace($MacAiRuntimeRoot)) {
+    $macAiRuntimeRootPath = Join-RepoPath $MacAiRuntimeRoot
+    if (Test-Path $macAiRuntimeRootPath) {
+        Write-Step "Packaging macOS AI runtime archive"
+        $resolvedMacAiRuntimeAssetPath = Join-RepoPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip"
+        & (Join-RepoPath "tools/package-ai-runtime.ps1") `
+            -Platform macos `
+            -RuntimeRoot $macAiRuntimeRootPath `
+            -OutputPath $resolvedMacAiRuntimeAssetPath `
+            -ExpectedRuntimeVersion $AiRuntimeVersion
+    }
+}
+
+Write-Step "Generating release metadata with Windows and macOS assets"
+$generateMetadataScript = Join-RepoPath "tools/generate-release-metadata.ps1"
+$generateMetadataArgs = @(
+    "-Version", $normalizedVersion,
+    "-Channel", $Channel,
+    "-ReleasePageUrl", $ReleasePageUrl,
+    "-OutputDir", $MetadataOutputDir,
+    "-NotesFile", $NotesFile,
+    "-WindowsAssetPath", $resolvedWindowsInstallerPath,
+    "-WindowsAssetUrl", $windowsAssetUrl,
+    "-MacAssetPath", $resolvedMacAssetPath,
+    "-MacAssetUrl", $macAssetUrl,
+    "-WindowsInstallerArguments", $WindowsInstallerArguments,
+    "-FullReleaseNotesUrl", $FullReleaseNotesUrl
+)
+
+if (-not [string]::IsNullOrWhiteSpace($MinimumSupportedVersion)) {
+    $generateMetadataArgs += @("-MinimumSupportedVersion", $MinimumSupportedVersion)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
+    $generateMetadataArgs += @(
+        "-WindowsAiRuntimeAssetPath", $resolvedWindowsAiRuntimeAssetPath,
+        "-WindowsAiRuntimeAssetUrl", $windowsAiRuntimeAssetUrl,
+        "-AiRuntimeVersion", $AiRuntimeVersion
+    )
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
+    $generateMetadataArgs += @(
+        "-MacAiRuntimeAssetPath", $resolvedMacAiRuntimeAssetPath,
+        "-MacAiRuntimeAssetUrl", $macAiRuntimeAssetUrl,
+        "-AiRuntimeVersion", $AiRuntimeVersion
+    )
+}
+
+& $generateMetadataScript @generateMetadataArgs
+
 Write-Step "Validating release metadata"
-& (Join-RepoPath "tools/validate-release-metadata.ps1") `
-    -MetadataDir $MetadataOutputDir `
-    -Channel $Channel `
-    -WindowsAssetPath $resolvedWindowsInstallerPath `
-    -MacAssetPath $resolvedMacAssetPath
+$validateMetadataArgs = @(
+    "-MetadataDir", $MetadataOutputDir,
+    "-Channel", $Channel,
+    "-WindowsAssetPath", $resolvedWindowsInstallerPath,
+    "-MacAssetPath", $resolvedMacAssetPath
+)
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
+    $validateMetadataArgs += @("-WindowsAiRuntimeAssetPath", $resolvedWindowsAiRuntimeAssetPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
+    $validateMetadataArgs += @("-MacAiRuntimeAssetPath", $resolvedMacAiRuntimeAssetPath)
+}
+
+& (Join-RepoPath "tools/validate-release-metadata.ps1") @validateMetadataArgs
 
 Write-Step "Preparing Netlify release bundle"
-& (Join-RepoPath "tools/prepare-netlify-release-site.ps1") `
-    -MetadataDir $MetadataOutputDir `
-    -OutputDir $NetlifyOutputDir `
-    -RepoSlug $RepoSlug
+$prepareNetlifyArgs = @(
+    "-MetadataDir", $MetadataOutputDir,
+    "-OutputDir", $NetlifyOutputDir,
+    "-RepoSlug", $RepoSlug
+)
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
+    $prepareNetlifyArgs += @("-WindowsAiRuntimeDownloadUrl", $windowsAiRuntimeAssetUrl)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
+    $prepareNetlifyArgs += @("-MacAiRuntimeDownloadUrl", $macAiRuntimeAssetUrl)
+}
+
+& (Join-RepoPath "tools/prepare-netlify-release-site.ps1") @prepareNetlifyArgs
 
 $resolvedMetadataDir = Resolve-RepoPath $MetadataOutputDir
 $resolvedNetlifyDir = Resolve-RepoPath $NetlifyOutputDir
@@ -286,6 +366,12 @@ New-Item -ItemType Directory -Force -Path $bundleNetlifyDir | Out-Null
 
 Copy-Item -LiteralPath $resolvedWindowsInstallerPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-Setup-x64.exe") -Force
 Copy-Item -LiteralPath $resolvedMacAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-macOS.dmg") -Force
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
+    Copy-Item -LiteralPath $resolvedWindowsAiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-windows-x64.zip") -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
+    Copy-Item -LiteralPath $resolvedMacAiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-macos-universal.zip") -Force
+}
 Copy-Item -Path (Join-Path $resolvedMetadataDir "*") -Destination $bundleMetadataDir -Recurse -Force
 Copy-Item -Path (Join-Path $resolvedNetlifyDir "*") -Destination $bundleNetlifyDir -Recurse -Force
 
@@ -298,14 +384,24 @@ $nextSteps = @(
     "",
     "GitHub release assets:",
     "  $bundleAssetsDir\OpenStudio-Setup-x64.exe",
-    "  $bundleAssetsDir\OpenStudio-macOS.dmg",
+    "  $bundleAssetsDir\OpenStudio-macOS.dmg"
+)
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
+    $nextSteps += "  $bundleAssetsDir\OpenStudio-AI-Runtime-windows-x64.zip"
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeAssetPath)) {
+    $nextSteps += "  $bundleAssetsDir\OpenStudio-AI-Runtime-macos-universal.zip"
+}
+
+$nextSteps += @(
     "",
     "Netlify release bundle:",
     "  $bundleNetlifyDir",
     "",
     "Suggested next steps:",
     "  1. Preferred: push tag $tag to $RepoSlug and let the Release workflow publish the assets.",
-    "  2. Fallback only: upload both files from github-release-assets manually.",
+    "  2. Fallback only: upload the files from github-release-assets manually.",
     "  3. Deploy or sync the contents of netlify-release-site if you use the updater metadata bundle.",
     "  4. Test the GitHub release download URLs.",
     "  5. Then verify https://openstudio.org.in/download/windows/latest and /download/macos/latest."

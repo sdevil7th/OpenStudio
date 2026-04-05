@@ -4,6 +4,12 @@
 /releases/stable/latest.json
   Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
+/releases/ai-runtime/latest.json
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/releases/ai-runtime/stable/latest.json
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
 /appcast/windows-stable.xml
   Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 

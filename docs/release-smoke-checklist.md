@@ -65,11 +65,15 @@ Use this checklist for every release candidate before publishing installers, man
 ## Updater And Release Metadata
 
 - Confirm `releases/latest.json` and `releases/stable/latest.json` match.
+- Confirm `releases/ai-runtime/latest.json` and `releases/ai-runtime/stable/latest.json` match when AI runtime metadata is part of the release.
 - Confirm `OpenStudio-checksums.txt` matches the published binaries.
 - Confirm `appcast/windows-stable.xml` points to the published Windows installer.
 - Confirm `appcast/macos-stable.xml` points to the published macOS DMG.
+- Confirm AI runtime metadata points to the published GitHub AI runtime assets with the correct SHA-256 and size.
 - Confirm Netlify serves updater files with the intended cache headers.
 - Confirm GitHub Release asset URLs resolve before publishing the appcast bundle.
+- Confirm `https://openstudio.org.in/releases/ai-runtime/latest.json` and `https://openstudio.org.in/releases/ai-runtime/stable/latest.json` are live and uncached.
+- Confirm `https://openstudio.org.in/download/ai-runtime/windows/latest` and `https://openstudio.org.in/download/ai-runtime/macos/latest` redirect cleanly if those convenience endpoints are enabled.
 - Run `./tools/validate-published-release.ps1 -MetadataDir dist/release-metadata -Channel stable -ReleaseSiteUrl https://openstudio.org.in -ValidateRedirects` after deploy and confirm it passes.
 
 ## Launch Sign-Off

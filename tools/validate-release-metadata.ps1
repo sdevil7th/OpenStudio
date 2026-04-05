@@ -10,7 +10,13 @@ param(
     [string]$WindowsAssetPath = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$MacAssetPath = ""
+    [string]$MacAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacAiRuntimeAssetPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -204,6 +210,8 @@ $resolvedMetadataDir = Join-Path $repoRoot $MetadataDir
 $checksumsPath = Join-Path $resolvedMetadataDir "OpenStudio-checksums.txt"
 $rootManifestPath = Join-Path $resolvedMetadataDir "releases/latest.json"
 $channelManifestPath = Join-Path $resolvedMetadataDir ("releases/{0}/latest.json" -f $Channel)
+$rootAiRuntimeManifestPath = Join-Path $resolvedMetadataDir "releases/ai-runtime/latest.json"
+$channelAiRuntimeManifestPath = Join-Path $resolvedMetadataDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)
 $windowsAppcastPath = Join-Path $resolvedMetadataDir ("appcast/windows-{0}.xml" -f $Channel)
 $macosAppcastPath = Join-Path $resolvedMetadataDir ("appcast/macos-{0}.xml" -f $Channel)
 
@@ -220,11 +228,32 @@ Assert-True ($rootJson -eq $channelJson) "Root latest.json and channel latest.js
 
 $windowsAsset = Get-AssetInfo $WindowsAssetPath
 $macosAsset = Get-AssetInfo $MacAssetPath
+$windowsAiRuntimeAsset = Get-AssetInfo $WindowsAiRuntimeAssetPath
+$macosAiRuntimeAsset = Get-AssetInfo $MacAiRuntimeAssetPath
 
 Validate-PlatformEntry -PlatformName "windows" -PlatformNode $rootManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAsset
 Validate-PlatformEntry -PlatformName "macos" -PlatformNode $rootManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAsset
 
 Validate-Appcast -PlatformName "windows" -AppcastPath $windowsAppcastPath -Manifest $rootManifest -PlatformNode $rootManifest.platforms.windows
 Validate-Appcast -PlatformName "macos" -AppcastPath $macosAppcastPath -Manifest $rootManifest -PlatformNode $rootManifest.platforms.macos
+
+if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManifestPath)) {
+    $rootAiRuntimeManifest = Load-Json $rootAiRuntimeManifestPath
+    $channelAiRuntimeManifest = Load-Json $channelAiRuntimeManifestPath
+
+    Assert-True ($rootAiRuntimeManifest.schemaVersion -ge 1) "AI runtime manifest has an invalid schemaVersion."
+    Assert-True ($rootAiRuntimeManifest.channel -eq $Channel) "AI runtime manifest channel does not match expected '$Channel'."
+    Assert-True (-not [string]::IsNullOrWhiteSpace($rootAiRuntimeManifest.appVersion)) "AI runtime manifest is missing appVersion."
+    Assert-True (-not [string]::IsNullOrWhiteSpace($rootAiRuntimeManifest.runtimeVersion)) "AI runtime manifest is missing runtimeVersion."
+    Assert-True (-not [string]::IsNullOrWhiteSpace($rootAiRuntimeManifest.publishedAt)) "AI runtime manifest is missing publishedAt."
+    Assert-True ($null -ne $rootAiRuntimeManifest.platforms) "AI runtime manifest is missing platforms."
+
+    $rootAiJson = ($rootAiRuntimeManifest | ConvertTo-Json -Depth 8)
+    $channelAiJson = ($channelAiRuntimeManifest | ConvertTo-Json -Depth 8)
+    Assert-True ($rootAiJson -eq $channelAiJson) "Root AI runtime latest.json and channel AI runtime latest.json do not match."
+
+    Validate-PlatformEntry -PlatformName "windows AI runtime" -PlatformNode $rootAiRuntimeManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAiRuntimeAsset
+    Validate-PlatformEntry -PlatformName "macos AI runtime" -PlatformNode $rootAiRuntimeManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAiRuntimeAsset
+}
 
 Write-Host "Release metadata validation passed for channel '$Channel'."
