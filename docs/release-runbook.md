@@ -31,7 +31,8 @@ Use this flow instead:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
-   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip`
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-arm64.zip`
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-x64.zip`
 8. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
 The stable installer/runtime filenames are part of the public download contract. The website repo is now the only publisher of public metadata and redirects.
@@ -92,7 +93,7 @@ If you want one command for the full guarded Windows path, use:
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
 8. Prepare and package the Windows AI runtime archive:
-   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -PythonExecutable python -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0`
+   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -Architecture x64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
    `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -ExpectedRuntimeVersion 1.0.0`
 9. Generate updater metadata:
    `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -WindowsAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-AI-Runtime-windows-x64.zip -AiRuntimeVersion 1.0.0`
@@ -115,12 +116,15 @@ If you want one command for the guarded macOS path, use:
    `./tools/package-macos-release.sh build-release-macos/<path-to-OpenStudio.app> 1.0.0`
    If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign` and `spctl`. If notarization credentials are present, it also staples and validates the notarized DMG.
    For the zero-cost v1 path, leave those signing variables unset and ship the unsigned DMG with manual Gatekeeper override instructions on the download page.
-5. Package the macOS AI runtime archive from your prepared macOS runtime root:
-   `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot <macos-runtime-root> -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip -ExpectedRuntimeVersion 1.0.0`
+5. Prepare and package separate macOS AI runtime archives:
+   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -ExpectedRuntimeVersion 1.0.0`
+   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-x64 -Architecture x64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-x64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-x64.zip -ExpectedRuntimeVersion 1.0.0`
 6. Generate updater metadata with the DMG path and URL included.
    For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 13.0`.
 7. Validate the generated metadata:
-   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-universal.zip`
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacArm64AiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -MacX64AiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-x64.zip`
 8. Stage the uniquely named GitHub Release metadata assets:
    `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
 
@@ -176,8 +180,9 @@ For the current release path, the only non-signing secret required for public me
 Optional repository variables:
 
 - `OPENSTUDIO_AI_RUNTIME_VERSION`
-- `OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT`
-- `OPENSTUDIO_MACOS_AI_RUNTIME_ROOT`
+- `OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG`
+- `OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION`
+- `OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR`
 - `OPENSTUDIO_WEBSITE_REPO`
 - `OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE`
 
@@ -185,20 +190,15 @@ The default website repo target is `sdevil7th/OpenStudioWebsite`.
 The default dispatch event type is `openstudio_release_published`.
 
 GitHub-hosted Windows releases no longer require a pre-existing committed `tools/python`
-tree. The release workflow now uses `actions/setup-python` with Python 3.12 on
-`windows-latest` and prepares a fresh AI runtime automatically before packaging it. Set
-`OPENSTUDIO_WINDOWS_AI_RUNTIME_ROOT` only if you want the workflow to reuse or overwrite a
-specific runner-local path.
+tree. The release workflow now downloads a relocatable standalone Python runtime, layers the
+pinned AI packages into it, validates that the packaged runtime is not a venv, and then
+publishes the resulting archive.
 
 GitHub-hosted macOS releases no longer require a pre-existing committed `tools/python-macos`
-tree. The release workflow now uses `actions/setup-python` with Python 3.10 on `macos-14`
-and prepares a fresh AI runtime automatically before packaging it. Python 3.10 is pinned
-there intentionally because the current `audio-separator` macOS dependency chain still
-resolves through `diffq` wheels that are available for macOS CPython 3.10, while newer
-macOS interpreters do not currently provide a compatible all-wheel path for the release
-runtime-preparation step. Set
-`OPENSTUDIO_MACOS_AI_RUNTIME_ROOT` only if you want the workflow to reuse or overwrite a
-specific runner-local path.
+tree. The release workflow now builds separate `arm64` and `x64` downloadable runtimes from
+the same relocatable standalone Python source on GitHub-hosted macOS runners. The arm64
+runtime is prepared on `macos-14`, and the x64 runtime is prepared on `macos-13`, so each
+published runtime is verified on matching hardware before release.
 
 Optional future additions:
 

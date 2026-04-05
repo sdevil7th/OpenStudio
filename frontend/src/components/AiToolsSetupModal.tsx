@@ -65,7 +65,10 @@ export default function AiToolsSetupModal() {
     aiToolsStatus.errorCode === "runtime_download_failed" ||
     aiToolsStatus.errorCode === "runtime_checksum_failed" ||
     aiToolsStatus.errorCode === "runtime_extraction_failed" ||
-    aiToolsStatus.errorCode === "runtime_verification_failed";
+    aiToolsStatus.errorCode === "runtime_verification_failed" ||
+    aiToolsStatus.errorCode === "runtime_not_relocatable" ||
+    aiToolsStatus.errorCode === "runtime_validation_failed" ||
+    aiToolsStatus.errorCode === "runtime_python_unlaunchable";
   const installLogPath = aiToolsStatus.detailLogPath;
 
   const errorTitle = isModelFailure

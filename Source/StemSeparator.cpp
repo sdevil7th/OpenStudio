@@ -19,6 +19,18 @@ juce::String quoteCommandPart(const juce::String& value)
     return value.quoted();
 }
 
+juce::String summariseDiagnosticLines (const juce::StringArray& lines)
+{
+    if (lines.isEmpty())
+        return {};
+
+    auto joined = lines.joinIntoString(" | ");
+    constexpr int maxLength = 280;
+    if (joined.length() > maxLength)
+        joined = joined.substring(0, maxLength - 3) + "...";
+    return joined;
+}
+
 bool isAiToolsTerminalState (const juce::String& state)
 {
     return state == "ready"
@@ -108,6 +120,21 @@ juce::String StemSeparator::getAiRuntimePlatformKey() const
 #endif
 }
 
+juce::String StemSeparator::getAiRuntimeArchitectureKey() const
+{
+#if JUCE_WINDOWS
+    return "x64";
+#elif JUCE_MAC
+   #if defined(__aarch64__) || defined(__arm64__) || defined(JUCE_ARM)
+    return "arm64";
+   #else
+    return "x64";
+   #endif
+#else
+    return {};
+#endif
+}
+
 juce::File StemSeparator::findSystemPython() const
 {
 #if JUCE_WINDOWS
@@ -172,11 +199,17 @@ juce::File StemSeparator::findPythonInRuntimeRoot (const juce::File& runtimeRoot
 #if JUCE_WINDOWS
     auto python = runtimeRoot.getChildFile("python.exe");
     if (! python.existsAsFile())
+        python = runtimeRoot.getChildFile("python/python.exe");
+    if (! python.existsAsFile())
         python = runtimeRoot.getChildFile("Scripts/python.exe");
 #else
     auto python = runtimeRoot.getChildFile("python3");
     if (! python.existsAsFile())
+        python = runtimeRoot.getChildFile("python/bin/python3");
+    if (! python.existsAsFile())
         python = runtimeRoot.getChildFile("bin/python3");
+    if (! python.existsAsFile())
+        python = runtimeRoot.getChildFile("python/bin/python");
     if (! python.existsAsFile())
         python = runtimeRoot.getChildFile("bin/python");
 #endif
@@ -607,11 +640,15 @@ bool StemSeparator::verifyFileSha256 (const juce::File& file, const juce::String
     return true;
 }
 
-bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile, const juce::File& destinationRoot, juce::String& error) const
+bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
+                                           const juce::File& destinationRoot,
+                                           juce::String& error,
+                                           juce::String& errorCode) const
 {
     if (! archiveFile.existsAsFile())
     {
         error = "The AI runtime archive was not found for extraction.";
+        errorCode = "runtime_extraction_failed";
         return false;
     }
 
@@ -623,6 +660,7 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile, const 
     if (auto result = zip.uncompressTo(extractionRoot); result.failed())
     {
         error = result.getErrorMessage();
+        errorCode = "runtime_extraction_failed";
         extractionRoot.deleteRecursively();
         return false;
     }
@@ -641,6 +679,23 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile, const 
     if (! findPythonInRuntimeRoot(sourceRoot).existsAsFile())
     {
         error = "OpenStudio could not find a usable Python runtime inside the downloaded archive.";
+        errorCode = "runtime_extraction_failed";
+        extractionRoot.deleteRecursively();
+        return false;
+    }
+
+    if (sourceRoot.getChildFile("pyvenv.cfg").existsAsFile())
+    {
+        error = "The downloaded AI runtime still contains pyvenv.cfg and is not relocatable.";
+        errorCode = "runtime_not_relocatable";
+        extractionRoot.deleteRecursively();
+        return false;
+    }
+
+    if (! sourceRoot.getChildFile(".openstudio-ai-runtime.json").existsAsFile())
+    {
+        error = "The downloaded AI runtime is missing OpenStudio runtime metadata.";
+        errorCode = "runtime_validation_failed";
         extractionRoot.deleteRecursively();
         return false;
     }
@@ -650,6 +705,7 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile, const 
     if (! sourceRoot.copyDirectoryTo(destinationRoot))
     {
         error = "OpenStudio could not copy the extracted AI runtime into your user profile.";
+        errorCode = "runtime_extraction_failed";
         extractionRoot.deleteRecursively();
         return false;
     }
@@ -946,7 +1002,22 @@ juce::var StemSeparator::installAiTools()
             {
                 auto platforms = manifestObject->getProperty("platforms");
                 if (auto* platformsObject = platforms.getDynamicObject())
+                {
                     platformNode = platformsObject->getProperty(getAiRuntimePlatformKey());
+
+#if JUCE_MAC
+                    if (auto* macPlatformObject = platformNode.getDynamicObject())
+                    {
+                        const auto architectureKey = getAiRuntimeArchitectureKey();
+                        const auto architectureNode = macPlatformObject->getProperty(architectureKey);
+                        if (! architectureNode.isVoid() && ! architectureNode.isUndefined())
+                        {
+                            platformNode = architectureNode;
+                            appendAiToolsLogLine("runtimeArchitecture=" + architectureKey);
+                        }
+                    }
+#endif
+                }
             }
 
             auto getProperty = [] (const juce::var& value, const juce::Identifier& property) -> juce::String
@@ -1049,12 +1120,13 @@ juce::var StemSeparator::installAiTools()
 
             updateStep("extracting_runtime", 0.7f, "Extracting the OpenStudio AI runtime", kInstallSourceDownloadedRuntime);
             juce::String extractionError;
-            if (! extractRuntimeArchive(runtimeArchive, runtimeRoot, extractionError))
+            juce::String extractionErrorCode;
+            if (! extractRuntimeArchive(runtimeArchive, runtimeRoot, extractionError, extractionErrorCode))
             {
                 finishWithStatus("error", 0.7f,
                                  "OpenStudio could not prepare the AI runtime on this machine.",
                                  extractionError,
-                                 "runtime_extraction_failed",
+                                 extractionErrorCode.isNotEmpty() ? extractionErrorCode : juce::String("runtime_extraction_failed"),
                                  false,
                                  false,
                                  false,
@@ -1070,7 +1142,7 @@ juce::var StemSeparator::installAiTools()
                 finishWithStatus("error", 0.75f,
                                  "OpenStudio could not verify the downloaded AI runtime.",
                                  "The extracted AI runtime did not contain a usable Python executable.",
-                                 "runtime_verification_failed",
+                                 "runtime_validation_failed",
                                  false,
                                  false,
                                  false,
@@ -1090,7 +1162,13 @@ juce::var StemSeparator::installAiTools()
             + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
             + " --model " + quoteCommandPart(kStemModelName)
             + " --log-path " + quoteCommandPart(logFile.getFullPathName())
-            + launchMode;
+            + launchMode
+            + " 2>&1";
+
+        appendAiToolsLogLine("launcherPython=" + launcherPython.getFullPathName());
+        appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
+        appendAiToolsLogLine("installerScript=" + installerScript.getFullPathName());
+        appendAiToolsLogLine("installerCommand=" + cmd);
 
         auto nextInstallProcess = std::make_unique<juce::ChildProcess>();
         if (! nextInstallProcess->start(cmd))
@@ -1111,6 +1189,10 @@ juce::var StemSeparator::installAiTools()
         {
             const juce::ScopedLock lock (aiToolsStatusLock);
             installOutputBuffer.clear();
+            installDiagnosticLines.clear();
+            installCommandLine = cmd;
+            installRuntimePythonPath = launcherPython.getFullPathName();
+            installRuntimeRootPath = runtimeRoot.getFullPathName();
             installProcess = std::move(nextInstallProcess);
             lastAiToolsStatus.state = devFallbackEnabled ? "creating_venv" : "verifying_runtime";
             lastAiToolsStatus.progress = devFallbackEnabled ? 0.1f : 0.8f;
@@ -1178,21 +1260,51 @@ void StemSeparator::pollInstallProgress()
 
             if (line.startsWith("{"))
                 lastAiToolsStatus = parseInstallJsonLine(line);
+            else if (line.isNotEmpty())
+            {
+                installDiagnosticLines.add(line);
+                while (installDiagnosticLines.size() > 8)
+                    installDiagnosticLines.remove(0);
+                appendAiToolsLogLine("[installer] " + line);
+            }
         }
 
         if (! installProcess->isRunning())
         {
             const auto exitCode = installProcess->getExitCode();
-            if (installOutputBuffer.trim().startsWith("{"))
-                lastAiToolsStatus = parseInstallJsonLine(installOutputBuffer.trim());
+            const auto finalLine = installOutputBuffer.trim();
+            if (finalLine.startsWith("{"))
+            {
+                lastAiToolsStatus = parseInstallJsonLine(finalLine);
+            }
+            else if (finalLine.isNotEmpty())
+            {
+                installDiagnosticLines.add(finalLine);
+                while (installDiagnosticLines.size() > 8)
+                    installDiagnosticLines.remove(0);
+                appendAiToolsLogLine("[installer] " + finalLine);
+            }
 
             if (exitCode != 0 && lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
             {
+                const auto lastDiagnostics = summariseDiagnosticLines(installDiagnosticLines);
+                appendAiToolsLogLine("installerExitCode=" + juce::String(exitCode));
+                appendAiToolsLogLine("installerRuntimePython=" + installRuntimePythonPath);
+                appendAiToolsLogLine("installerRuntimeRoot=" + installRuntimeRootPath);
+                appendAiToolsLogLine("installerCommandLine=" + installCommandLine);
+
                 lastAiToolsStatus.state = "error";
                 lastAiToolsStatus.progress = 0.0f;
+                lastAiToolsStatus.errorCode = installDiagnosticLines.isEmpty()
+                    ? "runtime_python_unlaunchable"
+                    : "runtime_validation_failed";
+                lastAiToolsStatus.message = installDiagnosticLines.isEmpty()
+                    ? "OpenStudio could not start the downloaded AI runtime."
+                    : "OpenStudio could not finish verifying the downloaded AI runtime.";
                 lastAiToolsStatus.error = "AI tools installer exited with code " + juce::String(exitCode) + ".";
-                lastAiToolsStatus.errorCode = "installer_exit_nonzero";
-                lastAiToolsStatus.message = "AI tools installation failed.";
+
+                if (lastDiagnostics.isNotEmpty())
+                    lastAiToolsStatus.error += " Last output: " + lastDiagnostics;
             }
 
             if (lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
@@ -1205,6 +1317,10 @@ void StemSeparator::pollInstallProgress()
             aiToolsInstallWorkInProgress = false;
             installProcess.reset();
             installOutputBuffer.clear();
+            installDiagnosticLines.clear();
+            installCommandLine.clear();
+            installRuntimePythonPath.clear();
+            installRuntimeRootPath.clear();
             shouldRefreshAfterExit = true;
         }
     }
@@ -1448,6 +1564,10 @@ void StemSeparator::cancelAiToolsInstall()
         }
         installProcess.reset();
         installOutputBuffer.clear();
+        installDiagnosticLines.clear();
+        installCommandLine.clear();
+        installRuntimePythonPath.clear();
+        installRuntimeRootPath.clear();
     }
 
     aiToolsInstallWorkInProgress = false;

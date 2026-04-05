@@ -16,10 +16,33 @@ param(
     [string]$WindowsAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$MacAiRuntimeAssetPath = ""
+    [string]$MacAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacArm64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacX64AiRuntimeAssetPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+function Resolve-MetadataPath {
+    param(
+        [string]$RepoRoot,
+        [string]$PathValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $RepoRoot
+    }
+
+    if ([System.IO.Path]::IsPathRooted($PathValue)) {
+        return [System.IO.Path]::GetFullPath($PathValue)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $PathValue))
+}
 
 function Fail {
     param([string]$Message)
@@ -206,7 +229,7 @@ function Validate-Appcast {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$resolvedMetadataDir = Join-Path $repoRoot $MetadataDir
+$resolvedMetadataDir = Resolve-MetadataPath -RepoRoot $repoRoot -PathValue $MetadataDir
 $checksumsPath = Join-Path $resolvedMetadataDir "OpenStudio-checksums.txt"
 $rootManifestPath = Join-Path $resolvedMetadataDir "releases/latest.json"
 $channelManifestPath = Join-Path $resolvedMetadataDir ("releases/{0}/latest.json" -f $Channel)
@@ -230,6 +253,8 @@ $windowsAsset = Get-AssetInfo $WindowsAssetPath
 $macosAsset = Get-AssetInfo $MacAssetPath
 $windowsAiRuntimeAsset = Get-AssetInfo $WindowsAiRuntimeAssetPath
 $macosAiRuntimeAsset = Get-AssetInfo $MacAiRuntimeAssetPath
+$macosArm64AiRuntimeAsset = Get-AssetInfo $MacArm64AiRuntimeAssetPath
+$macosX64AiRuntimeAsset = Get-AssetInfo $MacX64AiRuntimeAssetPath
 
 Validate-PlatformEntry -PlatformName "windows" -PlatformNode $rootManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAsset
 Validate-PlatformEntry -PlatformName "macos" -PlatformNode $rootManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAsset
@@ -253,7 +278,15 @@ if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManif
     Assert-True ($rootAiJson -eq $channelAiJson) "Root AI runtime latest.json and channel AI runtime latest.json do not match."
 
     Validate-PlatformEntry -PlatformName "windows AI runtime" -PlatformNode $rootAiRuntimeManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAiRuntimeAsset
-    Validate-PlatformEntry -PlatformName "macos AI runtime" -PlatformNode $rootAiRuntimeManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAiRuntimeAsset
+
+    $macAiNode = $rootAiRuntimeManifest.platforms.macos
+    if ($null -ne $macAiNode -and (($null -ne $macAiNode.arm64) -or ($null -ne $macAiNode.x64))) {
+        Validate-PlatformEntry -PlatformName "macos arm64 AI runtime" -PlatformNode $macAiNode.arm64 -Checksums $checksums -AssetInfo $macosArm64AiRuntimeAsset
+        Validate-PlatformEntry -PlatformName "macos x64 AI runtime" -PlatformNode $macAiNode.x64 -Checksums $checksums -AssetInfo $macosX64AiRuntimeAsset
+    }
+    else {
+        Validate-PlatformEntry -PlatformName "macos AI runtime" -PlatformNode $macAiNode -Checksums $checksums -AssetInfo $macosAiRuntimeAsset
+    }
 }
 
 Write-Host "Release metadata validation passed for channel '$Channel'."

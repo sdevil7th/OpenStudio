@@ -61,8 +61,12 @@ def resolve_runtime_python(runtime_root: Path) -> Path:
     candidates = [
         runtime_root / "python.exe",
         runtime_root / "python",
+        runtime_root / "python" / "python.exe",
+        runtime_root / "python" / "python",
         runtime_root / "Scripts" / "python.exe",
         runtime_root / "Scripts" / "python",
+        runtime_root / "python" / "bin" / "python3",
+        runtime_root / "python" / "bin" / "python",
         runtime_root / "python3",
         runtime_root / "bin" / "python3",
         runtime_root / "bin" / "python",
@@ -72,7 +76,7 @@ def resolve_runtime_python(runtime_root: Path) -> Path:
             return candidate
     fail(
         f"Could not find a Python executable inside {runtime_root}.",
-        error_code="runtime_verification_failed",
+        error_code="runtime_validation_failed",
         installSource="downloadedRuntime",
         requiresExternalPython=False,
         buildRuntimeMode="downloaded-runtime",
@@ -82,6 +86,7 @@ def resolve_runtime_python(runtime_root: Path) -> Path:
 
 def log_subprocess_output(result: subprocess.CompletedProcess[str], description: str) -> None:
     write_log(f"$ {description}")
+    write_log(f"[exitCode] {result.returncode}")
     if result.stdout:
         write_log("[stdout]")
         write_log(result.stdout)
@@ -136,12 +141,35 @@ def run_step(
 
 def verify_runtime(
     runtime_python: Path,
+    runtime_root: Path,
     *,
     install_source: str,
     requires_external_python: bool,
     python_detected: bool,
     build_runtime_mode: str,
 ) -> None:
+    if (runtime_root / "pyvenv.cfg").exists():
+        fail(
+            f"The extracted AI runtime at {runtime_root} still looks like a virtual environment and is not relocatable.",
+            progress=0.6,
+            error_code="runtime_not_relocatable",
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
+    if not (runtime_root / ".openstudio-ai-runtime.json").exists():
+        fail(
+            f"The extracted AI runtime at {runtime_root} is missing OpenStudio runtime metadata.",
+            progress=0.6,
+            error_code="runtime_validation_failed",
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
     run_step(
         [str(runtime_python), "-c", "import audio_separator.separator; print('ok')"],
         state="verifying_runtime",
@@ -149,7 +177,7 @@ def verify_runtime(
         description="Verifying the AI tools runtime",
         install_source=install_source,
         requires_external_python=requires_external_python,
-        error_code="runtime_verification_failed",
+        error_code="runtime_validation_failed",
         python_detected=python_detected,
         build_runtime_mode=build_runtime_mode,
     )
@@ -295,6 +323,7 @@ def main() -> None:
         runtime_python = resolve_runtime_python(runtime_root)
         verify_runtime(
             runtime_python,
+            runtime_root,
             install_source=install_source,
             requires_external_python=requires_external_python,
             python_detected=python_detected,
@@ -340,6 +369,7 @@ def main() -> None:
         runtime_python = bootstrap_runtime(runtime_root, bootstrap_python)
         verify_runtime(
             runtime_python,
+            runtime_root,
             install_source=install_source,
             requires_external_python=requires_external_python,
             python_detected=True,

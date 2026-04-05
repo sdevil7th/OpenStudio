@@ -143,6 +143,9 @@ private:
     /** Return the current platform key used inside AI runtime metadata. */
     juce::String getAiRuntimePlatformKey() const;
 
+    /** Return the current architecture key used for macOS AI runtime metadata. */
+    juce::String getAiRuntimeArchitectureKey() const;
+
     /** Return true if the given Python can import audio_separator. */
     bool canImportAudioSeparator (const juce::File& python) const;
 
@@ -190,7 +193,10 @@ private:
     bool verifyFileSha256 (const juce::File& file, const juce::String& expectedSha256, juce::String& error) const;
 
     /** Extract a runtime ZIP archive into the user runtime directory. */
-    bool extractRuntimeArchive (const juce::File& archiveFile, const juce::File& destinationRoot, juce::String& error) const;
+    bool extractRuntimeArchive (const juce::File& archiveFile,
+                                const juce::File& destinationRoot,
+                                juce::String& error,
+                                juce::String& errorCode) const;
 
     /** Serialize AI tools status to juce::var for the native bridge. */
     static juce::var aiToolsStatusToVar (const AiToolsStatus& status);
@@ -199,6 +205,10 @@ private:
     std::unique_ptr<juce::ChildProcess> installProcess;
     juce::String outputBuffer;  // Accumulated stdout from child
     juce::String installOutputBuffer;
+    juce::StringArray installDiagnosticLines;
+    juce::String installCommandLine;
+    juce::String installRuntimePythonPath;
+    juce::String installRuntimeRootPath;
     SeparationProgress lastProgress;
     mutable AiToolsStatus lastAiToolsStatus;
     mutable juce::CriticalSection aiToolsStatusLock;

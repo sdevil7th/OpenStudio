@@ -65,8 +65,6 @@ $resolvedWindowsAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($Wi
 }
 $resolvedMacAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($MacAiRuntimeDownloadUrl)) {
     $MacAiRuntimeDownloadUrl
-} elseif (-not [string]::IsNullOrWhiteSpace($RepoSlug)) {
-    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-macos-universal.zip"
 } else {
     ""
 }

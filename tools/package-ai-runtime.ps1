@@ -31,6 +31,16 @@ if (-not (Test-Path $resolvedRuntimeRoot)) {
     throw "Runtime root not found: $resolvedRuntimeRoot"
 }
 
+$venvMarker = Join-Path $resolvedRuntimeRoot "pyvenv.cfg"
+if (Test-Path $venvMarker) {
+    throw "Runtime root '$resolvedRuntimeRoot' still contains pyvenv.cfg and cannot be published as a relocatable runtime."
+}
+
+$metadataPath = Join-Path $resolvedRuntimeRoot ".openstudio-ai-runtime.json"
+if (-not (Test-Path $metadataPath)) {
+    throw "Runtime root '$resolvedRuntimeRoot' is missing .openstudio-ai-runtime.json."
+}
+
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutputPath) | Out-Null
 if (Test-Path $resolvedOutputPath) {
     Remove-Item -LiteralPath $resolvedOutputPath -Force

@@ -49,6 +49,18 @@ param(
     [string]$MacAiRuntimeAssetUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$MacArm64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacArm64AiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacX64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$MacX64AiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$AiRuntimeVersion = "",
 
     [Parameter(Mandatory = $false)]
@@ -65,6 +77,23 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Resolve-OutputPath {
+    param(
+        [string]$RepoRoot,
+        [string]$PathValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $RepoRoot
+    }
+
+    if ([System.IO.Path]::IsPathRooted($PathValue)) {
+        return [System.IO.Path]::GetFullPath($PathValue)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $PathValue))
+}
 
 function Get-AssetMetadata {
     param(
@@ -106,7 +135,7 @@ function Get-AppcastMimeType {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$resolvedOutputDir = Join-Path $repoRoot $OutputDir
+$resolvedOutputDir = Resolve-OutputPath -RepoRoot $repoRoot -PathValue $OutputDir
 $appcastDir = Join-Path $resolvedOutputDir "appcast"
 $releaseDir = Join-Path $resolvedOutputDir "releases"
 $channelReleaseDir = Join-Path $releaseDir $Channel
@@ -146,6 +175,8 @@ $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAsse
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
 $windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
 $macosAiRuntime = Get-AssetMetadata -AssetPath $MacAiRuntimeAssetPath -AssetUrl $MacAiRuntimeAssetUrl
+$macosArm64AiRuntime = Get-AssetMetadata -AssetPath $MacArm64AiRuntimeAssetPath -AssetUrl $MacArm64AiRuntimeAssetUrl
+$macosX64AiRuntime = Get-AssetMetadata -AssetPath $MacX64AiRuntimeAssetPath -AssetUrl $MacX64AiRuntimeAssetUrl
 
 $manifest = [ordered]@{
     schemaVersion = $SchemaVersion
@@ -173,12 +204,14 @@ if ($windows) { $checksums += "{0}  {1}" -f $windows.sha256, $windows.fileName }
 if ($macos) { $checksums += "{0}  {1}" -f $macos.sha256, $macos.fileName }
 if ($windowsAiRuntime) { $checksums += "{0}  {1}" -f $windowsAiRuntime.sha256, $windowsAiRuntime.fileName }
 if ($macosAiRuntime) { $checksums += "{0}  {1}" -f $macosAiRuntime.sha256, $macosAiRuntime.fileName }
+if ($macosArm64AiRuntime) { $checksums += "{0}  {1}" -f $macosArm64AiRuntime.sha256, $macosArm64AiRuntime.fileName }
+if ($macosX64AiRuntime) { $checksums += "{0}  {1}" -f $macosX64AiRuntime.sha256, $macosX64AiRuntime.fileName }
 
 Set-Content -Path (Join-Path $resolvedOutputDir "OpenStudio-checksums.txt") -Value ($checksums -join [Environment]::NewLine)
 Set-Content -Path (Join-Path $releaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
 Set-Content -Path (Join-Path $channelReleaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
 
-if (($windowsAiRuntime -or $macosAiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
+if (($windowsAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
     $aiRuntimeManifest = [ordered]@{
         schemaVersion = $SchemaVersion
         channel = $Channel
@@ -188,8 +221,18 @@ if (($windowsAiRuntime -or $macosAiRuntime) -and -not [string]::IsNullOrWhiteSpa
         platforms = [ordered]@{}
     }
 
-    if ($windowsAiRuntime) { $aiRuntimeManifest.platforms.windows = $windowsAiRuntime }
-    if ($macosAiRuntime) { $aiRuntimeManifest.platforms.macos = $macosAiRuntime }
+    if ($windowsAiRuntime) {
+        $aiRuntimeManifest.platforms.windows = $windowsAiRuntime
+    }
+
+    if ($macosArm64AiRuntime -or $macosX64AiRuntime) {
+        $aiRuntimeManifest.platforms.macos = [ordered]@{}
+        if ($macosArm64AiRuntime) { $aiRuntimeManifest.platforms.macos.arm64 = $macosArm64AiRuntime }
+        if ($macosX64AiRuntime) { $aiRuntimeManifest.platforms.macos.x64 = $macosX64AiRuntime }
+    }
+    elseif ($macosAiRuntime) {
+        $aiRuntimeManifest.platforms.macos = $macosAiRuntime
+    }
 
     Set-Content -Path (Join-Path $aiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 6)
     Set-Content -Path (Join-Path $channelAiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 6)
