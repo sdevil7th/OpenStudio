@@ -434,12 +434,6 @@ function Optimize-RuntimePayload {
     if (Test-Path $torchRoot) {
         Remove-OptionalPath (Join-Path $torchRoot "include")
         Remove-OptionalPath (Join-Path $torchRoot "share")
-        Remove-OptionalPath (Join-Path $torchRoot "testing")
-        Remove-OptionalPath (Join-Path $torchRoot "test")
-
-        if ($ResolvedRuntimeFamily -eq "windows-directml-x64") {
-            Remove-OptionalPath (Join-Path $torchRoot "distributed")
-        }
     }
 
     foreach ($packageName in @("pip", "setuptools", "wheel")) {
@@ -628,7 +622,7 @@ try {
     $pipInstallArguments += Get-PipInstallArguments -TargetPlatform $Platform -RequirementsPath $resolvedRequirementsFile
     Invoke-LoggedStep -Description "Installing AI runtime requirements into standalone runtime" -Command $pipInstallArguments
 
-    if ($Platform -eq "windows") {
+    if ($resolvedRuntimeFamily -eq "windows-cuda-x64") {
         $windowsTorchInstallArguments = @(
             $runtimePython,
             "-m",
