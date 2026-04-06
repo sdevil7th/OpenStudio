@@ -175,6 +175,21 @@ export default function AiToolsSetupModal() {
                   {buildRuntimeMode === "downloaded-runtime" ? "Downloaded runtime release build" : "Unbundled dev runtime"}
                 </span>
               </p>
+              {aiToolsStatus.runtimeCandidate ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Runtime candidate: <span className="text-daw-text">{aiToolsStatus.runtimeCandidate}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.fallbackAttempted ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  OpenStudio already attempted a fallback runtime candidate during this setup run.
+                </p>
+              ) : null}
+              {aiToolsStatus.installSessionId ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed break-all">
+                  Install session: <span className="text-daw-text">{aiToolsStatus.installSessionId}</span>
+                </p>
+              ) : null}
               {requiresExternalPython ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">
                   Python detected:{" "}

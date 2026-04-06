@@ -245,6 +245,9 @@ export interface AiToolsStatus {
     runtimeVersion?: string;
     modelVersion?: string;
     verificationMode?: "in-process" | "subprocess";
+    runtimeCandidate?: string;
+    installSessionId?: string;
+    fallbackAttempted?: boolean;
     restartRequired?: boolean;
   }
 

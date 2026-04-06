@@ -306,6 +306,12 @@ try {
         if ($remoteAiRuntimeManifest.platforms.windows.url) {
             Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.windows.url
         }
+        if ($remoteAiRuntimeManifest.platforms.windows.backends.cuda.url) {
+            Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.windows.backends.cuda.url
+        }
+        if ($remoteAiRuntimeManifest.platforms.windows.backends.directml.url) {
+            Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.windows.backends.directml.url
+        }
         if ($remoteAiRuntimeManifest.platforms.macos.url) {
             Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.macos.url
         }
@@ -322,6 +328,8 @@ try {
         Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/macos/latest")
         if ($hasAiRuntimeMetadata) {
             Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/latest")
+            Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/directml/latest")
+            Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/cuda/latest")
             Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/macos/latest")
         }
     }

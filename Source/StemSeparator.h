@@ -44,6 +44,9 @@ public:
         juce::String runtimeVersion;
         juce::String modelVersion { "BS-Roformer-SW.ckpt" };
         juce::String verificationMode;
+        juce::String runtimeCandidate;
+        juce::String installSessionId;
+        bool fallbackAttempted = false;
         bool restartRequired = false;
     };
 
@@ -238,6 +241,9 @@ private:
     juce::String installCommandLine;
     juce::String installRuntimePythonPath;
     juce::String installRuntimeRootPath;
+    juce::String installRuntimeCandidate;
+    juce::String installSessionId;
+    bool installFallbackAttempted = false;
     SeparationProgress lastProgress;
     mutable AiToolsStatus lastAiToolsStatus;
     mutable juce::CriticalSection aiToolsStatusLock;

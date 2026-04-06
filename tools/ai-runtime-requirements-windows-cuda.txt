@@ -1,0 +1,2 @@
+audio-separator==0.41.1
+onnxruntime-gpu>=1.17

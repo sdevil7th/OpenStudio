@@ -73,23 +73,6 @@ jobs:
           npm ci
           npm run build
 
-      - name: Prepare Windows AI runtime
-        shell: pwsh
-        run: |
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-windows-x64"
-
-          ./tools/prepare-ai-runtime.ps1 `
-            -Platform windows `
-            -RuntimeRoot $runtimeRoot `
-            -Architecture x64 `
-            -RequirementsFile "tools/ai-runtime-requirements-windows.txt" `
-            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION `
-            -StandaloneReleaseTag $env:AI_RUNTIME_STANDALONE_RELEASE_TAG `
-            -StandalonePythonVersion $env:AI_RUNTIME_STANDALONE_PYTHON_VERSION `
-            -StandaloneFlavor $env:AI_RUNTIME_STANDALONE_FLAVOR
-
-          "WINDOWS_AI_RUNTIME_ROOT=$runtimeRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup -y --no-progress
@@ -181,25 +164,6 @@ jobs:
             }
           }
 
-      - name: Package Windows AI runtime
-        shell: pwsh
-        run: |
-          if (-not (Test-Path $env:WINDOWS_AI_RUNTIME_ROOT)) {
-            throw "Windows AI runtime root was not found at '$env:WINDOWS_AI_RUNTIME_ROOT'."
-          }
-
-          ./tools/package-ai-runtime.ps1 `
-            -Platform windows `
-            -RuntimeRoot $env:WINDOWS_AI_RUNTIME_ROOT `
-            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
-            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-ai-runtime
-          path: dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip
-          if-no-files-found: error
-
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
@@ -263,23 +227,6 @@ jobs:
           npm ci
           npm run build
 
-      - name: Prepare macOS AI runtime
-        shell: pwsh
-        run: |
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-macos-arm64"
-
-          ./tools/prepare-ai-runtime.ps1 `
-            -Platform macos `
-            -RuntimeRoot $runtimeRoot `
-            -Architecture arm64 `
-            -RequirementsFile "tools/ai-runtime-requirements-macos.txt" `
-            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION `
-            -StandaloneReleaseTag $env:AI_RUNTIME_STANDALONE_RELEASE_TAG `
-            -StandalonePythonVersion $env:AI_RUNTIME_STANDALONE_PYTHON_VERSION `
-            -StandaloneFlavor $env:AI_RUNTIME_STANDALONE_FLAVOR
-
-          "MACOS_AI_RUNTIME_ROOT=$runtimeRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Prepare macOS signing certificate
         if: env.MACOS_CERTIFICATE_BASE64 != ''
         shell: bash
@@ -339,29 +286,10 @@ jobs:
         run: |
           test -f "dist/macos/OpenStudio-macOS.dmg"
 
-      - name: Package macOS AI runtime
-        shell: pwsh
-        run: |
-          if (-not (Test-Path $env:MACOS_AI_RUNTIME_ROOT)) {
-            throw "macOS AI runtime root was not found at '$env:MACOS_AI_RUNTIME_ROOT'."
-          }
-
-          ./tools/package-ai-runtime.ps1 `
-            -Platform macos `
-            -RuntimeRoot $env:MACOS_AI_RUNTIME_ROOT `
-            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip" `
-            -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION
-
       - name: Clean up macOS signing keychain
         if: always() && env.KEYCHAIN_PATH != ''
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-arm64-ai-runtime
-          path: dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
-          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
@@ -379,6 +307,8 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       RELEASE_NOTES_FILE: ${{ github.event.inputs.release_notes_file || 'packaging/release-notes-template.md' }}
+      AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
+      AI_RUNTIME_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_RELEASE_TAG }}
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
       WEBSITE_DISPATCH_EVENT_TYPE: ${{ vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE != '' && vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE || 'openstudio_release_published' }}
@@ -404,7 +334,14 @@ jobs:
 
       - name: Normalize version
         shell: bash
-        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+        run: |
+          echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+          echo "AI_RUNTIME_VERSION=${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
+          if [ -n "${AI_RUNTIME_RELEASE_TAG}" ]; then
+            echo "AI_RUNTIME_RELEASE_TAG=${AI_RUNTIME_RELEASE_TAG}" >> "$GITHUB_ENV"
+          else
+            echo "AI_RUNTIME_RELEASE_TAG=ai-runtime-v${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/download-artifact@v4
         with:
@@ -416,15 +353,18 @@ jobs:
           name: macos-release
           path: dist/macos
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-ai-runtime
-          path: dist/ai-runtime
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-arm64-ai-runtime
-          path: dist/ai-runtime
+      - name: Download AI runtime release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/ai-runtime
+          gh release download "$AI_RUNTIME_RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "OpenStudio-AI-Runtime-windows-directml-x64.zip" \
+            --pattern "OpenStudio-AI-Runtime-windows-cuda-x64.zip" \
+            --pattern "OpenStudio-AI-Runtime-macos-arm64.zip" \
+            --dir dist/ai-runtime
 
       - name: Verify downloaded release assets
         shell: pwsh
@@ -432,7 +372,8 @@ jobs:
           $requiredFiles = @(
             "dist/windows/OpenStudio-Setup-x64.exe",
             "dist/macos/OpenStudio-macOS.dmg",
-            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip",
+            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip",
+            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip",
             "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
           )
 
@@ -450,8 +391,9 @@ jobs:
           $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
           $windowsUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-Setup-x64.exe"
           $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
-          $windowsAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-AI-Runtime-windows-x64.zip"
-          $macosArm64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-AI-Runtime-macos-arm64.zip"
+          $windowsDirectmlAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-directml-x64.zip"
+          $windowsCudaAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-cuda-x64.zip"
+          $macosArm64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-macos-arm64.zip"
           ./tools/generate-release-metadata.ps1 `
             -Version $env:VERSION `
             -Channel stable `
@@ -463,11 +405,13 @@ jobs:
             -WindowsInstallerArguments "/SP- /NOICONS" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
             -MacAssetUrl $macosUrl `
-            -WindowsAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
-            -WindowsAiRuntimeAssetUrl $windowsAiRuntimeUrl `
+            -WindowsDirectmlAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip" `
+            -WindowsDirectmlAiRuntimeAssetUrl $windowsDirectmlAiRuntimeUrl `
+            -WindowsCudaAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip" `
+            -WindowsCudaAiRuntimeAssetUrl $windowsCudaAiRuntimeUrl `
             -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip" `
             -MacArm64AiRuntimeAssetUrl $macosArm64AiRuntimeUrl `
-            -AiRuntimeVersion $env:VERSION
+            -AiRuntimeVersion $env:AI_RUNTIME_VERSION
 
       - name: Validate release metadata
         shell: pwsh
@@ -477,7 +421,8 @@ jobs:
             -Channel stable `
             -WindowsAssetPath "dist/windows/OpenStudio-Setup-x64.exe" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
-            -WindowsAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip" `
+            -WindowsDirectmlAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip" `
+            -WindowsCudaAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip" `
             -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
 
       - name: Prepare uniquely named release metadata assets
@@ -498,8 +443,6 @@ jobs:
           files: |
             dist/windows/OpenStudio-Setup-x64.exe
             dist/macos/OpenStudio-macOS.dmg
-            dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip
-            dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
             dist/release-publish-assets/OpenStudio-checksums.txt
             dist/release-publish-assets/OpenStudio-release-latest.json
             dist/release-publish-assets/OpenStudio-release-stable-latest.json

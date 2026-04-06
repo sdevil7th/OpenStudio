@@ -14,6 +14,9 @@ param(
     [string]$RequirementsFile = "tools/ai-runtime-requirements.txt",
 
     [Parameter(Mandatory = $false)]
+    [string]$RuntimeFamily = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$WindowsTorchIndexUrl = "https://download.pytorch.org/whl/cu121",
 
     [Parameter(Mandatory = $false)]
@@ -31,6 +34,15 @@ param(
     [Parameter(Mandatory = $false)]
     [ValidateSet("install_only", "install_only_stripped")]
     [string]$StandaloneFlavor = "install_only",
+
+    [Parameter(Mandatory = $false)]
+    [string]$StandaloneCacheDir = "",
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectedPackagedBackends = @(),
+
+    [Parameter(Mandatory = $false)]
+    [string]$SizeReportPath = "",
 
     [Parameter(Mandatory = $false)]
     [switch]$ForceRecreate
@@ -333,6 +345,117 @@ function Resolve-RequirementsFile {
     return $resolved
 }
 
+function Get-DefaultRuntimeFamily {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("windows", "macos")]
+        [string]$TargetPlatform,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("x64", "arm64")]
+        [string]$TargetArchitecture,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRequirementsPath
+    )
+
+    $requirementsName = [System.IO.Path]::GetFileName($ResolvedRequirementsPath).ToLowerInvariant()
+
+    switch ("$TargetPlatform/$TargetArchitecture") {
+        "windows/x64" {
+            if ($requirementsName -like "*windows-cuda*") { return "windows-cuda-x64" }
+            if ($requirementsName -like "*windows-directml*" -or $requirementsName -like "*windows.txt") { return "windows-directml-x64" }
+            return "windows-x64"
+        }
+        "macos/arm64" { return "macos-arm64" }
+        "macos/x64"   { return "macos-x64" }
+        default       { return "$TargetPlatform-$TargetArchitecture" }
+    }
+}
+
+function Remove-OptionalPath {
+    param([string]$PathValue)
+
+    if (Test-Path $PathValue) {
+        Remove-Item -LiteralPath $PathValue -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-MatchingItems {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Patterns
+    )
+
+    foreach ($pattern in $Patterns) {
+        Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                ($_.PSIsContainer -and $_.Name -eq $pattern) -or
+                (-not $_.PSIsContainer -and $_.Name -like $pattern)
+            } |
+            ForEach-Object {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+    }
+}
+
+function Optimize-RuntimePayload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimeRootPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPlatform,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeFamily
+    )
+
+    $sitePackages = Join-Path $RuntimeRootPath "Lib/site-packages"
+    if (-not (Test-Path $sitePackages)) {
+        $sitePackages = Join-Path $RuntimeRootPath "python/Lib/site-packages"
+    }
+    if (-not (Test-Path $sitePackages)) {
+        $sitePackages = Join-Path $RuntimeRootPath "lib/python3.10/site-packages"
+    }
+
+    if (-not (Test-Path $sitePackages)) {
+        return
+    }
+
+    Write-Host "==> Trimming non-runtime payload from prepared AI runtime"
+    Remove-MatchingItems -Root $sitePackages -Patterns @("__pycache__", "*.pyc", "*.pyo")
+    Remove-MatchingItems -Root $sitePackages -Patterns @("tests", "test")
+
+    $torchRoot = Join-Path $sitePackages "torch"
+    if (Test-Path $torchRoot) {
+        Remove-OptionalPath (Join-Path $torchRoot "include")
+        Remove-OptionalPath (Join-Path $torchRoot "share")
+        Remove-OptionalPath (Join-Path $torchRoot "testing")
+        Remove-OptionalPath (Join-Path $torchRoot "test")
+
+        if ($ResolvedRuntimeFamily -eq "windows-directml-x64") {
+            Remove-OptionalPath (Join-Path $torchRoot "distributed")
+        }
+    }
+
+    foreach ($packageName in @("pip", "setuptools", "wheel")) {
+        Get-ChildItem -LiteralPath $sitePackages -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "$packageName*" } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    $scriptsDir = Join-Path $RuntimeRootPath "Scripts"
+    if ($TargetPlatform -eq "windows" -and (Test-Path $scriptsDir)) {
+        Get-ChildItem -LiteralPath $scriptsDir -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(pip|wheel|easy_install)' } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Invoke-RuntimeCapabilityProbe {
     param(
         [Parameter(Mandatory = $true)]
@@ -342,7 +465,10 @@ function Invoke-RuntimeCapabilityProbe {
         [string]$ProbeScriptPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$TargetPlatform
+        [string]$TargetPlatform,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$ExpectedBackends = @()
     )
 
     $probeJson = & $RuntimePython $ProbeScriptPath --acceleration-mode auto 2>&1
@@ -358,6 +484,12 @@ function Invoke-RuntimeCapabilityProbe {
     if ($TargetPlatform -eq "windows") {
         if (-not ($payload.packagedBackends -contains "cuda" -or $payload.packagedBackends -contains "directml")) {
             throw "Windows AI runtime did not package any accelerated backend support."
+        }
+    }
+
+    foreach ($expectedBackend in $ExpectedBackends) {
+        if (-not ($payload.packagedBackends -contains $expectedBackend)) {
+            throw "AI runtime capability probe did not report the expected packaged backend '$expectedBackend'."
         }
     }
 
@@ -395,9 +527,20 @@ if (-not (Test-Path $probeScriptPath)) {
 }
 
 $resolvedArchitecture = Get-TargetArchitecture -TargetPlatform $Platform -RequestedArchitecture $Architecture
+$resolvedRuntimeFamily = if ([string]::IsNullOrWhiteSpace($RuntimeFamily)) {
+    Get-DefaultRuntimeFamily -TargetPlatform $Platform -TargetArchitecture $resolvedArchitecture -ResolvedRequirementsPath $resolvedRequirementsFile
+} else {
+    $RuntimeFamily
+}
 $targetTriple = Get-StandaloneTargetTriple -TargetPlatform $Platform -TargetArchitecture $resolvedArchitecture
 $assetName = Get-StandaloneAssetName -PythonVersion $StandalonePythonVersion -ReleaseTag $StandaloneReleaseTag -TargetTriple $targetTriple -Flavor $StandaloneFlavor
 $assetUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$StandaloneReleaseTag/$assetName"
+
+$resolvedStandaloneCacheDir = if ([string]::IsNullOrWhiteSpace($StandaloneCacheDir)) {
+    ""
+} else {
+    Resolve-AbsolutePath -PathValue $StandaloneCacheDir
+}
 
 if ((Test-Path $resolvedRuntimeRoot) -and -not $ForceRecreate.IsPresent) {
     if (Test-RuntimeImport -RuntimeRootPath $resolvedRuntimeRoot) {
@@ -413,6 +556,7 @@ $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("OpenStudio-AIRuntime-P
 $downloadDir = Join-Path $workRoot "downloads"
 $extractDir = Join-Path $workRoot "extract"
 $archivePath = Join-Path $downloadDir $assetName
+$cachedArchivePath = if ([string]::IsNullOrWhiteSpace($resolvedStandaloneCacheDir)) { "" } else { Join-Path $resolvedStandaloneCacheDir $assetName }
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedRuntimeRoot) | Out-Null
@@ -421,14 +565,26 @@ try {
     Write-Host "==> Preparing OpenStudio AI runtime from relocatable standalone Python"
     Write-Host "platform=$Platform"
     Write-Host "architecture=$resolvedArchitecture"
+    Write-Host "runtimeFamily=$resolvedRuntimeFamily"
     Write-Host "standaloneReleaseTag=$StandaloneReleaseTag"
     Write-Host "standalonePythonVersion=$StandalonePythonVersion"
     Write-Host "standaloneAsset=$assetName"
     Write-Host "standaloneUrl=$assetUrl"
 
-    Write-Host "==> Downloading standalone Python runtime"
-    Write-Host ('$ ' + $assetUrl)
-    Invoke-DownloadFile -Url $assetUrl -DestinationPath $archivePath
+    if (-not [string]::IsNullOrWhiteSpace($cachedArchivePath) -and (Test-Path $cachedArchivePath)) {
+        Write-Host "==> Reusing cached standalone Python runtime"
+        New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+        Copy-Item -LiteralPath $cachedArchivePath -Destination $archivePath -Force
+    }
+    else {
+        Write-Host "==> Downloading standalone Python runtime"
+        Write-Host ('$ ' + $assetUrl)
+        Invoke-DownloadFile -Url $assetUrl -DestinationPath $archivePath
+        if (-not [string]::IsNullOrWhiteSpace($cachedArchivePath)) {
+            New-Item -ItemType Directory -Force -Path $resolvedStandaloneCacheDir | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination $cachedArchivePath -Force
+        }
+    }
 
     Expand-StandaloneArchive -ArchivePath $archivePath -DestinationPath $extractDir
 
@@ -485,20 +641,29 @@ try {
         Invoke-LoggedStep -Description "Installing CUDA-capable PyTorch wheels for Windows AI runtime" -Command $windowsTorchInstallArguments
     }
 
+    Optimize-RuntimePayload -RuntimeRootPath $resolvedRuntimeRoot -TargetPlatform $Platform -ResolvedRuntimeFamily $resolvedRuntimeFamily
+
     Invoke-LoggedStep -Description "Verifying standalone AI runtime import" -Command @(
         $runtimePython,
         "-c",
         "import audio_separator.separator; print('ok')"
     )
 
-    $capabilityProbe = Invoke-RuntimeCapabilityProbe -RuntimePython $runtimePython -ProbeScriptPath $probeScriptPath -TargetPlatform $Platform
+    $capabilityProbe = Invoke-RuntimeCapabilityProbe `
+        -RuntimePython $runtimePython `
+        -ProbeScriptPath $probeScriptPath `
+        -TargetPlatform $Platform `
+        -ExpectedBackends $ExpectedPackagedBackends
 
     $metadata = [ordered]@{
         schemaVersion = 2
         platform = $Platform
         architecture = $resolvedArchitecture
+        runtimeFamily = $resolvedRuntimeFamily
         runtimeVersion = $ExpectedRuntimeVersion
         preparedAtUtc = [DateTime]::UtcNow.ToString("o")
+        requirementsFile = [System.IO.Path]::GetFileName($resolvedRequirementsFile)
+        requirementsFileSha256 = (Get-FileHash -Algorithm SHA256 -Path $resolvedRequirementsFile).Hash.ToLowerInvariant()
         runtimeSource = [ordered]@{
             provider = "python-build-standalone"
             releaseTag = $StandaloneReleaseTag
@@ -517,6 +682,12 @@ try {
 
     $metadataPath = Join-Path $resolvedRuntimeRoot ".openstudio-ai-runtime.json"
     $metadata | ConvertTo-Json -Depth 6 | Set-Content -Path $metadataPath -Encoding UTF8
+
+    if (-not [string]::IsNullOrWhiteSpace($SizeReportPath)) {
+        & (Join-Path $PSScriptRoot "write-runtime-size-report.ps1") `
+            -RuntimeRoot $resolvedRuntimeRoot `
+            -OutputPath $SizeReportPath
+    }
 
     Write-Host "Prepared standalone AI runtime at $resolvedRuntimeRoot"
 }

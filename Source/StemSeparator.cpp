@@ -9,6 +9,14 @@ constexpr auto kInstallSourceExternalPython = "externalPython";
 constexpr auto kBuildRuntimeModeDownloadedRuntime = "downloaded-runtime";
 constexpr auto kBuildRuntimeModeUnbundledDev = "unbundled-dev";
 
+struct RuntimeDownloadCandidate
+{
+    juce::String key;
+    juce::String displayName;
+    juce::String selectionReason;
+    juce::var manifestNode;
+};
+
 juce::String makePythonImportCommand()
 {
     return "-c \"import audio_separator.separator; print('ok')\"";
@@ -17,6 +25,13 @@ juce::String makePythonImportCommand()
 juce::String quoteCommandPart(const juce::String& value)
 {
     return value.quoted();
+}
+
+juce::String getPropertyString (const juce::var& value, const juce::Identifier& property)
+{
+    if (auto* obj = value.getDynamicObject())
+        return obj->getProperty(property).toString();
+    return {};
 }
 
 juce::StringArray varToStringArray (const juce::var& value)
@@ -63,6 +78,40 @@ juce::String sanitiseArchiveEntryName (juce::String name)
 juce::File getApplicationRuntimeDirectory()
 {
     return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+}
+
+juce::String makeIsoTimestamp()
+{
+    return juce::Time::getCurrentTime().toISO8601(true);
+}
+
+juce::String makeAiLogEvent (const juce::String& component,
+                             const juce::String& phase,
+                             const juce::String& event,
+                             const juce::String& sessionId,
+                             const std::function<void (juce::DynamicObject&)>& extraFields = {})
+{
+    auto payload = std::make_unique<juce::DynamicObject>();
+    payload->setProperty("timestamp", makeIsoTimestamp());
+    payload->setProperty("component", component);
+    payload->setProperty("phase", phase);
+    payload->setProperty("event", event);
+    if (sessionId.isNotEmpty())
+        payload->setProperty("sessionId", sessionId);
+    if (extraFields)
+        extraFields(*payload);
+    return juce::JSON::toString(juce::var(payload.release()), true);
+}
+
+bool isLikelyNvidiaWindowsMachine()
+{
+#if JUCE_WINDOWS
+    juce::ChildProcess probe;
+    const auto command = "powershell -NoProfile -Command \"try { (Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join '\\n' } catch { '' }\"";
+    if (probe.start(command) && probe.waitForProcessToFinish(8000))
+        return probe.readAllProcessOutput().containsIgnoreCase("nvidia");
+#endif
+    return false;
 }
 }
 
@@ -527,6 +576,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
     status.supportedBackends.add("cpu");
     status.selectedBackend = "cpu";
     status.modelVersion = kStemModelName;
+    status.fallbackAttempted = false;
     return status;
 }
 
@@ -847,6 +897,9 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("runtimeVersion", status.runtimeVersion);
     obj->setProperty("modelVersion", status.modelVersion);
     obj->setProperty("verificationMode", status.verificationMode);
+    obj->setProperty("runtimeCandidate", status.runtimeCandidate);
+    obj->setProperty("installSessionId", status.installSessionId);
+    obj->setProperty("fallbackAttempted", status.fallbackAttempted);
     obj->setProperty("restartRequired", status.restartRequired);
     return juce::var(obj.release());
 }
@@ -930,18 +983,21 @@ juce::var StemSeparator::installAiTools()
         const auto modelsDir = getUserModelsDir();
         const auto downloadsDir = getAiRuntimeDownloadsDir();
         const auto manifestUrl = getAiRuntimeManifestUrl().trim();
+        const auto sessionId = juce::Uuid().toString();
+        juce::String selectedRuntimeCandidate;
+        bool fallbackAttempted = false;
 
-        auto finishWithStatus = [this] (const juce::String& state,
-                                        float progress,
-                                        const juce::String& message,
-                                        const juce::String& error,
-                                        const juce::String& errorCode,
-                                        bool pythonDetected,
-                                        bool runtimeInstalled,
-                                        bool modelInstalled,
-                                        bool requiresExternalPython,
-                                        const juce::String& installSource,
-                                        const juce::String& buildRuntimeMode)
+        auto finishWithStatus = [this, &selectedRuntimeCandidate, &sessionId, &fallbackAttempted] (const juce::String& state,
+                                                                                                    float progress,
+                                                                                                    const juce::String& message,
+                                                                                                    const juce::String& error,
+                                                                                                    const juce::String& errorCode,
+                                                                                                    bool pythonDetected,
+                                                                                                    bool runtimeInstalled,
+                                                                                                    bool modelInstalled,
+                                                                                                    bool requiresExternalPython,
+                                                                                                    const juce::String& installSource,
+                                                                                                    const juce::String& buildRuntimeMode)
         {
             aiToolsInstallWorkInProgress = false;
             updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
@@ -961,6 +1017,9 @@ juce::var StemSeparator::installAiTools()
                 status.requiresExternalPython = requiresExternalPython;
                 status.installSource = installSource;
                 status.helpUrl = requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
+                status.runtimeCandidate = selectedRuntimeCandidate;
+                status.installSessionId = sessionId;
+                status.fallbackAttempted = fallbackAttempted;
             });
         };
 
@@ -979,10 +1038,10 @@ juce::var StemSeparator::installAiTools()
                              devFallbackEnabled ? juce::String(kBuildRuntimeModeUnbundledDev) : juce::String(kBuildRuntimeModeDownloadedRuntime));
         };
 
-        auto updateStep = [this, &logFile, devFallbackEnabled] (const juce::String& state,
-                                                                 float progress,
-                                                                 const juce::String& message,
-                                                                 const juce::String& installSource)
+        auto updateStep = [this, &logFile, devFallbackEnabled, &selectedRuntimeCandidate, &sessionId, &fallbackAttempted] (const juce::String& state,
+                                                                                                                                 float progress,
+                                                                                                                                 const juce::String& message,
+                                                                                                                                 const juce::String& installSource)
         {
             appendAiToolsLogLine(message);
             updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
@@ -999,6 +1058,9 @@ juce::var StemSeparator::installAiTools()
                 status.requiresExternalPython = devFallbackEnabled;
                 status.installSource = installSource;
                 status.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
+                status.runtimeCandidate = selectedRuntimeCandidate;
+                status.installSessionId = sessionId;
+                status.fallbackAttempted = fallbackAttempted;
             });
         };
 
@@ -1009,6 +1071,7 @@ juce::var StemSeparator::installAiTools()
         logFile.replaceWithText({}, false, false, "\n");
 
         appendAiToolsLogLine("OpenStudio AI tools installer started");
+        appendAiToolsLogLine(makeAiLogEvent("installer", "startup", "installer_started", sessionId));
         appendAiToolsLogLine("buildRuntimeMode=" + juce::String(devFallbackEnabled ? kBuildRuntimeModeUnbundledDev : kBuildRuntimeModeDownloadedRuntime));
         appendAiToolsLogLine("systemPython=" + systemPython.getFullPathName());
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
@@ -1051,6 +1114,7 @@ juce::var StemSeparator::installAiTools()
 
             launcherPython = systemPython;
             launchMode = " --bootstrap-with " + quoteCommandPart(systemPython.getFullPathName());
+            selectedRuntimeCandidate = "external-python";
             updateStep("checking", 0.05f, "Using the system Python fallback for this dev build", kInstallSourceExternalPython);
         }
         else
@@ -1111,13 +1175,29 @@ juce::var StemSeparator::installAiTools()
                 return;
             }
 
-            juce::var platformNode;
+            auto buildCandidateFromNode = [] (const juce::String& key,
+                                              const juce::String& displayName,
+                                              const juce::String& selectionReason,
+                                              const juce::var& node)
+            {
+                RuntimeDownloadCandidate candidate;
+                candidate.key = key;
+                candidate.displayName = displayName;
+                candidate.selectionReason = selectionReason;
+                candidate.manifestNode = node;
+                return candidate;
+            };
+
+            juce::Array<RuntimeDownloadCandidate> runtimeCandidates;
+            juce::String runtimeVersion;
+
             if (auto* manifestObject = manifest.getDynamicObject())
             {
+                runtimeVersion = manifestObject->getProperty("runtimeVersion").toString().trim();
                 auto platforms = manifestObject->getProperty("platforms");
                 if (auto* platformsObject = platforms.getDynamicObject())
                 {
-                    platformNode = platformsObject->getProperty(getAiRuntimePlatformKey());
+                    auto platformNode = platformsObject->getProperty(getAiRuntimePlatformKey());
 
 #if JUCE_MAC
                     if (auto* macPlatformObject = platformNode.getDynamicObject())
@@ -1126,8 +1206,11 @@ juce::var StemSeparator::installAiTools()
                         const auto architectureNode = macPlatformObject->getProperty(architectureKey);
                         if (! architectureNode.isVoid() && ! architectureNode.isUndefined())
                         {
-                            platformNode = architectureNode;
                             appendAiToolsLogLine("runtimeArchitecture=" + architectureKey);
+                            runtimeCandidates.add(buildCandidateFromNode("macos-" + architectureKey,
+                                                                         "macOS " + architectureKey,
+                                                                         "Selected by current macOS architecture.",
+                                                                         architectureNode));
                         }
                         else if (! macPlatformObject->getProperty("arm64").isVoid()
                                  || ! macPlatformObject->getProperty("x64").isVoid())
@@ -1145,30 +1228,52 @@ juce::var StemSeparator::installAiTools()
                             return;
                         }
                     }
+                    else if (! platformNode.isVoid() && ! platformNode.isUndefined())
+                    {
+                        runtimeCandidates.add(buildCandidateFromNode("macos-legacy",
+                                                                     "macOS runtime",
+                                                                     "Using legacy macOS runtime manifest entry.",
+                                                                     platformNode));
+                    }
+#elif JUCE_WINDOWS
+                    if (auto* windowsPlatformObject = platformNode.getDynamicObject())
+                    {
+                        const auto likelyNvidia = isLikelyNvidiaWindowsMachine();
+                        appendAiToolsLogLine("windowsHardwareClass=" + juce::String(likelyNvidia ? "nvidia" : "non-nvidia"));
+                        if (auto* backendsObject = windowsPlatformObject->getProperty("backends").getDynamicObject())
+                        {
+                            const auto cudaNode = backendsObject->getProperty("cuda");
+                            const auto directmlNode = backendsObject->getProperty("directml");
+                            if (likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
+                                runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Selected first because NVIDIA hardware was detected.", cudaNode));
+                            if (! directmlNode.isVoid() && ! directmlNode.isUndefined())
+                                runtimeCandidates.add(buildCandidateFromNode("windows-directml-x64", "Windows DirectML runtime", likelyNvidia ? "Prepared as fallback if CUDA validation fails." : "Selected because no NVIDIA hardware was detected.", directmlNode));
+                            if (! likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined() && runtimeCandidates.isEmpty())
+                                runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Using CUDA runtime because it is the only published Windows candidate.", cudaNode));
+                        }
+
+                        if (runtimeCandidates.isEmpty() && getPropertyString(platformNode, "url").isNotEmpty())
+                            runtimeCandidates.add(buildCandidateFromNode("windows-legacy", "Windows runtime", "Using legacy flat Windows runtime manifest entry.", platformNode));
+                    }
+#else
+                    if (! platformNode.isVoid() && ! platformNode.isUndefined())
+                        runtimeCandidates.add(buildCandidateFromNode(getAiRuntimePlatformKey(), getAiRuntimePlatformKey() + " runtime", "Using platform runtime manifest entry.", platformNode));
 #endif
                 }
             }
 
-            auto getProperty = [] (const juce::var& value, const juce::Identifier& property) -> juce::String
-            {
-                if (auto* obj = value.getDynamicObject())
-                    return obj->getProperty(property).toString();
-                return {};
-            };
+            appendAiToolsLogLine(makeAiLogEvent("installer", "manifest", "manifest_fetch_succeeded", sessionId,
+                                                [&] (juce::DynamicObject& obj)
+                                                {
+                                                    obj.setProperty("runtimeVersion", runtimeVersion);
+                                                    obj.setProperty("candidateCount", runtimeCandidates.size());
+                                                }));
 
-            const auto runtimeUrl = getProperty(platformNode, "url").trim();
-            const auto runtimeSha256 = getProperty(platformNode, "sha256").trim();
-            auto runtimeFileName = getProperty(platformNode, "fileName").trim();
-            const auto runtimeVersion = getProperty(manifest, "runtimeVersion").trim();
-
-            if (runtimeFileName.isEmpty())
-                runtimeFileName = juce::URL(runtimeUrl).getFileName();
-
-            if (runtimeUrl.isEmpty() || runtimeSha256.isEmpty() || runtimeFileName.isEmpty())
+            if (runtimeCandidates.isEmpty())
             {
                 finishWithStatus("error", 0.05f,
                                  "OpenStudio received incomplete AI runtime metadata.",
-                                 "The AI runtime manifest did not include the current platform archive details.",
+                                 "The AI runtime manifest did not include the current platform runtime details.",
                                  "runtime_manifest_invalid",
                                  false,
                                  false,
@@ -1179,42 +1284,209 @@ juce::var StemSeparator::installAiTools()
                 return;
             }
 
-            const auto runtimeArchive = downloadsDir.getChildFile(runtimeFileName);
-            appendAiToolsLogLine("runtimeArchive=" + runtimeArchive.getFullPathName());
-            appendAiToolsLogLine("runtimeVersion=" + runtimeVersion);
+            juce::StringArray candidateKeys;
+            for (const auto& candidate : runtimeCandidates)
+                candidateKeys.add(candidate.key);
+            appendAiToolsLogLine("runtimeCandidates=" + candidateKeys.joinIntoString(","));
+            appendAiToolsLogLine(makeAiLogEvent("installer", "selection", "runtime_candidates_ready", sessionId,
+                                                [&] (juce::DynamicObject& obj)
+                                                {
+                                                    obj.setProperty("candidateKeys", candidateKeys.joinIntoString(","));
+                                                }));
 
-            updateStep("downloading_runtime", 0.1f, "Downloading the OpenStudio AI runtime", kInstallSourceDownloadedRuntime);
-            juce::String downloadError;
-            if (! downloadFileWithProgress(juce::URL(runtimeUrl), runtimeArchive,
-                                           [this, &logFile] (float progress, juce::int64 downloaded, juce::int64 total)
-                                           {
-                                               updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
-                                               {
-                                                   status.state = "downloading_runtime";
-                                                   status.progress = juce::jmap(progress, 0.1f, 0.55f);
-                                                   status.available = false;
-                                                   status.installInProgress = true;
-                                                   status.message = total > 0
-                                                       ? "Downloading the OpenStudio AI runtime (" + juce::String(downloaded / (1024 * 1024)) + " / " + juce::String(total / (1024 * 1024)) + " MB)"
-                                                       : "Downloading the OpenStudio AI runtime";
-                                                   status.detailLogPath = logFile.getFullPathName();
-                                                   status.buildRuntimeMode = kBuildRuntimeModeDownloadedRuntime;
-                                                   status.requiresExternalPython = false;
-                                                   status.installSource = kInstallSourceDownloadedRuntime;
-                                                   status.helpUrl.clear();
-                                               });
-                                           }, downloadError))
+            bool runtimePrepared = false;
+            juce::String terminalUserMessage;
+            juce::String terminalError;
+            juce::String terminalErrorCode;
+
+            for (int candidateIndex = 0; candidateIndex < runtimeCandidates.size(); ++candidateIndex)
             {
+                const auto& candidate = runtimeCandidates.getReference(candidateIndex);
+                selectedRuntimeCandidate = candidate.key;
+                fallbackAttempted = candidateIndex > 0;
+
+                appendAiToolsLogLine(makeAiLogEvent("installer", "selection", "runtime_candidate_selected", sessionId,
+                                                    [&] (juce::DynamicObject& obj)
+                                                    {
+                                                        obj.setProperty("runtimeCandidate", candidate.key);
+                                                        obj.setProperty("displayName", candidate.displayName);
+                                                        obj.setProperty("selectionReason", candidate.selectionReason);
+                                                        obj.setProperty("attempt", candidateIndex + 1);
+                                                        obj.setProperty("fallbackAttempted", fallbackAttempted);
+                                                    }));
+
+                const auto runtimeUrl = getPropertyString(candidate.manifestNode, "url").trim();
+                const auto runtimeSha256 = getPropertyString(candidate.manifestNode, "sha256").trim();
+                auto runtimeFileName = getPropertyString(candidate.manifestNode, "fileName").trim();
+
+                if (runtimeFileName.isEmpty())
+                    runtimeFileName = juce::URL(runtimeUrl).getFileName();
+
+                if (runtimeUrl.isEmpty() || runtimeSha256.isEmpty() || runtimeFileName.isEmpty())
+                {
+                    terminalUserMessage = "OpenStudio received incomplete AI runtime metadata.";
+                    terminalError = "The AI runtime manifest did not include archive details for runtime candidate '" + candidate.key + "'.";
+                    terminalErrorCode = "runtime_manifest_invalid";
+                    continue;
+                }
+
+                const auto runtimeArchive = downloadsDir.getChildFile(runtimeFileName);
+                appendAiToolsLogLine("runtimeArchive=" + runtimeArchive.getFullPathName());
+                appendAiToolsLogLine("runtimeVersion=" + runtimeVersion);
+
+                updateStep("downloading_runtime", 0.1f, "Downloading the OpenStudio AI runtime", kInstallSourceDownloadedRuntime);
+                appendAiToolsLogLine(makeAiLogEvent("installer", "download", "runtime_download_started", sessionId,
+                                                    [&] (juce::DynamicObject& obj)
+                                                    {
+                                                        obj.setProperty("runtimeCandidate", candidate.key);
+                                                        obj.setProperty("runtimeArchive", runtimeArchive.getFullPathName());
+                                                        obj.setProperty("runtimeUrl", runtimeUrl);
+                                                    }));
+
+                juce::String downloadError;
+                if (! downloadFileWithProgress(juce::URL(runtimeUrl), runtimeArchive,
+                                               [this, &logFile, candidate] (float progress, juce::int64 downloaded, juce::int64 total)
+                                               {
+                                                   updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
+                                                   {
+                                                       status.state = "downloading_runtime";
+                                                       status.progress = juce::jmap(progress, 0.1f, 0.55f);
+                                                       status.available = false;
+                                                       status.installInProgress = true;
+                                                       status.message = total > 0
+                                                           ? "Downloading the OpenStudio AI runtime (" + juce::String(downloaded / (1024 * 1024)) + " / " + juce::String(total / (1024 * 1024)) + " MB)"
+                                                           : "Downloading the OpenStudio AI runtime";
+                                                       status.detailLogPath = logFile.getFullPathName();
+                                                       status.buildRuntimeMode = kBuildRuntimeModeDownloadedRuntime;
+                                                       status.requiresExternalPython = false;
+                                                       status.installSource = kInstallSourceDownloadedRuntime;
+                                                       status.helpUrl.clear();
+                                                       status.runtimeCandidate = candidate.key;
+                                                   });
+                                               }, downloadError))
+                {
+                    if (aiToolsCancelRequested.load())
+                    {
+                        finishCancelled();
+                        return;
+                    }
+
+                    appendAiToolsLogLine(makeAiLogEvent("installer", "download", "runtime_download_failed", sessionId,
+                                                        [&] (juce::DynamicObject& obj)
+                                                        {
+                                                            obj.setProperty("runtimeCandidate", candidate.key);
+                                                            obj.setProperty("errorCode", "runtime_download_failed");
+                                                            obj.setProperty("errorMessage", downloadError);
+                                                        }));
+                    terminalUserMessage = "OpenStudio could not download the AI runtime.";
+                    terminalError = downloadError;
+                    terminalErrorCode = "runtime_download_failed";
+                    continue;
+                }
+
+                updateStep("verifying_runtime_archive", 0.6f, "Verifying the downloaded AI runtime", kInstallSourceDownloadedRuntime);
+                juce::String hashError;
+                if (! verifyFileSha256(runtimeArchive, runtimeSha256, hashError))
+                {
+                    appendAiToolsLogLine(makeAiLogEvent("installer", "checksum", "runtime_checksum_failed", sessionId,
+                                                        [&] (juce::DynamicObject& obj)
+                                                        {
+                                                            obj.setProperty("runtimeCandidate", candidate.key);
+                                                            obj.setProperty("errorCode", "runtime_checksum_failed");
+                                                            obj.setProperty("errorMessage", hashError);
+                                                        }));
+                    terminalUserMessage = "OpenStudio could not verify the AI runtime download.";
+                    terminalError = hashError;
+                    terminalErrorCode = "runtime_checksum_failed";
+                    continue;
+                }
+
                 if (aiToolsCancelRequested.load())
                 {
                     finishCancelled();
                     return;
                 }
 
-                finishWithStatus("error", 0.1f,
-                                 "OpenStudio could not download the AI runtime.",
-                                 downloadError,
-                                 "runtime_download_failed",
+                updateStep("extracting_runtime", 0.7f, "Extracting the OpenStudio AI runtime", kInstallSourceDownloadedRuntime);
+                juce::String extractionError;
+                juce::String extractionErrorCode;
+                if (! extractRuntimeArchive(runtimeArchive, runtimeRoot, extractionError, extractionErrorCode))
+                {
+                    appendAiToolsLogLine(makeAiLogEvent("installer", "extract", "runtime_extraction_failed", sessionId,
+                                                        [&] (juce::DynamicObject& obj)
+                                                        {
+                                                            obj.setProperty("runtimeCandidate", candidate.key);
+                                                            obj.setProperty("errorCode", extractionErrorCode.isNotEmpty() ? extractionErrorCode : juce::String("runtime_extraction_failed"));
+                                                            obj.setProperty("errorMessage", extractionError);
+                                                        }));
+                    terminalUserMessage = "OpenStudio could not prepare the AI runtime on this machine.";
+                    terminalError = extractionError;
+                    terminalErrorCode = extractionErrorCode.isNotEmpty() ? extractionErrorCode : juce::String("runtime_extraction_failed");
+                    continue;
+                }
+
+                launcherPython = findPythonInRuntimeRoot(runtimeRoot);
+                if (! launcherPython.existsAsFile())
+                {
+                    terminalUserMessage = "OpenStudio could not verify the downloaded AI runtime.";
+                    terminalError = "The extracted AI runtime did not contain a usable Python executable.";
+                    terminalErrorCode = "runtime_validation_failed";
+                    continue;
+                }
+
+                updateStep("probing_runtime", 0.78f, "Probing the downloaded AI runtime", kInstallSourceDownloadedRuntime);
+                const auto capabilities = probeRuntimeCapabilities(launcherPython, modelsDir, kStemModelName, "auto");
+                appendAiToolsLogLine(makeAiLogEvent("installer", "probe", "runtime_probe_finished", sessionId,
+                                                    [&] (juce::DynamicObject& obj)
+                                                    {
+                                                        obj.setProperty("runtimeCandidate", candidate.key);
+                                                        obj.setProperty("runtimeReady", capabilities.runtimeReady);
+                                                        obj.setProperty("selectedBackend", capabilities.selectedBackend);
+                                                        obj.setProperty("supportedBackends", capabilities.supportedBackends.joinIntoString(","));
+                                                    }));
+
+                if (! capabilities.runtimeReady)
+                {
+                    terminalUserMessage = "OpenStudio could not verify the downloaded AI runtime.";
+                    terminalError = "The extracted runtime failed its capability probe.";
+                    terminalErrorCode = "runtime_validation_failed";
+                    continue;
+                }
+
+#if JUCE_WINDOWS
+                if (candidate.key == "windows-cuda-x64" && capabilities.selectedBackend != "cuda")
+                {
+                    appendAiToolsLogLine(makeAiLogEvent("installer", "fallback", "runtime_candidate_rejected", sessionId,
+                                                        [&] (juce::DynamicObject& obj)
+                                                        {
+                                                            obj.setProperty("runtimeCandidate", candidate.key);
+                                                            obj.setProperty("selectedBackend", capabilities.selectedBackend);
+                                                            obj.setProperty("reason", "CUDA runtime did not activate the CUDA backend on this machine.");
+                                                        }));
+                    terminalUserMessage = "OpenStudio could not activate the preferred Windows GPU runtime.";
+                    terminalError = "The CUDA runtime did not report a CUDA backend on this machine.";
+                    terminalErrorCode = "runtime_backend_unavailable";
+                    continue;
+                }
+#endif
+
+                runtimePrepared = true;
+                launchMode = juce::String(" --verify-existing-runtime")
+                    + " --session-id " + quoteCommandPart(sessionId)
+                    + " --runtime-candidate " + quoteCommandPart(candidate.key);
+                if (fallbackAttempted)
+                    launchMode += " --fallback-attempted";
+
+                updateStep("verifying_runtime", 0.8f, "Verifying the downloaded AI runtime", kInstallSourceDownloadedRuntime);
+                break;
+            }
+
+            if (! runtimePrepared)
+            {
+                finishWithStatus("error", 0.8f,
+                                 terminalUserMessage.isNotEmpty() ? terminalUserMessage : juce::String("OpenStudio could not prepare the AI runtime."),
+                                 terminalError,
+                                 terminalErrorCode.isNotEmpty() ? terminalErrorCode : juce::String("runtime_validation_failed"),
                                  false,
                                  false,
                                  false,
@@ -1223,66 +1495,6 @@ juce::var StemSeparator::installAiTools()
                                  kBuildRuntimeModeDownloadedRuntime);
                 return;
             }
-
-            updateStep("verifying_runtime_archive", 0.6f, "Verifying the downloaded AI runtime", kInstallSourceDownloadedRuntime);
-            juce::String hashError;
-            if (! verifyFileSha256(runtimeArchive, runtimeSha256, hashError))
-            {
-                finishWithStatus("error", 0.6f,
-                                 "OpenStudio could not verify the AI runtime download.",
-                                 hashError,
-                                 "runtime_checksum_failed",
-                                 false,
-                                 false,
-                                 false,
-                                 false,
-                                 kInstallSourceDownloadedRuntime,
-                                 kBuildRuntimeModeDownloadedRuntime);
-                return;
-            }
-
-            if (aiToolsCancelRequested.load())
-            {
-                finishCancelled();
-                return;
-            }
-
-            updateStep("extracting_runtime", 0.7f, "Extracting the OpenStudio AI runtime", kInstallSourceDownloadedRuntime);
-            juce::String extractionError;
-            juce::String extractionErrorCode;
-            if (! extractRuntimeArchive(runtimeArchive, runtimeRoot, extractionError, extractionErrorCode))
-            {
-                finishWithStatus("error", 0.7f,
-                                 "OpenStudio could not prepare the AI runtime on this machine.",
-                                 extractionError,
-                                 extractionErrorCode.isNotEmpty() ? extractionErrorCode : juce::String("runtime_extraction_failed"),
-                                 false,
-                                 false,
-                                 false,
-                                 false,
-                                 kInstallSourceDownloadedRuntime,
-                                 kBuildRuntimeModeDownloadedRuntime);
-                return;
-            }
-
-            launcherPython = findPythonInRuntimeRoot(runtimeRoot);
-            if (! launcherPython.existsAsFile())
-            {
-                finishWithStatus("error", 0.75f,
-                                 "OpenStudio could not verify the downloaded AI runtime.",
-                                 "The extracted AI runtime did not contain a usable Python executable.",
-                                 "runtime_validation_failed",
-                                 false,
-                                 false,
-                                 false,
-                                 false,
-                                 kInstallSourceDownloadedRuntime,
-                                 kBuildRuntimeModeDownloadedRuntime);
-                return;
-            }
-
-            launchMode = " --verify-existing-runtime";
-            updateStep("verifying_runtime", 0.8f, "Verifying the downloaded AI runtime", kInstallSourceDownloadedRuntime);
         }
 
         // Launch the installer directly via ChildProcess. Do not append shell
@@ -1323,6 +1535,9 @@ juce::var StemSeparator::installAiTools()
             installCommandLine = cmd;
             installRuntimePythonPath = launcherPython.getFullPathName();
             installRuntimeRootPath = runtimeRoot.getFullPathName();
+            installRuntimeCandidate = selectedRuntimeCandidate;
+            installSessionId = sessionId;
+            installFallbackAttempted = fallbackAttempted;
             installProcess = std::move(nextInstallProcess);
             lastAiToolsStatus.state = devFallbackEnabled ? "creating_venv" : "verifying_runtime";
             lastAiToolsStatus.progress = devFallbackEnabled ? 0.1f : 0.8f;
@@ -1341,6 +1556,9 @@ juce::var StemSeparator::installAiTools()
             lastAiToolsStatus.error.clear();
             lastAiToolsStatus.errorCode.clear();
             lastAiToolsStatus.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
+            lastAiToolsStatus.runtimeCandidate = selectedRuntimeCandidate;
+            lastAiToolsStatus.installSessionId = sessionId;
+            lastAiToolsStatus.fallbackAttempted = fallbackAttempted;
         }
     }).detach();
 
@@ -1437,6 +1655,10 @@ void StemSeparator::pollInstallProgress()
                     lastAiToolsStatus.error += " Last output: " + lastDiagnostics;
             }
 
+            lastAiToolsStatus.runtimeCandidate = installRuntimeCandidate;
+            lastAiToolsStatus.installSessionId = installSessionId;
+            lastAiToolsStatus.fallbackAttempted = installFallbackAttempted;
+
             if (lastAiToolsStatus.state != "error"
                 && lastAiToolsStatus.state != "cancelled"
                 && lastAiToolsStatus.state != "ready")
@@ -1453,6 +1675,9 @@ void StemSeparator::pollInstallProgress()
             installCommandLine.clear();
             installRuntimePythonPath.clear();
             installRuntimeRootPath.clear();
+            installRuntimeCandidate.clear();
+            installSessionId.clear();
+            installFallbackAttempted = false;
             shouldRefreshAfterExit = lastAiToolsStatus.state != "ready";
         }
     }
@@ -1504,6 +1729,12 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.modelVersion = json["modelVersion"].toString();
     if (json.hasProperty("verificationMode"))
         status.verificationMode = json["verificationMode"].toString();
+    if (json.hasProperty("runtimeCandidate"))
+        status.runtimeCandidate = json["runtimeCandidate"].toString();
+    if (json.hasProperty("sessionId"))
+        status.installSessionId = json["sessionId"].toString();
+    if (json.hasProperty("fallbackAttempted"))
+        status.fallbackAttempted = static_cast<bool>(json["fallbackAttempted"]);
     if (json.hasProperty("restartRequired"))
         status.restartRequired = static_cast<bool>(json["restartRequired"]);
 

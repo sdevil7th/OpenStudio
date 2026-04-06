@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from datetime import datetime, timezone
 import json
 import platform
 import shutil
@@ -29,6 +30,13 @@ FALLBACK_MIN_PYTHON = (3, 10)
 FALLBACK_MAX_PYTHON_EXCLUSIVE = (3, 14)
 
 LOG_PATH: Path | None = None
+SESSION_ID = ""
+RUNTIME_CANDIDATE = ""
+FALLBACK_ATTEMPTED = False
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def write_log(message: str) -> None:
@@ -39,8 +47,28 @@ def write_log(message: str) -> None:
         handle.write(message.rstrip() + "\n")
 
 
+def log_event(component: str, phase: str, event: str, **kwargs) -> None:
+    payload = {
+        "timestamp": utc_now_iso(),
+        "component": component,
+        "phase": phase,
+        "event": event,
+        "platform": platform.system().lower(),
+        "sessionId": SESSION_ID,
+        "runtimeCandidate": RUNTIME_CANDIDATE,
+        "fallbackAttempted": FALLBACK_ATTEMPTED,
+    }
+    payload.update(kwargs)
+    write_log(json.dumps(payload, ensure_ascii=True))
+
+
 def emit(state: str, progress: float, **kwargs) -> None:
     payload = {"state": state, "progress": round(progress, 4)}
+    if SESSION_ID:
+        payload["sessionId"] = SESSION_ID
+    if RUNTIME_CANDIDATE:
+        payload["runtimeCandidate"] = RUNTIME_CANDIDATE
+    payload["fallbackAttempted"] = FALLBACK_ATTEMPTED
     payload.update(kwargs)
     if LOG_PATH is not None and "detailLogPath" not in payload:
         payload["detailLogPath"] = str(LOG_PATH)
@@ -123,6 +151,14 @@ def run_step(
     build_runtime_mode: str,
     cwd: Path | None = None,
 ) -> None:
+    log_event(
+        "installer",
+        state,
+        "step_start",
+        description=description,
+        command=command,
+        buildRuntimeMode=build_runtime_mode,
+    )
     emit(
         state,
         progress,
@@ -143,6 +179,14 @@ def run_step(
     )
     log_subprocess_output(result, " ".join(command))
     if result.returncode != 0:
+        log_event(
+            "installer",
+            state,
+            "step_failed",
+            description=description,
+            exitCode=result.returncode,
+            errorCode=error_code,
+        )
         fail(
             f"{description} failed. See the install log for details.",
             progress=progress,
@@ -152,6 +196,13 @@ def run_step(
             pythonDetected=python_detected,
             buildRuntimeMode=build_runtime_mode,
         )
+    log_event(
+        "installer",
+        state,
+        "step_succeeded",
+        description=description,
+        exitCode=result.returncode,
+    )
 
 
 def stream_step(
@@ -167,6 +218,14 @@ def stream_step(
     build_runtime_mode: str,
     cwd: Path | None = None,
 ) -> None:
+    log_event(
+        "installer",
+        state,
+        "step_start",
+        description=description,
+        command=command,
+        buildRuntimeMode=build_runtime_mode,
+    )
     emit(
         state,
         progress,
@@ -201,6 +260,15 @@ def stream_step(
     write_log(f"[exitCode] {return_code}")
     if return_code != 0:
         detail = " ".join(recent_lines).strip()
+        log_event(
+            "installer",
+            state,
+            "step_failed",
+            description=description,
+            exitCode=return_code,
+            errorCode=error_code,
+            lastOutput=detail,
+        )
         fail(
             f"{description} failed. {detail if detail else 'See the install log for details.'}",
             progress=progress,
@@ -210,6 +278,13 @@ def stream_step(
             pythonDetected=python_detected,
             buildRuntimeMode=build_runtime_mode,
         )
+    log_event(
+        "installer",
+        state,
+        "step_succeeded",
+        description=description,
+        exitCode=return_code,
+    )
 
 
 def verify_runtime(
@@ -250,6 +325,14 @@ def verify_runtime(
     write_log(f"runtime_python={resolved_runtime_python}")
     write_log(f"current_python={resolved_current_python}")
     write_log(f"verificationMode={'in-process' if same_interpreter else 'subprocess'}")
+    log_event(
+        "installer",
+        "verifying_runtime",
+        "verification_start",
+        runtimePython=str(resolved_runtime_python),
+        currentPython=str(resolved_current_python),
+        verificationMode="in-process" if same_interpreter else "subprocess",
+    )
 
     emit(
         "verifying_runtime",
@@ -269,6 +352,15 @@ def verify_runtime(
             import audio_separator.separator  # noqa: F401
         except Exception as exc:
             write_log(f"[in-process verification error] {type(exc).__name__}: {exc}")
+            log_event(
+                "installer",
+                "verifying_runtime",
+                "verification_failed",
+                verificationMode="in-process",
+                errorCode="runtime_validation_failed",
+                exceptionType=type(exc).__name__,
+                exceptionMessage=str(exc),
+            )
             fail(
                 f"Verifying the AI tools runtime failed: {type(exc).__name__}: {exc}",
                 progress=0.65,
@@ -280,6 +372,12 @@ def verify_runtime(
             )
 
         write_log("[in-process verification] import audio_separator.separator succeeded")
+        log_event(
+            "installer",
+            "verifying_runtime",
+            "verification_succeeded",
+            verificationMode="in-process",
+        )
         return
 
     run_step(
@@ -307,6 +405,13 @@ def probe_runtime(
     python_detected: bool,
     build_runtime_mode: str,
 ) -> dict[str, object]:
+    log_event(
+        "probe",
+        "probing_runtime",
+        "probe_start",
+        accelerationMode=acceleration_mode,
+        modelName=model_name,
+    )
     emit(
         "probing_runtime",
         0.96,
@@ -337,8 +442,20 @@ def probe_runtime(
     write_log(f"selectedBackend={report.get('selectedBackend', 'cpu')}")
     if report.get("fallbackReason"):
         write_log(f"fallbackReason={report['fallbackReason']}")
+    if report.get("backendDecisionTrace"):
+        write_log(f"backendDecisionTrace={' | '.join(report['backendDecisionTrace'])}")
 
     if not report.get("runtimeReady"):
+        log_event(
+            "probe",
+            "probing_runtime",
+            "probe_failed",
+            errorCode=report.get("errorCode", "runtime_validation_failed"),
+            fallbackReason=report.get("fallbackReason", ""),
+            supportedBackends=report.get("supportedBackends", []),
+            selectedBackend=report.get("selectedBackend", "cpu"),
+            probeDurationMs=report.get("probeDurationMs", 0),
+        )
         fail(
             "OpenStudio could not validate the managed AI runtime on this machine.",
             progress=0.96,
@@ -349,6 +466,15 @@ def probe_runtime(
             buildRuntimeMode=build_runtime_mode,
         )
 
+    log_event(
+        "probe",
+        "probing_runtime",
+        "probe_succeeded",
+        supportedBackends=report.get("supportedBackends", []),
+        selectedBackend=report.get("selectedBackend", "cpu"),
+        fallbackReason=report.get("fallbackReason", ""),
+        probeDurationMs=report.get("probeDurationMs", 0),
+    )
     return report
 
 
@@ -416,6 +542,12 @@ def download_model(
     python_detected: bool,
     build_runtime_mode: str,
 ) -> Path:
+    log_event(
+        "installer",
+        "downloading_model",
+        "model_download_start",
+        modelName=model_name,
+    )
     emit(
         "downloading_model",
         0.82,
@@ -438,6 +570,14 @@ def download_model(
             write_log("[in-process model download] completed")
         except Exception as exc:
             write_log(f"[in-process model download error] {type(exc).__name__}: {exc}")
+            log_event(
+                "installer",
+                "downloading_model",
+                "model_download_failed",
+                errorCode="model_download_failed",
+                exceptionType=type(exc).__name__,
+                exceptionMessage=str(exc),
+            )
             fail(
                 f"Downloading the stem separation model failed: {type(exc).__name__}: {exc}",
                 progress=0.92,
@@ -466,6 +606,14 @@ def download_model(
 
     model_path = models_dir / model_name
     if not model_path.exists():
+        log_event(
+            "installer",
+            "downloading_model",
+            "model_download_failed",
+            errorCode="model_download_failed",
+            reason="model file missing after download",
+            modelPath=str(model_path),
+        )
         fail(
             f"OpenStudio could not verify the downloaded stem model in {models_dir}.",
             progress=0.95,
@@ -475,11 +623,17 @@ def download_model(
             pythonDetected=python_detected,
             buildRuntimeMode=build_runtime_mode,
         )
+    log_event(
+        "installer",
+        "downloading_model",
+        "model_download_succeeded",
+        modelPath=str(model_path),
+    )
     return model_path
 
 
 def main() -> None:
-    global LOG_PATH
+    global LOG_PATH, SESSION_ID, RUNTIME_CANDIDATE, FALLBACK_ATTEMPTED
 
     parser = argparse.ArgumentParser(description="Install OpenStudio AI tools")
     parser.add_argument("--runtime-root", required=True, help="Directory for the prepared AI runtime")
@@ -488,12 +642,18 @@ def main() -> None:
     parser.add_argument("--bootstrap-with", help="Python executable to use for dev fallback bootstrapping")
     parser.add_argument("--verify-existing-runtime", action="store_true", help="Verify the already-prepared OpenStudio runtime and download the model")
     parser.add_argument("--log-path", help="Detailed installer log file path")
+    parser.add_argument("--session-id", default="", help="Install session id for correlated logging")
+    parser.add_argument("--runtime-candidate", default="", help="Selected runtime candidate identity")
+    parser.add_argument("--fallback-attempted", action="store_true", help="True when this install is using a fallback runtime candidate")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).expanduser().resolve()
     models_dir = Path(args.models_dir).expanduser().resolve()
     bootstrap_python = Path(args.bootstrap_with).expanduser().resolve() if args.bootstrap_with else None
     LOG_PATH = Path(args.log_path).expanduser().resolve() if args.log_path else None
+    SESSION_ID = args.session_id
+    RUNTIME_CANDIDATE = args.runtime_candidate
+    FALLBACK_ATTEMPTED = bool(args.fallback_attempted)
 
     if LOG_PATH is not None:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -503,6 +663,20 @@ def main() -> None:
     write_log(f"sys.executable={sys.executable}")
     write_log(f"runtime_root={runtime_root}")
     write_log(f"models_dir={models_dir}")
+    if SESSION_ID:
+        write_log(f"sessionId={SESSION_ID}")
+    if RUNTIME_CANDIDATE:
+        write_log(f"runtimeCandidate={RUNTIME_CANDIDATE}")
+    write_log(f"fallbackAttempted={FALLBACK_ATTEMPTED}")
+    log_event(
+        "installer",
+        "startup",
+        "installer_started",
+        pythonExecutable=sys.executable,
+        runtimeRoot=str(runtime_root),
+        modelsDir=str(models_dir),
+        verifyExistingRuntime=bool(args.verify_existing_runtime),
+    )
 
     runtime_root.parent.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -609,6 +783,16 @@ def main() -> None:
         modelVersion=runtime_probe.get("modelVersion", args.model),
         verificationMode="in-process" if safe_resolve(runtime_python) == safe_resolve(Path(sys.executable)) else "subprocess",
         restartRequired=bool(runtime_probe.get("restartRequired", False)),
+    )
+    log_event(
+        "installer",
+        "ready",
+        "installer_ready",
+        runtimeVersion=runtime_probe.get("runtimeVersion", ""),
+        modelVersion=runtime_probe.get("modelVersion", args.model),
+        supportedBackends=runtime_probe.get("supportedBackends", []),
+        selectedBackend=runtime_probe.get("selectedBackend", "cpu"),
+        verificationMode="in-process" if safe_resolve(runtime_python) == safe_resolve(Path(sys.executable)) else "subprocess",
     )
 
 

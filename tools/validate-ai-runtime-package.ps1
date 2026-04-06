@@ -10,7 +10,13 @@ param(
     [string]$ExpectedSha256 = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$ExpectedRuntimeVersion = ""
+    [string]$ExpectedRuntimeVersion = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedRuntimeFamily = "",
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectedPackagedBackends = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -131,6 +137,11 @@ try {
         Write-Host "Validated runtime version hint: $ExpectedRuntimeVersion"
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRuntimeFamily)) {
+        Assert-True ($metadata.runtimeFamily -eq $ExpectedRuntimeFamily) "AI runtime metadata runtimeFamily '$($metadata.runtimeFamily)' did not match expected '$ExpectedRuntimeFamily'."
+        Write-Host "Validated runtime family hint: $ExpectedRuntimeFamily"
+    }
+
     $diagnosticsJson = & $pythonExe -c "import json, pathlib, sys; import audio_separator.separator; print(json.dumps({'ok': True, 'executable': sys.executable, 'prefix': sys.prefix, 'base_prefix': sys.base_prefix, 'version': sys.version, 'cwd': str(pathlib.Path.cwd())}))" 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "AI runtime import verification failed for '$pythonExe'. Output: $diagnosticsJson"
@@ -160,6 +171,10 @@ try {
 
     if ($Platform -eq "macos") {
         Assert-True (($probe.packagedBackends -contains "coreml") -or ($probe.packagedBackends -contains "mps") -or ($probe.packagedBackends -contains "cpu")) "macOS AI runtime probe did not report packaged backends."
+    }
+
+    foreach ($expectedBackend in $ExpectedPackagedBackends) {
+        Assert-True (($probe.packagedBackends -contains $expectedBackend)) "AI runtime probe did not report expected packaged backend '$expectedBackend'."
     }
 
     Write-Host "AI runtime package validation passed for $Platform at $resolvedArchive"

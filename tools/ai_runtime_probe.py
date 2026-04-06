@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import sys
+import time
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ def probe_runtime_capabilities(
     model_name: str = "",
     acceleration_mode: str = "auto",
 ) -> dict[str, Any]:
+    started_at = time.perf_counter()
     report: dict[str, Any] = {
         "schemaVersion": 1,
         "runtimeReady": False,
@@ -63,6 +65,9 @@ def probe_runtime_capabilities(
         "modelInstalled": False,
         "modelVersion": model_name or "",
         "fallbackReason": "",
+        "errorCode": "",
+        "backendDecisionTrace": [],
+        "probeDurationMs": 0,
     }
 
     if models_dir and model_name:
@@ -74,6 +79,9 @@ def probe_runtime_capabilities(
         import audio_separator.separator  # noqa: F401
     except Exception as exc:
         report["fallbackReason"] = f"runtime import failed: {type(exc).__name__}: {exc}"
+        report["errorCode"] = "probe_import_failed"
+        report["backendDecisionTrace"].append("import audio_separator.separator failed")
+        report["probeDurationMs"] = round((time.perf_counter() - started_at) * 1000, 3)
         return report
 
     report["runtimeReady"] = True
@@ -91,6 +99,7 @@ def probe_runtime_capabilities(
         ort_providers = list(ort.get_available_providers())
     except Exception:
         ort_providers = []
+        report["backendDecisionTrace"].append("onnxruntime.get_available_providers failed")
     report["onnxProviders"] = ort_providers
 
     packaged_backends: list[str] = []
@@ -101,6 +110,7 @@ def probe_runtime_capabilities(
         and "CUDAExecutionProvider" in ort_providers
     ):
         packaged_backends.append("cuda")
+        report["backendDecisionTrace"].append("packaged cuda runtime detected")
 
     if (
         report["platform"] == "windows"
@@ -109,6 +119,7 @@ def probe_runtime_capabilities(
         and "DmlExecutionProvider" in ort_providers
     ):
         packaged_backends.append("directml")
+        report["backendDecisionTrace"].append("packaged directml runtime detected")
 
     mps_available = bool(
         hasattr(torch.backends, "mps")
@@ -120,8 +131,10 @@ def probe_runtime_capabilities(
         and "CoreMLExecutionProvider" in ort_providers
     ):
         packaged_backends.append("coreml")
+        report["backendDecisionTrace"].append("packaged coreml runtime detected")
     if report["platform"] == "darwin" and report["architecture"] == "arm64" and mps_available:
         packaged_backends.append("mps")
+        report["backendDecisionTrace"].append("packaged mps runtime detected")
 
     packaged_backends.append("cpu")
     report["packagedBackends"] = list(dict.fromkeys(packaged_backends))
@@ -131,10 +144,12 @@ def probe_runtime_capabilities(
 
     if acceleration_mode == "cpu-only":
         fallback_reason = "acceleration mode forced CPU-only"
+        report["backendDecisionTrace"].append("requested acceleration mode forced cpu-only")
     elif report["platform"] == "windows":
         cuda_available = bool(torch.cuda.is_available() and "cuda" in report["packagedBackends"])
         if cuda_available:
             supported_backends.append("cuda")
+            report["backendDecisionTrace"].append("cuda backend available on current machine")
 
         dml_available = False
         if "directml" in report["packagedBackends"]:
@@ -144,21 +159,28 @@ def probe_runtime_capabilities(
                 dml_available = bool(torch_directml.is_available())
             except Exception:
                 dml_available = False
+                report["backendDecisionTrace"].append("torch_directml import or availability check failed")
 
         if dml_available:
             supported_backends.append("directml")
+            report["backendDecisionTrace"].append("directml backend available on current machine")
 
         if not supported_backends:
             fallback_reason = "no GPU backend could be configured on this Windows machine"
+            report["errorCode"] = "probe_backend_unavailable"
     elif report["platform"] == "darwin" and report["architecture"] == "arm64":
         if "coreml" in report["packagedBackends"]:
             supported_backends.append("coreml")
+            report["backendDecisionTrace"].append("coreml backend available on current machine")
         if mps_available:
             supported_backends.append("mps")
+            report["backendDecisionTrace"].append("mps backend available on current machine")
         if not supported_backends:
             fallback_reason = "no Apple Silicon acceleration backend could be configured"
+            report["errorCode"] = "probe_backend_unavailable"
     else:
         fallback_reason = "no accelerated backend is supported for this platform"
+        report["errorCode"] = "probe_backend_unavailable"
 
     supported_backends.append("cpu")
     report["supportedBackends"] = list(dict.fromkeys(supported_backends))
@@ -183,6 +205,9 @@ def probe_runtime_capabilities(
         report["selectedBackend"] = "cpu"
 
     report["fallbackReason"] = fallback_reason
+    if not report["errorCode"]:
+        report["errorCode"] = ""
+    report["probeDurationMs"] = round((time.perf_counter() - started_at) * 1000, 3)
     return report
 
 

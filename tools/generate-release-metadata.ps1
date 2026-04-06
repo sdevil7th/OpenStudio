@@ -43,6 +43,18 @@ param(
     [string]$WindowsAiRuntimeAssetUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlAiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaAiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$MacAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
@@ -174,6 +186,8 @@ if (-not [string]::IsNullOrWhiteSpace($MacMinimumSystemVersion)) {
 $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAssetUrl -AdditionalProperties $windowsAdditional
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
 $windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
+$windowsDirectmlAiRuntime = Get-AssetMetadata -AssetPath $WindowsDirectmlAiRuntimeAssetPath -AssetUrl $WindowsDirectmlAiRuntimeAssetUrl
+$windowsCudaAiRuntime = Get-AssetMetadata -AssetPath $WindowsCudaAiRuntimeAssetPath -AssetUrl $WindowsCudaAiRuntimeAssetUrl
 $macosAiRuntime = Get-AssetMetadata -AssetPath $MacAiRuntimeAssetPath -AssetUrl $MacAiRuntimeAssetUrl
 $macosArm64AiRuntime = Get-AssetMetadata -AssetPath $MacArm64AiRuntimeAssetPath -AssetUrl $MacArm64AiRuntimeAssetUrl
 $macosX64AiRuntime = Get-AssetMetadata -AssetPath $MacX64AiRuntimeAssetPath -AssetUrl $MacX64AiRuntimeAssetUrl
@@ -203,6 +217,8 @@ $checksums = @()
 if ($windows) { $checksums += "{0}  {1}" -f $windows.sha256, $windows.fileName }
 if ($macos) { $checksums += "{0}  {1}" -f $macos.sha256, $macos.fileName }
 if ($windowsAiRuntime) { $checksums += "{0}  {1}" -f $windowsAiRuntime.sha256, $windowsAiRuntime.fileName }
+if ($windowsDirectmlAiRuntime) { $checksums += "{0}  {1}" -f $windowsDirectmlAiRuntime.sha256, $windowsDirectmlAiRuntime.fileName }
+if ($windowsCudaAiRuntime) { $checksums += "{0}  {1}" -f $windowsCudaAiRuntime.sha256, $windowsCudaAiRuntime.fileName }
 if ($macosAiRuntime) { $checksums += "{0}  {1}" -f $macosAiRuntime.sha256, $macosAiRuntime.fileName }
 if ($macosArm64AiRuntime) { $checksums += "{0}  {1}" -f $macosArm64AiRuntime.sha256, $macosArm64AiRuntime.fileName }
 if ($macosX64AiRuntime) { $checksums += "{0}  {1}" -f $macosX64AiRuntime.sha256, $macosX64AiRuntime.fileName }
@@ -211,9 +227,9 @@ Set-Content -Path (Join-Path $resolvedOutputDir "OpenStudio-checksums.txt") -Val
 Set-Content -Path (Join-Path $releaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
 Set-Content -Path (Join-Path $channelReleaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
 
-if (($windowsAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
+if (($windowsAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
     $aiRuntimeManifest = [ordered]@{
-        schemaVersion = $SchemaVersion
+        schemaVersion = [Math]::Max($SchemaVersion, 3)
         channel = $Channel
         appVersion = $Version
         runtimeVersion = $AiRuntimeVersion
@@ -221,7 +237,29 @@ if (($windowsAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX6
         platforms = [ordered]@{}
     }
 
-    if ($windowsAiRuntime) {
+    if ($windowsDirectmlAiRuntime -or $windowsCudaAiRuntime) {
+        $windowsPlatform = [ordered]@{}
+
+        if ($windowsDirectmlAiRuntime) {
+            foreach ($entry in $windowsDirectmlAiRuntime.GetEnumerator()) {
+                $windowsPlatform[$entry.Key] = $entry.Value
+            }
+        } elseif ($windowsAiRuntime) {
+            foreach ($entry in $windowsAiRuntime.GetEnumerator()) {
+                $windowsPlatform[$entry.Key] = $entry.Value
+            }
+        }
+
+        $windowsBackends = [ordered]@{}
+        if ($windowsDirectmlAiRuntime) { $windowsBackends.directml = $windowsDirectmlAiRuntime }
+        if ($windowsCudaAiRuntime) { $windowsBackends.cuda = $windowsCudaAiRuntime }
+        if ($windowsBackends.Count -gt 0) {
+            $windowsPlatform.backends = $windowsBackends
+        }
+
+        $aiRuntimeManifest.platforms.windows = $windowsPlatform
+    }
+    elseif ($windowsAiRuntime) {
         $aiRuntimeManifest.platforms.windows = $windowsAiRuntime
     }
 

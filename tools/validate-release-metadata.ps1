@@ -16,6 +16,12 @@ param(
     [string]$WindowsAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$MacAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
@@ -252,6 +258,8 @@ Assert-True ($rootJson -eq $channelJson) "Root latest.json and channel latest.js
 $windowsAsset = Get-AssetInfo $WindowsAssetPath
 $macosAsset = Get-AssetInfo $MacAssetPath
 $windowsAiRuntimeAsset = Get-AssetInfo $WindowsAiRuntimeAssetPath
+$windowsDirectmlAiRuntimeAsset = Get-AssetInfo $WindowsDirectmlAiRuntimeAssetPath
+$windowsCudaAiRuntimeAsset = Get-AssetInfo $WindowsCudaAiRuntimeAssetPath
 $macosAiRuntimeAsset = Get-AssetInfo $MacAiRuntimeAssetPath
 $macosArm64AiRuntimeAsset = Get-AssetInfo $MacArm64AiRuntimeAssetPath
 $macosX64AiRuntimeAsset = Get-AssetInfo $MacX64AiRuntimeAssetPath
@@ -277,7 +285,21 @@ if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManif
     $channelAiJson = ($channelAiRuntimeManifest | ConvertTo-Json -Depth 8)
     Assert-True ($rootAiJson -eq $channelAiJson) "Root AI runtime latest.json and channel AI runtime latest.json do not match."
 
-    Validate-PlatformEntry -PlatformName "windows AI runtime" -PlatformNode $rootAiRuntimeManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAiRuntimeAsset
+    $windowsAiNode = $rootAiRuntimeManifest.platforms.windows
+    if ($null -ne $windowsAiNode -and $null -ne $windowsAiNode.backends) {
+        Validate-PlatformEntry -PlatformName "windows AI runtime legacy" -PlatformNode $windowsAiNode -Checksums $checksums -AssetInfo $(if ($null -ne $windowsDirectmlAiRuntimeAsset) { $windowsDirectmlAiRuntimeAsset } else { $windowsAiRuntimeAsset })
+        Validate-PlatformEntry -PlatformName "windows directml AI runtime" -PlatformNode $windowsAiNode.backends.directml -Checksums $checksums -AssetInfo $windowsDirectmlAiRuntimeAsset
+        Validate-PlatformEntry -PlatformName "windows cuda AI runtime" -PlatformNode $windowsAiNode.backends.cuda -Checksums $checksums -AssetInfo $windowsCudaAiRuntimeAsset
+
+        if ($null -ne $windowsAiNode.backends.directml) {
+            Assert-True ($windowsAiNode.url -eq $windowsAiNode.backends.directml.url) "Legacy Windows AI runtime URL must match the DirectML runtime URL during migration."
+            Assert-True ($windowsAiNode.sha256 -eq $windowsAiNode.backends.directml.sha256) "Legacy Windows AI runtime hash must match the DirectML runtime hash during migration."
+            Assert-True ($windowsAiNode.fileName -eq $windowsAiNode.backends.directml.fileName) "Legacy Windows AI runtime filename must match the DirectML runtime filename during migration."
+        }
+    }
+    else {
+        Validate-PlatformEntry -PlatformName "windows AI runtime" -PlatformNode $windowsAiNode -Checksums $checksums -AssetInfo $windowsAiRuntimeAsset
+    }
 
     $macAiNode = $rootAiRuntimeManifest.platforms.macos
     if ($null -ne $macAiNode -and (($null -ne $macAiNode.arm64) -or ($null -ne $macAiNode.x64))) {

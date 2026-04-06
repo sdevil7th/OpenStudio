@@ -18,6 +18,12 @@ param(
     [string]$WindowsAiRuntimeDownloadUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlAiRuntimeDownloadUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaAiRuntimeDownloadUrl = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$MacAiRuntimeDownloadUrl = ""
 )
 
@@ -58,8 +64,20 @@ $resolvedWindowsDownloadUrl = Resolve-DownloadUrl -ProvidedUrl $WindowsDownloadU
 $resolvedMacDownloadUrl = Resolve-DownloadUrl -ProvidedUrl $MacDownloadUrl -RepoSlug $RepoSlug -FileName "OpenStudio-macOS.dmg"
 $resolvedWindowsAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeDownloadUrl)) {
     $WindowsAiRuntimeDownloadUrl
+} elseif (-not [string]::IsNullOrWhiteSpace($WindowsDirectmlAiRuntimeDownloadUrl)) {
+    $WindowsDirectmlAiRuntimeDownloadUrl
 } elseif (-not [string]::IsNullOrWhiteSpace($RepoSlug)) {
-    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip"
+    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-windows-directml-x64.zip"
+} else {
+    ""
+}
+$resolvedWindowsDirectmlAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($WindowsDirectmlAiRuntimeDownloadUrl)) {
+    $WindowsDirectmlAiRuntimeDownloadUrl
+} else {
+    ""
+}
+$resolvedWindowsCudaAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($WindowsCudaAiRuntimeDownloadUrl)) {
+    $WindowsCudaAiRuntimeDownloadUrl
 } else {
     ""
 }
@@ -76,6 +94,12 @@ $redirects = @(
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeDownloadUrl)) {
     $redirects += "/download/ai-runtime/windows/latest  $resolvedWindowsAiRuntimeDownloadUrl  302"
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeDownloadUrl)) {
+    $redirects += "/download/ai-runtime/windows/directml/latest  $resolvedWindowsDirectmlAiRuntimeDownloadUrl  302"
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeDownloadUrl)) {
+    $redirects += "/download/ai-runtime/windows/cuda/latest  $resolvedWindowsCudaAiRuntimeDownloadUrl  302"
 }
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedMacAiRuntimeDownloadUrl)) {
@@ -107,6 +131,28 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeDownloadUrl)) {
 [[redirects]]
   from = "/download/ai-runtime/windows/latest"
   to = "$resolvedWindowsAiRuntimeDownloadUrl"
+  status = 302
+  force = true
+"@
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeDownloadUrl)) {
+    $netlifyToml += @"
+
+[[redirects]]
+  from = "/download/ai-runtime/windows/directml/latest"
+  to = "$resolvedWindowsDirectmlAiRuntimeDownloadUrl"
+  status = 302
+  force = true
+"@
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeDownloadUrl)) {
+    $netlifyToml += @"
+
+[[redirects]]
+  from = "/download/ai-runtime/windows/cuda/latest"
+  to = "$resolvedWindowsCudaAiRuntimeDownloadUrl"
   status = 302
   force = true
 "@

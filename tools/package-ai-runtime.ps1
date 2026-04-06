@@ -10,7 +10,10 @@ param(
     [string]$OutputPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$ExpectedRuntimeVersion = ""
+    [string]$ExpectedRuntimeVersion = "",
+
+    [Parameter(Mandatory = $false)]
+    [int64]$MaxArtifactSizeBytes = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,7 +65,28 @@ if ($Platform -eq "macos") {
     }
 }
 else {
-    Compress-Archive -Path (Join-Path $resolvedRuntimeRoot "*") -DestinationPath $resolvedOutputPath -CompressionLevel Optimal
+    $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+    if ($null -ne $sevenZip) {
+        Push-Location $resolvedRuntimeRoot
+        try {
+            & $sevenZip.Source a -tzip -mx=9 -mfb=258 -mpass=15 $resolvedOutputPath *
+            if ($LASTEXITCODE -ne 0) {
+                throw "7-Zip runtime archive packaging failed with exit code $LASTEXITCODE."
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    else {
+        Compress-Archive -Path (Join-Path $resolvedRuntimeRoot "*") -DestinationPath $resolvedOutputPath -CompressionLevel Optimal
+    }
+}
+
+$artifactSize = (Get-Item $resolvedOutputPath).Length
+Write-Host "compressedArtifactSizeBytes=$artifactSize"
+if ($MaxArtifactSizeBytes -gt 0 -and $artifactSize -gt $MaxArtifactSizeBytes) {
+    throw "AI runtime archive '$resolvedOutputPath' is $artifactSize bytes, which exceeds the configured limit of $MaxArtifactSizeBytes bytes."
 }
 
 & (Join-Path $PSScriptRoot "validate-ai-runtime-package.ps1") `

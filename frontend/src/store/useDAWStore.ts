@@ -90,6 +90,7 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   buildRuntimeMode: "downloaded-runtime",
   supportedBackends: ["cpu"],
   selectedBackend: "cpu",
+  fallbackAttempted: false,
   restartRequired: false,
 };
 

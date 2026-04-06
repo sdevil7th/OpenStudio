@@ -1,2 +1,6 @@
+# Backward-compatible alias for the default Windows managed runtime family.
+# The dedicated runtime release workflow now publishes explicit backend-specific
+# Windows runtimes using:
+#   - tools/ai-runtime-requirements-windows-directml.txt
+#   - tools/ai-runtime-requirements-windows-cuda.txt
 audio-separator[dml]==0.41.1
-onnxruntime-gpu>=1.17

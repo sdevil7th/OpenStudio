@@ -16,6 +16,9 @@ param(
     [string]$ReleasePageUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$AiRuntimeReleaseTag = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$FullReleaseNotesUrl = "",
 
     [Parameter(Mandatory = $false)]
@@ -50,6 +53,12 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$WindowsAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
     [string]$MacArm64AiRuntimeAssetPath = "",
@@ -173,18 +182,26 @@ if ([string]::IsNullOrWhiteSpace($FullReleaseNotesUrl)) {
     $FullReleaseNotesUrl = $ReleasePageUrl
 }
 
+if ([string]::IsNullOrWhiteSpace($AiRuntimeReleaseTag)) {
+    $AiRuntimeReleaseTag = $tag
+}
+
 if ([string]::IsNullOrWhiteSpace($BundleOutputDir)) {
     $BundleOutputDir = "dist/public-release/$normalizedVersion"
 }
 
 $windowsAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-Setup-x64.exe"
 $macAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-macOS.dmg"
-$windowsAiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-AI-Runtime-windows-x64.zip"
-$macArm64AiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-AI-Runtime-macos-arm64.zip"
-$macX64AiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$tag/OpenStudio-AI-Runtime-macos-x64.zip"
+$windowsAiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$AiRuntimeReleaseTag/OpenStudio-AI-Runtime-windows-x64.zip"
+$windowsDirectmlAiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$AiRuntimeReleaseTag/OpenStudio-AI-Runtime-windows-directml-x64.zip"
+$windowsCudaAiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$AiRuntimeReleaseTag/OpenStudio-AI-Runtime-windows-cuda-x64.zip"
+$macArm64AiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$AiRuntimeReleaseTag/OpenStudio-AI-Runtime-macos-arm64.zip"
+$macX64AiRuntimeAssetUrl = "https://github.com/$RepoSlug/releases/download/$AiRuntimeReleaseTag/OpenStudio-AI-Runtime-macos-x64.zip"
 
 $resolvedWindowsInstallerPath = ""
 $resolvedWindowsAiRuntimeAssetPath = ""
+$resolvedWindowsDirectmlAiRuntimeAssetPath = ""
+$resolvedWindowsCudaAiRuntimeAssetPath = ""
 $resolvedMacArm64AiRuntimeAssetPath = ""
 $resolvedMacX64AiRuntimeAssetPath = ""
 
@@ -257,6 +274,13 @@ Assert-FileExists -PathValue $resolvedMacAssetPath -Label "macOS DMG"
 
 if (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeAssetPath)) {
     $resolvedWindowsAiRuntimeAssetPath = Resolve-OptionalAsset -ProvidedPath $WindowsAiRuntimeAssetPath -Candidates @() -Label "Windows AI runtime archive"
+} elseif (-not [string]::IsNullOrWhiteSpace($WindowsDirectmlAiRuntimeAssetPath) -or -not [string]::IsNullOrWhiteSpace($WindowsCudaAiRuntimeAssetPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($WindowsDirectmlAiRuntimeAssetPath)) {
+        $resolvedWindowsDirectmlAiRuntimeAssetPath = Resolve-OptionalAsset -ProvidedPath $WindowsDirectmlAiRuntimeAssetPath -Candidates @() -Label "Windows DirectML AI runtime archive"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WindowsCudaAiRuntimeAssetPath)) {
+        $resolvedWindowsCudaAiRuntimeAssetPath = Resolve-OptionalAsset -ProvidedPath $WindowsCudaAiRuntimeAssetPath -Candidates @() -Label "Windows CUDA AI runtime archive"
+    }
 } elseif (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeRoot)) {
     $windowsAiRuntimeRootPath = Join-RepoPath $WindowsAiRuntimeRoot
     if (Test-Path $windowsAiRuntimeRootPath) {
@@ -268,6 +292,10 @@ if (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeAssetPath)) {
             -OutputPath $resolvedWindowsAiRuntimeAssetPath `
             -ExpectedRuntimeVersion $AiRuntimeVersion
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath) -and -not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
+    $resolvedWindowsDirectmlAiRuntimeAssetPath = $resolvedWindowsAiRuntimeAssetPath
 }
 
 if (-not [string]::IsNullOrWhiteSpace($MacArm64AiRuntimeAssetPath)) {
@@ -315,6 +343,18 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
         "-WindowsAiRuntimeAssetUrl", $windowsAiRuntimeAssetUrl
     )
 }
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath)) {
+    $generateMetadataArgs += @(
+        "-WindowsDirectmlAiRuntimeAssetPath", $resolvedWindowsDirectmlAiRuntimeAssetPath,
+        "-WindowsDirectmlAiRuntimeAssetUrl", $windowsDirectmlAiRuntimeAssetUrl
+    )
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeAssetPath)) {
+    $generateMetadataArgs += @(
+        "-WindowsCudaAiRuntimeAssetPath", $resolvedWindowsCudaAiRuntimeAssetPath,
+        "-WindowsCudaAiRuntimeAssetUrl", $windowsCudaAiRuntimeAssetUrl
+    )
+}
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedMacArm64AiRuntimeAssetPath)) {
     $generateMetadataArgs += @(
@@ -331,6 +371,8 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedMacX64AiRuntimeAssetPath)) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath) `
+    -or -not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath) `
+    -or -not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeAssetPath) `
     -or -not [string]::IsNullOrWhiteSpace($resolvedMacArm64AiRuntimeAssetPath) `
     -or -not [string]::IsNullOrWhiteSpace($resolvedMacX64AiRuntimeAssetPath)) {
     $generateMetadataArgs += @("-AiRuntimeVersion", $AiRuntimeVersion)
@@ -348,6 +390,12 @@ $validateMetadataArgs = @(
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
     $validateMetadataArgs += @("-WindowsAiRuntimeAssetPath", $resolvedWindowsAiRuntimeAssetPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath)) {
+    $validateMetadataArgs += @("-WindowsDirectmlAiRuntimeAssetPath", $resolvedWindowsDirectmlAiRuntimeAssetPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeAssetPath)) {
+    $validateMetadataArgs += @("-WindowsCudaAiRuntimeAssetPath", $resolvedWindowsCudaAiRuntimeAssetPath)
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedMacArm64AiRuntimeAssetPath)) {
     $validateMetadataArgs += @("-MacArm64AiRuntimeAssetPath", $resolvedMacArm64AiRuntimeAssetPath)
@@ -367,6 +415,9 @@ $prepareNetlifyArgs = @(
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
     $prepareNetlifyArgs += @("-WindowsAiRuntimeDownloadUrl", $windowsAiRuntimeAssetUrl)
+}
+elseif (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath)) {
+    $prepareNetlifyArgs += @("-WindowsAiRuntimeDownloadUrl", $windowsDirectmlAiRuntimeAssetUrl)
 }
 & (Join-RepoPath "tools/prepare-netlify-release-site.ps1") @prepareNetlifyArgs
 
@@ -389,6 +440,12 @@ Copy-Item -LiteralPath $resolvedWindowsInstallerPath -Destination (Join-Path $bu
 Copy-Item -LiteralPath $resolvedMacAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-macOS.dmg") -Force
 if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
     Copy-Item -LiteralPath $resolvedWindowsAiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-windows-x64.zip") -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath)) {
+    Copy-Item -LiteralPath $resolvedWindowsDirectmlAiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-windows-directml-x64.zip") -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeAssetPath)) {
+    Copy-Item -LiteralPath $resolvedWindowsCudaAiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-windows-cuda-x64.zip") -Force
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedMacArm64AiRuntimeAssetPath)) {
     Copy-Item -LiteralPath $resolvedMacArm64AiRuntimeAssetPath -Destination (Join-Path $bundleAssetsDir "OpenStudio-AI-Runtime-macos-arm64.zip") -Force
@@ -416,6 +473,12 @@ $nextSteps = @(
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath)) {
     $nextSteps += "  $bundleAssetsDir\OpenStudio-AI-Runtime-windows-x64.zip"
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsDirectmlAiRuntimeAssetPath)) {
+    $nextSteps += "  $bundleAssetsDir\OpenStudio-AI-Runtime-windows-directml-x64.zip"
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsCudaAiRuntimeAssetPath)) {
+    $nextSteps += "  $bundleAssetsDir\OpenStudio-AI-Runtime-windows-cuda-x64.zip"
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedMacArm64AiRuntimeAssetPath)) {
     $nextSteps += "  $bundleAssetsDir\OpenStudio-AI-Runtime-macos-arm64.zip"
