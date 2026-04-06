@@ -9,6 +9,7 @@
 ## Known Issues
 - macOS v1 ships as an unsigned DMG. Users may need to right-click `OpenStudio.app` and choose **Open**, then allow it in **System Settings > Privacy & Security**.
 - The optional AI Tools runtime for stem separation is not bundled in the base app. OpenStudio downloads its managed AI runtime on first use, so the first install can take time and depends on network availability.
+- AI Tools currently publish a managed macOS runtime for Apple Silicon only. Intel Macs can run the base app, but AI Tools remain unavailable there for now.
 - Document any other launch-day limitations here.
 
 ## Upgrade Notes

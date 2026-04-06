@@ -1015,6 +1015,21 @@ juce::var StemSeparator::installAiTools()
                             platformNode = architectureNode;
                             appendAiToolsLogLine("runtimeArchitecture=" + architectureKey);
                         }
+                        else if (! macPlatformObject->getProperty("arm64").isVoid()
+                                 || ! macPlatformObject->getProperty("x64").isVoid())
+                        {
+                            finishWithStatus("error", 0.05f,
+                                             "AI Tools are not available for this Mac yet.",
+                                             "The published AI runtime metadata does not include a macOS " + architectureKey + " runtime for this release.",
+                                             "runtime_platform_unsupported",
+                                             false,
+                                             false,
+                                             false,
+                                             false,
+                                             kInstallSourceDownloadedRuntime,
+                                             kBuildRuntimeModeDownloadedRuntime);
+                            return;
+                        }
                     }
 #endif
                 }

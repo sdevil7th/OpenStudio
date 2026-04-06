@@ -32,7 +32,6 @@ Use this flow instead:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-arm64.zip`
-   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-x64.zip`
 8. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
 The stable installer/runtime filenames are part of the public download contract. The website repo is now the only publisher of public metadata and redirects.
@@ -116,15 +115,14 @@ If you want one command for the guarded macOS path, use:
    `./tools/package-macos-release.sh build-release-macos/<path-to-OpenStudio.app> 1.0.0`
    If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign` and `spctl`. If notarization credentials are present, it also staples and validates the notarized DMG.
    For the zero-cost v1 path, leave those signing variables unset and ship the unsigned DMG with manual Gatekeeper override instructions on the download page.
-5. Prepare and package separate macOS AI runtime archives:
+5. Prepare and package the macOS AI runtime archive for Apple Silicon:
    `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
    `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -ExpectedRuntimeVersion 1.0.0`
-   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-x64 -Architecture x64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
-   `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-x64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-x64.zip -ExpectedRuntimeVersion 1.0.0`
+   Intel macOS AI runtime support is currently disabled because the pinned `audio-separator` dependency stack does not publish a satisfiable Intel macOS wheel set for the release path.
 6. Generate updater metadata with the DMG path and URL included.
    For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 13.0`.
 7. Validate the generated metadata:
-   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacArm64AiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -MacX64AiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-x64.zip`
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacArm64AiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip`
 8. Stage the uniquely named GitHub Release metadata assets:
    `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
 
@@ -195,13 +193,10 @@ pinned AI packages into it, validates that the packaged runtime is not a venv, a
 publishes the resulting archive.
 
 GitHub-hosted macOS releases no longer require a pre-existing committed `tools/python-macos`
-tree. The release workflow now builds separate `arm64` and `x64` downloadable runtimes from
-the same relocatable standalone Python source on GitHub-hosted macOS runners. The arm64
-runtime is prepared on `macos-14`, and the x64 runtime is prepared on `macos-15-intel`, so each
-published runtime is verified on matching hardware before release. If GitHub Actions reports a
-runner error such as `The configuration '...' is not supported` for the x64 runtime job, switch
-that job to the exact Intel macOS hosted runner label shown as available under `Actions -> Runners`
-for this repo rather than guessing another generic macOS label.
+tree. The release workflow now builds the downloadable AI runtime for Apple Silicon (`arm64`)
+from the same relocatable standalone Python source on GitHub-hosted macOS runners. Intel macOS
+machines can still run the base app, but AI Tools remain unsupported there until the pinned
+dependency stack publishes a satisfiable Intel macOS wheel set for release builds.
 
 Optional future additions:
 

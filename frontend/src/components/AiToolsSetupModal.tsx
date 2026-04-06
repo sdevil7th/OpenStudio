@@ -57,6 +57,7 @@ export default function AiToolsSetupModal() {
     buildRuntimeMode === "downloaded-runtime" ||
     (aiToolsStatus.installSource === "downloadedRuntime" && !requiresExternalPython);
   const isModelFailure = aiToolsStatus.errorCode === "model_download_failed";
+  const isUnsupportedPlatform = aiToolsStatus.errorCode === "runtime_platform_unsupported";
   const isRuntimeManifestFailure =
     aiToolsStatus.errorCode === "runtime_manifest_missing" ||
     aiToolsStatus.errorCode === "runtime_manifest_unavailable" ||
@@ -73,6 +74,8 @@ export default function AiToolsSetupModal() {
 
   const errorTitle = isModelFailure
     ? "Model download needs attention"
+    : isUnsupportedPlatform
+      ? "AI Tools are not available on this Mac"
     : isRuntimeManifestFailure
       ? "AI runtime download info is unavailable"
       : isRuntimeArchiveFailure
@@ -89,6 +92,8 @@ export default function AiToolsSetupModal() {
 
   const retryGuidance = isModelFailure
     ? "The runtime is already in place. Retry after checking your internet connection, VPN, firewall, or antivirus if the download keeps failing."
+    : isUnsupportedPlatform
+      ? "This release currently supports AI Tools on Apple Silicon Macs only. The base app can still be used normally on Intel Macs."
     : isRuntimeManifestFailure
       ? "Retry once in case the release metadata service was temporarily unavailable. If the same message appears again, OpenStudio may not be able to reach the published AI runtime metadata from this machine."
     : isDownloadedRuntimeFlow
@@ -145,6 +150,8 @@ export default function AiToolsSetupModal() {
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 {isModelFailure
                   ? "OpenStudio prepared the AI runtime, but the stem model download did not complete."
+                  : isUnsupportedPlatform
+                    ? "This OpenStudio release does not currently publish an AI runtime for this Mac architecture."
                   : isRuntimeManifestFailure
                     ? "OpenStudio could not fetch the published AI runtime metadata needed for this setup."
                   : isRuntimeArchiveFailure
