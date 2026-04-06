@@ -343,6 +343,21 @@ jobs:
             echo "AI_RUNTIME_RELEASE_TAG=ai-runtime-v${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
           fi
 
+      - name: Verify AI runtime release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$AI_RUNTIME_RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Using AI runtime release tag: $AI_RUNTIME_RELEASE_TAG"
+            exit 0
+          fi
+
+          echo "Configured AI runtime release '$AI_RUNTIME_RELEASE_TAG' was not found in ${{ github.repository }}." >&2
+          echo "App releases now reuse an existing AI runtime release by default." >&2
+          echo "Either run .github/workflows/ai-runtime-release.yml first, or point OPENSTUDIO_AI_RUNTIME_RELEASE_TAG / OPENSTUDIO_AI_RUNTIME_VERSION at an existing runtime release." >&2
+          exit 1
+
       - uses: actions/download-artifact@v4
         with:
           name: windows-release

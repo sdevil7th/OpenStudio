@@ -256,6 +256,19 @@ export default function StemSeparationModal() {
                 {aiToolsStatus.error ? (
                   <p className="mt-2 text-daw-record">{aiToolsStatus.error}</p>
                 ) : null}
+                {aiToolsStatus.lastPhase ? (
+                  <p className="mt-2">Last phase: <span className="text-daw-text">{aiToolsStatus.lastPhase}</span></p>
+                ) : null}
+                {aiToolsStatus.installSessionId ? (
+                  <p className="mt-1 break-all">
+                    Session: <span className="text-daw-text">{aiToolsStatus.installSessionId}</span>
+                  </p>
+                ) : null}
+                {aiToolsStatus.detailLogPath ? (
+                  <p className="mt-1 break-all">
+                    Install log: <span className="text-daw-text">{aiToolsStatus.detailLogPath}</span>
+                  </p>
+                ) : null}
               </div>
 
               {aiToolsStatus.installInProgress && (
@@ -288,7 +301,9 @@ export default function StemSeparationModal() {
                         : "Install AI Tools"
                       : "Install AI Tools"}
                   </Button>
-                  {(aiToolsStatus.state === "pythonMissing" || aiToolsStatus.state === "error") && (
+                  {(aiToolsStatus.state === "pythonMissing"
+                    || aiToolsStatus.state === "error"
+                    || aiToolsStatus.state === "cancelled") && (
                     <Button variant="ghost" onClick={() => void openAiToolsSetup()}>
                       Open Setup Guide
                     </Button>

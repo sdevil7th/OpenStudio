@@ -247,6 +247,8 @@ export interface AiToolsStatus {
     verificationMode?: "in-process" | "subprocess";
     runtimeCandidate?: string;
     installSessionId?: string;
+    lastPhase?: string;
+    terminalReason?: string;
     fallbackAttempted?: boolean;
     restartRequired?: boolean;
   }
@@ -4132,6 +4134,7 @@ class NativeBridge {
         buildRuntimeMode: "downloaded-runtime",
         supportedBackends: ["cpu"],
         selectedBackend: "cpu",
+        lastPhase: "runtimeMissing",
         restartRequired: false,
       };
   }

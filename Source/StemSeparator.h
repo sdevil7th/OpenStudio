@@ -46,6 +46,8 @@ public:
         juce::String verificationMode;
         juce::String runtimeCandidate;
         juce::String installSessionId;
+        juce::String lastPhase;
+        juce::String terminalReason;
         bool fallbackAttempted = false;
         bool restartRequired = false;
     };
@@ -243,6 +245,11 @@ private:
     juce::String installRuntimeRootPath;
     juce::String installRuntimeCandidate;
     juce::String installSessionId;
+    juce::String installLastObservedPhase;
+    double installLaunchTimeMs = 0.0;
+    double installFirstOutputTimeMs = 0.0;
+    double installLastOutputTimeMs = 0.0;
+    bool installSawTerminalStatus = false;
     bool installFallbackAttempted = false;
     SeparationProgress lastProgress;
     mutable AiToolsStatus lastAiToolsStatus;

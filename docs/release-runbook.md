@@ -18,6 +18,12 @@
 
 For normal public releases, do not draft a GitHub release manually and do not upload installer assets by hand.
 
+Default release model:
+
+- Normal app releases reuse an already-published AI runtime release.
+- Rebuild/publish AI runtimes only when runtime dependencies, packaging scripts, or runtime metadata actually changed.
+- The app release workflow expects `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and `OPENSTUDIO_AI_RUNTIME_VERSION` to point at a real runtime release, and it now fails early if that runtime release is missing.
+
 Use this flow instead:
 
 1. Run the local Windows RC gate first:
@@ -25,14 +31,18 @@ Use this flow instead:
 2. Confirm the installed Windows app launches visibly in both normal mode and `--ui-safe-mode`, and `%APPDATA%\OpenStudio\logs\OpenStudio_Startup.log` records `Frontend startup state: boot-ready`.
 3. Push the release-ready commit(s) to GitHub.
 4. Wait for `.github/workflows/verify.yml` to pass on that commit.
-5. Push a version tag like `v0.0.2`.
-6. Let `.github/workflows/release.yml` build Windows and macOS, publish the GitHub Release, attach the fixed-name assets, and then trigger the website repo so it can publish the public metadata and redirects.
-7. Verify the published direct-download URLs:
+5. Decide whether the AI runtime needs rebuilding:
+   - If runtime inputs did not change, keep `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and `OPENSTUDIO_AI_RUNTIME_VERSION` pinned to the latest known-good runtime release.
+   - If runtime inputs changed, publish the runtime first with `.github/workflows/ai-runtime-release.yml`, then update those variables to the new runtime release tag/version.
+6. Push a version tag like `v0.0.2`.
+7. Let `.github/workflows/release.yml` build Windows and macOS, reuse the pinned AI runtime release, publish the GitHub Release, attach the fixed-name assets, and then trigger the website repo so it can publish the public metadata and redirects.
+8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
-   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-windows-x64.zip`
+   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-directml-x64.zip`
+   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-cuda-x64.zip`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-arm64.zip`
-8. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
+9. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
 The stable installer/runtime filenames are part of the public download contract. The website repo is now the only publisher of public metadata and redirects.
 
@@ -178,6 +188,7 @@ For the current release path, the only non-signing secret required for public me
 Optional repository variables:
 
 - `OPENSTUDIO_AI_RUNTIME_VERSION`
+- `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR`

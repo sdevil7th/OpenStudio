@@ -70,6 +70,7 @@ def emit(state: str, progress: float, **kwargs) -> None:
         payload["runtimeCandidate"] = RUNTIME_CANDIDATE
     payload["fallbackAttempted"] = FALLBACK_ATTEMPTED
     payload.update(kwargs)
+    payload.setdefault("lastPhase", state)
     if LOG_PATH is not None and "detailLogPath" not in payload:
         payload["detailLogPath"] = str(LOG_PATH)
     print(json.dumps(payload), flush=True)
@@ -83,7 +84,7 @@ def fail(
     error_code: str = "unknown_error",
     **kwargs,
 ) -> None:
-    emit(state, progress, error=message, errorCode=error_code, **kwargs)
+    emit(state, progress, error=message, errorCode=error_code, terminalReason=error_code, **kwargs)
     sys.exit(1)
 
 

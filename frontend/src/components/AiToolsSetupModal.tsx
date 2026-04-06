@@ -51,6 +51,7 @@ export default function AiToolsSetupModal() {
 
   const isPythonMissing = aiToolsStatus.state === "pythonMissing";
   const hasInstallError = aiToolsStatus.state === "error" || aiToolsStatus.state === "cancelled";
+  const isInstallComplete = aiToolsStatus.available || aiToolsStatus.state === "ready";
   const requiresExternalPython = aiToolsStatus.requiresExternalPython;
   const buildRuntimeMode = aiToolsStatus.buildRuntimeMode ?? "downloaded-runtime";
   const isDownloadedRuntimeFlow =
@@ -69,7 +70,10 @@ export default function AiToolsSetupModal() {
     aiToolsStatus.errorCode === "runtime_verification_failed" ||
     aiToolsStatus.errorCode === "runtime_not_relocatable" ||
     aiToolsStatus.errorCode === "runtime_validation_failed" ||
-    aiToolsStatus.errorCode === "runtime_python_unlaunchable";
+    aiToolsStatus.errorCode === "runtime_python_unlaunchable" ||
+    aiToolsStatus.errorCode === "installer_exited_incomplete" ||
+    aiToolsStatus.errorCode === "installer_output_timeout" ||
+    aiToolsStatus.errorCode === "model_preparation_incomplete";
   const installLogPath = aiToolsStatus.detailLogPath;
 
   const errorTitle = isModelFailure
@@ -112,7 +116,6 @@ export default function AiToolsSetupModal() {
   };
 
   const handleRetry = async () => {
-    closeAiToolsSetup();
     await installAiTools();
   };
 
@@ -136,7 +139,48 @@ export default function AiToolsSetupModal() {
             <p className="text-xs text-daw-text-secondary leading-relaxed">{recommendationText}</p>
           </div>
 
-          {isPythonMissing ? (
+          {isInstallComplete ? (
+            <div className="rounded border border-green-600/40 bg-green-950/30 p-3 space-y-2">
+              <p className="text-sm font-semibold text-green-400">AI Tools are ready</p>
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                The runtime and stem-separation model are installed for this OpenStudio session.
+                You can continue straight into stem separation now.
+              </p>
+              {aiToolsStatus.selectedBackend ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Active backend: <span className="text-daw-text">{aiToolsStatus.selectedBackend}</span>
+                </p>
+              ) : null}
+            </div>
+          ) : aiToolsStatus.installInProgress ? (
+            <div className="rounded border border-daw-accent/40 bg-neutral-950/70 p-3 space-y-3">
+              <p className="text-sm font-semibold text-daw-text">Installing AI Tools</p>
+              <div className="w-full bg-neutral-900 rounded-full h-2">
+                <div
+                  className="bg-daw-accent h-2 rounded-full transition-all duration-200"
+                  style={{ width: `${Math.max(4, Math.round(aiToolsStatus.progress * 100))}%` }}
+                />
+              </div>
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                {aiToolsStatus.message || "Preparing AI Tools..."}
+              </p>
+              {aiToolsStatus.lastPhase ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Current phase: <span className="text-daw-text">{aiToolsStatus.lastPhase}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.runtimeCandidate ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Runtime candidate: <span className="text-daw-text">{aiToolsStatus.runtimeCandidate}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.installSessionId ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed break-all">
+                  Install session: <span className="text-daw-text">{aiToolsStatus.installSessionId}</span>
+                </p>
+              ) : null}
+            </div>
+          ) : isPythonMissing ? (
             <div className="rounded border border-yellow-600/40 bg-yellow-950/30 p-3 space-y-2">
               <p className="text-sm font-semibold text-yellow-400">Python is required</p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
@@ -188,6 +232,16 @@ export default function AiToolsSetupModal() {
               {aiToolsStatus.installSessionId ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed break-all">
                   Install session: <span className="text-daw-text">{aiToolsStatus.installSessionId}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.lastPhase ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Failed phase: <span className="text-daw-text">{aiToolsStatus.lastPhase}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.terminalReason ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Terminal reason: <span className="text-daw-text">{aiToolsStatus.terminalReason}</span>
                 </p>
               ) : null}
               {requiresExternalPython ? (
@@ -305,8 +359,9 @@ export default function AiToolsSetupModal() {
 
           <div className="border-t border-neutral-800 pt-3 space-y-2">
             <p className="text-xs text-daw-text-secondary leading-relaxed">
-              After the runtime is ready, OpenStudio will continue the rest of the AI tools setup in
-              the background. You can keep using the app while that runs.
+              {isInstallComplete
+                ? "AI Tools finished installing in this session. You can close this window and continue working."
+                : "After the runtime is ready, OpenStudio will continue the rest of the AI tools setup in the background. You can keep using the app while that runs."}
             </p>
           </div>
         </div>
@@ -328,9 +383,15 @@ export default function AiToolsSetupModal() {
         <Button
           variant="primary"
           onClick={() => void handleRetry()}
-          disabled={aiToolsStatus.installInProgress}
+          disabled={aiToolsStatus.installInProgress || isInstallComplete}
         >
-          {requiresExternalPython && isPythonMissing ? "Retry After Python Install" : "Retry Install"}
+          {isInstallComplete
+            ? "AI Tools Ready"
+            : aiToolsStatus.installInProgress
+              ? "Installing..."
+              : requiresExternalPython && isPythonMissing
+                ? "Retry After Python Install"
+                : "Retry Install"}
         </Button>
       </ModalFooter>
     </Modal>

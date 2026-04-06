@@ -8,6 +8,7 @@ constexpr auto kInstallSourceDownloadedRuntime = "downloadedRuntime";
 constexpr auto kInstallSourceExternalPython = "externalPython";
 constexpr auto kBuildRuntimeModeDownloadedRuntime = "downloaded-runtime";
 constexpr auto kBuildRuntimeModeUnbundledDev = "unbundled-dev";
+constexpr double kInstallerOutputTimeoutMs = 20000.0;
 
 struct RuntimeDownloadCandidate
 {
@@ -65,6 +66,12 @@ bool isAiToolsTerminalState (const juce::String& state)
         || state == "pythonMissing"
         || state == "runtimeMissing"
         || state == "modelMissing";
+}
+
+bool isInstallerTerminalFailureCode (const juce::String& errorCode)
+{
+    return errorCode == "installer_exited_incomplete"
+        || errorCode == "installer_output_timeout";
 }
 
 juce::String sanitiseArchiveEntryName (juce::String name)
@@ -498,7 +505,21 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.progress = 1.0f;
         status.error.clear();
         status.errorCode.clear();
+        status.terminalReason.clear();
+        status.lastPhase = "ready";
         status.message = "AI tools are ready.";
+        return status;
+    }
+
+    if (status.state == "error" && isInstallerTerminalFailureCode(status.errorCode))
+    {
+        status.available = false;
+        status.installInProgress = false;
+        status.terminalReason = status.errorCode;
+
+        if (status.message.isEmpty())
+            status.message = "OpenStudio could not confirm that AI Tools finished installing.";
+
         return status;
     }
 
@@ -509,6 +530,8 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.message = "The AI tools installer is unavailable in this build.";
         status.error = "AI tools installer script not found.";
         status.errorCode = "installer_unavailable";
+        status.lastPhase = "installer_unavailable";
+        status.terminalReason = status.errorCode;
         return status;
     }
 
@@ -519,6 +542,8 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.message = "This release is missing its AI runtime download configuration. Reinstall OpenStudio or contact support.";
         status.error = "OpenStudio could not find the compiled AI runtime manifest URL for this installed build.";
         status.errorCode = "runtime_manifest_missing";
+        status.lastPhase = "fetching_runtime_manifest";
+        status.terminalReason = status.errorCode;
         return status;
     }
 
@@ -531,6 +556,8 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
             status.message = "Python 3.10 through 3.13 is required for this dev build before AI tools can be installed.";
             status.error.clear();
             status.errorCode = "python_missing";
+            status.lastPhase = "pythonMissing";
+            status.terminalReason.clear();
             return status;
         }
 
@@ -541,6 +568,8 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
             : "Install AI Tools to download the managed OpenStudio AI runtime.";
         status.error.clear();
         status.errorCode.clear();
+        status.lastPhase = "runtimeMissing";
+        status.terminalReason.clear();
         return status;
     }
 
@@ -549,6 +578,8 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
     status.message = "Install AI Tools to download the stem separation model.";
     status.error.clear();
     status.errorCode.clear();
+    status.lastPhase = "modelMissing";
+    status.terminalReason.clear();
     return status;
 }
 
@@ -573,6 +604,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
     status.error.clear();
     status.errorCode.clear();
     status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
+    status.lastPhase = status.state;
     status.supportedBackends.add("cpu");
     status.selectedBackend = "cpu";
     status.modelVersion = kStemModelName;
@@ -642,6 +674,7 @@ void StemSeparator::scheduleStatusRefresh()
 
     std::thread ([this]
     {
+        const auto previousStatus = getCachedAiToolsStatusSnapshot();
         auto installedPython = findPython();
         auto systemPython = findSystemPython();
         auto script = findScript();
@@ -658,6 +691,24 @@ void StemSeparator::scheduleStatusRefresh()
         refreshedStatus.runtimeVersion = runtimeCapabilities.runtimeVersion;
         refreshedStatus.modelVersion = runtimeCapabilities.modelVersion;
         refreshedStatus.restartRequired = runtimeCapabilities.restartRequired;
+
+        if (isInstallerTerminalFailureCode(previousStatus.errorCode))
+        {
+            appendAiToolsLogLine(makeAiLogEvent("host",
+                                                "refresh",
+                                                "post_exit_refresh_result",
+                                                previousStatus.installSessionId,
+                                                [&] (juce::DynamicObject& obj)
+                                                {
+                                                    obj.setProperty("runtimeCandidate", previousStatus.runtimeCandidate);
+                                                    obj.setProperty("previousErrorCode", previousStatus.errorCode);
+                                                    obj.setProperty("lastPhase", previousStatus.lastPhase);
+                                                    obj.setProperty("refreshedState", refreshedStatus.state);
+                                                    obj.setProperty("runtimeInstalled", refreshedStatus.runtimeInstalled);
+                                                    obj.setProperty("modelInstalled", refreshedStatus.modelInstalled);
+                                                    obj.setProperty("available", refreshedStatus.available);
+                                                }));
+        }
 
         {
             const juce::ScopedLock lock (aiToolsStatusLock);
@@ -899,6 +950,8 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("verificationMode", status.verificationMode);
     obj->setProperty("runtimeCandidate", status.runtimeCandidate);
     obj->setProperty("installSessionId", status.installSessionId);
+    obj->setProperty("lastPhase", status.lastPhase);
+    obj->setProperty("terminalReason", status.terminalReason);
     obj->setProperty("fallbackAttempted", status.fallbackAttempted);
     obj->setProperty("restartRequired", status.restartRequired);
     return juce::var(obj.release());
@@ -1019,6 +1072,8 @@ juce::var StemSeparator::installAiTools()
                 status.helpUrl = requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.installSessionId = sessionId;
+                status.lastPhase = state;
+                status.terminalReason = state == "error" ? errorCode : juce::String();
                 status.fallbackAttempted = fallbackAttempted;
             });
         };
@@ -1060,6 +1115,8 @@ juce::var StemSeparator::installAiTools()
                 status.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.installSessionId = sessionId;
+                status.lastPhase = state;
+                status.terminalReason.clear();
                 status.fallbackAttempted = fallbackAttempted;
             });
         };
@@ -1511,6 +1568,12 @@ juce::var StemSeparator::installAiTools()
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
         appendAiToolsLogLine("installerScript=" + installerScript.getFullPathName());
         appendAiToolsLogLine("installerCommand=" + cmd);
+        appendAiToolsLogLine(makeAiLogEvent("host", "launch", "installer_launch_started", sessionId,
+                                            [&] (juce::DynamicObject& obj)
+                                            {
+                                                obj.setProperty("runtimeCandidate", selectedRuntimeCandidate);
+                                                obj.setProperty("command", cmd);
+                                            }));
 
         auto nextInstallProcess = std::make_unique<juce::ChildProcess>();
         if (! nextInstallProcess->start(cmd))
@@ -1537,6 +1600,11 @@ juce::var StemSeparator::installAiTools()
             installRuntimeRootPath = runtimeRoot.getFullPathName();
             installRuntimeCandidate = selectedRuntimeCandidate;
             installSessionId = sessionId;
+            installLastObservedPhase = devFallbackEnabled ? juce::String("creating_venv") : juce::String("verifying_runtime");
+            installLaunchTimeMs = juce::Time::getMillisecondCounterHiRes();
+            installFirstOutputTimeMs = 0.0;
+            installLastOutputTimeMs = 0.0;
+            installSawTerminalStatus = false;
             installFallbackAttempted = fallbackAttempted;
             installProcess = std::move(nextInstallProcess);
             lastAiToolsStatus.state = devFallbackEnabled ? "creating_venv" : "verifying_runtime";
@@ -1558,6 +1626,8 @@ juce::var StemSeparator::installAiTools()
             lastAiToolsStatus.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
             lastAiToolsStatus.runtimeCandidate = selectedRuntimeCandidate;
             lastAiToolsStatus.installSessionId = sessionId;
+            lastAiToolsStatus.lastPhase = installLastObservedPhase;
+            lastAiToolsStatus.terminalReason.clear();
             lastAiToolsStatus.fallbackAttempted = fallbackAttempted;
         }
     }).detach();
@@ -1576,6 +1646,23 @@ void StemSeparator::pollInstallProgress()
         if (! installProcess)
             return;
 
+        auto noteInstallerOutput = [&]
+        {
+            const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+            if (installFirstOutputTimeMs <= 0.0)
+            {
+                installFirstOutputTimeMs = nowMs;
+                appendAiToolsLogLine(makeAiLogEvent("host", "installer", "installer_first_output", installSessionId,
+                                                    [&] (juce::DynamicObject& obj)
+                                                    {
+                                                        obj.setProperty("runtimeCandidate", installRuntimeCandidate);
+                                                        obj.setProperty("launchDelayMs", juce::roundToInt(nowMs - installLaunchTimeMs));
+                                                    }));
+            }
+
+            installLastOutputTimeMs = nowMs;
+        };
+
         char buffer[4096];
         while (installProcess->isRunning())
         {
@@ -1585,6 +1672,31 @@ void StemSeparator::pollInstallProgress()
 
             buffer[bytesRead] = '\0';
             installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
+            noteInstallerOutput();
+        }
+
+        if (installProcess->isRunning()
+            && installFirstOutputTimeMs <= 0.0
+            && juce::Time::getMillisecondCounterHiRes() - installLaunchTimeMs >= kInstallerOutputTimeoutMs)
+        {
+            appendAiToolsLogLine(makeAiLogEvent("host", "installer", "installer_output_timeout", installSessionId,
+                                                [&] (juce::DynamicObject& obj)
+                                                {
+                                                    obj.setProperty("runtimeCandidate", installRuntimeCandidate);
+                                                    obj.setProperty("lastPhase", installLastObservedPhase);
+                                                    obj.setProperty("timeoutMs", juce::roundToInt(kInstallerOutputTimeoutMs));
+                                                }));
+
+            lastAiToolsStatus.state = "error";
+            lastAiToolsStatus.progress = 0.0f;
+            lastAiToolsStatus.available = false;
+            lastAiToolsStatus.message = "OpenStudio did not receive any installer progress from the AI tools setup.";
+            lastAiToolsStatus.error = "The AI tools installer did not emit progress within "
+                + juce::String(juce::roundToInt(kInstallerOutputTimeoutMs / 1000.0)) + " seconds.";
+            lastAiToolsStatus.errorCode = "installer_output_timeout";
+            lastAiToolsStatus.lastPhase = installLastObservedPhase.isNotEmpty() ? installLastObservedPhase : juce::String("installer_launch");
+            lastAiToolsStatus.terminalReason = "installer_output_timeout";
+            installProcess->kill();
         }
 
         if (! installProcess->isRunning())
@@ -1597,6 +1709,7 @@ void StemSeparator::pollInstallProgress()
 
                 buffer[bytesRead] = '\0';
                 installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
+                noteInstallerOutput();
             }
         }
 
@@ -1607,7 +1720,13 @@ void StemSeparator::pollInstallProgress()
             installOutputBuffer = installOutputBuffer.substring(lineEnd + 1);
 
             if (line.startsWith("{"))
+            {
                 lastAiToolsStatus = parseInstallJsonLine(line);
+                installLastObservedPhase = lastAiToolsStatus.lastPhase.isNotEmpty() ? lastAiToolsStatus.lastPhase
+                                                                                    : lastAiToolsStatus.state;
+                if (isAiToolsTerminalState(lastAiToolsStatus.state))
+                    installSawTerminalStatus = true;
+            }
             else if (line.isNotEmpty())
             {
                 installDiagnosticLines.add(line);
@@ -1624,6 +1743,10 @@ void StemSeparator::pollInstallProgress()
             if (finalLine.startsWith("{"))
             {
                 lastAiToolsStatus = parseInstallJsonLine(finalLine);
+                installLastObservedPhase = lastAiToolsStatus.lastPhase.isNotEmpty() ? lastAiToolsStatus.lastPhase
+                                                                                    : lastAiToolsStatus.state;
+                if (isAiToolsTerminalState(lastAiToolsStatus.state))
+                    installSawTerminalStatus = true;
             }
             else if (finalLine.isNotEmpty())
             {
@@ -1650,6 +1773,37 @@ void StemSeparator::pollInstallProgress()
                     ? "OpenStudio could not start the downloaded AI runtime."
                     : "OpenStudio could not finish verifying the downloaded AI runtime.";
                 lastAiToolsStatus.error = "AI tools installer exited with code " + juce::String(exitCode) + ".";
+                lastAiToolsStatus.lastPhase = installLastObservedPhase.isNotEmpty() ? installLastObservedPhase : juce::String("installer_process");
+                lastAiToolsStatus.terminalReason = lastAiToolsStatus.errorCode;
+
+                if (lastDiagnostics.isNotEmpty())
+                    lastAiToolsStatus.error += " Last output: " + lastDiagnostics;
+            }
+            else if (lastAiToolsStatus.state != "error"
+                     && lastAiToolsStatus.state != "cancelled"
+                     && lastAiToolsStatus.state != "ready")
+            {
+                const auto lastDiagnostics = summariseDiagnosticLines(installDiagnosticLines);
+                appendAiToolsLogLine(makeAiLogEvent("host",
+                                                    "installer",
+                                                    "installer_exited_without_terminal_status",
+                                                    installSessionId,
+                                                    [&] (juce::DynamicObject& obj)
+                                                    {
+                                                        obj.setProperty("runtimeCandidate", installRuntimeCandidate);
+                                                        obj.setProperty("exitCode", static_cast<int> (exitCode));
+                                                        obj.setProperty("lastPhase", installLastObservedPhase);
+                                                        obj.setProperty("sawTerminalStatus", installSawTerminalStatus);
+                                                    }));
+
+                lastAiToolsStatus.state = "error";
+                lastAiToolsStatus.progress = 0.0f;
+                lastAiToolsStatus.available = false;
+                lastAiToolsStatus.errorCode = "installer_exited_incomplete";
+                lastAiToolsStatus.message = "OpenStudio could not confirm that AI tools finished installing.";
+                lastAiToolsStatus.error = "The AI tools installer exited before it reported a ready state.";
+                lastAiToolsStatus.lastPhase = installLastObservedPhase.isNotEmpty() ? installLastObservedPhase : juce::String("installer_process");
+                lastAiToolsStatus.terminalReason = "installer_exited_incomplete";
 
                 if (lastDiagnostics.isNotEmpty())
                     lastAiToolsStatus.error += " Last output: " + lastDiagnostics;
@@ -1658,14 +1812,6 @@ void StemSeparator::pollInstallProgress()
             lastAiToolsStatus.runtimeCandidate = installRuntimeCandidate;
             lastAiToolsStatus.installSessionId = installSessionId;
             lastAiToolsStatus.fallbackAttempted = installFallbackAttempted;
-
-            if (lastAiToolsStatus.state != "error"
-                && lastAiToolsStatus.state != "cancelled"
-                && lastAiToolsStatus.state != "ready")
-            {
-                lastAiToolsStatus.state = "checking";
-                lastAiToolsStatus.message = "Verifying AI tools installation...";
-            }
 
             lastAiToolsStatus.installInProgress = false;
             aiToolsInstallWorkInProgress = false;
@@ -1677,6 +1823,11 @@ void StemSeparator::pollInstallProgress()
             installRuntimeRootPath.clear();
             installRuntimeCandidate.clear();
             installSessionId.clear();
+            installLastObservedPhase.clear();
+            installLaunchTimeMs = 0.0;
+            installFirstOutputTimeMs = 0.0;
+            installLastOutputTimeMs = 0.0;
+            installSawTerminalStatus = false;
             installFallbackAttempted = false;
             shouldRefreshAfterExit = lastAiToolsStatus.state != "ready";
         }
@@ -1733,10 +1884,19 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.runtimeCandidate = json["runtimeCandidate"].toString();
     if (json.hasProperty("sessionId"))
         status.installSessionId = json["sessionId"].toString();
+    if (json.hasProperty("lastPhase"))
+        status.lastPhase = json["lastPhase"].toString();
+    if (json.hasProperty("terminalReason"))
+        status.terminalReason = json["terminalReason"].toString();
     if (json.hasProperty("fallbackAttempted"))
         status.fallbackAttempted = static_cast<bool>(json["fallbackAttempted"]);
     if (json.hasProperty("restartRequired"))
         status.restartRequired = static_cast<bool>(json["restartRequired"]);
+
+    if (status.lastPhase.isEmpty() && status.state.isNotEmpty())
+        status.lastPhase = status.state;
+    if (status.state == "error" && status.terminalReason.isEmpty() && status.errorCode.isNotEmpty())
+        status.terminalReason = status.errorCode;
 
     status.installInProgress = ! isAiToolsTerminalState(status.state);
     if (status.requiresExternalPython && status.helpUrl.isEmpty())
@@ -1949,6 +2109,14 @@ void StemSeparator::cancelAiToolsInstall()
         installCommandLine.clear();
         installRuntimePythonPath.clear();
         installRuntimeRootPath.clear();
+        installRuntimeCandidate.clear();
+        installSessionId.clear();
+        installLastObservedPhase.clear();
+        installLaunchTimeMs = 0.0;
+        installFirstOutputTimeMs = 0.0;
+        installLastOutputTimeMs = 0.0;
+        installSawTerminalStatus = false;
+        installFallbackAttempted = false;
     }
 
     aiToolsInstallWorkInProgress = false;
@@ -1962,6 +2130,8 @@ void StemSeparator::cancelAiToolsInstall()
         status.message = "AI tools installation was cancelled.";
         status.error.clear();
         status.errorCode.clear();
+        status.lastPhase = "cancelled";
+        status.terminalReason.clear();
         if (status.requiresExternalPython)
             status.helpUrl = kPythonHelpUrl;
         else
