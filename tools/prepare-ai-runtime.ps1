@@ -14,6 +14,12 @@ param(
     [string]$RequirementsFile = "tools/ai-runtime-requirements.txt",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsTorchIndexUrl = "https://download.pytorch.org/whl/cu121",
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$WindowsTorchPackages = @("torch", "torchvision", "torchaudio"),
+
+    [Parameter(Mandatory = $false)]
     [string]$ExpectedRuntimeVersion = "",
 
     [Parameter(Mandatory = $false)]
@@ -299,6 +305,65 @@ function Get-PipInstallArguments {
     return $arguments
 }
 
+function Resolve-RequirementsFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("windows", "macos")]
+        [string]$TargetPlatform,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ConfiguredPath
+    )
+
+    $resolved = Resolve-AbsolutePath -PathValue $ConfiguredPath
+    if ([System.IO.Path]::GetFileName($resolved) -ne "ai-runtime-requirements.txt") {
+        return $resolved
+    }
+
+    $preferredFile = switch ($TargetPlatform) {
+        "windows" { Resolve-AbsolutePath -PathValue "tools/ai-runtime-requirements-windows.txt" }
+        "macos"   { Resolve-AbsolutePath -PathValue "tools/ai-runtime-requirements-macos.txt" }
+        default   { $resolved }
+    }
+
+    if (Test-Path $preferredFile) {
+        return $preferredFile
+    }
+
+    return $resolved
+}
+
+function Invoke-RuntimeCapabilityProbe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimePython,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProbeScriptPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPlatform
+    )
+
+    $probeJson = & $RuntimePython $ProbeScriptPath --acceleration-mode auto 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "AI runtime capability probe failed. Output: $probeJson"
+    }
+
+    $payload = ($probeJson | Select-Object -Last 1) | ConvertFrom-Json -AsHashtable
+    if (-not $payload.runtimeReady) {
+        throw "AI runtime capability probe did not report a ready runtime."
+    }
+
+    if ($TargetPlatform -eq "windows") {
+        if (-not ($payload.packagedBackends -contains "cuda" -or $payload.packagedBackends -contains "directml")) {
+            throw "Windows AI runtime did not package any accelerated backend support."
+        }
+    }
+
+    return $payload
+}
+
 function Test-RuntimeImport {
     param(
         [Parameter(Mandatory = $true)]
@@ -319,10 +384,14 @@ function Test-RuntimeImport {
 }
 
 $resolvedRuntimeRoot = Resolve-AbsolutePath -PathValue $RuntimeRoot
-$resolvedRequirementsFile = Resolve-AbsolutePath -PathValue $RequirementsFile
+$resolvedRequirementsFile = Resolve-RequirementsFile -TargetPlatform $Platform -ConfiguredPath $RequirementsFile
+$probeScriptPath = Resolve-AbsolutePath -PathValue "tools/ai_runtime_probe.py"
 
 if (-not (Test-Path $resolvedRequirementsFile)) {
     throw "Requirements file not found: $resolvedRequirementsFile"
+}
+if (-not (Test-Path $probeScriptPath)) {
+    throw "AI runtime probe script not found: $probeScriptPath"
 }
 
 $resolvedArchitecture = Get-TargetArchitecture -TargetPlatform $Platform -RequestedArchitecture $Architecture
@@ -403,11 +472,26 @@ try {
     $pipInstallArguments += Get-PipInstallArguments -TargetPlatform $Platform -RequirementsPath $resolvedRequirementsFile
     Invoke-LoggedStep -Description "Installing AI runtime requirements into standalone runtime" -Command $pipInstallArguments
 
+    if ($Platform -eq "windows") {
+        $windowsTorchInstallArguments = @(
+            $runtimePython,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--index-url",
+            $WindowsTorchIndexUrl
+        ) + $WindowsTorchPackages
+        Invoke-LoggedStep -Description "Installing CUDA-capable PyTorch wheels for Windows AI runtime" -Command $windowsTorchInstallArguments
+    }
+
     Invoke-LoggedStep -Description "Verifying standalone AI runtime import" -Command @(
         $runtimePython,
         "-c",
         "import audio_separator.separator; print('ok')"
     )
+
+    $capabilityProbe = Invoke-RuntimeCapabilityProbe -RuntimePython $runtimePython -ProbeScriptPath $probeScriptPath -TargetPlatform $Platform
 
     $metadata = [ordered]@{
         schemaVersion = 2
@@ -423,6 +507,11 @@ try {
             targetTriple = $targetTriple
             assetName = $assetName
             assetUrl = $assetUrl
+        }
+        capabilityProfile = [ordered]@{
+            packagedBackends = @($capabilityProbe.packagedBackends)
+            supportedBackends = @($capabilityProbe.supportedBackends)
+            selectedBackend = [string]$capabilityProbe.selectedBackend
         }
     }
 

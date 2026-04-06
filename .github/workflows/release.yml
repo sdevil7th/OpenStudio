@@ -82,7 +82,7 @@ jobs:
             -Platform windows `
             -RuntimeRoot $runtimeRoot `
             -Architecture x64 `
-            -RequirementsFile "tools/ai-runtime-requirements.txt" `
+            -RequirementsFile "tools/ai-runtime-requirements-windows.txt" `
             -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION `
             -StandaloneReleaseTag $env:AI_RUNTIME_STANDALONE_RELEASE_TAG `
             -StandalonePythonVersion $env:AI_RUNTIME_STANDALONE_PYTHON_VERSION `
@@ -272,7 +272,7 @@ jobs:
             -Platform macos `
             -RuntimeRoot $runtimeRoot `
             -Architecture arm64 `
-            -RequirementsFile "tools/ai-runtime-requirements.txt" `
+            -RequirementsFile "tools/ai-runtime-requirements-macos.txt" `
             -ExpectedRuntimeVersion $env:AI_RUNTIME_VERSION `
             -StandaloneReleaseTag $env:AI_RUNTIME_STANDALONE_RELEASE_TAG `
             -StandalonePythonVersion $env:AI_RUNTIME_STANDALONE_PYTHON_VERSION `

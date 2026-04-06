@@ -39,6 +39,12 @@ public:
         juce::String helpUrl;
         juce::String installSource { "downloadedRuntime" };
         juce::String buildRuntimeMode { "downloaded-runtime" };
+        juce::StringArray supportedBackends;
+        juce::String selectedBackend { "cpu" };
+        juce::String runtimeVersion;
+        juce::String modelVersion { "BS-Roformer-SW.ckpt" };
+        juce::String verificationMode;
+        bool restartRequired = false;
     };
 
     /** Check if Python environment and audio-separator are available. */
@@ -68,6 +74,9 @@ public:
         float progress = 0.0f;
         juce::StringPairArray stemFiles;  // stem name -> file path (populated on "done")
         juce::String error;
+        juce::String backend { "cpu" };
+        juce::String accelerationMode { "auto" };
+        int threadCap = 0;
     };
 
     /**
@@ -77,14 +86,14 @@ public:
      * @param inputFile     Audio file to separate
      * @param outputDir     Directory to write stem WAV files
      * @param stemNames     Which stems to extract (e.g., {"Vocals", "Drums", "Bass"})
-     * @param useGPU        Use CUDA GPU acceleration
+     * @param accelerationMode Automatic accelerator selection policy ("auto" or "cpu-only")
      * @param modelName     Model checkpoint filename (default: BS-Roformer-SW.ckpt)
      * @return true if process launched successfully
      */
     bool startSeparation (const juce::File& inputFile,
                           const juce::File& outputDir,
                           const juce::StringArray& stemNames,
-                          bool useGPU = false,
+                          const juce::String& accelerationMode = "auto",
                           const juce::String& modelName = "BS-Roformer-SW.ckpt");
 
     /** Poll the child process for progress. Returns current state. */
@@ -128,6 +137,9 @@ private:
     /** Find the AI tools installer helper script. */
     juce::File findInstallerScript() const;
 
+    /** Find the AI runtime probe helper script. */
+    juce::File findRuntimeProbeScript() const;
+
     /** Find the models directory. */
     juce::File findModelsDir() const;
 
@@ -148,6 +160,23 @@ private:
 
     /** Return true if the given Python can import audio_separator. */
     bool canImportAudioSeparator (const juce::File& python) const;
+
+    struct RuntimeCapabilities
+    {
+        bool runtimeReady = false;
+        bool modelInstalled = false;
+        juce::StringArray supportedBackends;
+        juce::String selectedBackend { "cpu" };
+        juce::String runtimeVersion;
+        juce::String modelVersion { "BS-Roformer-SW.ckpt" };
+        bool restartRequired = false;
+    };
+
+    /** Probe runtime capabilities via the helper script. */
+    RuntimeCapabilities probeRuntimeCapabilities (const juce::File& python,
+                                                  const juce::File& modelsDir,
+                                                  const juce::String& modelName,
+                                                  const juce::String& accelerationMode = "auto") const;
 
     /** Return true if the preferred stem model is available. */
     bool hasRequiredModel (const juce::File& modelsDir) const;

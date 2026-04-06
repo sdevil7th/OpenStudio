@@ -1,1 +1,5 @@
+# Deprecated compatibility shim.
+# Prefer platform-specific requirements files:
+#   - tools/ai-runtime-requirements-windows.txt
+#   - tools/ai-runtime-requirements-macos.txt
 audio-separator[cpu]==0.41.1

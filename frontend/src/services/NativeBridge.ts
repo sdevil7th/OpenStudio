@@ -157,6 +157,9 @@ export interface StemSepProgress {
   progress: number;
   stemFiles?: Array<{ name: string; filePath: string }>;
   error?: string;
+  backend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+  accelerationMode?: "auto" | "cpu-only";
+  threadCap?: number;
 }
 
 export interface ActiveRecordingMIDIPreviewRequest {
@@ -213,6 +216,7 @@ export interface AiToolsStatus {
       | "extracting_runtime"
       | "creating_venv"
       | "verifying_runtime"
+      | "probing_runtime"
       | "downloading_model"
       | "pythonMissing"
       | "runtimeMissing"
@@ -236,6 +240,12 @@ export interface AiToolsStatus {
     helpUrl?: string;
     installSource?: "downloadedRuntime" | "externalPython" | "none";
     buildRuntimeMode?: "downloaded-runtime" | "unbundled-dev";
+    supportedBackends?: string[];
+    selectedBackend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+    runtimeVersion?: string;
+    modelVersion?: string;
+    verificationMode?: "in-process" | "subprocess";
+    restartRequired?: boolean;
   }
 
 export interface InstallAiToolsResponse {
@@ -4117,6 +4127,9 @@ class NativeBridge {
         message: "AI tools are unavailable in the web preview.",
         installSource: "none",
         buildRuntimeMode: "downloaded-runtime",
+        supportedBackends: ["cpu"],
+        selectedBackend: "cpu",
+        restartRequired: false,
       };
   }
 
@@ -4142,7 +4155,7 @@ class NativeBridge {
 
   // ==================== Phase 10: Stem Separation Workflow ====================
 
-  async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
+  async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string; accelerationMode?: "auto" | "cpu-only" }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
     if (this.isNative && window.__JUCE__?.backend.separateStemsAsync)
       return await window.__JUCE__.backend.separateStemsAsync(trackId, clipId, JSON.stringify(options));
     console.log("[NativeBridge] Mock separateStemsAsync:", trackId, clipId, options);

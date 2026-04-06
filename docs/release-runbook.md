@@ -92,7 +92,7 @@ If you want one command for the full guarded Windows path, use:
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
 8. Prepare and package the Windows AI runtime archive:
-   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -Architecture x64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -Architecture x64 -RequirementsFile tools/ai-runtime-requirements-windows.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
    `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -ExpectedRuntimeVersion 1.0.0`
 9. Generate updater metadata:
    `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -WindowsAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-AI-Runtime-windows-x64.zip -AiRuntimeVersion 1.0.0`
@@ -116,7 +116,7 @@ If you want one command for the guarded macOS path, use:
    If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign` and `spctl`. If notarization credentials are present, it also staples and validates the notarized DMG.
    For the zero-cost v1 path, leave those signing variables unset and ship the unsigned DMG with manual Gatekeeper override instructions on the download page.
 5. Prepare and package the macOS AI runtime archive for Apple Silicon:
-   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements-macos.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
    `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -ExpectedRuntimeVersion 1.0.0`
    Intel macOS AI runtime support is currently disabled because the pinned `audio-separator` dependency stack does not publish a satisfiable Intel macOS wheel set for the release path.
 6. Generate updater metadata with the DMG path and URL included.

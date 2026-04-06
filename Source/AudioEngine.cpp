@@ -8989,7 +8989,9 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
     if (requestedStems.isEmpty())
         requestedStems = StemSeparator::getAllStemNames();
 
-    bool useGPU = options.getProperty("gpu", false);
+    auto accelerationMode = options.getProperty("accelerationMode", "auto").toString();
+    if (accelerationMode.isEmpty())
+        accelerationMode = options.getProperty("gpu", false) ? "auto" : "cpu-only";
 
     // Find audio file — prefer filePath from options (frontend knows the clip's file),
     // fall back to searching PlaybackEngine clips by trackId
@@ -9047,7 +9049,7 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
         .getChildFile(audioFile.getFileNameWithoutExtension() + "_stems");
 
     // Start Python subprocess
-    if (! stemSeparator.startSeparation(audioFile, outputDir, requestedStems, useGPU))
+    if (! stemSeparator.startSeparation(audioFile, outputDir, requestedStems, accelerationMode))
     {
         juce::Logger::writeToLog("StemSeparator: Failed to start separation.");
         result->setProperty("started", false);
@@ -9067,6 +9069,9 @@ juce::var AudioEngine::getStemSeparationProgress()
 
     obj->setProperty("state", progress.state);
     obj->setProperty("progress", static_cast<double>(progress.progress));
+    obj->setProperty("backend", progress.backend);
+    obj->setProperty("accelerationMode", progress.accelerationMode);
+    obj->setProperty("threadCap", progress.threadCap);
 
     if (progress.state == "done" && progress.stemFiles.size() > 0)
     {

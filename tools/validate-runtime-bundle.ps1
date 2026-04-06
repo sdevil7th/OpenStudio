@@ -139,7 +139,8 @@ $bundledFeatureEntries = @(
     @{ Source = "effects"; Target = "effects"; Description = "stock effects bundle" },
     @{ Source = "scripts"; Target = "scripts"; Description = "stock scripts bundle" },
     @{ Source = "resources/models/basic_pitch_nmp.onnx"; Target = "models/basic_pitch_nmp.onnx"; Description = "polyphonic pitch model" },
-    @{ Source = "tools/install_ai_tools.py"; Target = "scripts/install_ai_tools.py"; Description = "AI tools installer script" }
+    @{ Source = "tools/install_ai_tools.py"; Target = "scripts/install_ai_tools.py"; Description = "AI tools installer script" },
+    @{ Source = "tools/ai_runtime_probe.py"; Target = "scripts/ai_runtime_probe.py"; Description = "AI runtime capability probe script" }
 )
 
 foreach ($entry in $shellCriticalRuntimeEntries) {

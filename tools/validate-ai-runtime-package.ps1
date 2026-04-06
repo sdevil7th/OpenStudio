@@ -18,6 +18,12 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$probeScriptPath = Join-Path $repoRoot "tools/ai_runtime_probe.py"
+if (-not (Test-Path $probeScriptPath)) {
+    throw "AI runtime probe script not found: $probeScriptPath"
+}
+
 function Resolve-PythonExecutable {
     param([string]$Root)
 
@@ -137,6 +143,24 @@ try {
     $runtimeRootResolved = [System.IO.Path]::GetFullPath($runtimeRoot)
     $pythonResolved = [System.IO.Path]::GetFullPath([string]$diagnostics.executable)
     Assert-True ($pythonResolved.StartsWith($runtimeRootResolved, [System.StringComparison]::OrdinalIgnoreCase)) "AI runtime executable '$pythonResolved' was not launched from inside '$runtimeRootResolved'."
+
+    $probeJson = & $pythonExe $probeScriptPath --acceleration-mode auto 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "AI runtime capability probe failed for '$pythonExe'. Output: $probeJson"
+    }
+
+    $probe = ($probeJson | Select-Object -Last 1) | ConvertFrom-Json
+    Assert-True ($probe.runtimeReady -eq $true) "AI runtime capability probe did not report a ready runtime."
+    Assert-True ($probe.selectedBackend -in @("cuda", "directml", "coreml", "mps", "cpu")) "AI runtime capability probe returned an unexpected selectedBackend '$($probe.selectedBackend)'."
+    Assert-True ($probe.supportedBackends.Count -ge 1) "AI runtime capability probe did not report supportedBackends."
+
+    if ($Platform -eq "windows") {
+        Assert-True (($probe.packagedBackends -contains "cuda") -or ($probe.packagedBackends -contains "directml")) "Windows AI runtime probe did not report any packaged accelerated backend."
+    }
+
+    if ($Platform -eq "macos") {
+        Assert-True (($probe.packagedBackends -contains "coreml") -or ($probe.packagedBackends -contains "mps") -or ($probe.packagedBackends -contains "cpu")) "macOS AI runtime probe did not report packaged backends."
+    }
 
     Write-Host "AI runtime package validation passed for $Platform at $resolvedArchive"
 }

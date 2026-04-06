@@ -88,6 +88,9 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   message: "Checking AI tools...",
   installSource: "downloadedRuntime",
   buildRuntimeMode: "downloaded-runtime",
+  supportedBackends: ["cpu"],
+  selectedBackend: "cpu",
+  restartRequired: false,
 };
 
 // ============================================

@@ -27,6 +27,9 @@ interface StemSepProgress {
   progress: number;
   stemFiles?: Array<{ name: string; filePath: string }>;
   error?: string;
+  backend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+  accelerationMode?: "auto" | "cpu-only";
+  threadCap?: number;
 }
 
 export default function StemSeparationModal() {
@@ -84,10 +87,11 @@ export default function StemSeparationModal() {
   };
 
   const statusText = () => {
+    const backendLabel = progress.backend ? ` (${progress.backend.toUpperCase()})` : "";
     switch (progress.state) {
-      case "loading": return "Loading model...";
-      case "analyzing": return `Separating stems... ${Math.round(progress.progress * 100)}%`;
-      case "writing": return "Writing stem files...";
+      case "loading": return `Loading model...${backendLabel}`;
+      case "analyzing": return `Separating stems... ${Math.round(progress.progress * 100)}%${backendLabel}`;
+      case "writing": return `Writing stem files...${backendLabel}`;
       case "done": return "Separation complete!";
       case "error": return `Error: ${progress.error}`;
       default: return "";
@@ -113,6 +117,7 @@ export default function StemSeparationModal() {
       const result = await nativeBridge.separateStemsAsync(stemSepTrackId, stemSepClipId, {
         stems: selectedStems,
         filePath: sourceClip.filePath,
+        accelerationMode: "auto",
       });
 
       if (!result.started) {

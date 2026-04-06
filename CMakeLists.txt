@@ -549,6 +549,15 @@ if(EXISTS "${STEM_INSTALLER_SCRIPT}")
     )
 endif()
 
+set(AI_RUNTIME_PROBE_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/ai_runtime_probe.py")
+if(EXISTS "${AI_RUNTIME_PROBE_SCRIPT}")
+    openstudio_copy_runtime_file(
+        "${AI_RUNTIME_PROBE_SCRIPT}"
+        "scripts/ai_runtime_probe.py"
+        "Copying AI runtime probe script to output directory"
+    )
+endif()
+
 # Remove legacy bundled AI runtime artifacts from reused build directories.
 openstudio_remove_runtime_path(
     "python"

@@ -14,6 +14,7 @@ an external Python interpreter.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import platform
 import shutil
@@ -21,7 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-REQUIREMENT_SPEC = "audio-separator[cpu]==0.41.1"
+from ai_runtime_probe import probe_runtime_capabilities
+
 DEFAULT_MODEL_NAME = "BS-Roformer-SW.ckpt"
 FALLBACK_MIN_PYTHON = (3, 10)
 FALLBACK_MAX_PYTHON_EXCLUSIVE = (3, 14)
@@ -82,6 +84,12 @@ def resolve_runtime_python(runtime_root: Path) -> Path:
         buildRuntimeMode="downloaded-runtime",
     )
     raise AssertionError("unreachable")
+
+
+def get_requirement_specifiers() -> list[str]:
+    if platform.system() == "Windows":
+        return ["audio-separator[dml]==0.41.1", "onnxruntime-gpu>=1.17"]
+    return ["audio-separator[cpu]==0.41.1"]
 
 
 def log_subprocess_output(result: subprocess.CompletedProcess[str], description: str) -> None:
@@ -146,6 +154,64 @@ def run_step(
         )
 
 
+def stream_step(
+    command: list[str],
+    *,
+    state: str,
+    progress: float,
+    description: str,
+    install_source: str,
+    requires_external_python: bool,
+    error_code: str,
+    python_detected: bool,
+    build_runtime_mode: str,
+    cwd: Path | None = None,
+) -> None:
+    emit(
+        state,
+        progress,
+        message=description,
+        installSource=install_source,
+        requiresExternalPython=requires_external_python,
+        pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
+    )
+    write_log(f"$ {' '.join(command)}")
+    recent_lines: deque[str] = deque(maxlen=12)
+
+    with subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    ) as process:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            recent_lines.append(line)
+            write_log(line)
+        return_code = process.wait()
+
+    write_log(f"[exitCode] {return_code}")
+    if return_code != 0:
+        detail = " ".join(recent_lines).strip()
+        fail(
+            f"{description} failed. {detail if detail else 'See the install log for details.'}",
+            progress=progress,
+            error_code=error_code,
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
+
 def verify_runtime(
     runtime_python: Path,
     runtime_root: Path,
@@ -195,6 +261,9 @@ def verify_runtime(
         buildRuntimeMode=build_runtime_mode,
     )
 
+    verification_mode = "in-process" if same_interpreter else "subprocess"
+    write_log(f"verificationMode={verification_mode}")
+
     if same_interpreter:
         try:
             import audio_separator.separator  # noqa: F401
@@ -225,6 +294,62 @@ def verify_runtime(
         build_runtime_mode=build_runtime_mode,
         cwd=runtime_root,
     )
+
+
+def probe_runtime(
+    runtime_root: Path,
+    models_dir: Path,
+    model_name: str,
+    *,
+    acceleration_mode: str,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> dict[str, object]:
+    emit(
+        "probing_runtime",
+        0.96,
+        message="Checking AI runtime capabilities",
+        installSource=install_source,
+        requiresExternalPython=requires_external_python,
+        pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
+    )
+
+    metadata_path = runtime_root / ".openstudio-ai-runtime.json"
+    runtime_version = ""
+    if metadata_path.exists():
+        try:
+            runtime_version = json.loads(metadata_path.read_text(encoding="utf-8")).get("runtimeVersion", "")
+        except Exception:
+            runtime_version = ""
+
+    report = probe_runtime_capabilities(
+        models_dir=str(models_dir),
+        model_name=model_name,
+        acceleration_mode=acceleration_mode,
+    )
+    report["runtimeVersion"] = runtime_version
+    report["modelVersion"] = model_name
+
+    write_log(f"supportedBackends={','.join(report.get('supportedBackends', []))}")
+    write_log(f"selectedBackend={report.get('selectedBackend', 'cpu')}")
+    if report.get("fallbackReason"):
+        write_log(f"fallbackReason={report['fallbackReason']}")
+
+    if not report.get("runtimeReady"):
+        fail(
+            "OpenStudio could not validate the managed AI runtime on this machine.",
+            progress=0.96,
+            error_code="runtime_validation_failed",
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
+    return report
 
 
 def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
@@ -263,7 +388,7 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
     )
 
     run_step(
-        [str(runtime_python), "-m", "pip", "install", REQUIREMENT_SPEC],
+        [str(runtime_python), "-m", "pip", "install", *get_requirement_specifiers()],
         state="installing",
         progress=0.55,
         description="Installing stem separation packages",
@@ -300,21 +425,44 @@ def download_model(
         pythonDetected=python_detected,
         buildRuntimeMode=build_runtime_mode,
     )
-    model_bootstrap = (
-        "from audio_separator.separator import Separator; "
-        f"Separator(output_dir=r'{models_dir}', model_file_dir=r'{models_dir}').load_model(model_filename=r'{model_name}')"
-    )
-    run_step(
-        [str(runtime_python), "-c", model_bootstrap],
-        state="downloading_model",
-        progress=0.92,
-        description="Downloading the stem separation model",
-        install_source=install_source,
-        requires_external_python=requires_external_python,
-        error_code="model_download_failed",
-        python_detected=python_detected,
-        build_runtime_mode=build_runtime_mode,
-    )
+    if safe_resolve(runtime_python) == safe_resolve(Path(sys.executable)):
+        try:
+            from audio_separator.separator import Separator
+
+            write_log("[in-process model download] starting")
+            Separator(
+                output_dir=str(models_dir),
+                model_file_dir=str(models_dir),
+                use_directml=(platform.system() == "Windows"),
+            ).load_model(model_filename=model_name)
+            write_log("[in-process model download] completed")
+        except Exception as exc:
+            write_log(f"[in-process model download error] {type(exc).__name__}: {exc}")
+            fail(
+                f"Downloading the stem separation model failed: {type(exc).__name__}: {exc}",
+                progress=0.92,
+                error_code="model_download_failed",
+                installSource=install_source,
+                requiresExternalPython=requires_external_python,
+                pythonDetected=python_detected,
+                buildRuntimeMode=build_runtime_mode,
+            )
+    else:
+        model_bootstrap = (
+            "from audio_separator.separator import Separator; "
+            f"Separator(output_dir=r'{models_dir}', model_file_dir=r'{models_dir}', use_directml={platform.system() == 'Windows'}).load_model(model_filename=r'{model_name}')"
+        )
+        stream_step(
+            [str(runtime_python), "-c", model_bootstrap],
+            state="downloading_model",
+            progress=0.92,
+            description="Downloading the stem separation model",
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            error_code="model_download_failed",
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
 
     model_path = models_dir / model_name
     if not model_path.exists():
@@ -430,6 +578,17 @@ def main() -> None:
         build_runtime_mode=build_runtime_mode,
     )
 
+    runtime_probe = probe_runtime(
+        runtime_root,
+        models_dir,
+        args.model,
+        acceleration_mode="auto",
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
     emit(
         "ready",
         1.0,
@@ -444,6 +603,12 @@ def main() -> None:
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
         buildRuntimeMode=build_runtime_mode,
+        supportedBackends=runtime_probe.get("supportedBackends", []),
+        selectedBackend=runtime_probe.get("selectedBackend", "cpu"),
+        runtimeVersion=runtime_probe.get("runtimeVersion", ""),
+        modelVersion=runtime_probe.get("modelVersion", args.model),
+        verificationMode="in-process" if safe_resolve(runtime_python) == safe_resolve(Path(sys.executable)) else "subprocess",
+        restartRequired=bool(runtime_probe.get("restartRequired", False)),
     )
 
 

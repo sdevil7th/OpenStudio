@@ -308,6 +308,7 @@ function App() {
       "installing",
       "creating_venv",
       "verifying_runtime",
+      "probing_runtime",
       "downloading_model",
     ]);
     const wasInstallAttempt = previousInstallInProgress || installAttemptStates.has(previousState);

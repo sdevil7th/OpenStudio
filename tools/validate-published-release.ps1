@@ -309,6 +309,12 @@ try {
         if ($remoteAiRuntimeManifest.platforms.macos.url) {
             Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.macos.url
         }
+        if ($remoteAiRuntimeManifest.platforms.macos.arm64.url) {
+            Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.macos.arm64.url
+        }
+        if ($remoteAiRuntimeManifest.platforms.macos.x64.url) {
+            Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.macos.x64.url
+        }
     }
 
     if ($ValidateRedirects) {

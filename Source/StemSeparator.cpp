@@ -19,6 +19,17 @@ juce::String quoteCommandPart(const juce::String& value)
     return value.quoted();
 }
 
+juce::StringArray varToStringArray (const juce::var& value)
+{
+    juce::StringArray result;
+    if (auto* array = value.getArray())
+    {
+        for (const auto& item : *array)
+            result.add(item.toString());
+    }
+    return result;
+}
+
 juce::String summariseDiagnosticLines (const juce::StringArray& lines)
 {
     if (lines.isEmpty())
@@ -274,6 +285,28 @@ juce::File StemSeparator::findInstallerScript() const
     return {};
 }
 
+juce::File StemSeparator::findRuntimeProbeScript() const
+{
+    auto appDir = getApplicationRuntimeDirectory();
+
+    auto script = appDir.getChildFile("../../../tools/ai_runtime_probe.py");
+    if (script.existsAsFile())
+        return script;
+
+    script = appDir.getChildFile("scripts/ai_runtime_probe.py");
+    if (script.existsAsFile())
+        return script;
+
+#if JUCE_MAC
+    auto resourcesDir = appDir.getParentDirectory().getChildFile("Resources");
+    script = resourcesDir.getChildFile("scripts/ai_runtime_probe.py");
+    if (script.existsAsFile())
+        return script;
+#endif
+
+    return {};
+}
+
 juce::File StemSeparator::findModelsDir() const
 {
     const auto userModelsDir = getUserModelsDir();
@@ -313,6 +346,60 @@ bool StemSeparator::canImportAudioSeparator(const juce::File& python) const
         return check.readAllProcessOutput().trim().contains("ok");
 
     return false;
+}
+
+StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (const juce::File& python,
+                                                                            const juce::File& modelsDir,
+                                                                            const juce::String& modelName,
+                                                                            const juce::String& accelerationMode) const
+{
+    RuntimeCapabilities capabilities;
+
+    if (! python.existsAsFile())
+        return capabilities;
+
+    const auto probeScript = findRuntimeProbeScript();
+    if (! probeScript.existsAsFile())
+        return capabilities;
+
+    juce::ChildProcess probe;
+    const auto command = quoteCommandPart(python.getFullPathName())
+        + " " + quoteCommandPart(probeScript.getFullPathName())
+        + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
+        + " --model " + quoteCommandPart(modelName)
+        + " --acceleration-mode " + quoteCommandPart(accelerationMode);
+
+    if (! probe.start(command) || ! probe.waitForProcessToFinish(15000))
+        return capabilities;
+
+    auto output = probe.readAllProcessOutput().trim();
+    if (probe.getExitCode() != 0 || output.isEmpty())
+        return capabilities;
+
+    const auto lastLine = output.fromLastOccurrenceOf("\n", false, false).trim();
+    const auto json = juce::JSON::parse(lastLine.isNotEmpty() ? lastLine : output);
+    if (! json.isObject())
+        return capabilities;
+
+    if (auto* obj = json.getDynamicObject())
+    {
+        capabilities.runtimeReady = static_cast<bool>(obj->getProperty("runtimeReady"));
+        capabilities.modelInstalled = static_cast<bool>(obj->getProperty("modelInstalled"));
+        capabilities.supportedBackends = varToStringArray(obj->getProperty("supportedBackends"));
+        capabilities.selectedBackend = obj->getProperty("selectedBackend").toString();
+        capabilities.runtimeVersion = obj->getProperty("runtimeVersion").toString();
+        capabilities.modelVersion = obj->getProperty("modelVersion").toString();
+        capabilities.restartRequired = static_cast<bool>(obj->getProperty("restartRequired"));
+    }
+
+    if (capabilities.supportedBackends.isEmpty())
+        capabilities.supportedBackends.add("cpu");
+    if (capabilities.selectedBackend.isEmpty())
+        capabilities.selectedBackend = "cpu";
+    if (capabilities.modelVersion.isEmpty())
+        capabilities.modelVersion = modelName;
+
+    return capabilities;
 }
 
 bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
@@ -437,6 +524,9 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
     status.error.clear();
     status.errorCode.clear();
     status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
+    status.supportedBackends.add("cpu");
+    status.selectedBackend = "cpu";
+    status.modelVersion = kStemModelName;
     return status;
 }
 
@@ -465,6 +555,12 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
 
     if (status.requiresExternalPython && status.helpUrl.isEmpty())
         status.helpUrl = kPythonHelpUrl;
+    if (status.supportedBackends.isEmpty())
+        status.supportedBackends.add("cpu");
+    if (status.selectedBackend.isEmpty())
+        status.selectedBackend = "cpu";
+    if (status.modelVersion.isEmpty())
+        status.modelVersion = kStemModelName;
     return status;
 }
 
@@ -500,9 +596,18 @@ void StemSeparator::scheduleStatusRefresh()
         auto systemPython = findSystemPython();
         auto script = findScript();
         auto installerScript = findInstallerScript();
-        const auto modelInstalled = hasRequiredModel(getUserModelsDir());
-        const auto runtimeInstalled = installedPython.existsAsFile() && canImportAudioSeparator (installedPython);
+        const auto modelsDir = getUserModelsDir();
+        auto runtimeCapabilities = installedPython.existsAsFile()
+            ? probeRuntimeCapabilities(installedPython, modelsDir, kStemModelName, "auto")
+            : RuntimeCapabilities{};
+        const auto modelInstalled = runtimeCapabilities.modelInstalled || hasRequiredModel(modelsDir);
+        const auto runtimeInstalled = runtimeCapabilities.runtimeReady;
         auto refreshedStatus = buildAiToolsStatus (systemPython, script, installerScript, runtimeInstalled, modelInstalled);
+        refreshedStatus.supportedBackends = runtimeCapabilities.supportedBackends;
+        refreshedStatus.selectedBackend = runtimeCapabilities.selectedBackend;
+        refreshedStatus.runtimeVersion = runtimeCapabilities.runtimeVersion;
+        refreshedStatus.modelVersion = runtimeCapabilities.modelVersion;
+        refreshedStatus.restartRequired = runtimeCapabilities.restartRequired;
 
         {
             const juce::ScopedLock lock (aiToolsStatusLock);
@@ -717,6 +822,9 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
 juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
 {
     auto obj = std::make_unique<juce::DynamicObject>();
+    juce::Array<juce::var> supportedBackends;
+    for (const auto& backend : status.supportedBackends)
+        supportedBackends.add(backend);
     obj->setProperty("state", status.state);
     obj->setProperty("progress", static_cast<double>(status.progress));
     obj->setProperty("available", status.available);
@@ -734,6 +842,12 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("helpUrl", status.helpUrl);
     obj->setProperty("installSource", status.installSource);
     obj->setProperty("buildRuntimeMode", status.buildRuntimeMode);
+    obj->setProperty("supportedBackends", supportedBackends);
+    obj->setProperty("selectedBackend", status.selectedBackend);
+    obj->setProperty("runtimeVersion", status.runtimeVersion);
+    obj->setProperty("modelVersion", status.modelVersion);
+    obj->setProperty("verificationMode", status.verificationMode);
+    obj->setProperty("restartRequired", status.restartRequired);
     return juce::var(obj.release());
 }
 
@@ -1323,7 +1437,9 @@ void StemSeparator::pollInstallProgress()
                     lastAiToolsStatus.error += " Last output: " + lastDiagnostics;
             }
 
-            if (lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
+            if (lastAiToolsStatus.state != "error"
+                && lastAiToolsStatus.state != "cancelled"
+                && lastAiToolsStatus.state != "ready")
             {
                 lastAiToolsStatus.state = "checking";
                 lastAiToolsStatus.message = "Verifying AI tools installation...";
@@ -1337,7 +1453,7 @@ void StemSeparator::pollInstallProgress()
             installCommandLine.clear();
             installRuntimePythonPath.clear();
             installRuntimeRootPath.clear();
-            shouldRefreshAfterExit = true;
+            shouldRefreshAfterExit = lastAiToolsStatus.state != "ready";
         }
     }
 
@@ -1378,6 +1494,18 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.modelInstalled = static_cast<bool>(json["modelInstalled"]);
     if (json.hasProperty("available"))
         status.available = static_cast<bool>(json["available"]);
+    if (json.hasProperty("supportedBackends"))
+        status.supportedBackends = varToStringArray(json["supportedBackends"]);
+    if (json.hasProperty("selectedBackend"))
+        status.selectedBackend = json["selectedBackend"].toString();
+    if (json.hasProperty("runtimeVersion"))
+        status.runtimeVersion = json["runtimeVersion"].toString();
+    if (json.hasProperty("modelVersion"))
+        status.modelVersion = json["modelVersion"].toString();
+    if (json.hasProperty("verificationMode"))
+        status.verificationMode = json["verificationMode"].toString();
+    if (json.hasProperty("restartRequired"))
+        status.restartRequired = static_cast<bool>(json["restartRequired"]);
 
     status.installInProgress = ! isAiToolsTerminalState(status.state);
     if (status.requiresExternalPython && status.helpUrl.isEmpty())
@@ -1398,7 +1526,7 @@ bool StemSeparator::isAvailable() const
 bool StemSeparator::startSeparation(const juce::File& inputFile,
                                     const juce::File& outputDir,
                                     const juce::StringArray& stemNames,
-                                    bool useGPU,
+                                    const juce::String& accelerationMode,
                                     const juce::String& modelName)
 {
     if (isRunning())
@@ -1449,7 +1577,7 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
         + " --model " + quoteCommandPart(modelName)
         + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
         + " --stems " + stemNames.joinIntoString(",")
-        + (useGPU ? " --gpu" : "");
+        + " --acceleration-mode " + quoteCommandPart(accelerationMode);
 
     juce::Logger::writeToLog("StemSeparator: Starting: " + cmd);
 
@@ -1541,6 +1669,12 @@ StemSeparator::SeparationProgress StemSeparator::parseJsonLine(const juce::Strin
 
     if (json.hasProperty("error"))
         result.error = json["error"].toString();
+    if (json.hasProperty("backend"))
+        result.backend = json["backend"].toString();
+    if (json.hasProperty("accelerationMode"))
+        result.accelerationMode = json["accelerationMode"].toString();
+    if (json.hasProperty("threadCap"))
+        result.threadCap = static_cast<int>(json["threadCap"]);
 
     if (json.hasProperty("stems"))
     {
