@@ -29,6 +29,13 @@
 
 ---
 
+## macOS installation debugging
+- This command needs to be ran on macOS after installation through installer to un-quarantine the app and use it
+- Otherwise the app would be shown as damaged or broken in macOS
+```bash
+xattr -dr com.apple.quarantine /Applications/OpenStudio.app
+```
+
 ## What is OpenStudio?
 
 **OpenStudio** is a hybrid DAW with a high-performance C++ audio engine and a fully hardware-accelerated React frontend rendered inside a native desktop application. It combines the audio processing power of JUCE with the flexibility and speed of modern web UI tooling — no Electron, no Chromium overhead, just a native embedded web UI on top of the audio engine.

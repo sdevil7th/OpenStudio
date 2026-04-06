@@ -10,6 +10,7 @@ const isPackagedResourceProviderOrigin =
   window.location.origin === "https://juce.backend" || window.location.protocol === "juce:";
 
 let bootTerminalStateSent = false;
+const STARTUP_REPORT_TIMEOUT_MS = 1500;
 
 async function waitForNativeBackend(timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
@@ -65,6 +66,25 @@ async function invokeNativeFunction<T>(name: string, ...args: unknown[]): Promis
   });
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 function createBootOverlay() {
   const overlay = document.createElement("div");
   overlay.id = "openstudio-boot-overlay";
@@ -102,26 +122,42 @@ function removeBootOverlay() {
 }
 
 async function reportFrontendStartupState(state: string, detail: string) {
+  try {
+    const nativeResult = await withTimeout(
+      invokeNativeFunction("reportFrontendStartupState", state, detail),
+      STARTUP_REPORT_TIMEOUT_MS,
+      `Native startup reporting (${state})`,
+    );
+
+    if (nativeResult !== undefined) {
+      console.debug(`[Startup] Reported ${state} through native function`);
+      return;
+    }
+  } catch (error) {
+    console.error("[Startup] Failed to report startup state through native function:", error);
+  }
+
   if (isPackagedResourceProviderOrigin) {
     try {
       const url = new URL("./__openstudio__/startup", window.location.href);
       url.searchParams.set("state", state);
       url.searchParams.set("detail", detail);
-      await fetch(url.toString(), {
-        method: "GET",
-        cache: "no-store",
-      });
+      await withTimeout(
+        fetch(url.toString(), {
+          method: "GET",
+          cache: "no-store",
+        }),
+        STARTUP_REPORT_TIMEOUT_MS,
+        `Resource-provider startup reporting (${state})`,
+      );
+      console.debug(`[Startup] Reported ${state} through resource provider fallback`);
       return;
     } catch (error) {
       console.error("[Startup] Failed to report startup state through resource provider:", error);
     }
   }
 
-  try {
-    await invokeNativeFunction("reportFrontendStartupState", state, detail);
-  } catch (error) {
-    console.error("[Startup] Failed to report startup state:", error);
-  }
+  console.error(`[Startup] Unable to report startup state '${state}' through any transport.`);
 }
 
 function finishStartup(state: "boot-ready" | "boot-failed", detail: string) {

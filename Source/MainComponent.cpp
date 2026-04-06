@@ -712,6 +712,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                else if (parameterNames[i] == "detail")
                                    detail = parameterValues[i];
                            }
+                           juce::Logger::writeToLog("Frontend startup report received via resource provider: state=" + state
+                                                    + (detail.isNotEmpty() ? " detail=" + detail : ""));
                            juce::Component::SafePointer<MainComponent> safeThis(this);
 
                            juce::MessageManager::callAsync([safeThis, state, detail]()
@@ -852,6 +854,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                    .withNativeFunction ("reportFrontendStartupState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        const auto state = args.size() > 0 ? args[0].toString().trim().toLowerCase() : juce::String();
                        const auto detail = args.size() > 1 ? args[1].toString() : juce::String();
+                       juce::Logger::writeToLog("Frontend startup report received via native function: state=" + state
+                                                + (detail.isNotEmpty() ? " detail=" + detail : ""));
 
                        if (state == "boot-started")
                        {
@@ -5066,7 +5070,7 @@ void MainComponent::timerCallback()
         if (elapsedMs >= kFrontendStartupTimeoutMs)
         {
             frontendStartupState = FrontendStartupState::timedOut;
-            frontendStartupDetail = "The embedded frontend did not report a ready state within "
+            frontendStartupDetail = "No boot-ready signal was received from the embedded frontend within "
                                     + juce::String(kFrontendStartupTimeoutMs / 1000.0, 1)
                                     + " seconds.";
             startupWatchdogActive = false;

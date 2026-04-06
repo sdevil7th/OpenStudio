@@ -62,6 +62,12 @@ git tag v0.0.2
 git push origin v0.0.2
 ```
 
+## This command needs to be ran on macOS after installation through installer to un-quarantine the app and use it
+## Otherwise the app would be shown as damaged or broken in macOS
+```bash
+xattr -dr com.apple.quarantine /Applications/OpenStudio.app
+```
+
 ## Comparison with REAPER
 
 | Feature | Studio13 (Hybrid) | REAPER (Native) |
