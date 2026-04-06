@@ -370,7 +370,9 @@ jobs:
           if-no-files-found: error
 
   build-macos-runtime-x64:
-    runs-on: macos-13
+    # Use an explicit Intel GitHub-hosted runner label here. Generic older labels like
+    # `macos-13` may be remapped by some GitHub environments to unsupported internal configs.
+    runs-on: macos-15-intel
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
@@ -385,6 +387,24 @@ jobs:
         run: |
           echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
           echo "AI_RUNTIME_VERSION=${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Validate Intel macOS runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Configured runs-on label: macos-15-intel"
+          echo "uname -m: $(uname -m)"
+          if sysctl -n machdep.cpu.brand_string >/dev/null 2>&1; then
+            echo "CPU: $(sysctl -n machdep.cpu.brand_string)"
+          fi
+          if command -v python3 >/dev/null 2>&1; then
+            echo "python3 platform.machine(): $(python3 -c 'import platform; print(platform.machine())')"
+          fi
+
+          if [[ "$(uname -m)" != "x86_64" ]]; then
+            echo "The macOS x64 AI runtime job requires an Intel GitHub-hosted runner. Check the configured runs-on label and available Intel macOS runners for this repo." >&2
+            exit 1
+          fi
 
       - name: Prepare macOS x64 AI runtime
         shell: pwsh

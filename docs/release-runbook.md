@@ -197,8 +197,11 @@ publishes the resulting archive.
 GitHub-hosted macOS releases no longer require a pre-existing committed `tools/python-macos`
 tree. The release workflow now builds separate `arm64` and `x64` downloadable runtimes from
 the same relocatable standalone Python source on GitHub-hosted macOS runners. The arm64
-runtime is prepared on `macos-14`, and the x64 runtime is prepared on `macos-13`, so each
-published runtime is verified on matching hardware before release.
+runtime is prepared on `macos-14`, and the x64 runtime is prepared on `macos-15-intel`, so each
+published runtime is verified on matching hardware before release. If GitHub Actions reports a
+runner error such as `The configuration '...' is not supported` for the x64 runtime job, switch
+that job to the exact Intel macOS hosted runner label shown as available under `Actions -> Runners`
+for this repo rather than guessing another generic macOS label.
 
 Optional future additions:
 
