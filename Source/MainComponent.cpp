@@ -695,25 +695,49 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                    .withResourceProvider ([this] (const juce::String& path) -> std::optional<juce::WebBrowserComponent::Resource> {
                        const auto requestedPath = path.upToFirstOccurrenceOf("?", false, false)
                                                      .upToFirstOccurrenceOf("#", false, false);
+                       const auto normalisedRequestedPath = normaliseResourceRequestPath(path);
+                       static constexpr auto startupRoutePrefix = "__openstudio__/startup";
 
-                       if (requestedPath == "/__openstudio__/startup")
+                       if (normalisedRequestedPath == startupRoutePrefix
+                           || normalisedRequestedPath.startsWithIgnoreCase(juce::String(startupRoutePrefix) + "/"))
                        {
-                           const auto requestUrl = juce::URL(juce::WebBrowserComponent::getResourceProviderRoot()
-                                                             + path.fromFirstOccurrenceOf("/", false, false));
                            juce::String state;
                            juce::String detail;
-                           const auto& parameterNames = requestUrl.getParameterNames();
-                           const auto& parameterValues = requestUrl.getParameterValues();
 
-                           for (int i = 0; i < parameterNames.size(); ++i)
+                           if (normalisedRequestedPath.startsWithIgnoreCase(juce::String(startupRoutePrefix) + "/"))
                            {
-                               if (parameterNames[i] == "state")
-                                   state = parameterValues[i].trim().toLowerCase();
-                               else if (parameterNames[i] == "detail")
-                                   detail = parameterValues[i];
+                               state = normalisedRequestedPath.fromFirstOccurrenceOf(juce::String(startupRoutePrefix) + "/", false, false)
+                                                              .upToFirstOccurrenceOf("/", false, false)
+                                                              .trim()
+                                                              .toLowerCase();
                            }
-                           juce::Logger::writeToLog("Frontend startup report received via resource provider: state=" + state
-                                                    + (detail.isNotEmpty() ? " detail=" + detail : ""));
+
+                           if (state.isEmpty())
+                           {
+                               const auto requestUrl = juce::URL(juce::WebBrowserComponent::getResourceProviderRoot()
+                                                                 + path.fromFirstOccurrenceOf("/", false, false));
+                               const auto& parameterNames = requestUrl.getParameterNames();
+                               const auto& parameterValues = requestUrl.getParameterValues();
+
+                               for (int i = 0; i < parameterNames.size(); ++i)
+                               {
+                                   if (parameterNames[i] == "state")
+                                       state = parameterValues[i].trim().toLowerCase();
+                                   else if (parameterNames[i] == "detail")
+                                       detail = parameterValues[i];
+                               }
+                           }
+
+                           if (state.isEmpty())
+                           {
+                               juce::Logger::writeToLog("Frontend startup report received via resource provider: malformed request path="
+                                                        + requestedPath + " normalised=" + normalisedRequestedPath);
+                           }
+                           else
+                           {
+                               juce::Logger::writeToLog("Frontend startup report received via resource provider: state=" + state
+                                                        + (detail.isNotEmpty() ? " detail=" + detail : ""));
+                           }
                            juce::Component::SafePointer<MainComponent> safeThis(this);
 
                            juce::MessageManager::callAsync([safeThis, state, detail]()
@@ -734,6 +758,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                else if (state == "boot-failed")
                                {
                                    safeThis->markFrontendStartupFailed(detail.isNotEmpty() ? detail : "The embedded frontend reported a startup failure.");
+                               }
+                               else
+                               {
+                                   juce::Logger::writeToLog("Frontend startup state: malformed or unknown resource-provider value '"
+                                                            + state + "'" + (detail.isNotEmpty() ? " - " + detail : ""));
                                }
                            });
 

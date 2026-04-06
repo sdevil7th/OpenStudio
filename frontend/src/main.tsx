@@ -85,6 +85,29 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   });
 }
 
+async function reportFrontendStartupStateViaNativeFunction(state: string, detail: string) {
+  const nativeResult = await withTimeout(
+    invokeNativeFunction("reportFrontendStartupState", state, detail),
+    STARTUP_REPORT_TIMEOUT_MS,
+    `Native startup reporting (${state})`,
+  );
+
+  if (nativeResult === undefined) {
+    throw new Error(`Native startup reporting (${state}) returned no result.`);
+  }
+}
+
+async function reportFrontendStartupStateViaResourceProvider(state: string) {
+  await withTimeout(
+    fetch(`/__openstudio__/startup/${encodeURIComponent(state)}`, {
+      method: "GET",
+      cache: "no-store",
+    }),
+    STARTUP_REPORT_TIMEOUT_MS,
+    `Resource-provider startup reporting (${state})`,
+  );
+}
+
 function createBootOverlay() {
   const overlay = document.createElement("div");
   overlay.id = "openstudio-boot-overlay";
@@ -122,39 +145,22 @@ function removeBootOverlay() {
 }
 
 async function reportFrontendStartupState(state: string, detail: string) {
-  try {
-    const nativeResult = await withTimeout(
-      invokeNativeFunction("reportFrontendStartupState", state, detail),
-      STARTUP_REPORT_TIMEOUT_MS,
-      `Native startup reporting (${state})`,
-    );
-
-    if (nativeResult !== undefined) {
-      console.debug(`[Startup] Reported ${state} through native function`);
-      return;
-    }
-  } catch (error) {
-    console.error("[Startup] Failed to report startup state through native function:", error);
-  }
-
   if (isPackagedResourceProviderOrigin) {
     try {
-      const url = new URL("./__openstudio__/startup", window.location.href);
-      url.searchParams.set("state", state);
-      url.searchParams.set("detail", detail);
-      await withTimeout(
-        fetch(url.toString(), {
-          method: "GET",
-          cache: "no-store",
-        }),
-        STARTUP_REPORT_TIMEOUT_MS,
-        `Resource-provider startup reporting (${state})`,
-      );
-      console.debug(`[Startup] Reported ${state} through resource provider fallback`);
+      await reportFrontendStartupStateViaResourceProvider(state);
+      console.debug(`[Startup] Reported ${state} through resource provider`);
       return;
     } catch (error) {
       console.error("[Startup] Failed to report startup state through resource provider:", error);
     }
+  }
+
+  try {
+    await reportFrontendStartupStateViaNativeFunction(state, detail);
+    console.debug(`[Startup] Reported ${state} through native function`);
+    return;
+  } catch (error) {
+    console.error("[Startup] Failed to report startup state through native function:", error);
   }
 
   console.error(`[Startup] Unable to report startup state '${state}' through any transport.`);

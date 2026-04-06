@@ -1171,14 +1171,15 @@ juce::var StemSeparator::installAiTools()
             updateStep("verifying_runtime", 0.8f, "Verifying the downloaded AI runtime", kInstallSourceDownloadedRuntime);
         }
 
+        // Launch the installer directly via ChildProcess. Do not append shell
+        // redirection here; those tokens would be passed through as literal argv.
         auto cmd = quoteCommandPart(launcherPython.getFullPathName())
             + " " + quoteCommandPart(installerScript.getFullPathName())
             + " --runtime-root " + quoteCommandPart(runtimeRoot.getFullPathName())
             + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
             + " --model " + quoteCommandPart(kStemModelName)
             + " --log-path " + quoteCommandPart(logFile.getFullPathName())
-            + launchMode
-            + " 2>&1";
+            + launchMode;
 
         appendAiToolsLogLine("launcherPython=" + launcherPython.getFullPathName());
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
