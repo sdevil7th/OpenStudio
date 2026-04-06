@@ -72,7 +72,7 @@ def resolve_runtime_python(runtime_root: Path) -> Path:
         runtime_root / "bin" / "python",
     ]
     for candidate in candidates:
-        if candidate.exists():
+        if candidate.exists() and candidate.is_file():
             return candidate
     fail(
         f"Could not find a Python executable inside {runtime_root}.",
@@ -93,6 +93,13 @@ def log_subprocess_output(result: subprocess.CompletedProcess[str], description:
     if result.stderr:
         write_log("[stderr]")
         write_log(result.stderr)
+
+
+def safe_resolve(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def run_step(
@@ -170,6 +177,42 @@ def verify_runtime(
             buildRuntimeMode=build_runtime_mode,
         )
 
+    resolved_runtime_python = safe_resolve(runtime_python)
+    resolved_current_python = safe_resolve(Path(sys.executable))
+    same_interpreter = resolved_runtime_python == resolved_current_python
+
+    write_log(f"runtime_python={resolved_runtime_python}")
+    write_log(f"current_python={resolved_current_python}")
+    write_log(f"verificationMode={'in-process' if same_interpreter else 'subprocess'}")
+
+    emit(
+        "verifying_runtime",
+        0.65,
+        message="Verifying the AI tools runtime",
+        installSource=install_source,
+        requiresExternalPython=requires_external_python,
+        pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
+    )
+
+    if same_interpreter:
+        try:
+            import audio_separator.separator  # noqa: F401
+        except Exception as exc:
+            write_log(f"[in-process verification error] {type(exc).__name__}: {exc}")
+            fail(
+                f"Verifying the AI tools runtime failed: {type(exc).__name__}: {exc}",
+                progress=0.65,
+                error_code="runtime_validation_failed",
+                installSource=install_source,
+                requiresExternalPython=requires_external_python,
+                pythonDetected=python_detected,
+                buildRuntimeMode=build_runtime_mode,
+            )
+
+        write_log("[in-process verification] import audio_separator.separator succeeded")
+        return
+
     run_step(
         [str(runtime_python), "-c", "import audio_separator.separator; print('ok')"],
         state="verifying_runtime",
@@ -180,6 +223,7 @@ def verify_runtime(
         error_code="runtime_validation_failed",
         python_detected=python_detected,
         build_runtime_mode=build_runtime_mode,
+        cwd=runtime_root,
     )
 
 
