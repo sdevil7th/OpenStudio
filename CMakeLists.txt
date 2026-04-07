@@ -70,7 +70,30 @@ FetchContent_Declare(
 set(YSFX_PLUGIN OFF CACHE BOOL "" FORCE)
 set(YSFX_TOOLS OFF CACHE BOOL "" FORCE)
 set(YSFX_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(ysfx)
+FetchContent_GetProperties(ysfx)
+set(_ysfx_deps_dir "${CMAKE_BINARY_DIR}/_deps")
+set(_ysfx_subbuild_dir "${_ysfx_deps_dir}/ysfx-subbuild")
+set(_ysfx_is_valid FALSE)
+if (DEFINED ysfx_SOURCE_DIR
+    AND EXISTS "${ysfx_SOURCE_DIR}/CMakeLists.txt"
+    AND EXISTS "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/fft.c"
+    AND EXISTS "${ysfx_SOURCE_DIR}/sources/ysfx.cpp")
+    set(_ysfx_is_valid TRUE)
+elseif (DEFINED ysfx_SOURCE_DIR AND EXISTS "${ysfx_SOURCE_DIR}")
+    message(WARNING "Cached ysfx dependency at '${ysfx_SOURCE_DIR}' is incomplete. Removing it so FetchContent can repopulate a clean copy.")
+    file(REMOVE_RECURSE "${ysfx_SOURCE_DIR}")
+    if (DEFINED ysfx_BINARY_DIR AND EXISTS "${ysfx_BINARY_DIR}")
+        file(REMOVE_RECURSE "${ysfx_BINARY_DIR}")
+    endif()
+    if (EXISTS "${_ysfx_subbuild_dir}")
+        file(REMOVE_RECURSE "${_ysfx_subbuild_dir}")
+    endif()
+endif()
+if (_ysfx_is_valid)
+    add_subdirectory("${ysfx_SOURCE_DIR}" "${ysfx_BINARY_DIR}")
+else()
+    FetchContent_MakeAvailable(ysfx)
+endif()
 
 # Fetch Lua 5.4 — scripting engine (MIT license)
 FetchContent_Declare(
@@ -197,6 +220,7 @@ target_include_directories(OpenStudio PRIVATE
     Source
     # YSFX include paths
     "${ysfx_SOURCE_DIR}/include"
+    "${ysfx_SOURCE_DIR}/sources"
     # CLAP SDK headers
     "${clap_SOURCE_DIR}/include"
     # Signalsmith Stretch — header-only pitch shifting (MIT)
@@ -390,7 +414,7 @@ juce_generate_juce_header(OpenStudio)
 
 # Standard strict warnings
 if(MSVC)
-    target_compile_options(OpenStudio PRIVATE /W4)
+    target_compile_options(OpenStudio PRIVATE /W4 /FS)
 else()
     target_compile_options(OpenStudio PRIVATE -Wall -Wextra)
 endif()

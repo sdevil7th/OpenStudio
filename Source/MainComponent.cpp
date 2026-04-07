@@ -513,6 +513,37 @@ juce::String getStartupModeQueryValue(MainComponent::StartupMode startupMode)
     return startupMode == MainComponent::StartupMode::safe ? "safe" : "normal";
 }
 
+juce::String getHostPlatformQueryValue()
+{
+#if JUCE_WINDOWS
+    return "windows";
+#elif JUCE_MAC
+    return "macos";
+#elif JUCE_LINUX
+    return "linux";
+#else
+    return "unknown";
+#endif
+}
+
+juce::String getWindowChromeQueryValue(MainComponent::WindowRole role)
+{
+    if (role == MainComponent::WindowRole::mixer)
+        return "native";
+
+#if JUCE_MAC
+    return "native";
+#else
+    return "custom";
+#endif
+}
+
+bool isLocalFrontendDevServerReachable()
+{
+    juce::StreamingSocket socket;
+    return socket.connect("127.0.0.1", 5173, 750);
+}
+
 juce::String appendFrontendStartupQuery(const juce::String& baseUrl,
                                         MainComponent::WindowRole role,
                                         MainComponent::StartupMode startupMode)
@@ -526,6 +557,8 @@ juce::String appendFrontendStartupQuery(const juce::String& baseUrl,
 
     appendParameter("window", getWindowRoleQueryValue(role));
     appendParameter("startup", getStartupModeQueryValue(startupMode));
+    appendParameter("platform", getHostPlatformQueryValue());
+    appendParameter("windowChrome", getWindowChromeQueryValue(role));
     return url;
 }
 
@@ -4601,13 +4634,25 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
     if (supported && dependencyStatus.shellRuntimeAssetsPresent)
     {
-        // Development URL (Vite default)
-        #if JUCE_DEBUG
+        bool loadedFrontend = false;
+
+       #if JUCE_DEBUG
+        if (isLocalFrontendDevServerReachable())
+        {
             const auto frontendUrl = appendFrontendStartupQuery("http://localhost:5173", windowRole, startupMode);
-            juce::Logger::writeToLog("Loading from localhost:5173");
+            juce::Logger::writeToLog("Loading frontend from localhost:5173");
             beginFrontendStartupWatchdog(frontendUrl);
             webView.goToURL(frontendUrl);
-        #else
+            loadedFrontend = true;
+        }
+        else
+        {
+            juce::Logger::writeToLog("localhost:5173 is unreachable; falling back to the packaged frontend.");
+        }
+       #endif
+
+        if (! loadedFrontend)
+        {
             if (packagedFrontend.existsAsFile())
             {
                 webuiDir = packagedFrontend.getParentDirectory();
@@ -4615,6 +4660,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                 const auto frontendUrl = appendFrontendStartupQuery(juce::WebBrowserComponent::getResourceProviderRoot() + "index.html", windowRole, startupMode);
                 beginFrontendStartupWatchdog(frontendUrl);
                 webView.goToURL(frontendUrl);
+                loadedFrontend = true;
             }
             else
             {
@@ -4625,7 +4671,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                 startupRepairAction = StartupRepairAction::installation;
                 showStartupFallback("Packaged frontend missing", message, true);
             }
-        #endif
+        }
     }
 
     addAndMakeVisible(startupRetryButton);
@@ -4923,6 +4969,8 @@ juce::var MainComponent::buildStartupDiagnostics() const
     const auto selfTestReport = buildStartupSelfTestReport();
     diagnostics->setProperty("windowRole", getWindowRoleQueryValue(windowRole));
     diagnostics->setProperty("startupMode", getStartupModeQueryValue(startupMode));
+    diagnostics->setProperty("platform", getHostPlatformQueryValue());
+    diagnostics->setProperty("windowChrome", getWindowChromeQueryValue(windowRole));
     diagnostics->setProperty("browserBackend", describeBrowserBackend(getPreferredBrowserBackend()));
     diagnostics->setProperty("startupState", describeFrontendStartupState(frontendStartupState));
     diagnostics->setProperty("targetUrl", frontendStartupTargetUrl);

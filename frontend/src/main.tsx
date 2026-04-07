@@ -1,13 +1,12 @@
 import React, { useEffect, useRef } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
+import { startupMode, windowRole } from "./utils/windowEnvironment";
 
-const searchParams = new URLSearchParams(window.location.search);
-const windowRole = searchParams.get("window");
-const startupMode = searchParams.get("startup") ?? "normal";
 const isSafeStartup = startupMode === "safe";
 const isPackagedResourceProviderOrigin =
-  window.location.origin === "https://juce.backend" || window.location.protocol === "juce:";
+  window.location.origin === "https://juce.backend" ||
+  window.location.protocol === "juce:";
 
 let bootTerminalStateSent = false;
 const STARTUP_REPORT_TIMEOUT_MS = 1500;
@@ -27,7 +26,10 @@ async function waitForNativeBackend(timeoutMs = 5000) {
   return undefined;
 }
 
-async function invokeNativeFunction<T>(name: string, ...args: unknown[]): Promise<T | undefined> {
+async function invokeNativeFunction<T>(
+  name: string,
+  ...args: unknown[]
+): Promise<T | undefined> {
   const backend = await waitForNativeBackend();
   if (!backend?.emitEvent || !backend?.addEventListener) {
     return undefined;
@@ -48,15 +50,18 @@ async function invokeNativeFunction<T>(name: string, ...args: unknown[]): Promis
       reject(new Error(`Native function call timed out: ${name}`));
     }, 5000);
 
-    token = addEventListener("__juce__complete", (data: { promiseId?: number; result?: T }) => {
-      if (data?.promiseId !== resultId) {
-        return;
-      }
+    token = addEventListener(
+      "__juce__complete",
+      (data: { promiseId?: number; result?: T }) => {
+        if (data?.promiseId !== resultId) {
+          return;
+        }
 
-      window.clearTimeout(timeout);
-      removeEventListener?.(token);
-      resolve(data.result);
-    });
+        window.clearTimeout(timeout);
+        removeEventListener?.(token);
+        resolve(data.result);
+      },
+    );
 
     emitEvent("__juce__invoke", {
       name,
@@ -66,7 +71,11 @@ async function invokeNativeFunction<T>(name: string, ...args: unknown[]): Promis
   });
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const timeout = window.setTimeout(() => {
       reject(new Error(`${label} timed out after ${timeoutMs}ms`));
@@ -85,7 +94,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   });
 }
 
-async function reportFrontendStartupStateViaNativeFunction(state: string, detail: string) {
+async function reportFrontendStartupStateViaNativeFunction(
+  state: string,
+  detail: string,
+) {
   const nativeResult = await withTimeout(
     invokeNativeFunction("reportFrontendStartupState", state, detail),
     STARTUP_REPORT_TIMEOUT_MS,
@@ -151,7 +163,10 @@ async function reportFrontendStartupState(state: string, detail: string) {
       console.debug(`[Startup] Reported ${state} through resource provider`);
       return;
     } catch (error) {
-      console.error("[Startup] Failed to report startup state through resource provider:", error);
+      console.error(
+        "[Startup] Failed to report startup state through resource provider:",
+        error,
+      );
     }
   }
 
@@ -160,10 +175,15 @@ async function reportFrontendStartupState(state: string, detail: string) {
     console.debug(`[Startup] Reported ${state} through native function`);
     return;
   } catch (error) {
-    console.error("[Startup] Failed to report startup state through native function:", error);
+    console.error(
+      "[Startup] Failed to report startup state through native function:",
+      error,
+    );
   }
 
-  console.error(`[Startup] Unable to report startup state '${state}' through any transport.`);
+  console.error(
+    `[Startup] Unable to report startup state '${state}' through any transport.`,
+  );
 }
 
 function finishStartup(state: "boot-ready" | "boot-failed", detail: string) {
@@ -188,7 +208,8 @@ window.addEventListener("error", (event) => {
 
 window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
-  const detail = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  const detail =
+    reason instanceof Error ? reason.stack || reason.message : String(reason);
   finishStartup("boot-failed", `unhandledrejection: ${detail}`);
 });
 
@@ -218,13 +239,17 @@ function StartupReadySentinel() {
 
 const rootElement = document.getElementById("root");
 if (!rootElement) {
-  finishStartup("boot-failed", "The #root element was not found in index.html.");
+  finishStartup(
+    "boot-failed",
+    "The #root element was not found in index.html.",
+  );
   throw new Error("Root element not found");
 }
 const appRoot = rootElement;
 
 function renderBootstrapFailure(error: unknown) {
-  const message = error instanceof Error ? error.stack || error.message : String(error);
+  const message =
+    error instanceof Error ? error.stack || error.message : String(error);
   const escapedMessage = message
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

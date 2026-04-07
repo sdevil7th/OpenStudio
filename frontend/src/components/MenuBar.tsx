@@ -6,13 +6,15 @@ import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore, THEME_PRESETS } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
+import { usesNativeWindowChrome } from "../utils/windowEnvironment";
 
 /**
  * Main Menu Bar Component
  * Contains File, Edit, View, Insert, Track, Options, Actions, Help menus
  */
 export function MenuBar() {
-  const shortcut = (actionId: string, fallback: string) => getEffectiveActionShortcut(actionId) ?? fallback;
+  const shortcut = (actionId: string, fallback: string) =>
+    getEffectiveActionShortcut(actionId) ?? fallback;
   const {
     toggleMixer,
     showMixer,
@@ -34,33 +36,36 @@ export function MenuBar() {
     toggleVirtualKeyboard,
     showUndoHistory,
     toggleUndoHistory,
-  } = useDAWStore(useShallow((s) => ({
-    toggleMixer: s.toggleMixer,
-    showMixer: s.showMixer,
-    showMasterTrackInTCP: s.showMasterTrackInTCP,
-    toggleMasterTrackInTCP: s.toggleMasterTrackInTCP,
-    openSettings: s.openSettings,
-    openProjectSettings: s.openProjectSettings,
-    openRenderModal: s.openRenderModal,
-    newProject: s.newProject,
-    saveProject: s.saveProject,
-    loadProject: s.loadProject,
-    snapEnabled: s.snapEnabled,
-    toggleSnap: s.toggleSnap,
-    gridSize: s.gridSize,
-    setGridSize: s.setGridSize,
-    recentProjects: s.recentProjects,
-    clearRecentProjects: s.clearRecentProjects,
-    showVirtualKeyboard: s.showVirtualKeyboard,
-    toggleVirtualKeyboard: s.toggleVirtualKeyboard,
-    showUndoHistory: s.showUndoHistory,
-    toggleUndoHistory: s.toggleUndoHistory,
-  })));
+  } = useDAWStore(
+    useShallow((s) => ({
+      toggleMixer: s.toggleMixer,
+      showMixer: s.showMixer,
+      showMasterTrackInTCP: s.showMasterTrackInTCP,
+      toggleMasterTrackInTCP: s.toggleMasterTrackInTCP,
+      openSettings: s.openSettings,
+      openProjectSettings: s.openProjectSettings,
+      openRenderModal: s.openRenderModal,
+      newProject: s.newProject,
+      saveProject: s.saveProject,
+      loadProject: s.loadProject,
+      snapEnabled: s.snapEnabled,
+      toggleSnap: s.toggleSnap,
+      gridSize: s.gridSize,
+      setGridSize: s.setGridSize,
+      recentProjects: s.recentProjects,
+      clearRecentProjects: s.clearRecentProjects,
+      showVirtualKeyboard: s.showVirtualKeyboard,
+      toggleVirtualKeyboard: s.toggleVirtualKeyboard,
+      showUndoHistory: s.showUndoHistory,
+      toggleUndoHistory: s.toggleUndoHistory,
+    })),
+  );
 
   const [isMaximized, setIsMaximized] = useState(false);
 
   // Query maximize state on mount
   useEffect(() => {
+    if (usesNativeWindowChrome) return;
     nativeBridge.isWindowMaximized().then(setIsMaximized);
   }, []);
 
@@ -78,6 +83,7 @@ export function MenuBar() {
   }, []);
 
   const handleDragStart = useCallback((e: React.MouseEvent) => {
+    if (usesNativeWindowChrome) return;
     // Only drag from the empty space (not from menus or buttons)
     if ((e.target as HTMLElement).closest("[data-no-drag]")) return;
     if (e.button !== 0) return;
@@ -85,6 +91,7 @@ export function MenuBar() {
   }, []);
 
   const handleDoubleClick = useCallback(async (e: React.MouseEvent) => {
+    if (usesNativeWindowChrome) return;
     if ((e.target as HTMLElement).closest("[data-no-drag]")) return;
     const newState = await nativeBridge.maximizeWindow();
     setIsMaximized(newState);
@@ -94,7 +101,9 @@ export function MenuBar() {
     const result = await nativeBridge.checkForUpdates(true);
 
     if (result?.status === "up-to-date") {
-      useDAWStore.getState().showToast("OpenStudio is already up to date.", "success");
+      useDAWStore
+        .getState()
+        .showToast("OpenStudio is already up to date.", "success");
       return;
     }
 
@@ -102,9 +111,10 @@ export function MenuBar() {
       const version = result.version || "the latest version";
       const mandatoryLabel = result.mandatory ? "A required " : "";
       const isMacUpdate = result.platform === "macos";
-      const notes = typeof result.notes === "string" && result.notes.trim().length > 0
-        ? `\n\nRelease notes:\n${result.notes}`
-        : "";
+      const notes =
+        typeof result.notes === "string" && result.notes.trim().length > 0
+          ? `\n\nRelease notes:\n${result.notes}`
+          : "";
       const actionPrompt = isMacUpdate
         ? "Download and open the DMG now? You may still need to drag the app into Applications and use right-click > Open."
         : "Download and install it now?";
@@ -125,39 +135,42 @@ export function MenuBar() {
       );
 
       if (installResult?.status === "install-started") {
-        useDAWStore.getState().showToast(
-          installResult?.message || "Update downloaded. The installer has been opened.",
-          "success",
-        );
+        useDAWStore
+          .getState()
+          .showToast(
+            installResult?.message ||
+              "Update downloaded. The installer has been opened.",
+            "success",
+          );
       } else if (installResult?.status === "release-page-opened") {
-        useDAWStore.getState().showToast(
-          "Opened the release page for the latest update.",
-          "info",
-        );
+        useDAWStore
+          .getState()
+          .showToast("Opened the release page for the latest update.", "info");
       } else {
-        useDAWStore.getState().showToast(
-          installResult?.message || "Update download or installation failed.",
-          "error",
-        );
+        useDAWStore
+          .getState()
+          .showToast(
+            installResult?.message || "Update download or installation failed.",
+            "error",
+          );
       }
 
       return;
     }
 
-    useDAWStore.getState().showToast(
-      result?.message || "Could not check for updates.",
-      "error",
-    );
+    useDAWStore
+      .getState()
+      .showToast(result?.message || "Could not check for updates.", "error");
   }, []);
 
   const handleAbout = useCallback(async () => {
     const version = await nativeBridge.getAppVersion();
     alert(
       `OpenStudio ${version}\n\n` +
-      "A hybrid DAW with a JUCE C++ backend and React/TypeScript frontend.\n\n" +
-      "Built with:\n  JUCE 8.0 - Audio engine, VST3 hosting\n" +
-      "  React - User interface\n  Konva - Timeline canvas\n  Zustand - State management\n\n" +
-      "github.com/openstudio",
+        "A hybrid DAW with a JUCE C++ backend and React/TypeScript frontend.\n\n" +
+        "Built with:\n  JUCE 8.0 - Audio engine, VST3 hosting\n" +
+        "  React - User interface\n  Konva - Timeline canvas\n  Zustand - State management\n\n" +
+        "github.com/openstudio",
     );
   }, []);
 
@@ -201,7 +214,10 @@ export function MenuBar() {
                 onClick: async () => {
                   const success = await loadProject(projectPath);
                   if (!success) {
-                    console.error("Failed to load recent project:", projectPath);
+                    console.error(
+                      "Failed to load recent project:",
+                      projectPath,
+                    );
                   }
                 },
               })),
@@ -235,9 +251,12 @@ export function MenuBar() {
     {
       label: "Save New Version",
       onClick: () => {
-        useDAWStore.getState().saveNewVersion().then((success) => {
-          if (success) console.log("New version saved");
-        });
+        useDAWStore
+          .getState()
+          .saveNewVersion()
+          .then((success) => {
+            if (success) console.log("New version saved");
+          });
       },
     },
     {
@@ -260,12 +279,17 @@ export function MenuBar() {
       },
       submenu: (() => {
         const templates = useDAWStore.getState().projectTemplates;
-        if (templates.length === 0) return [{ label: "(no templates)", disabled: true }];
+        if (templates.length === 0)
+          return [{ label: "(no templates)", disabled: true }];
         return [
           ...templates.map((t, i) => ({
             label: t.name,
             onClick: () => {
-              if (confirm(`Load template "${t.name}"? This will replace the current project.`)) {
+              if (
+                confirm(
+                  `Load template "${t.name}"? This will replace the current project.`,
+                )
+              ) {
                 useDAWStore.getState().loadTemplate(i);
               }
             },
@@ -318,7 +342,9 @@ export function MenuBar() {
     },
     {
       label: "Export Project MIDI...",
-      onClick: () => { useDAWStore.getState().exportProjectMIDI(); },
+      onClick: () => {
+        useDAWStore.getState().exportProjectMIDI();
+      },
     },
     {
       label: "Clean Project Directory...",
@@ -349,14 +375,20 @@ export function MenuBar() {
       label: "Open Project (Safe Mode)...",
       shortcut: shortcut("file.openSafeMode", "Ctrl+Shift+O"),
       onClick: () => {
-        useDAWStore.getState().loadProject(undefined, { bypassFX: true }).then((success) => {
-          if (success) console.log("Project loaded in Safe Mode (FX bypassed)");
-        });
+        useDAWStore
+          .getState()
+          .loadProject(undefined, { bypassFX: true })
+          .then((success) => {
+            if (success)
+              console.log("Project loaded in Safe Mode (FX bypassed)");
+          });
       },
     },
     {
       label: "Archive Session...",
-      onClick: () => { useDAWStore.getState().archiveSession(); },
+      onClick: () => {
+        useDAWStore.getState().archiveSession();
+      },
     },
     {
       label: "Media Pool",
@@ -474,7 +506,8 @@ export function MenuBar() {
       label: "Toolbars",
       submenu: (() => {
         const toolbars = useDAWStore.getState().customToolbars;
-        if (toolbars.length === 0) return [{ label: "(no custom toolbars)", disabled: true }];
+        if (toolbars.length === 0)
+          return [{ label: "(no custom toolbars)", disabled: true }];
         return toolbars.map((t) => ({
           label: t.name,
           checked: t.visible,
@@ -763,7 +796,9 @@ export function MenuBar() {
         const state = useDAWStore.getState();
         const targetTrackId = state.selectedTrackIds[0];
         if (!targetTrackId) {
-          const midiTrack = state.tracks.find((t) => t.type === "midi" || t.type === "instrument");
+          const midiTrack = state.tracks.find(
+            (t) => t.type === "midi" || t.type === "instrument",
+          );
           if (!midiTrack) {
             alert("No MIDI or instrument track. Create one first.");
             return;
@@ -811,7 +846,9 @@ export function MenuBar() {
       label: "Track Spacer Below",
       onClick: () => {
         const state = useDAWStore.getState();
-        const targetTrackId = state.selectedTrackIds[0] || state.tracks[state.tracks.length - 1]?.id;
+        const targetTrackId =
+          state.selectedTrackIds[0] ||
+          state.tracks[state.tracks.length - 1]?.id;
         if (targetTrackId) {
           state.addSpacer(targetTrackId);
         }
@@ -820,7 +857,13 @@ export function MenuBar() {
   ];
 
   // Options menu - record mode, ripple editing, etc.
-  const { recordMode, rippleMode, lockSettings, globalLocked, moveEnvelopesWithItems } = useDAWStore.getState();
+  const {
+    recordMode,
+    rippleMode,
+    lockSettings,
+    globalLocked,
+    moveEnvelopesWithItems,
+  } = useDAWStore.getState();
   const optionsMenuItems: MenuItemProps[] = [
     {
       label: "Record Mode",
@@ -874,17 +917,24 @@ export function MenuBar() {
         {
           label: "Lock Items",
           checked: lockSettings.items,
-          onClick: () => useDAWStore.getState().setLockSetting("items", !lockSettings.items),
+          onClick: () =>
+            useDAWStore.getState().setLockSetting("items", !lockSettings.items),
         },
         {
           label: "Lock Envelopes",
           checked: lockSettings.envelopes,
-          onClick: () => useDAWStore.getState().setLockSetting("envelopes", !lockSettings.envelopes),
+          onClick: () =>
+            useDAWStore
+              .getState()
+              .setLockSetting("envelopes", !lockSettings.envelopes),
         },
         {
           label: "Lock Time Selection",
           checked: lockSettings.timeSelection,
-          onClick: () => useDAWStore.getState().setLockSetting("timeSelection", !lockSettings.timeSelection),
+          onClick: () =>
+            useDAWStore
+              .getState()
+              .setLockSetting("timeSelection", !lockSettings.timeSelection),
         },
       ],
     },
@@ -970,12 +1020,19 @@ export function MenuBar() {
   return (
     <div
       className="h-8 bg-daw-darker border-b border-daw-border flex items-center text-sm shrink-0 relative z-9999 select-none"
-      onMouseDown={handleDragStart}
-      onDoubleClick={handleDoubleClick}
+      onMouseDown={usesNativeWindowChrome ? undefined : handleDragStart}
+      onDoubleClick={usesNativeWindowChrome ? undefined : handleDoubleClick}
     >
       {/* App icon + Menus (no-drag so clicks work normally) */}
-      <div className="flex items-center shrink-0" data-no-drag role="menubar" aria-label="Main menu">
-        <img src="./icon.svg" alt="OpenStudio" className="w-4 h-4 mx-2" />
+      <div
+        className={`flex items-center shrink-0 ${usesNativeWindowChrome ? "px-2" : ""}`}
+        data-no-drag
+        role="menubar"
+        aria-label="Main menu"
+      >
+        {!usesNativeWindowChrome && (
+          <img src="./icon.svg" alt="OpenStudio" className="w-4 h-4 mx-2" />
+        )}
         <MenuDropdown label="File" items={fileMenuItems} />
         <EditMenu />
         <MenuDropdown label="View" items={viewMenuItems} />
@@ -985,35 +1042,44 @@ export function MenuBar() {
       </div>
 
       {/* Draggable spacer — fills remaining width, acts as title bar drag area */}
-      <div className="flex-1 min-w-0" />
+      {!usesNativeWindowChrome && (
+        <>
+          <div className="flex-1 min-w-0" />
 
-      {/* Window controls */}
-      <div className="flex items-center shrink-0 h-full" data-no-drag role="group" aria-label="Window controls">
-        <button
-          onClick={handleMinimize}
-          className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
-          title="Minimize"
-          aria-label="Minimize window"
-        >
-          <Minus size={14} />
-        </button>
-        <button
-          onClick={handleMaximize}
-          className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
-          title={isMaximized ? "Restore" : "Maximize"}
-          aria-label={isMaximized ? "Restore window" : "Maximize window"}
-        >
-          {isMaximized ? <Copy size={12} /> : <Square size={12} />}
-        </button>
-        <button
-          onClick={handleClose}
-          className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-red-600 hover:text-white transition-colors"
-          title="Close"
-          aria-label="Close window"
-        >
-          <X size={14} />
-        </button>
-      </div>
+          {/* Window controls */}
+          <div
+            className="flex items-center shrink-0 h-full"
+            data-no-drag
+            role="group"
+            aria-label="Window controls"
+          >
+            <button
+              onClick={handleMinimize}
+              className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
+              title="Minimize"
+              aria-label="Minimize window"
+            >
+              <Minus size={14} />
+            </button>
+            <button
+              onClick={handleMaximize}
+              className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-neutral-700/60 hover:text-white transition-colors"
+              title={isMaximized ? "Restore" : "Maximize"}
+              aria-label={isMaximized ? "Restore window" : "Maximize window"}
+            >
+              {isMaximized ? <Copy size={12} /> : <Square size={12} />}
+            </button>
+            <button
+              onClick={handleClose}
+              className="h-full px-3.5 flex items-center justify-center text-neutral-400 hover:bg-red-600 hover:text-white transition-colors"
+              title="Close"
+              aria-label="Close window"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

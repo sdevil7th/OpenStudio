@@ -200,10 +200,18 @@ public:
                     MainComponent::WindowCallbacks callbacks)
             : DocumentWindow (name,
                               juce::Colours::black,
+#if JUCE_MAC
+                              juce::DocumentWindow::allButtons)
+#else
                               0)
+#endif
         {
+#if JUCE_MAC
+            setUsingNativeTitleBar (true);
+#else
             setUsingNativeTitleBar (false);
             setTitleBarHeight (0);
+#endif
             setContentOwned (new MainComponent(audioEngine,
                                                appUpdater,
                                                startupMode,
