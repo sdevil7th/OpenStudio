@@ -39,8 +39,7 @@ Use this flow instead:
 8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
-   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-directml-x64.zip`
-   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-cuda-x64.zip`
+   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-arm64.zip`
 9. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
@@ -101,14 +100,14 @@ If you want one command for the full guarded Windows path, use:
    This now also validates staged Windows prerequisite installers when they are part of the runtime contract.
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
-8. Prepare and package the Windows AI runtime archive:
-   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -Architecture x64 -RequirementsFile tools/ai-runtime-requirements-windows.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
-   `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -ExpectedRuntimeVersion 1.0.0`
+8. Prepare and package the Windows AI base runtime archive:
+   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows-base -Architecture x64 -RequirementsFile tools/ai-runtime-requirements-windows-base.txt -RuntimeFamily windows-base-x64 -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows-base -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -ExpectedRuntimeVersion 1.0.0`
 9. Generate updater metadata:
-   `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip -WindowsAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-AI-Runtime-windows-x64.zip -AiRuntimeVersion 1.0.0`
+   `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsBaseAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsBaseAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsCudaInstallPlanPath tools/ai-runtime-install-plan-windows-cuda.json -WindowsDirectmlInstallPlanPath tools/ai-runtime-install-plan-windows-directml.json -AiRuntimeVersion 1.0.0`
    Optional appcast fields: `-FullReleaseNotesUrl https://openstudio.org.in/releases/1.0.0 -WindowsInstallerArguments "/SP- /NOICONS"`
 10. Validate the generated metadata:
-   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-x64.zip`
+   `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsBaseAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsCudaInstallPlanPath tools/ai-runtime-install-plan-windows-cuda.json -WindowsDirectmlInstallPlanPath tools/ai-runtime-install-plan-windows-directml.json`
 11. Stage the uniquely named GitHub Release metadata assets:
    `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
 12. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.

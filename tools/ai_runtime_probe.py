@@ -48,6 +48,7 @@ def probe_runtime_capabilities(
     started_at = time.perf_counter()
     report: dict[str, Any] = {
         "schemaVersion": 1,
+        "baseRuntimeReady": False,
         "runtimeReady": False,
         "restartRequired": False,
         "platform": platform.system().lower(),
@@ -72,6 +73,8 @@ def probe_runtime_capabilities(
 
     if models_dir and model_name:
         report["modelInstalled"] = (Path(models_dir) / model_name).exists()
+
+    report["baseRuntimeReady"] = True
 
     try:
         import torch
@@ -229,7 +232,7 @@ def main() -> int:
         acceleration_mode=args.acceleration_mode,
     )
     print(json.dumps(report), flush=True)
-    return 0 if report.get("runtimeReady") else 1
+    return 0 if report.get("baseRuntimeReady") else 1
 
 
 if __name__ == "__main__":

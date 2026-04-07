@@ -66,6 +66,64 @@ function Resolve-AbsolutePath {
     return Join-Path $PWD $PathValue
 }
 
+function ConvertTo-HashtableRecursive {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = [ordered]@{}
+        foreach ($entry in $Value.GetEnumerator()) {
+            $result[$entry.Key] = ConvertTo-HashtableRecursive -Value $entry.Value
+        }
+        return $result
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = @()
+        foreach ($item in $Value) {
+            $items += ,(ConvertTo-HashtableRecursive -Value $item)
+        }
+        return ,$items
+    }
+
+    if ($Value.PSObject -and $Value.PSObject.Properties.Count -gt 0 -and -not ($Value -is [string])) {
+        $result = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-HashtableRecursive -Value $property.Value
+        }
+        return $result
+    }
+
+    return $Value
+}
+
+function ConvertFrom-JsonCompat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Json,
+
+        [switch]$AsHashtable
+    )
+
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        if ($AsHashtable) {
+            return $Json | ConvertFrom-Json -AsHashtable
+        }
+
+        return $Json | ConvertFrom-Json
+    }
+
+    $parsed = $Json | ConvertFrom-Json
+    if ($AsHashtable) {
+        return ConvertTo-HashtableRecursive -Value $parsed
+    }
+
+    return $parsed
+}
+
 function Invoke-LoggedStep {
     param(
         [Parameter(Mandatory = $true)]
@@ -363,6 +421,7 @@ function Get-DefaultRuntimeFamily {
 
     switch ("$TargetPlatform/$TargetArchitecture") {
         "windows/x64" {
+            if ($requirementsName -like "*windows-base*") { return "windows-base-x64" }
             if ($requirementsName -like "*windows-cuda*") { return "windows-cuda-x64" }
             if ($requirementsName -like "*windows-directml*" -or $requirementsName -like "*windows.txt") { return "windows-directml-x64" }
             return "windows-x64"
@@ -371,6 +430,19 @@ function Get-DefaultRuntimeFamily {
         "macos/x64"   { return "macos-x64" }
         default       { return "$TargetPlatform-$TargetArchitecture" }
     }
+}
+
+function Get-RuntimePreparationMode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeFamily
+    )
+
+    if ($ResolvedRuntimeFamily -eq "windows-base-x64") {
+        return "base"
+    }
+
+    return "full"
 }
 
 function Remove-OptionalPath {
@@ -436,14 +508,16 @@ function Optimize-RuntimePayload {
         Remove-OptionalPath (Join-Path $torchRoot "share")
     }
 
-    foreach ($packageName in @("pip", "setuptools", "wheel")) {
-        Get-ChildItem -LiteralPath $sitePackages -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like "$packageName*" } |
-            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($ResolvedRuntimeFamily -notlike "windows-base-*") {
+        foreach ($packageName in @("pip", "setuptools", "wheel")) {
+            Get-ChildItem -LiteralPath $sitePackages -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$packageName*" } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        }
     }
 
     $scriptsDir = Join-Path $RuntimeRootPath "Scripts"
-    if ($TargetPlatform -eq "windows" -and (Test-Path $scriptsDir)) {
+    if ($TargetPlatform -eq "windows" -and (Test-Path $scriptsDir) -and $ResolvedRuntimeFamily -notlike "windows-base-*") {
         Get-ChildItem -LiteralPath $scriptsDir -Force -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^(pip|wheel|easy_install)' } |
             ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
@@ -470,7 +544,7 @@ function Invoke-RuntimeCapabilityProbe {
         throw "AI runtime capability probe failed. Output: $probeJson"
     }
 
-    $payload = ($probeJson | Select-Object -Last 1) | ConvertFrom-Json -AsHashtable
+    $payload = ConvertFrom-JsonCompat -Json (($probeJson | Select-Object -Last 1) | Out-String) -AsHashtable
     if (-not $payload.runtimeReady) {
         throw "AI runtime capability probe did not report a ready runtime."
     }
@@ -505,6 +579,19 @@ function Test-RuntimeImport {
         return $false
     }
 
+    $metadataPath = Join-Path $RuntimeRootPath ".openstudio-ai-runtime.json"
+    if (Test-Path $metadataPath) {
+        try {
+            $metadata = Get-Content -Path $metadataPath -Raw | ConvertFrom-Json
+            if ($metadata.runtimeMode -eq "base") {
+                & $runtimePython -m pip --version 2>&1 | Out-Host
+                return $LASTEXITCODE -eq 0
+            }
+        }
+        catch {
+        }
+    }
+
     & $runtimePython -c "import audio_separator.separator; print('ok')" 2>&1 | Out-Host
     return $LASTEXITCODE -eq 0
 }
@@ -526,6 +613,7 @@ $resolvedRuntimeFamily = if ([string]::IsNullOrWhiteSpace($RuntimeFamily)) {
 } else {
     $RuntimeFamily
 }
+$runtimePreparationMode = Get-RuntimePreparationMode -ResolvedRuntimeFamily $resolvedRuntimeFamily
 $targetTriple = Get-StandaloneTargetTriple -TargetPlatform $Platform -TargetArchitecture $resolvedArchitecture
 $assetName = Get-StandaloneAssetName -PythonVersion $StandalonePythonVersion -ReleaseTag $StandaloneReleaseTag -TargetTriple $targetTriple -Flavor $StandaloneFlavor
 $assetUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$StandaloneReleaseTag/$assetName"
@@ -560,6 +648,7 @@ try {
     Write-Host "platform=$Platform"
     Write-Host "architecture=$resolvedArchitecture"
     Write-Host "runtimeFamily=$resolvedRuntimeFamily"
+    Write-Host "runtimeMode=$runtimePreparationMode"
     Write-Host "standaloneReleaseTag=$StandaloneReleaseTag"
     Write-Host "standalonePythonVersion=$StandalonePythonVersion"
     Write-Host "standaloneAsset=$assetName"
@@ -620,7 +709,9 @@ try {
 
     $pipInstallArguments = @($runtimePython)
     $pipInstallArguments += Get-PipInstallArguments -TargetPlatform $Platform -RequirementsPath $resolvedRequirementsFile
-    Invoke-LoggedStep -Description "Installing AI runtime requirements into standalone runtime" -Command $pipInstallArguments
+    if ((Get-Content -Path $resolvedRequirementsFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith("#") }).Count -gt 0) {
+        Invoke-LoggedStep -Description "Installing AI runtime requirements into standalone runtime" -Command $pipInstallArguments
+    }
 
     if ($resolvedRuntimeFamily -eq "windows-cuda-x64") {
         $windowsTorchInstallArguments = @(
@@ -637,23 +728,64 @@ try {
 
     Optimize-RuntimePayload -RuntimeRootPath $resolvedRuntimeRoot -TargetPlatform $Platform -ResolvedRuntimeFamily $resolvedRuntimeFamily
 
-    Invoke-LoggedStep -Description "Verifying standalone AI runtime import" -Command @(
-        $runtimePython,
-        "-c",
-        "import audio_separator.separator; print('ok')"
-    )
+    $installPlansMetadata = @()
+    if ($resolvedRuntimeFamily -eq "windows-base-x64") {
+        $plansDir = Join-Path $resolvedRuntimeRoot "openstudio-ai-backend-plans"
+        New-Item -ItemType Directory -Force -Path $plansDir | Out-Null
+        foreach ($planFile in @(
+            (Join-Path $PSScriptRoot "ai-runtime-install-plan-windows-cuda.json"),
+            (Join-Path $PSScriptRoot "ai-runtime-install-plan-windows-directml.json")
+        )) {
+            if (-not (Test-Path $planFile)) {
+                throw "Expected Windows backend install plan was not found: $planFile"
+            }
 
-    $capabilityProbe = Invoke-RuntimeCapabilityProbe `
-        -RuntimePython $runtimePython `
-        -ProbeScriptPath $probeScriptPath `
-        -TargetPlatform $Platform `
-        -ExpectedBackends $ExpectedPackagedBackends
+            $targetPlanPath = Join-Path $plansDir ([System.IO.Path]::GetFileName($planFile))
+            Copy-Item -LiteralPath $planFile -Destination $targetPlanPath -Force
+
+            $plan = ConvertFrom-JsonCompat -Json (Get-Content -Path $planFile -Raw) -AsHashtable
+            $installPlansMetadata += [ordered]@{
+                id = [string]$plan.id
+                backend = [string]$plan.backend
+                fileName = [System.IO.Path]::GetFileName($planFile)
+                sha256 = (Get-FileHash -Algorithm SHA256 -Path $planFile).Hash.ToLowerInvariant()
+            }
+        }
+
+        Invoke-LoggedStep -Description "Verifying standalone base AI runtime" -Command @(
+            $runtimePython,
+            "-m",
+            "pip",
+            "--version"
+        )
+        $capabilityProbe = @{
+            packagedBackends = @("cpu")
+            supportedBackends = @("cpu")
+            selectedBackend = "cpu"
+            baseRuntimeReady = $true
+            runtimeReady = $false
+        }
+    }
+    else {
+        Invoke-LoggedStep -Description "Verifying standalone AI runtime import" -Command @(
+            $runtimePython,
+            "-c",
+            "import audio_separator.separator; print('ok')"
+        )
+
+        $capabilityProbe = Invoke-RuntimeCapabilityProbe `
+            -RuntimePython $runtimePython `
+            -ProbeScriptPath $probeScriptPath `
+            -TargetPlatform $Platform `
+            -ExpectedBackends $ExpectedPackagedBackends
+    }
 
     $metadata = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         platform = $Platform
         architecture = $resolvedArchitecture
         runtimeFamily = $resolvedRuntimeFamily
+        runtimeMode = $runtimePreparationMode
         runtimeVersion = $ExpectedRuntimeVersion
         preparedAtUtc = [DateTime]::UtcNow.ToString("o")
         requirementsFile = [System.IO.Path]::GetFileName($resolvedRequirementsFile)
@@ -668,10 +800,16 @@ try {
             assetUrl = $assetUrl
         }
         capabilityProfile = [ordered]@{
+            baseRuntimeReady = [bool]$capabilityProbe.baseRuntimeReady
+            runtimeReady = [bool]$capabilityProbe.runtimeReady
             packagedBackends = @($capabilityProbe.packagedBackends)
             supportedBackends = @($capabilityProbe.supportedBackends)
             selectedBackend = [string]$capabilityProbe.selectedBackend
         }
+    }
+
+    if ($installPlansMetadata.Count -gt 0) {
+        $metadata.installPlans = $installPlansMetadata
     }
 
     $metadataPath = Join-Path $resolvedRuntimeRoot ".openstudio-ai-runtime.json"

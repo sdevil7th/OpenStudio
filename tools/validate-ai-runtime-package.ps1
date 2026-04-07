@@ -131,6 +131,10 @@ try {
 
     $metadata = Get-Content -Path $metadataPath -Raw | ConvertFrom-Json
     Assert-True ($metadata.schemaVersion -ge 2) "AI runtime metadata schemaVersion is invalid."
+    $runtimeMode = [string]$metadata.runtimeMode
+    if ([string]::IsNullOrWhiteSpace($runtimeMode)) {
+        $runtimeMode = "full"
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($ExpectedRuntimeVersion)) {
         Assert-True ($metadata.runtimeVersion -eq $ExpectedRuntimeVersion) "AI runtime metadata runtimeVersion '$($metadata.runtimeVersion)' did not match expected '$ExpectedRuntimeVersion'."
@@ -142,18 +146,34 @@ try {
         Write-Host "Validated runtime family hint: $ExpectedRuntimeFamily"
     }
 
-    $diagnosticsJson = & $pythonExe -c "import json, pathlib, sys; import audio_separator.separator; print(json.dumps({'ok': True, 'executable': sys.executable, 'prefix': sys.prefix, 'base_prefix': sys.base_prefix, 'version': sys.version, 'cwd': str(pathlib.Path.cwd())}))" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "AI runtime import verification failed for '$pythonExe'. Output: $diagnosticsJson"
+    if ($runtimeMode -eq "base") {
+        $diagnosticsJson = & $pythonExe -m pip --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Base AI runtime pip verification failed for '$pythonExe'. Output: $diagnosticsJson"
+        }
+
+        $plansDir = Join-Path $runtimeRoot "openstudio-ai-backend-plans"
+        Assert-True (Test-Path $plansDir) "Base AI runtime is missing openstudio-ai-backend-plans."
+        Assert-True ($null -ne $metadata.installPlans -and $metadata.installPlans.Count -ge 1) "Base AI runtime metadata is missing installPlans."
+        foreach ($plan in $metadata.installPlans) {
+            $planPath = Join-Path $plansDir $plan.fileName
+            Assert-True (Test-Path $planPath) "Base AI runtime is missing backend install plan '$($plan.fileName)'."
+        }
     }
+    else {
+        $diagnosticsJson = & $pythonExe -c "import json, pathlib, sys; import audio_separator.separator; print(json.dumps({'ok': True, 'executable': sys.executable, 'prefix': sys.prefix, 'base_prefix': sys.base_prefix, 'version': sys.version, 'cwd': str(pathlib.Path.cwd())}))" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "AI runtime import verification failed for '$pythonExe'. Output: $diagnosticsJson"
+        }
 
-    $diagnostics = ($diagnosticsJson | Select-Object -Last 1) | ConvertFrom-Json
-    Assert-True ($diagnostics.ok -eq $true) "AI runtime diagnostics did not report success."
-    Assert-True ($diagnostics.prefix -eq $diagnostics.base_prefix) "AI runtime prefix '$($diagnostics.prefix)' does not match base_prefix '$($diagnostics.base_prefix)'. This runtime still looks like a venv."
+        $diagnostics = ($diagnosticsJson | Select-Object -Last 1) | ConvertFrom-Json
+        Assert-True ($diagnostics.ok -eq $true) "AI runtime diagnostics did not report success."
+        Assert-True ($diagnostics.prefix -eq $diagnostics.base_prefix) "AI runtime prefix '$($diagnostics.prefix)' does not match base_prefix '$($diagnostics.base_prefix)'. This runtime still looks like a venv."
 
-    $runtimeRootResolved = [System.IO.Path]::GetFullPath($runtimeRoot)
-    $pythonResolved = [System.IO.Path]::GetFullPath([string]$diagnostics.executable)
-    Assert-True ($pythonResolved.StartsWith($runtimeRootResolved, [System.StringComparison]::OrdinalIgnoreCase)) "AI runtime executable '$pythonResolved' was not launched from inside '$runtimeRootResolved'."
+        $runtimeRootResolved = [System.IO.Path]::GetFullPath($runtimeRoot)
+        $pythonResolved = [System.IO.Path]::GetFullPath([string]$diagnostics.executable)
+        Assert-True ($pythonResolved.StartsWith($runtimeRootResolved, [System.StringComparison]::OrdinalIgnoreCase)) "AI runtime executable '$pythonResolved' was not launched from inside '$runtimeRootResolved'."
+    }
 
     $probeJson = & $pythonExe $probeScriptPath --acceleration-mode auto 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -161,20 +181,27 @@ try {
     }
 
     $probe = ($probeJson | Select-Object -Last 1) | ConvertFrom-Json
-    Assert-True ($probe.runtimeReady -eq $true) "AI runtime capability probe did not report a ready runtime."
+    Assert-True ($probe.baseRuntimeReady -eq $true) "AI runtime capability probe did not report a valid base runtime."
     Assert-True ($probe.selectedBackend -in @("cuda", "directml", "coreml", "mps", "cpu")) "AI runtime capability probe returned an unexpected selectedBackend '$($probe.selectedBackend)'."
     Assert-True ($probe.supportedBackends.Count -ge 1) "AI runtime capability probe did not report supportedBackends."
 
-    if ($Platform -eq "windows") {
-        Assert-True (($probe.packagedBackends -contains "cuda") -or ($probe.packagedBackends -contains "directml")) "Windows AI runtime probe did not report any packaged accelerated backend."
+    if ($runtimeMode -eq "base") {
+        Assert-True ($probe.runtimeReady -eq $false) "Base AI runtime should not report runtimeReady before backend overlay installation."
     }
+    else {
+        Assert-True ($probe.runtimeReady -eq $true) "AI runtime capability probe did not report a ready runtime."
 
-    if ($Platform -eq "macos") {
-        Assert-True (($probe.packagedBackends -contains "coreml") -or ($probe.packagedBackends -contains "mps") -or ($probe.packagedBackends -contains "cpu")) "macOS AI runtime probe did not report packaged backends."
-    }
+        if ($Platform -eq "windows") {
+            Assert-True (($probe.packagedBackends -contains "cuda") -or ($probe.packagedBackends -contains "directml")) "Windows AI runtime probe did not report any packaged accelerated backend."
+        }
 
-    foreach ($expectedBackend in $ExpectedPackagedBackends) {
-        Assert-True (($probe.packagedBackends -contains $expectedBackend)) "AI runtime probe did not report expected packaged backend '$expectedBackend'."
+        if ($Platform -eq "macos") {
+            Assert-True (($probe.packagedBackends -contains "coreml") -or ($probe.packagedBackends -contains "mps") -or ($probe.packagedBackends -contains "cpu")) "macOS AI runtime probe did not report packaged backends."
+        }
+
+        foreach ($expectedBackend in $ExpectedPackagedBackends) {
+            Assert-True (($probe.packagedBackends -contains $expectedBackend)) "AI runtime probe did not report expected packaged backend '$expectedBackend'."
+        }
     }
 
     Write-Host "AI runtime package validation passed for $Platform at $resolvedArchive"

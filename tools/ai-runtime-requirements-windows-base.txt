@@ -1,0 +1,3 @@
+# Base Windows AI runtime.
+# Keep this lean and relocatable: backend overlays are installed on-device
+# during AI Tools setup from the manifest-provided install plans.

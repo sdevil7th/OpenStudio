@@ -376,8 +376,7 @@ jobs:
           mkdir -p dist/ai-runtime
           gh release download "$AI_RUNTIME_RELEASE_TAG" \
             --repo "${{ github.repository }}" \
-            --pattern "OpenStudio-AI-Runtime-windows-directml-x64.zip" \
-            --pattern "OpenStudio-AI-Runtime-windows-cuda-x64.zip" \
+            --pattern "OpenStudio-AI-Runtime-windows-base-x64.zip" \
             --pattern "OpenStudio-AI-Runtime-macos-arm64.zip" \
             --dir dist/ai-runtime
 
@@ -387,8 +386,7 @@ jobs:
           $requiredFiles = @(
             "dist/windows/OpenStudio-Setup-x64.exe",
             "dist/macos/OpenStudio-macOS.dmg",
-            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip",
-            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip",
+            "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip",
             "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
           )
 
@@ -406,8 +404,7 @@ jobs:
           $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
           $windowsUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-Setup-x64.exe"
           $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
-          $windowsDirectmlAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-directml-x64.zip"
-          $windowsCudaAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-cuda-x64.zip"
+          $windowsBaseAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-base-x64.zip"
           $macosArm64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-macos-arm64.zip"
           ./tools/generate-release-metadata.ps1 `
             -Version $env:VERSION `
@@ -420,10 +417,10 @@ jobs:
             -WindowsInstallerArguments "/SP- /NOICONS" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
             -MacAssetUrl $macosUrl `
-            -WindowsDirectmlAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip" `
-            -WindowsDirectmlAiRuntimeAssetUrl $windowsDirectmlAiRuntimeUrl `
-            -WindowsCudaAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip" `
-            -WindowsCudaAiRuntimeAssetUrl $windowsCudaAiRuntimeUrl `
+            -WindowsBaseAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `
+            -WindowsBaseAiRuntimeAssetUrl $windowsBaseAiRuntimeUrl `
+            -WindowsCudaInstallPlanPath "tools/ai-runtime-install-plan-windows-cuda.json" `
+            -WindowsDirectmlInstallPlanPath "tools/ai-runtime-install-plan-windows-directml.json" `
             -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip" `
             -MacArm64AiRuntimeAssetUrl $macosArm64AiRuntimeUrl `
             -AiRuntimeVersion $env:AI_RUNTIME_VERSION
@@ -436,8 +433,9 @@ jobs:
             -Channel stable `
             -WindowsAssetPath "dist/windows/OpenStudio-Setup-x64.exe" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
-            -WindowsDirectmlAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip" `
-            -WindowsCudaAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip" `
+            -WindowsBaseAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `
+            -WindowsCudaInstallPlanPath "tools/ai-runtime-install-plan-windows-cuda.json" `
+            -WindowsDirectmlInstallPlanPath "tools/ai-runtime-install-plan-windows-directml.json" `
             -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
 
       - name: Prepare uniquely named release metadata assets

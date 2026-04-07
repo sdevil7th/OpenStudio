@@ -11,7 +11,7 @@ on:
         required: true
 
 jobs:
-  build-windows-runtime-directml:
+  build-windows-runtime-base:
     runs-on: windows-latest
     env:
       VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
@@ -33,96 +33,38 @@ jobs:
           path: |
             .cache/ai-runtime
             ~\AppData\Local\pip\Cache
-          key: windows-directml-${{ env.VERSION }}-${{ env.AI_RUNTIME_STANDALONE_RELEASE_TAG }}-${{ hashFiles('tools/ai-runtime-requirements-windows-directml.txt') }}
+          key: windows-base-${{ env.VERSION }}-${{ env.AI_RUNTIME_STANDALONE_RELEASE_TAG }}-${{ hashFiles('tools/ai-runtime-requirements-windows-base.txt', 'tools/ai-runtime-install-plan-windows-cuda.json', 'tools/ai-runtime-install-plan-windows-directml.json') }}
 
-      - name: Prepare DirectML runtime
+      - name: Prepare Windows base runtime
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/ai-runtime/reports | Out-Null
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-windows-directml-x64"
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-windows-base-x64"
           ./tools/prepare-ai-runtime.ps1 `
             -Platform windows `
             -RuntimeRoot $runtimeRoot `
             -Architecture x64 `
-            -RuntimeFamily "windows-directml-x64" `
-            -RequirementsFile "tools/ai-runtime-requirements-windows-directml.txt" `
+            -RuntimeFamily "windows-base-x64" `
+            -RequirementsFile "tools/ai-runtime-requirements-windows-base.txt" `
             -ExpectedRuntimeVersion $env:VERSION `
             -StandaloneReleaseTag $env:AI_RUNTIME_STANDALONE_RELEASE_TAG `
             -StandalonePythonVersion $env:AI_RUNTIME_STANDALONE_PYTHON_VERSION `
             -StandaloneFlavor $env:AI_RUNTIME_STANDALONE_FLAVOR `
             -StandaloneCacheDir ".cache/ai-runtime" `
-            -ExpectedPackagedBackends "directml" `
-            -SizeReportPath "dist/ai-runtime/reports/windows-directml-size-report.json"
+            -SizeReportPath "dist/ai-runtime/reports/windows-base-size-report.json"
           ./tools/package-ai-runtime.ps1 `
             -Platform windows `
             -RuntimeRoot $runtimeRoot `
-            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip" `
+            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `
             -ExpectedRuntimeVersion $env:VERSION `
             -MaxArtifactSizeBytes 2100000000
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-directml-ai-runtime
+          name: windows-base-ai-runtime
           path: |
-            dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip
-            dist/ai-runtime/reports/windows-directml-size-report.json
-          if-no-files-found: error
-
-  build-windows-runtime-cuda:
-    runs-on: windows-latest
-    env:
-      VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
-      AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
-      AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.10.20' }}
-      AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Normalize runtime version
-        shell: pwsh
-        run: |
-          $version = "${env:VERSION}" -replace '^ai-runtime-v', '' -replace '^v', ''
-          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Cache standalone Python and wheels
-        uses: actions/cache@v4
-        with:
-          path: |
-            .cache/ai-runtime
-            ~\AppData\Local\pip\Cache
-          key: windows-cuda-${{ env.VERSION }}-${{ env.AI_RUNTIME_STANDALONE_RELEASE_TAG }}-${{ hashFiles('tools/ai-runtime-requirements-windows-cuda.txt') }}
-
-      - name: Prepare CUDA runtime
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/ai-runtime/reports | Out-Null
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-windows-cuda-x64"
-          ./tools/prepare-ai-runtime.ps1 `
-            -Platform windows `
-            -RuntimeRoot $runtimeRoot `
-            -Architecture x64 `
-            -RuntimeFamily "windows-cuda-x64" `
-            -RequirementsFile "tools/ai-runtime-requirements-windows-cuda.txt" `
-            -ExpectedRuntimeVersion $env:VERSION `
-            -StandaloneReleaseTag $env:AI_RUNTIME_STANDALONE_RELEASE_TAG `
-            -StandalonePythonVersion $env:AI_RUNTIME_STANDALONE_PYTHON_VERSION `
-            -StandaloneFlavor $env:AI_RUNTIME_STANDALONE_FLAVOR `
-            -StandaloneCacheDir ".cache/ai-runtime" `
-            -ExpectedPackagedBackends "cuda" `
-            -SizeReportPath "dist/ai-runtime/reports/windows-cuda-size-report.json"
-          ./tools/package-ai-runtime.ps1 `
-            -Platform windows `
-            -RuntimeRoot $runtimeRoot `
-            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip" `
-            -ExpectedRuntimeVersion $env:VERSION `
-            -MaxArtifactSizeBytes 2100000000
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-cuda-ai-runtime
-          path: |
-            dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip
-            dist/ai-runtime/reports/windows-cuda-size-report.json
+            dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip
+            dist/ai-runtime/reports/windows-base-size-report.json
           if-no-files-found: error
 
   build-macos-runtime-arm64:
@@ -182,8 +124,7 @@ jobs:
   publish-ai-runtime:
     runs-on: ubuntu-latest
     needs:
-      - build-windows-runtime-directml
-      - build-windows-runtime-cuda
+      - build-windows-runtime-base
       - build-macos-runtime-arm64
     permissions:
       contents: write
@@ -198,12 +139,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: windows-directml-ai-runtime
-          path: dist/ai-runtime
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-cuda-ai-runtime
+          name: windows-base-ai-runtime
           path: dist/ai-runtime
 
       - uses: actions/download-artifact@v4
@@ -217,13 +153,11 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('ai-runtime-v{0}', github.event.inputs.runtime_version) }}
           name: OpenStudio AI Runtime ${{ env.VERSION }}
           body: |
-            Backend-specific OpenStudio AI runtimes.
+            OpenStudio AI base runtimes. Windows accelerator backends are installed on-device from the pinned install plans in the published runtime manifest.
           fail_on_unmatched_files: true
           overwrite_files: true
           files: |
-            dist/ai-runtime/OpenStudio-AI-Runtime-windows-directml-x64.zip
-            dist/ai-runtime/OpenStudio-AI-Runtime-windows-cuda-x64.zip
+            dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip
             dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
-            dist/ai-runtime/windows-directml-size-report.json
-            dist/ai-runtime/windows-cuda-size-report.json
+            dist/ai-runtime/windows-base-size-report.json
             dist/ai-runtime/macos-arm64-size-report.json

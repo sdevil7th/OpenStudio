@@ -45,6 +45,7 @@ public:
         juce::String modelVersion { "BS-Roformer-SW.ckpt" };
         juce::String verificationMode;
         juce::String runtimeCandidate;
+        juce::String backendRequested;
         juce::String installSessionId;
         juce::String lastPhase;
         juce::String terminalReason;
@@ -168,6 +169,7 @@ private:
 
     struct RuntimeCapabilities
     {
+        bool baseRuntimeReady = false;
         bool runtimeReady = false;
         bool modelInstalled = false;
         juce::StringArray supportedBackends;
@@ -244,6 +246,7 @@ private:
     juce::String installRuntimePythonPath;
     juce::String installRuntimeRootPath;
     juce::String installRuntimeCandidate;
+    juce::String installBackendRequested;
     juce::String installSessionId;
     juce::String installLastObservedPhase;
     double installLaunchTimeMs = 0.0;

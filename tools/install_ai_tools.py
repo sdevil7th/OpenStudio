@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from ai_runtime_probe import probe_runtime_capabilities
 
@@ -33,6 +34,14 @@ LOG_PATH: Path | None = None
 SESSION_ID = ""
 RUNTIME_CANDIDATE = ""
 FALLBACK_ATTEMPTED = False
+
+
+class InstallerStepError(Exception):
+    def __init__(self, message: str, *, error_code: str, progress: float) -> None:
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+        self.progress = progress
 
 
 def utc_now_iso() -> str:
@@ -151,6 +160,7 @@ def run_step(
     python_detected: bool,
     build_runtime_mode: str,
     cwd: Path | None = None,
+    raise_on_error: bool = False,
 ) -> None:
     log_event(
         "installer",
@@ -188,6 +198,12 @@ def run_step(
             exitCode=result.returncode,
             errorCode=error_code,
         )
+        if raise_on_error:
+            raise InstallerStepError(
+                f"{description} failed. See the install log for details.",
+                error_code=error_code,
+                progress=progress,
+            )
         fail(
             f"{description} failed. See the install log for details.",
             progress=progress,
@@ -218,6 +234,7 @@ def stream_step(
     python_detected: bool,
     build_runtime_mode: str,
     cwd: Path | None = None,
+    raise_on_error: bool = False,
 ) -> None:
     log_event(
         "installer",
@@ -270,6 +287,12 @@ def stream_step(
             errorCode=error_code,
             lastOutput=detail,
         )
+        if raise_on_error:
+            raise InstallerStepError(
+                f"{description} failed. {detail if detail else 'See the install log for details.'}",
+                error_code=error_code,
+                progress=progress,
+            )
         fail(
             f"{description} failed. {detail if detail else 'See the install log for details.'}",
             progress=progress,
@@ -292,12 +315,20 @@ def verify_runtime(
     runtime_python: Path,
     runtime_root: Path,
     *,
+    require_audio_separator: bool,
     install_source: str,
     requires_external_python: bool,
     python_detected: bool,
     build_runtime_mode: str,
+    raise_on_error: bool = False,
 ) -> None:
     if (runtime_root / "pyvenv.cfg").exists():
+        if raise_on_error:
+            raise InstallerStepError(
+                f"The extracted AI runtime at {runtime_root} still looks like a virtual environment and is not relocatable.",
+                error_code="runtime_not_relocatable",
+                progress=0.6,
+            )
         fail(
             f"The extracted AI runtime at {runtime_root} still looks like a virtual environment and is not relocatable.",
             progress=0.6,
@@ -309,6 +340,12 @@ def verify_runtime(
         )
 
     if not (runtime_root / ".openstudio-ai-runtime.json").exists():
+        if raise_on_error:
+            raise InstallerStepError(
+                f"The extracted AI runtime at {runtime_root} is missing OpenStudio runtime metadata.",
+                error_code="runtime_validation_failed",
+                progress=0.6,
+            )
         fail(
             f"The extracted AI runtime at {runtime_root} is missing OpenStudio runtime metadata.",
             progress=0.6,
@@ -322,23 +359,26 @@ def verify_runtime(
     resolved_runtime_python = safe_resolve(runtime_python)
     resolved_current_python = safe_resolve(Path(sys.executable))
     same_interpreter = resolved_runtime_python == resolved_current_python
+    verification_scope = "full" if require_audio_separator else "base"
 
     write_log(f"runtime_python={resolved_runtime_python}")
     write_log(f"current_python={resolved_current_python}")
     write_log(f"verificationMode={'in-process' if same_interpreter else 'subprocess'}")
+    write_log(f"verificationScope={verification_scope}")
     log_event(
         "installer",
-        "verifying_runtime",
+        "verifying_base_runtime" if not require_audio_separator else "verifying_runtime",
         "verification_start",
         runtimePython=str(resolved_runtime_python),
         currentPython=str(resolved_current_python),
         verificationMode="in-process" if same_interpreter else "subprocess",
+        verificationScope=verification_scope,
     )
 
     emit(
-        "verifying_runtime",
+        "verifying_base_runtime" if not require_audio_separator else "verifying_runtime",
         0.65,
-        message="Verifying the AI tools runtime",
+        message="Verifying the AI tools base runtime" if not require_audio_separator else "Verifying the AI tools runtime",
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
@@ -350,48 +390,215 @@ def verify_runtime(
 
     if same_interpreter:
         try:
-            import audio_separator.separator  # noqa: F401
+            if require_audio_separator:
+                import audio_separator.separator  # noqa: F401
+            else:
+                import pip  # noqa: F401
         except Exception as exc:
             write_log(f"[in-process verification error] {type(exc).__name__}: {exc}")
             log_event(
                 "installer",
-                "verifying_runtime",
+                "verifying_base_runtime" if not require_audio_separator else "verifying_runtime",
                 "verification_failed",
                 verificationMode="in-process",
+                verificationScope=verification_scope,
                 errorCode="runtime_validation_failed",
                 exceptionType=type(exc).__name__,
                 exceptionMessage=str(exc),
             )
+            if raise_on_error:
+                raise InstallerStepError(
+                    f"Verifying the AI tools {'base runtime' if not require_audio_separator else 'runtime'} failed: {type(exc).__name__}: {exc}",
+                    error_code="base_runtime_invalid" if not require_audio_separator else "runtime_validation_failed",
+                    progress=0.65,
+                )
             fail(
-                f"Verifying the AI tools runtime failed: {type(exc).__name__}: {exc}",
+                f"Verifying the AI tools {'base runtime' if not require_audio_separator else 'runtime'} failed: {type(exc).__name__}: {exc}",
                 progress=0.65,
-                error_code="runtime_validation_failed",
+                error_code="base_runtime_invalid" if not require_audio_separator else "runtime_validation_failed",
                 installSource=install_source,
                 requiresExternalPython=requires_external_python,
                 pythonDetected=python_detected,
                 buildRuntimeMode=build_runtime_mode,
             )
 
-        write_log("[in-process verification] import audio_separator.separator succeeded")
+        write_log("[in-process verification] " + ("import audio_separator.separator succeeded" if require_audio_separator else "pip import succeeded"))
         log_event(
             "installer",
-            "verifying_runtime",
+            "verifying_base_runtime" if not require_audio_separator else "verifying_runtime",
             "verification_succeeded",
             verificationMode="in-process",
+            verificationScope=verification_scope,
         )
         return
 
     run_step(
-        [str(runtime_python), "-c", "import audio_separator.separator; print('ok')"],
-        state="verifying_runtime",
+        [str(runtime_python), "-c", "import audio_separator.separator; print('ok')"] if require_audio_separator else [str(runtime_python), "-m", "pip", "--version"],
+        state="verifying_runtime" if require_audio_separator else "verifying_base_runtime",
         progress=0.65,
-        description="Verifying the AI tools runtime",
+        description="Verifying the AI tools runtime" if require_audio_separator else "Verifying the AI tools base runtime",
         install_source=install_source,
         requires_external_python=requires_external_python,
-        error_code="runtime_validation_failed",
+        error_code="runtime_validation_failed" if require_audio_separator else "base_runtime_invalid",
         python_detected=python_detected,
         build_runtime_mode=build_runtime_mode,
         cwd=runtime_root,
+        raise_on_error=raise_on_error,
+    )
+
+
+def load_backend_install_plan(install_plan_path: Path) -> dict[str, Any]:
+    try:
+        install_plan = json.loads(install_plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(
+            f"OpenStudio could not parse the backend install plan: {type(exc).__name__}: {exc}",
+            progress=0.68,
+            error_code="backend_install_plan_invalid",
+            installSource="downloadedRuntime",
+            requiresExternalPython=False,
+            pythonDetected=False,
+            buildRuntimeMode="downloaded-runtime",
+        )
+        raise AssertionError("unreachable")
+
+    if not isinstance(install_plan, dict) or not isinstance(install_plan.get("steps"), list):
+        fail(
+            "OpenStudio received an invalid backend install plan.",
+            progress=0.68,
+            error_code="backend_install_plan_invalid",
+            installSource="downloadedRuntime",
+            requiresExternalPython=False,
+            pythonDetected=False,
+            buildRuntimeMode="downloaded-runtime",
+        )
+        raise AssertionError("unreachable")
+
+    return install_plan
+
+
+def apply_backend_install_plan(
+    runtime_python: Path,
+    runtime_root: Path,
+    install_plan: dict[str, Any],
+    *,
+    backend_requested: str,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> None:
+    plan_id = str(install_plan.get("id", "")).strip()
+    package_source = str(install_plan.get("packageSource", "")).strip()
+    steps = install_plan.get("steps", [])
+
+    write_log(f"backendRequested={backend_requested}")
+    write_log(f"installPlanId={plan_id}")
+    write_log(f"packageSource={package_source}")
+    log_event(
+        "installer",
+        "installing_backend",
+        "backend_install_start",
+        backendRequested=backend_requested,
+        installPlanId=plan_id,
+        packageSource=package_source,
+        stepCount=len(steps),
+    )
+
+    emit(
+        "installing_backend",
+        0.74,
+        message=f"Installing the {backend_requested} AI backend",
+        backendRequested=backend_requested,
+        installPlanId=plan_id,
+        packageSource=package_source,
+        installSource=install_source,
+        requiresExternalPython=requires_external_python,
+        pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
+    )
+
+    for index, step in enumerate(steps, start=1):
+        step_type = str(step.get("type", "")).strip()
+        description = str(step.get("description", f"Applying backend install step {index}")).strip()
+        if step_type == "pip_install":
+            command: list[str] = [str(runtime_python), "-m", "pip", "install", "--upgrade"]
+            index_url = str(step.get("indexUrl", "")).strip()
+            if index_url:
+                command += ["--index-url", index_url]
+            extra_index_urls = step.get("extraIndexUrls", [])
+            if isinstance(extra_index_urls, list):
+                for extra_index_url in extra_index_urls:
+                    if str(extra_index_url).strip():
+                        command += ["--extra-index-url", str(extra_index_url).strip()]
+            packages = step.get("packages", [])
+            if not isinstance(packages, list) or not packages:
+                fail(
+                    f"Backend install plan step {index} is missing packages.",
+                    progress=0.74,
+                    error_code="backend_install_plan_invalid",
+                    installSource=install_source,
+                    requiresExternalPython=requires_external_python,
+                    pythonDetected=python_detected,
+                    buildRuntimeMode=build_runtime_mode,
+                )
+            command += [str(package) for package in packages]
+            stream_step(
+                command,
+                state="installing_backend",
+                progress=min(0.74 + (0.12 * index / max(len(steps), 1)), 0.86),
+                description=description,
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                error_code="backend_install_failed",
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+                cwd=runtime_root,
+                raise_on_error=True,
+            )
+        elif step_type == "pip_uninstall":
+            packages = step.get("packages", [])
+            if not isinstance(packages, list) or not packages:
+                fail(
+                    f"Backend install plan step {index} is missing packages.",
+                    progress=0.74,
+                    error_code="backend_install_plan_invalid",
+                    installSource=install_source,
+                    requiresExternalPython=requires_external_python,
+                    pythonDetected=python_detected,
+                    buildRuntimeMode=build_runtime_mode,
+                )
+            run_step(
+                [str(runtime_python), "-m", "pip", "uninstall", "-y", *[str(package) for package in packages]],
+                state="installing_backend",
+                progress=min(0.74 + (0.12 * index / max(len(steps), 1)), 0.86),
+                description=description,
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                error_code="backend_install_failed",
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+                cwd=runtime_root,
+                raise_on_error=True,
+            )
+        else:
+            fail(
+                f"Unsupported backend install step type '{step_type}'.",
+                progress=0.74,
+                error_code="backend_install_plan_invalid",
+                installSource=install_source,
+                requiresExternalPython=requires_external_python,
+                pythonDetected=python_detected,
+                buildRuntimeMode=build_runtime_mode,
+            )
+
+    log_event(
+        "installer",
+        "installing_backend",
+        "backend_install_succeeded",
+        backendRequested=backend_requested,
+        installPlanId=plan_id,
+        packageSource=package_source,
     )
 
 
@@ -401,10 +608,12 @@ def probe_runtime(
     model_name: str,
     *,
     acceleration_mode: str,
+    backend_requested: str,
     install_source: str,
     requires_external_python: bool,
     python_detected: bool,
     build_runtime_mode: str,
+    raise_on_error: bool = False,
 ) -> dict[str, object]:
     log_event(
         "probe",
@@ -457,10 +666,16 @@ def probe_runtime(
             selectedBackend=report.get("selectedBackend", "cpu"),
             probeDurationMs=report.get("probeDurationMs", 0),
         )
+        if raise_on_error:
+            raise InstallerStepError(
+                "OpenStudio could not validate the managed AI runtime on this machine.",
+                error_code="backend_probe_failed" if backend_requested else "runtime_validation_failed",
+                progress=0.96,
+            )
         fail(
             "OpenStudio could not validate the managed AI runtime on this machine.",
             progress=0.96,
-            error_code="runtime_validation_failed",
+            error_code="backend_probe_failed" if backend_requested else "runtime_validation_failed",
             installSource=install_source,
             requiresExternalPython=requires_external_python,
             pythonDetected=python_detected,
@@ -477,6 +692,21 @@ def probe_runtime(
         probeDurationMs=report.get("probeDurationMs", 0),
     )
     return report
+
+
+def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested: str) -> tuple[str, dict[str, Any]] | None:
+    if platform.system() != "Windows":
+        return None
+
+    normalized_backend = backend_requested.strip().lower()
+    if normalized_backend != "cuda":
+        return None
+
+    fallback_plan_path = runtime_root / "openstudio-ai-backend-plans" / "ai-runtime-install-plan-windows-directml.json"
+    if not fallback_plan_path.exists():
+        return None
+
+    return ("directml", load_backend_install_plan(fallback_plan_path))
 
 
 def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
@@ -538,6 +768,7 @@ def download_model(
     models_dir: Path,
     model_name: str,
     *,
+    backend_requested: str,
     install_source: str,
     requires_external_python: bool,
     python_detected: bool,
@@ -566,7 +797,7 @@ def download_model(
             Separator(
                 output_dir=str(models_dir),
                 model_file_dir=str(models_dir),
-                use_directml=(platform.system() == "Windows"),
+                use_directml=(platform.system() == "Windows" and backend_requested == "directml"),
             ).load_model(model_filename=model_name)
             write_log("[in-process model download] completed")
         except Exception as exc:
@@ -591,7 +822,7 @@ def download_model(
     else:
         model_bootstrap = (
             "from audio_separator.separator import Separator; "
-            f"Separator(output_dir=r'{models_dir}', model_file_dir=r'{models_dir}', use_directml={platform.system() == 'Windows'}).load_model(model_filename=r'{model_name}')"
+            f"Separator(output_dir=r'{models_dir}', model_file_dir=r'{models_dir}', use_directml={platform.system() == 'Windows' and backend_requested == 'directml'}).load_model(model_filename=r'{model_name}')"
         )
         stream_step(
             [str(runtime_python), "-c", model_bootstrap],
@@ -646,6 +877,8 @@ def main() -> None:
     parser.add_argument("--session-id", default="", help="Install session id for correlated logging")
     parser.add_argument("--runtime-candidate", default="", help="Selected runtime candidate identity")
     parser.add_argument("--fallback-attempted", action="store_true", help="True when this install is using a fallback runtime candidate")
+    parser.add_argument("--backend-requested", default="", help="Requested backend overlay identity for Windows base runtimes")
+    parser.add_argument("--backend-install-plan", default="", help="Path to a JSON backend install plan")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).expanduser().resolve()
@@ -669,6 +902,10 @@ def main() -> None:
     if RUNTIME_CANDIDATE:
         write_log(f"runtimeCandidate={RUNTIME_CANDIDATE}")
     write_log(f"fallbackAttempted={FALLBACK_ATTEMPTED}")
+    if args.backend_requested:
+        write_log(f"backendRequested={args.backend_requested}")
+    if args.backend_install_plan:
+        write_log(f"backendInstallPlan={args.backend_install_plan}")
     log_event(
         "installer",
         "startup",
@@ -677,10 +914,13 @@ def main() -> None:
         runtimeRoot=str(runtime_root),
         modelsDir=str(models_dir),
         verifyExistingRuntime=bool(args.verify_existing_runtime),
+        backendRequested=args.backend_requested,
+        backendInstallPlan=args.backend_install_plan,
     )
 
     runtime_root.parent.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
+    effective_backend_requested = args.backend_requested.strip()
 
     if args.verify_existing_runtime:
         install_source = "downloadedRuntime"
@@ -688,14 +928,152 @@ def main() -> None:
         python_detected = False
         build_runtime_mode = "downloaded-runtime"
         runtime_python = resolve_runtime_python(runtime_root)
+        backend_install_plan = None
+        backend_requested = args.backend_requested.strip()
+        effective_backend_requested = backend_requested
+        if args.backend_install_plan:
+            backend_install_plan = load_backend_install_plan(Path(args.backend_install_plan).expanduser().resolve())
         verify_runtime(
             runtime_python,
             runtime_root,
+            require_audio_separator=backend_install_plan is None,
             install_source=install_source,
             requires_external_python=requires_external_python,
             python_detected=python_detected,
             build_runtime_mode=build_runtime_mode,
         )
+        if backend_install_plan is not None:
+            effective_backend_requested = backend_requested or str(backend_install_plan.get("backend", "")).strip() or "cpu"
+            try:
+                apply_backend_install_plan(
+                    runtime_python,
+                    runtime_root,
+                    backend_install_plan,
+                    backend_requested=effective_backend_requested,
+                    install_source=install_source,
+                    requires_external_python=requires_external_python,
+                    python_detected=python_detected,
+                    build_runtime_mode=build_runtime_mode,
+                )
+                verify_runtime(
+                    runtime_python,
+                    runtime_root,
+                    require_audio_separator=True,
+                    install_source=install_source,
+                    requires_external_python=requires_external_python,
+                    python_detected=python_detected,
+                    build_runtime_mode=build_runtime_mode,
+                    raise_on_error=True,
+                )
+                probe_runtime(
+                    runtime_root,
+                    models_dir,
+                    args.model,
+                    acceleration_mode="auto",
+                    backend_requested=effective_backend_requested,
+                    install_source=install_source,
+                    requires_external_python=requires_external_python,
+                    python_detected=python_detected,
+                    build_runtime_mode=build_runtime_mode,
+                    raise_on_error=True,
+                )
+            except InstallerStepError as primary_exc:
+                fallback_plan = resolve_fallback_backend_install_plan(runtime_root, effective_backend_requested)
+                if fallback_plan is None or FALLBACK_ATTEMPTED:
+                    fail(
+                        primary_exc.message,
+                        progress=primary_exc.progress,
+                        error_code=primary_exc.error_code,
+                        installSource=install_source,
+                        requiresExternalPython=requires_external_python,
+                        pythonDetected=python_detected,
+                        buildRuntimeMode=build_runtime_mode,
+                    )
+
+                fallback_backend_requested, fallback_backend_install_plan = fallback_plan
+                failed_backend_requested = effective_backend_requested
+                FALLBACK_ATTEMPTED = True
+                effective_backend_requested = fallback_backend_requested
+                write_log(f"fallbackAttempted={FALLBACK_ATTEMPTED}")
+                write_log(f"backendRequested={effective_backend_requested}")
+                log_event(
+                    "installer",
+                    "installing_backend",
+                    "backend_fallback_started",
+                    failedBackend=failed_backend_requested,
+                    fallbackBackend=fallback_backend_requested,
+                    previousErrorCode=primary_exc.error_code,
+                    previousErrorMessage=primary_exc.message,
+                )
+                emit(
+                    "installing_backend",
+                    0.74,
+                    message=f"Falling back to the {fallback_backend_requested} AI backend",
+                    backendRequested=fallback_backend_requested,
+                    terminalReason="backend_fallback_started",
+                    installSource=install_source,
+                    requiresExternalPython=requires_external_python,
+                    pythonDetected=python_detected,
+                    buildRuntimeMode=build_runtime_mode,
+                )
+
+                try:
+                    apply_backend_install_plan(
+                        runtime_python,
+                        runtime_root,
+                        fallback_backend_install_plan,
+                        backend_requested=fallback_backend_requested,
+                        install_source=install_source,
+                        requires_external_python=requires_external_python,
+                        python_detected=python_detected,
+                        build_runtime_mode=build_runtime_mode,
+                    )
+                    verify_runtime(
+                        runtime_python,
+                        runtime_root,
+                        require_audio_separator=True,
+                        install_source=install_source,
+                        requires_external_python=requires_external_python,
+                        python_detected=python_detected,
+                        build_runtime_mode=build_runtime_mode,
+                        raise_on_error=True,
+                    )
+                    probe_runtime(
+                        runtime_root,
+                        models_dir,
+                        args.model,
+                        acceleration_mode="auto",
+                        backend_requested=fallback_backend_requested,
+                        install_source=install_source,
+                        requires_external_python=requires_external_python,
+                        python_detected=python_detected,
+                        build_runtime_mode=build_runtime_mode,
+                        raise_on_error=True,
+                    )
+                    log_event(
+                        "installer",
+                        "installing_backend",
+                        "backend_fallback_succeeded",
+                        backendRequested=fallback_backend_requested,
+                    )
+                except InstallerStepError as fallback_exc:
+                    log_event(
+                        "installer",
+                        "installing_backend",
+                        "backend_fallback_failed",
+                        backendRequested=fallback_backend_requested,
+                        errorCode=fallback_exc.error_code,
+                        errorMessage=fallback_exc.message,
+                    )
+                    fail(
+                        fallback_exc.message,
+                        progress=fallback_exc.progress,
+                        error_code="backend_fallback_exhausted",
+                        installSource=install_source,
+                        requiresExternalPython=requires_external_python,
+                        pythonDetected=python_detected,
+                        buildRuntimeMode=build_runtime_mode,
+                    )
     else:
         install_source = "externalPython"
         requires_external_python = True
@@ -737,6 +1115,7 @@ def main() -> None:
         verify_runtime(
             runtime_python,
             runtime_root,
+            require_audio_separator=True,
             install_source=install_source,
             requires_external_python=requires_external_python,
             python_detected=True,
@@ -747,6 +1126,7 @@ def main() -> None:
         runtime_python,
         models_dir,
         args.model,
+        backend_requested=effective_backend_requested,
         install_source=install_source,
         requires_external_python=requires_external_python,
         python_detected=python_detected,
@@ -758,6 +1138,7 @@ def main() -> None:
         models_dir,
         args.model,
         acceleration_mode="auto",
+        backend_requested=effective_backend_requested,
         install_source=install_source,
         requires_external_python=requires_external_python,
         python_detected=python_detected,
@@ -779,6 +1160,7 @@ def main() -> None:
         pythonDetected=python_detected,
         buildRuntimeMode=build_runtime_mode,
         supportedBackends=runtime_probe.get("supportedBackends", []),
+        backendRequested=effective_backend_requested,
         selectedBackend=runtime_probe.get("selectedBackend", "cpu"),
         runtimeVersion=runtime_probe.get("runtimeVersion", ""),
         modelVersion=runtime_probe.get("modelVersion", args.model),
@@ -791,6 +1173,7 @@ def main() -> None:
         "installer_ready",
         runtimeVersion=runtime_probe.get("runtimeVersion", ""),
         modelVersion=runtime_probe.get("modelVersion", args.model),
+        backendRequested=effective_backend_requested,
         supportedBackends=runtime_probe.get("supportedBackends", []),
         selectedBackend=runtime_probe.get("selectedBackend", "cpu"),
         verificationMode="in-process" if safe_resolve(runtime_python) == safe_resolve(Path(sys.executable)) else "subprocess",

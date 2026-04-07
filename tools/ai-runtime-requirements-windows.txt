@@ -1,6 +1,5 @@
 # Backward-compatible alias for the default Windows managed runtime family.
-# The dedicated runtime release workflow now publishes explicit backend-specific
-# Windows runtimes using:
-#   - tools/ai-runtime-requirements-windows-directml.txt
-#   - tools/ai-runtime-requirements-windows-cuda.txt
-audio-separator[dml]==0.41.1
+# The publishable Windows runtime is now a small base runtime; the CUDA or
+# DirectML backend overlay is installed on-device during AI Tools setup.
+#
+# Keep this file aligned with tools/ai-runtime-requirements-windows-base.txt.

@@ -16,10 +16,19 @@ param(
     [string]$WindowsAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsBaseAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$WindowsDirectmlAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
     [string]$WindowsCudaAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlInstallPlanPath = "",
 
     [Parameter(Mandatory = $false)]
     [string]$MacAiRuntimeAssetPath = "",
@@ -110,6 +119,16 @@ function Get-AssetInfo {
         Size = [int64]$item.Length
         Sha256 = $hash
     }
+}
+
+function Load-OptionalJson {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+        return $null
+    }
+
+    return Get-Content $Path -Raw | ConvertFrom-Json
 }
 
 function Validate-ManifestBasics {
@@ -258,11 +277,14 @@ Assert-True ($rootJson -eq $channelJson) "Root latest.json and channel latest.js
 $windowsAsset = Get-AssetInfo $WindowsAssetPath
 $macosAsset = Get-AssetInfo $MacAssetPath
 $windowsAiRuntimeAsset = Get-AssetInfo $WindowsAiRuntimeAssetPath
+$windowsBaseAiRuntimeAsset = Get-AssetInfo $WindowsBaseAiRuntimeAssetPath
 $windowsDirectmlAiRuntimeAsset = Get-AssetInfo $WindowsDirectmlAiRuntimeAssetPath
 $windowsCudaAiRuntimeAsset = Get-AssetInfo $WindowsCudaAiRuntimeAssetPath
 $macosAiRuntimeAsset = Get-AssetInfo $MacAiRuntimeAssetPath
 $macosArm64AiRuntimeAsset = Get-AssetInfo $MacArm64AiRuntimeAssetPath
 $macosX64AiRuntimeAsset = Get-AssetInfo $MacX64AiRuntimeAssetPath
+$windowsCudaInstallPlan = Load-OptionalJson $WindowsCudaInstallPlanPath
+$windowsDirectmlInstallPlan = Load-OptionalJson $WindowsDirectmlInstallPlanPath
 
 Validate-PlatformEntry -PlatformName "windows" -PlatformNode $rootManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAsset
 Validate-PlatformEntry -PlatformName "macos" -PlatformNode $rootManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAsset
@@ -286,7 +308,26 @@ if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManif
     Assert-True ($rootAiJson -eq $channelAiJson) "Root AI runtime latest.json and channel AI runtime latest.json do not match."
 
     $windowsAiNode = $rootAiRuntimeManifest.platforms.windows
-    if ($null -ne $windowsAiNode -and $null -ne $windowsAiNode.backends) {
+    if ($null -ne $windowsAiNode -and $null -ne $windowsAiNode.base) {
+        Validate-PlatformEntry -PlatformName "windows base AI runtime" -PlatformNode $windowsAiNode.base -Checksums $checksums -AssetInfo $windowsBaseAiRuntimeAsset
+
+        $directmlNode = $windowsAiNode.backends.directml
+        $cudaNode = $windowsAiNode.backends.cuda
+        Assert-True ($null -ne $directmlNode) "Windows AI runtime manifest is missing the DirectML backend entry."
+        Assert-True ($null -ne $cudaNode) "Windows AI runtime manifest is missing the CUDA backend entry."
+        Assert-True ($directmlNode.backend -eq "directml") "Windows DirectML backend manifest entry is missing backend='directml'."
+        Assert-True ($cudaNode.backend -eq "cuda") "Windows CUDA backend manifest entry is missing backend='cuda'."
+        Assert-True ($null -ne $directmlNode.installPlan) "Windows DirectML backend manifest entry is missing installPlan."
+        Assert-True ($null -ne $cudaNode.installPlan) "Windows CUDA backend manifest entry is missing installPlan."
+
+        if ($null -ne $windowsDirectmlInstallPlan) {
+            Assert-True (($directmlNode.installPlan | ConvertTo-Json -Depth 12) -eq ($windowsDirectmlInstallPlan | ConvertTo-Json -Depth 12)) "Windows DirectML installPlan does not match the repo-pinned install plan."
+        }
+        if ($null -ne $windowsCudaInstallPlan) {
+            Assert-True (($cudaNode.installPlan | ConvertTo-Json -Depth 12) -eq ($windowsCudaInstallPlan | ConvertTo-Json -Depth 12)) "Windows CUDA installPlan does not match the repo-pinned install plan."
+        }
+    }
+    elseif ($null -ne $windowsAiNode -and $null -ne $windowsAiNode.backends) {
         Validate-PlatformEntry -PlatformName "windows AI runtime legacy" -PlatformNode $windowsAiNode -Checksums $checksums -AssetInfo $(if ($null -ne $windowsDirectmlAiRuntimeAsset) { $windowsDirectmlAiRuntimeAsset } else { $windowsAiRuntimeAsset })
         Validate-PlatformEntry -PlatformName "windows directml AI runtime" -PlatformNode $windowsAiNode.backends.directml -Checksums $checksums -AssetInfo $windowsDirectmlAiRuntimeAsset
         Validate-PlatformEntry -PlatformName "windows cuda AI runtime" -PlatformNode $windowsAiNode.backends.cuda -Checksums $checksums -AssetInfo $windowsCudaAiRuntimeAsset

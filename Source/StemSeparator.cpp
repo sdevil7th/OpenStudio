@@ -16,6 +16,8 @@ struct RuntimeDownloadCandidate
     juce::String displayName;
     juce::String selectionReason;
     juce::var manifestNode;
+    juce::String backendRequested;
+    juce::var backendInstallPlan;
 };
 
 juce::String makePythonImportCommand()
@@ -439,6 +441,7 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
 
     if (auto* obj = json.getDynamicObject())
     {
+        capabilities.baseRuntimeReady = static_cast<bool>(obj->getProperty("baseRuntimeReady"));
         capabilities.runtimeReady = static_cast<bool>(obj->getProperty("runtimeReady"));
         capabilities.modelInstalled = static_cast<bool>(obj->getProperty("modelInstalled"));
         capabilities.supportedBackends = varToStringArray(obj->getProperty("supportedBackends"));
@@ -683,8 +686,8 @@ void StemSeparator::scheduleStatusRefresh()
         auto runtimeCapabilities = installedPython.existsAsFile()
             ? probeRuntimeCapabilities(installedPython, modelsDir, kStemModelName, "auto")
             : RuntimeCapabilities{};
-        const auto modelInstalled = runtimeCapabilities.modelInstalled || hasRequiredModel(modelsDir);
-        const auto runtimeInstalled = runtimeCapabilities.runtimeReady;
+        const auto modelInstalled = runtimeCapabilities.runtimeReady && (runtimeCapabilities.modelInstalled || hasRequiredModel(modelsDir));
+        const auto runtimeInstalled = runtimeCapabilities.baseRuntimeReady || installedPython.existsAsFile();
         auto refreshedStatus = buildAiToolsStatus (systemPython, script, installerScript, runtimeInstalled, modelInstalled);
         refreshedStatus.supportedBackends = runtimeCapabilities.supportedBackends;
         refreshedStatus.selectedBackend = runtimeCapabilities.selectedBackend;
@@ -949,6 +952,7 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("modelVersion", status.modelVersion);
     obj->setProperty("verificationMode", status.verificationMode);
     obj->setProperty("runtimeCandidate", status.runtimeCandidate);
+    obj->setProperty("backendRequested", status.backendRequested);
     obj->setProperty("installSessionId", status.installSessionId);
     obj->setProperty("lastPhase", status.lastPhase);
     obj->setProperty("terminalReason", status.terminalReason);
@@ -1038,9 +1042,11 @@ juce::var StemSeparator::installAiTools()
         const auto manifestUrl = getAiRuntimeManifestUrl().trim();
         const auto sessionId = juce::Uuid().toString();
         juce::String selectedRuntimeCandidate;
+        juce::String selectedBackendRequested;
+        juce::File selectedBackendInstallPlanFile;
         bool fallbackAttempted = false;
 
-        auto finishWithStatus = [this, &selectedRuntimeCandidate, &sessionId, &fallbackAttempted] (const juce::String& state,
+        auto finishWithStatus = [this, &selectedRuntimeCandidate, &selectedBackendRequested, &sessionId, &fallbackAttempted] (const juce::String& state,
                                                                                                     float progress,
                                                                                                     const juce::String& message,
                                                                                                     const juce::String& error,
@@ -1071,6 +1077,7 @@ juce::var StemSeparator::installAiTools()
                 status.installSource = installSource;
                 status.helpUrl = requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
                 status.runtimeCandidate = selectedRuntimeCandidate;
+                status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
                 status.lastPhase = state;
                 status.terminalReason = state == "error" ? errorCode : juce::String();
@@ -1093,7 +1100,7 @@ juce::var StemSeparator::installAiTools()
                              devFallbackEnabled ? juce::String(kBuildRuntimeModeUnbundledDev) : juce::String(kBuildRuntimeModeDownloadedRuntime));
         };
 
-        auto updateStep = [this, &logFile, devFallbackEnabled, &selectedRuntimeCandidate, &sessionId, &fallbackAttempted] (const juce::String& state,
+        auto updateStep = [this, &logFile, devFallbackEnabled, &selectedRuntimeCandidate, &selectedBackendRequested, &sessionId, &fallbackAttempted] (const juce::String& state,
                                                                                                                                  float progress,
                                                                                                                                  const juce::String& message,
                                                                                                                                  const juce::String& installSource)
@@ -1114,6 +1121,7 @@ juce::var StemSeparator::installAiTools()
                 status.installSource = installSource;
                 status.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
                 status.runtimeCandidate = selectedRuntimeCandidate;
+                status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
                 status.lastPhase = state;
                 status.terminalReason.clear();
@@ -1172,6 +1180,7 @@ juce::var StemSeparator::installAiTools()
             launcherPython = systemPython;
             launchMode = " --bootstrap-with " + quoteCommandPart(systemPython.getFullPathName());
             selectedRuntimeCandidate = "external-python";
+            selectedBackendRequested.clear();
             updateStep("checking", 0.05f, "Using the system Python fallback for this dev build", kInstallSourceExternalPython);
         }
         else
@@ -1235,13 +1244,17 @@ juce::var StemSeparator::installAiTools()
             auto buildCandidateFromNode = [] (const juce::String& key,
                                               const juce::String& displayName,
                                               const juce::String& selectionReason,
-                                              const juce::var& node)
+                                              const juce::var& node,
+                                              const juce::String& backendRequested = {},
+                                              const juce::var& backendInstallPlan = {})
             {
                 RuntimeDownloadCandidate candidate;
                 candidate.key = key;
                 candidate.displayName = displayName;
                 candidate.selectionReason = selectionReason;
                 candidate.manifestNode = node;
+                candidate.backendRequested = backendRequested;
+                candidate.backendInstallPlan = backendInstallPlan;
                 return candidate;
             };
 
@@ -1297,16 +1310,49 @@ juce::var StemSeparator::installAiTools()
                     {
                         const auto likelyNvidia = isLikelyNvidiaWindowsMachine();
                         appendAiToolsLogLine("windowsHardwareClass=" + juce::String(likelyNvidia ? "nvidia" : "non-nvidia"));
+                        const auto baseNode = windowsPlatformObject->getProperty("base");
                         if (auto* backendsObject = windowsPlatformObject->getProperty("backends").getDynamicObject())
                         {
                             const auto cudaNode = backendsObject->getProperty("cuda");
                             const auto directmlNode = backendsObject->getProperty("directml");
-                            if (likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
-                                runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Selected first because NVIDIA hardware was detected.", cudaNode));
-                            if (! directmlNode.isVoid() && ! directmlNode.isUndefined())
-                                runtimeCandidates.add(buildCandidateFromNode("windows-directml-x64", "Windows DirectML runtime", likelyNvidia ? "Prepared as fallback if CUDA validation fails." : "Selected because no NVIDIA hardware was detected.", directmlNode));
-                            if (! likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined() && runtimeCandidates.isEmpty())
-                                runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Using CUDA runtime because it is the only published Windows candidate.", cudaNode));
+
+                            const auto hasBaseRuntime = ! baseNode.isVoid() && ! baseNode.isUndefined() && getPropertyString(baseNode, "url").isNotEmpty();
+                            const auto cudaInstallPlan = getPropertyString(cudaNode, "backend").isNotEmpty() ? cudaNode.getDynamicObject()->getProperty("installPlan") : juce::var();
+                            const auto directmlInstallPlan = getPropertyString(directmlNode, "backend").isNotEmpty() ? directmlNode.getDynamicObject()->getProperty("installPlan") : juce::var();
+
+                            if (hasBaseRuntime && ! cudaInstallPlan.isVoid() && ! directmlInstallPlan.isVoid())
+                            {
+                                if (likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:cuda",
+                                                                                 "Windows base runtime + CUDA",
+                                                                                 "Selected first because NVIDIA hardware was detected.",
+                                                                                 baseNode,
+                                                                                 "cuda",
+                                                                                 cudaInstallPlan));
+                                if (! directmlNode.isVoid() && ! directmlNode.isUndefined())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:directml",
+                                                                                 "Windows base runtime + DirectML",
+                                                                                 likelyNvidia ? "Prepared as fallback if the CUDA backend install or probe fails." : "Selected because no NVIDIA hardware was detected.",
+                                                                                 baseNode,
+                                                                                 "directml",
+                                                                                 directmlInstallPlan));
+                                if (! likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined() && runtimeCandidates.isEmpty())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:cuda",
+                                                                                 "Windows base runtime + CUDA",
+                                                                                 "Using the CUDA backend because it is the only published Windows backend plan.",
+                                                                                 baseNode,
+                                                                                 "cuda",
+                                                                                 cudaInstallPlan));
+                            }
+                            else
+                            {
+                                if (likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Selected first because NVIDIA hardware was detected.", cudaNode));
+                                if (! directmlNode.isVoid() && ! directmlNode.isUndefined())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-directml-x64", "Windows DirectML runtime", likelyNvidia ? "Prepared as fallback if CUDA validation fails." : "Selected because no NVIDIA hardware was detected.", directmlNode));
+                                if (! likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined() && runtimeCandidates.isEmpty())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Using CUDA runtime because it is the only published Windows candidate.", cudaNode));
+                            }
                         }
 
                         if (runtimeCandidates.isEmpty() && getPropertyString(platformNode, "url").isNotEmpty())
@@ -1360,12 +1406,15 @@ juce::var StemSeparator::installAiTools()
             {
                 const auto& candidate = runtimeCandidates.getReference(candidateIndex);
                 selectedRuntimeCandidate = candidate.key;
+                selectedBackendRequested = candidate.backendRequested;
+                selectedBackendInstallPlanFile = {};
                 fallbackAttempted = candidateIndex > 0;
 
                 appendAiToolsLogLine(makeAiLogEvent("installer", "selection", "runtime_candidate_selected", sessionId,
                                                     [&] (juce::DynamicObject& obj)
                                                     {
                                                         obj.setProperty("runtimeCandidate", candidate.key);
+                                                        obj.setProperty("backendRequested", candidate.backendRequested);
                                                         obj.setProperty("displayName", candidate.displayName);
                                                         obj.setProperty("selectionReason", candidate.selectionReason);
                                                         obj.setProperty("attempt", candidateIndex + 1);
@@ -1419,6 +1468,7 @@ juce::var StemSeparator::installAiTools()
                                                        status.installSource = kInstallSourceDownloadedRuntime;
                                                        status.helpUrl.clear();
                                                        status.runtimeCandidate = candidate.key;
+                                                       status.backendRequested = candidate.backendRequested;
                                                    });
                                                }, downloadError))
                 {
@@ -1491,18 +1541,37 @@ juce::var StemSeparator::installAiTools()
                     continue;
                 }
 
-                updateStep("probing_runtime", 0.78f, "Probing the downloaded AI runtime", kInstallSourceDownloadedRuntime);
+                updateStep(candidate.backendRequested.isNotEmpty() ? "verifying_base_runtime" : "probing_runtime",
+                           0.78f,
+                           candidate.backendRequested.isNotEmpty() ? "Checking the downloaded AI base runtime" : "Probing the downloaded AI runtime",
+                           kInstallSourceDownloadedRuntime);
                 const auto capabilities = probeRuntimeCapabilities(launcherPython, modelsDir, kStemModelName, "auto");
                 appendAiToolsLogLine(makeAiLogEvent("installer", "probe", "runtime_probe_finished", sessionId,
                                                     [&] (juce::DynamicObject& obj)
                                                     {
                                                         obj.setProperty("runtimeCandidate", candidate.key);
+                                                        obj.setProperty("backendRequested", candidate.backendRequested);
+                                                        obj.setProperty("baseRuntimeReady", capabilities.baseRuntimeReady);
                                                         obj.setProperty("runtimeReady", capabilities.runtimeReady);
                                                         obj.setProperty("selectedBackend", capabilities.selectedBackend);
                                                         obj.setProperty("supportedBackends", capabilities.supportedBackends.joinIntoString(","));
                                                     }));
 
-                if (! capabilities.runtimeReady)
+                if (candidate.backendRequested.isNotEmpty())
+                {
+                    if (! capabilities.baseRuntimeReady)
+                    {
+                        terminalUserMessage = "OpenStudio could not verify the downloaded AI base runtime.";
+                        terminalError = "The extracted base runtime failed its capability probe.";
+                        terminalErrorCode = "base_runtime_invalid";
+                        continue;
+                    }
+
+                    const auto planFileName = "OpenStudio-AI-InstallPlan-" + sessionId + "-" + candidate.backendRequested + ".json";
+                    selectedBackendInstallPlanFile = downloadsDir.getChildFile(planFileName);
+                    selectedBackendInstallPlanFile.replaceWithText(juce::JSON::toString(candidate.backendInstallPlan, true), false, false, "\n");
+                }
+                else if (! capabilities.runtimeReady)
                 {
                     terminalUserMessage = "OpenStudio could not verify the downloaded AI runtime.";
                     terminalError = "The extracted runtime failed its capability probe.";
@@ -1534,7 +1603,10 @@ juce::var StemSeparator::installAiTools()
                 if (fallbackAttempted)
                     launchMode += " --fallback-attempted";
 
-                updateStep("verifying_runtime", 0.8f, "Verifying the downloaded AI runtime", kInstallSourceDownloadedRuntime);
+                updateStep(candidate.backendRequested.isNotEmpty() ? "verifying_base_runtime" : "verifying_runtime",
+                           0.8f,
+                           candidate.backendRequested.isNotEmpty() ? "Preparing the AI backend overlay..." : "Verifying the downloaded AI runtime",
+                           kInstallSourceDownloadedRuntime);
                 break;
             }
 
@@ -1563,15 +1635,23 @@ juce::var StemSeparator::installAiTools()
             + " --model " + quoteCommandPart(kStemModelName)
             + " --log-path " + quoteCommandPart(logFile.getFullPathName())
             + launchMode;
+        if (selectedBackendRequested.isNotEmpty())
+            cmd += " --backend-requested " + quoteCommandPart(selectedBackendRequested);
+        if (selectedBackendInstallPlanFile.existsAsFile())
+            cmd += " --backend-install-plan " + quoteCommandPart(selectedBackendInstallPlanFile.getFullPathName());
 
         appendAiToolsLogLine("launcherPython=" + launcherPython.getFullPathName());
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
         appendAiToolsLogLine("installerScript=" + installerScript.getFullPathName());
+        appendAiToolsLogLine("backendRequested=" + selectedBackendRequested);
+        if (selectedBackendInstallPlanFile.existsAsFile())
+            appendAiToolsLogLine("backendInstallPlan=" + selectedBackendInstallPlanFile.getFullPathName());
         appendAiToolsLogLine("installerCommand=" + cmd);
         appendAiToolsLogLine(makeAiLogEvent("host", "launch", "installer_launch_started", sessionId,
                                             [&] (juce::DynamicObject& obj)
                                             {
                                                 obj.setProperty("runtimeCandidate", selectedRuntimeCandidate);
+                                                obj.setProperty("backendRequested", selectedBackendRequested);
                                                 obj.setProperty("command", cmd);
                                             }));
 
@@ -1599,6 +1679,7 @@ juce::var StemSeparator::installAiTools()
             installRuntimePythonPath = launcherPython.getFullPathName();
             installRuntimeRootPath = runtimeRoot.getFullPathName();
             installRuntimeCandidate = selectedRuntimeCandidate;
+            installBackendRequested = selectedBackendRequested;
             installSessionId = sessionId;
             installLastObservedPhase = devFallbackEnabled ? juce::String("creating_venv") : juce::String("verifying_runtime");
             installLaunchTimeMs = juce::Time::getMillisecondCounterHiRes();
@@ -1625,6 +1706,7 @@ juce::var StemSeparator::installAiTools()
             lastAiToolsStatus.errorCode.clear();
             lastAiToolsStatus.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
             lastAiToolsStatus.runtimeCandidate = selectedRuntimeCandidate;
+            lastAiToolsStatus.backendRequested = selectedBackendRequested;
             lastAiToolsStatus.installSessionId = sessionId;
             lastAiToolsStatus.lastPhase = installLastObservedPhase;
             lastAiToolsStatus.terminalReason.clear();
@@ -1810,6 +1892,7 @@ void StemSeparator::pollInstallProgress()
             }
 
             lastAiToolsStatus.runtimeCandidate = installRuntimeCandidate;
+            lastAiToolsStatus.backendRequested = installBackendRequested;
             lastAiToolsStatus.installSessionId = installSessionId;
             lastAiToolsStatus.fallbackAttempted = installFallbackAttempted;
 
@@ -1822,6 +1905,7 @@ void StemSeparator::pollInstallProgress()
             installRuntimePythonPath.clear();
             installRuntimeRootPath.clear();
             installRuntimeCandidate.clear();
+            installBackendRequested.clear();
             installSessionId.clear();
             installLastObservedPhase.clear();
             installLaunchTimeMs = 0.0;
@@ -1882,6 +1966,8 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.verificationMode = json["verificationMode"].toString();
     if (json.hasProperty("runtimeCandidate"))
         status.runtimeCandidate = json["runtimeCandidate"].toString();
+    if (json.hasProperty("backendRequested"))
+        status.backendRequested = json["backendRequested"].toString();
     if (json.hasProperty("sessionId"))
         status.installSessionId = json["sessionId"].toString();
     if (json.hasProperty("lastPhase"))
@@ -2110,6 +2196,7 @@ void StemSeparator::cancelAiToolsInstall()
         installRuntimePythonPath.clear();
         installRuntimeRootPath.clear();
         installRuntimeCandidate.clear();
+        installBackendRequested.clear();
         installSessionId.clear();
         installLastObservedPhase.clear();
         installLaunchTimeMs = 0.0;

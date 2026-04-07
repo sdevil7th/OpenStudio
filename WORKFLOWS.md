@@ -62,6 +62,13 @@ git tag v0.0.2
 git push origin v0.0.2
 ```
 
+## Release trigger for AI Tools runtime
+```bash
+git tag ai-runtime-v0.0.31
+git push origin ai-runtime-v0.0.31
+
+```
+
 ## This command needs to be ran on macOS after installation through installer to un-quarantine the app and use it
 ## Otherwise the app would be shown as damaged or broken in macOS
 ```bash

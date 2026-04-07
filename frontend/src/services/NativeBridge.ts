@@ -214,6 +214,8 @@ export interface AiToolsStatus {
       | "downloading_runtime"
       | "verifying_runtime_archive"
       | "extracting_runtime"
+      | "verifying_base_runtime"
+      | "installing_backend"
       | "creating_venv"
       | "verifying_runtime"
       | "probing_runtime"
@@ -246,6 +248,7 @@ export interface AiToolsStatus {
     modelVersion?: string;
     verificationMode?: "in-process" | "subprocess";
     runtimeCandidate?: string;
+    backendRequested?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
     installSessionId?: string;
     lastPhase?: string;
     terminalReason?: string;

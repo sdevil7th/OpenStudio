@@ -18,6 +18,9 @@ param(
     [string]$WindowsAiRuntimeDownloadUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsBaseAiRuntimeDownloadUrl = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$WindowsDirectmlAiRuntimeDownloadUrl = "",
 
     [Parameter(Mandatory = $false)]
@@ -62,12 +65,14 @@ Copy-Item -Path (Join-Path $netlifyTemplateDir "_headers") -Destination (Join-Pa
 
 $resolvedWindowsDownloadUrl = Resolve-DownloadUrl -ProvidedUrl $WindowsDownloadUrl -RepoSlug $RepoSlug -FileName "OpenStudio-Setup-x64.exe"
 $resolvedMacDownloadUrl = Resolve-DownloadUrl -ProvidedUrl $MacDownloadUrl -RepoSlug $RepoSlug -FileName "OpenStudio-macOS.dmg"
-$resolvedWindowsAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeDownloadUrl)) {
+$resolvedWindowsAiRuntimeDownloadUrl = if (-not [string]::IsNullOrWhiteSpace($WindowsBaseAiRuntimeDownloadUrl)) {
+    $WindowsBaseAiRuntimeDownloadUrl
+} elseif (-not [string]::IsNullOrWhiteSpace($WindowsAiRuntimeDownloadUrl)) {
     $WindowsAiRuntimeDownloadUrl
 } elseif (-not [string]::IsNullOrWhiteSpace($WindowsDirectmlAiRuntimeDownloadUrl)) {
     $WindowsDirectmlAiRuntimeDownloadUrl
 } elseif (-not [string]::IsNullOrWhiteSpace($RepoSlug)) {
-    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-windows-directml-x64.zip"
+    "https://github.com/$RepoSlug/releases/latest/download/OpenStudio-AI-Runtime-windows-base-x64.zip"
 } else {
     ""
 }

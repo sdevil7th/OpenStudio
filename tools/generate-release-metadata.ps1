@@ -43,6 +43,18 @@ param(
     [string]$WindowsAiRuntimeAssetUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$WindowsBaseAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsBaseAiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsCudaInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsDirectmlInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$WindowsDirectmlAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
@@ -138,6 +150,74 @@ function Get-AssetMetadata {
     return $metadata
 }
 
+function ConvertTo-HashtableRecursive {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = [ordered]@{}
+        foreach ($entry in $Value.GetEnumerator()) {
+            $result[$entry.Key] = ConvertTo-HashtableRecursive -Value $entry.Value
+        }
+        return $result
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = @()
+        foreach ($item in $Value) {
+            $items += ,(ConvertTo-HashtableRecursive -Value $item)
+        }
+        return ,$items
+    }
+
+    if ($Value.PSObject -and $Value.PSObject.Properties.Count -gt 0 -and -not ($Value -is [string])) {
+        $result = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-HashtableRecursive -Value $property.Value
+        }
+        return $result
+    }
+
+    return $Value
+}
+
+function ConvertFrom-JsonCompat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Json,
+
+        [switch]$AsHashtable
+    )
+
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        if ($AsHashtable) {
+            return $Json | ConvertFrom-Json -AsHashtable
+        }
+
+        return $Json | ConvertFrom-Json
+    }
+
+    $parsed = $Json | ConvertFrom-Json
+    if ($AsHashtable) {
+        return ConvertTo-HashtableRecursive -Value $parsed
+    }
+
+    return $parsed
+}
+
+function Load-OptionalJsonFile {
+    param([string]$PathValue)
+
+    if ([string]::IsNullOrWhiteSpace($PathValue) -or -not (Test-Path $PathValue)) {
+        return $null
+    }
+
+    return ConvertFrom-JsonCompat -Json (Get-Content $PathValue -Raw) -AsHashtable
+}
+
 function Get-AppcastMimeType {
     param([string]$FileName)
 
@@ -186,11 +266,14 @@ if (-not [string]::IsNullOrWhiteSpace($MacMinimumSystemVersion)) {
 $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAssetUrl -AdditionalProperties $windowsAdditional
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
 $windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
+$windowsBaseAiRuntime = Get-AssetMetadata -AssetPath $WindowsBaseAiRuntimeAssetPath -AssetUrl $WindowsBaseAiRuntimeAssetUrl
 $windowsDirectmlAiRuntime = Get-AssetMetadata -AssetPath $WindowsDirectmlAiRuntimeAssetPath -AssetUrl $WindowsDirectmlAiRuntimeAssetUrl
 $windowsCudaAiRuntime = Get-AssetMetadata -AssetPath $WindowsCudaAiRuntimeAssetPath -AssetUrl $WindowsCudaAiRuntimeAssetUrl
 $macosAiRuntime = Get-AssetMetadata -AssetPath $MacAiRuntimeAssetPath -AssetUrl $MacAiRuntimeAssetUrl
 $macosArm64AiRuntime = Get-AssetMetadata -AssetPath $MacArm64AiRuntimeAssetPath -AssetUrl $MacArm64AiRuntimeAssetUrl
 $macosX64AiRuntime = Get-AssetMetadata -AssetPath $MacX64AiRuntimeAssetPath -AssetUrl $MacX64AiRuntimeAssetUrl
+$windowsCudaInstallPlan = Load-OptionalJsonFile -PathValue $WindowsCudaInstallPlanPath
+$windowsDirectmlInstallPlan = Load-OptionalJsonFile -PathValue $WindowsDirectmlInstallPlanPath
 
 $manifest = [ordered]@{
     schemaVersion = $SchemaVersion
@@ -217,6 +300,7 @@ $checksums = @()
 if ($windows) { $checksums += "{0}  {1}" -f $windows.sha256, $windows.fileName }
 if ($macos) { $checksums += "{0}  {1}" -f $macos.sha256, $macos.fileName }
 if ($windowsAiRuntime) { $checksums += "{0}  {1}" -f $windowsAiRuntime.sha256, $windowsAiRuntime.fileName }
+if ($windowsBaseAiRuntime) { $checksums += "{0}  {1}" -f $windowsBaseAiRuntime.sha256, $windowsBaseAiRuntime.fileName }
 if ($windowsDirectmlAiRuntime) { $checksums += "{0}  {1}" -f $windowsDirectmlAiRuntime.sha256, $windowsDirectmlAiRuntime.fileName }
 if ($windowsCudaAiRuntime) { $checksums += "{0}  {1}" -f $windowsCudaAiRuntime.sha256, $windowsCudaAiRuntime.fileName }
 if ($macosAiRuntime) { $checksums += "{0}  {1}" -f $macosAiRuntime.sha256, $macosAiRuntime.fileName }
@@ -224,12 +308,12 @@ if ($macosArm64AiRuntime) { $checksums += "{0}  {1}" -f $macosArm64AiRuntime.sha
 if ($macosX64AiRuntime) { $checksums += "{0}  {1}" -f $macosX64AiRuntime.sha256, $macosX64AiRuntime.fileName }
 
 Set-Content -Path (Join-Path $resolvedOutputDir "OpenStudio-checksums.txt") -Value ($checksums -join [Environment]::NewLine)
-Set-Content -Path (Join-Path $releaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
-Set-Content -Path (Join-Path $channelReleaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 6)
+Set-Content -Path (Join-Path $releaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 12)
+Set-Content -Path (Join-Path $channelReleaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 12)
 
-if (($windowsAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
+if (($windowsAiRuntime -or $windowsBaseAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
     $aiRuntimeManifest = [ordered]@{
-        schemaVersion = [Math]::Max($SchemaVersion, 3)
+        schemaVersion = [Math]::Max($SchemaVersion, 4)
         channel = $Channel
         appVersion = $Version
         runtimeVersion = $AiRuntimeVersion
@@ -237,10 +321,13 @@ if (($windowsAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -
         platforms = [ordered]@{}
     }
 
-    if ($windowsDirectmlAiRuntime -or $windowsCudaAiRuntime) {
+    if ($windowsBaseAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime) {
         $windowsPlatform = [ordered]@{}
 
-        if ($windowsDirectmlAiRuntime) {
+        if ($windowsBaseAiRuntime) {
+            $windowsPlatform.base = $windowsBaseAiRuntime
+        }
+        elseif ($windowsDirectmlAiRuntime) {
             foreach ($entry in $windowsDirectmlAiRuntime.GetEnumerator()) {
                 $windowsPlatform[$entry.Key] = $entry.Value
             }
@@ -251,10 +338,32 @@ if (($windowsAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -
         }
 
         $windowsBackends = [ordered]@{}
-        if ($windowsDirectmlAiRuntime) { $windowsBackends.directml = $windowsDirectmlAiRuntime }
-        if ($windowsCudaAiRuntime) { $windowsBackends.cuda = $windowsCudaAiRuntime }
+        if ($windowsDirectmlAiRuntime) {
+            $windowsBackends.directml = $windowsDirectmlAiRuntime
+        } elseif ($windowsDirectmlInstallPlan) {
+            $windowsBackends.directml = [ordered]@{
+                backend = "directml"
+                installPlan = $windowsDirectmlInstallPlan
+            }
+        }
+        if ($windowsCudaAiRuntime) {
+            $windowsBackends.cuda = $windowsCudaAiRuntime
+        } elseif ($windowsCudaInstallPlan) {
+            $windowsBackends.cuda = [ordered]@{
+                backend = "cuda"
+                installPlan = $windowsCudaInstallPlan
+            }
+        }
         if ($windowsBackends.Count -gt 0) {
             $windowsPlatform.backends = $windowsBackends
+        }
+
+        if (-not $windowsBaseAiRuntime -and $windowsDirectmlAiRuntime) {
+            foreach ($entry in $windowsDirectmlAiRuntime.GetEnumerator()) {
+                if (-not $windowsPlatform.Contains($entry.Key)) {
+                    $windowsPlatform[$entry.Key] = $entry.Value
+                }
+            }
         }
 
         $aiRuntimeManifest.platforms.windows = $windowsPlatform
@@ -272,8 +381,8 @@ if (($windowsAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -
         $aiRuntimeManifest.platforms.macos = $macosAiRuntime
     }
 
-    Set-Content -Path (Join-Path $aiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 6)
-    Set-Content -Path (Join-Path $channelAiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 6)
+    Set-Content -Path (Join-Path $aiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 12)
+    Set-Content -Path (Join-Path $channelAiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 12)
 }
 
 if ($windows) {

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "windows-cuda-cu121-v1",
+  "backend": "cuda",
+  "platform": "windows",
+  "architecture": "x64",
+  "pythonFamily": "3.10",
+  "packageSource": "official-upstream",
+  "steps": [
+    {
+      "type": "pip_install",
+      "description": "Installing GPU stem separation packages",
+      "packages": [
+        "audio-separator[gpu]==0.41.1"
+      ]
+    },
+    {
+      "type": "pip_uninstall",
+      "description": "Removing default PyTorch wheels before applying the CUDA overlay",
+      "packages": [
+        "torch",
+        "torchvision",
+        "torchaudio"
+      ]
+    },
+    {
+      "type": "pip_install",
+      "description": "Installing CUDA-capable PyTorch wheels from the official PyTorch index",
+      "indexUrl": "https://download.pytorch.org/whl/cu121",
+      "packages": [
+        "torch==2.5.1",
+        "torchvision==0.20.1",
+        "torchaudio==2.5.1"
+      ]
+    }
+  ]
+}
