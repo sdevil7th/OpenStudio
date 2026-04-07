@@ -29,6 +29,7 @@ import { SortableTrackHeader } from "./components/SortableTrackHeader";
 import { AddMultipleTracksModal } from "./components/AddMultipleTracksModal";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { EssentialControlsCard } from "./components/EssentialControlsCard";
+import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
 import {
   createMultipleTracks,
   createTrackOfType,
@@ -266,13 +267,15 @@ function App() {
   // Subscribe only to isPlaying to avoid re-rendering App on every time update
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
   const aiToolsStatus = useDAWStore((state) => state.aiToolsStatus);
+  const aiToolsStatusLastUpdatedAt = useDAWStore((state) => state.aiToolsStatusLastUpdatedAt);
   const refreshAiToolsStatus = useDAWStore((state) => state.refreshAiToolsStatus);
-  const reopenStemSeparation = useDAWStore((state) => state.reopenStemSeparation);
+  const applyAiToolsStatusUpdate = useDAWStore((state) => state.applyAiToolsStatusUpdate);
   const cancelAiToolsInstall = useDAWStore((state) => state.cancelAiToolsInstall);
   const openAiToolsSetup = useDAWStore((state) => state.openAiToolsSetup);
   const showToast = useDAWStore((state) => state.showToast);
   const previousAiToolsStateRef = useRef(aiToolsStatus.state);
   const previousAiToolsInstallInProgressRef = useRef(aiToolsStatus.installInProgress);
+  const [showAiToolsInstallBlocker, setShowAiToolsInstallBlocker] = useState(false);
 
   useEffect(() => startMixerUISync(), []);
 
@@ -281,8 +284,15 @@ function App() {
   }, [refreshAiToolsStatus]);
 
   useEffect(() => {
-    const shouldPollAiToolsStatus =
-      aiToolsStatus.installInProgress || aiToolsStatus.state === "checking";
+    const unsubscribe = nativeBridge.onAiToolsStatusUpdate((status) => {
+      applyAiToolsStatusUpdate(status);
+    });
+
+    return () => unsubscribe();
+  }, [applyAiToolsStatusUpdate]);
+
+  useEffect(() => {
+    const shouldPollAiToolsStatus = aiToolsStatus.state === "checking";
 
     if (!shouldPollAiToolsStatus) {
       return;
@@ -290,10 +300,24 @@ function App() {
 
     const timer = window.setInterval(() => {
       void refreshAiToolsStatus();
-    }, 1000);
+    }, 1500);
 
     return () => window.clearInterval(timer);
   }, [aiToolsStatus.installInProgress, aiToolsStatus.state, refreshAiToolsStatus]);
+
+  useEffect(() => {
+    if (!aiToolsStatus.installInProgress) {
+      setShowAiToolsInstallBlocker(false);
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const staleMs = Date.now() - aiToolsStatusLastUpdatedAt;
+      setShowAiToolsInstallBlocker(staleMs >= 8000);
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [aiToolsStatus.installInProgress, aiToolsStatusLastUpdatedAt]);
 
   useEffect(() => {
     const previousState = previousAiToolsStateRef.current;
@@ -364,6 +388,14 @@ function App() {
             : state.panelPositions.mixer,
         },
       }));
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = nativeBridge.onAppCloseRequested(() => {
+      void useDAWStore.getState().requestQuit();
     });
 
     return unsubscribe;
@@ -601,7 +633,7 @@ function App() {
       if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) return;
 
       try {
-        const success = await useDAWStore.getState().loadProject(pendingProjectPath);
+        const success = await useDAWStore.getState().requestOpenProject(pendingProjectPath);
         if (!success) {
           console.error("[App] Failed to open launch project:", pendingProjectPath);
         }
@@ -1160,6 +1192,8 @@ function App() {
         </Suspense>
       )}
 
+      <UnsavedChangesDialog />
+
       {/* Transport Bar (above Mixer like Reaper) */}
       <div role="contentinfo" aria-label="Transport controls">
         <BottomTransportBar />
@@ -1566,6 +1600,49 @@ function App() {
       )}
 
       {/* File Drop Overlay — shown when dragging files from OS file explorer */}
+      {showAiToolsInstallBlocker && (
+        <div className="fixed inset-0 z-[10002] flex items-center justify-center bg-black/75 backdrop-blur-sm">
+          <div className="w-[min(52rem,calc(100vw-2rem))] rounded-2xl border border-daw-accent/30 bg-neutral-950 shadow-2xl">
+            <div className="border-b border-neutral-800 px-5 py-4">
+              <p className="text-base font-semibold text-white">Installing AI Tools</p>
+              <p className="mt-1 text-sm text-neutral-300">
+                OpenStudio is still preparing large AI components. Progress is being monitored in the background.
+              </p>
+            </div>
+            <div className="space-y-4 p-5">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-neutral-200">{aiToolsStatus.stepLabel || aiToolsStatus.message || "Installing AI Tools..."}</span>
+                  <span className="text-neutral-400">
+                    {Math.max(0, Math.round((aiToolsStatus.progress ?? 0) * 100))}%
+                  </span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full rounded-full bg-daw-accent transition-all duration-300"
+                    style={{ width: `${Math.max(6, Math.min((aiToolsStatus.progress ?? 0) * 100, 100))}%` }}
+                  />
+                </div>
+              </div>
+              <div className="grid gap-2 text-xs text-neutral-400 sm:grid-cols-3">
+                <span>Phase: <span className="text-neutral-200">{aiToolsStatus.lastPhase || aiToolsStatus.state}</span></span>
+                <span>Elapsed: <span className="text-neutral-200">{Math.max(0, Math.round((aiToolsStatus.elapsedMs ?? 0) / 1000))}s</span></span>
+                <span>Session: <span className="text-neutral-200">{aiToolsStatus.installSessionId || "n/a"}</span></span>
+              </div>
+              <div className="rounded-xl border border-neutral-800 bg-black px-4 py-3 font-mono text-xs text-green-300">
+                <div className="max-h-56 space-y-1 overflow-y-auto">
+                  {(aiToolsStatus.activityLines?.length ? aiToolsStatus.activityLines : [aiToolsStatus.message || "Installing AI Tools..."]).map((line, index) => (
+                    <div key={`${index}-${line}`} className="break-words">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isDraggingFiles && (
         <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
           <div className="flex flex-col items-center gap-3 px-8 py-6 rounded-xl border-2 border-dashed border-daw-accent bg-neutral-900/90 shadow-2xl">
@@ -1602,9 +1679,11 @@ function App() {
                     : "AI tools are installing"}
                 </p>
                 <p className="mt-1 text-xs text-neutral-300">
-                  {aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
-                    ? "OpenStudio is downloading and preparing its AI runtime in the background. This is a one-time setup and the app will stay usable while it runs."
-                    : "OpenStudio is preparing optional AI tooling in the background. You can keep working while this finishes."}
+                  {aiToolsStatus.downloadHint
+                    ? aiToolsStatus.downloadHint
+                    : aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
+                      ? "OpenStudio is downloading and preparing its AI runtime in the background. This is a one-time setup and the app will stay usable while it runs."
+                      : "OpenStudio is preparing optional AI tooling in the background. You can keep working while this finishes."}
                 </p>
               </div>
               <div className="h-3 w-3 rounded-full bg-daw-accent shadow-[0_0_16px_rgba(59,130,246,0.9)] animate-pulse" />
@@ -1618,20 +1697,23 @@ function App() {
                 />
               </div>
               <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
-                <span>{aiToolsStatus.message || "Preparing optional AI tools..."}</span>
+                <span>{aiToolsStatus.stepLabel || aiToolsStatus.message || "Preparing optional AI tools..."}</span>
                 <span>{Math.round((aiToolsStatus.progress ?? 0) * 100)}%</span>
               </div>
+              {aiToolsStatus.statusWarning ? (
+                <p className="mt-2 text-[11px] text-yellow-300">{aiToolsStatus.statusWarning}</p>
+              ) : null}
             </div>
 
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => {
-                  reopenStemSeparation();
+                  openAiToolsSetup();
                 }}
                 className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs font-medium text-neutral-200 transition-colors hover:border-neutral-500 hover:bg-neutral-800"
               >
-                View details
+                Open progress
               </button>
               {aiToolsStatus.installInProgress && (
                 <button

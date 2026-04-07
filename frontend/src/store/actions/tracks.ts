@@ -47,6 +47,70 @@ function cloneTrackForDuplication(track: any, newTrackId: string) {
   };
 }
 
+function collectTrackClipIds(track: any): Set<string> {
+  const clipIds = new Set<string>();
+  for (const clip of track?.clips ?? [])
+    clipIds.add(clip.id);
+  for (const clip of track?.midiClips ?? [])
+    clipIds.add(clip.id);
+  return clipIds;
+}
+
+async function clearTrackBoundUiBeforeRemoval(state: any, trackId: string, track: any) {
+  const clipIds = collectTrackClipIds(track);
+
+  if (state.showPitchEditor
+      && (state.pitchEditorTrackId === trackId
+          || (state.pitchEditorClipId && clipIds.has(state.pitchEditorClipId)))) {
+    state.closePitchEditor();
+  }
+
+  if (state.showPianoRoll
+      && (state.pianoRollTrackId === trackId
+          || (state.pianoRollClipId && clipIds.has(state.pianoRollClipId)))) {
+    state.closePianoRoll();
+  }
+
+  if (state.showPluginBrowser && state.pluginBrowserTrackId === trackId)
+    state.closePluginBrowser();
+
+  if (state.showEnvelopeManager && state.envelopeManagerTrackId === trackId)
+    state.closeEnvelopeManager();
+
+  if (state.showChannelStripEQ && state.channelStripEQTrackId === trackId)
+    state.closeChannelStripEQ();
+
+  if (state.showTrackRouting && state.trackRoutingTrackId === trackId)
+    state.closeTrackRouting();
+
+  if (state.showStemSeparation
+      && (state.stemSepTrackId === trackId
+          || (state.stemSepClipId && clipIds.has(state.stemSepClipId)))) {
+    state.closeStemSeparation();
+  }
+
+  if (state.showDynamicSplit && state.dynamicSplitClipId && clipIds.has(state.dynamicSplitClipId))
+    state.closeDynamicSplit();
+
+  if (state.showCrossfadeEditor && state.crossfadeEditorClipIds) {
+    const [clipA, clipB] = state.crossfadeEditorClipIds;
+    if ((clipA && clipIds.has(clipA)) || (clipB && clipIds.has(clipB)))
+      state.closeCrossfadeEditor();
+  }
+
+  if (state.showClipProperties) {
+    const selectedClipIds = [
+      ...(state.selectedClipId ? [state.selectedClipId] : []),
+      ...(state.selectedClipIds ?? []),
+    ];
+    if (selectedClipIds.some((clipId: string) => clipIds.has(clipId))) {
+      state.toggleClipProperties();
+    }
+  }
+
+  await nativeBridge.closeAllPluginWindows().catch(() => false);
+}
+
 async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: boolean }) {
   if (options?.includeAddTrack) {
     await nativeBridge.addTrack(track.id);
@@ -271,6 +335,8 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         description: `Remove track "${track.name}"`,
         timestamp: Date.now(),
         execute: async () => {
+          await clearTrackBoundUiBeforeRemoval(get(), id, trackSnapshot);
+
           // Clear clips from backend playback engine
           for (const clip of trackSnapshot.clips) {
             if (clip.filePath) {
@@ -281,6 +347,10 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
           set((s) => ({
             tracks: s.tracks.filter((t) => t.id !== id),
             selectedTrackId: s.selectedTrackId === id ? null : s.selectedTrackId,
+            selectedTrackIds: s.selectedTrackIds.filter((trackId) => trackId !== id),
+            lastSelectedTrackId: s.lastSelectedTrackId === id ? null : s.lastSelectedTrackId,
+            selectedClipId: s.selectedClipId && collectTrackClipIds(trackSnapshot).has(s.selectedClipId) ? null : s.selectedClipId,
+            selectedClipIds: s.selectedClipIds.filter((clipId) => !collectTrackClipIds(trackSnapshot).has(clipId)),
             metronomeTrackId: s.metronomeTrackId === id ? null : s.metronomeTrackId,
           }));
         },

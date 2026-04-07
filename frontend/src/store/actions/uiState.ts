@@ -62,7 +62,7 @@ export const uiStateActions = (set: SetFn) => ({
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) =>
     set({ showStemSeparation: true, stemSepTrackId: trackId, stemSepClipId: clipId, stemSepClipName: name, stemSepClipDuration: duration }),
   closeStemSeparation: () =>
-    set({ showStemSeparation: false }),
+    set({ showStemSeparation: false, stemSepTrackId: null, stemSepClipId: null, stemSepClipName: "", stemSepClipDuration: 0 }),
   reopenStemSeparation: () =>
     set((state: any) =>
       state.stemSepTrackId && state.stemSepClipId

@@ -65,6 +65,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; Check: CanLaunchInstalledApp
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\OpenStudio"
+Type: filesandordirs; Name: "{appdata}\OpenStudio"
+Type: filesandordirs; Name: "{localappdata}\Studio13"
+Type: filesandordirs; Name: "{appdata}\Studio13"
+
 [Code]
 var
   CanLaunchInstalledAppValue: Boolean;
@@ -239,4 +245,16 @@ end;
 function CanLaunchInstalledApp(): Boolean;
 begin
   Result := CanLaunchInstalledAppValue;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := MsgBox(
+    'Uninstalling OpenStudio will also remove its user-scoped app data for a fresh reinstall state.' + #13#10#13#10 +
+    'This includes AI runtime files, downloaded models, logs, cached downloads, and OpenStudio settings under Local and Roaming AppData.' + #13#10#13#10 +
+    'Project folders outside AppData will not be deleted.' + #13#10#13#10 +
+    'Do you want to continue?',
+    mbConfirmation,
+    MB_YESNO
+  ) = IDYES;
 end;

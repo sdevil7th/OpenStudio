@@ -250,7 +250,10 @@ public:
 
         void closeButtonPressed() override
         {
-            juce::JUCEApplication::getInstance()->systemRequestedQuit();
+            if (auto* component = getMainComponent())
+                component->requestFrontendAppClose();
+            else
+                juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
 
         MainComponent* getMainComponent() const

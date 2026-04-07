@@ -10,6 +10,7 @@
     {
       "type": "pip_install",
       "description": "Installing GPU stem separation packages",
+      "stepLabel": "Installing GPU stem separation packages",
       "packages": [
         "audio-separator[gpu]==0.41.1"
       ]
@@ -17,6 +18,7 @@
     {
       "type": "pip_uninstall",
       "description": "Removing default PyTorch wheels before applying the CUDA overlay",
+      "stepLabel": "Removing default PyTorch wheels",
       "packages": [
         "torch",
         "torchvision",
@@ -26,6 +28,9 @@
     {
       "type": "pip_install",
       "description": "Installing CUDA-capable PyTorch wheels from the official PyTorch index",
+      "stepLabel": "Downloading CUDA PyTorch wheels",
+      "downloadHint": "This is the largest Windows AI download and can take several minutes depending on your connection.",
+      "isLargeDownload": true,
       "indexUrl": "https://download.pytorch.org/whl/cu121",
       "packages": [
         "torch==2.5.1",

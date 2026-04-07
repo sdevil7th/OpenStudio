@@ -10,6 +10,9 @@
     {
       "type": "pip_install",
       "description": "Installing DirectML stem separation packages",
+      "stepLabel": "Installing DirectML stem separation packages",
+      "downloadHint": "OpenStudio is downloading the DirectML backend packages for Windows.",
+      "isLargeDownload": true,
       "packages": [
         "audio-separator[dml]==0.41.1"
       ]

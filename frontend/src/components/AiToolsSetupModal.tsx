@@ -37,6 +37,13 @@ function parentPath(path: string): string {
   return segments.join("/");
 }
 
+function formatElapsed(ms?: number): string {
+  const totalSeconds = Math.max(0, Math.round((ms ?? 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
 export default function AiToolsSetupModal() {
   const { showAiToolsSetup, closeAiToolsSetup, installAiTools, aiToolsStatus } = useDAWStore(
     useShallow((s) => ({
@@ -75,6 +82,8 @@ export default function AiToolsSetupModal() {
     aiToolsStatus.errorCode === "installer_output_timeout" ||
     aiToolsStatus.errorCode === "model_preparation_incomplete";
   const installLogPath = aiToolsStatus.detailLogPath;
+  const activityLines = aiToolsStatus.activityLines ?? [];
+  const hasActivityConsole = aiToolsStatus.installInProgress || activityLines.length > 0;
 
   const errorTitle = isModelFailure
     ? "Model download needs attention"
@@ -120,9 +129,9 @@ export default function AiToolsSetupModal() {
   };
 
   return (
-    <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="md">
+    <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="md" fullHeight className="max-h-[80vh]">
       <ModalHeader title="AI Tools Setup" />
-      <ModalContent>
+      <ModalContent className="space-y-5">
         <div className="space-y-5">
           <div className="rounded bg-daw-dark p-3 space-y-1">
             <p className="text-sm font-medium text-daw-text">What is this?</p>
@@ -164,9 +173,35 @@ export default function AiToolsSetupModal() {
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 {aiToolsStatus.message || "Preparing AI Tools..."}
               </p>
+              {aiToolsStatus.downloadHint ? (
+                <p className="text-xs text-blue-300 leading-relaxed">{aiToolsStatus.downloadHint}</p>
+              ) : null}
+              <div className="grid gap-2 text-xs text-daw-text-secondary sm:grid-cols-3">
+                <p>
+                  Step: <span className="text-daw-text">{aiToolsStatus.stepLabel || aiToolsStatus.lastPhase || aiToolsStatus.state}</span>
+                </p>
+                <p>
+                  Elapsed: <span className="text-daw-text">{formatElapsed(aiToolsStatus.elapsedMs)}</span>
+                </p>
+                <p>
+                  {aiToolsStatus.stepCount && aiToolsStatus.stepIndex
+                    ? <>Stage: <span className="text-daw-text">{aiToolsStatus.stepIndex} / {aiToolsStatus.stepCount}</span></>
+                    : <>Progress: <span className="text-daw-text">{Math.max(0, Math.round((aiToolsStatus.progress ?? 0) * 100))}%</span></>}
+                </p>
+              </div>
               {aiToolsStatus.lastPhase ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">
                   Current phase: <span className="text-daw-text">{aiToolsStatus.lastPhase}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.isLargeDownload ? (
+                <p className="text-xs text-yellow-300 leading-relaxed">
+                  This step downloads large AI packages and can take several minutes depending on your connection.
+                </p>
+              ) : null}
+              {aiToolsStatus.statusWarning ? (
+                <p className="rounded border border-yellow-600/30 bg-yellow-950/20 px-3 py-2 text-xs leading-relaxed text-yellow-200">
+                  {aiToolsStatus.statusWarning}
                 </p>
               ) : null}
               {aiToolsStatus.runtimeCandidate ? (
@@ -179,6 +214,19 @@ export default function AiToolsSetupModal() {
                   Install session: <span className="text-daw-text">{aiToolsStatus.installSessionId}</span>
                 </p>
               ) : null}
+              <div className="rounded-xl border border-neutral-800 bg-black px-3 py-3 font-mono text-[11px] text-green-300">
+                <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-neutral-500">
+                  <span>Installer Activity</span>
+                  <span>{formatElapsed(aiToolsStatus.elapsedMs)}</span>
+                </div>
+                <div className="max-h-44 space-y-1 overflow-y-auto">
+                  {(activityLines.length > 0 ? activityLines : [aiToolsStatus.message || "Preparing AI Tools..."]).map((line, index) => (
+                    <div key={`${index}-${line}`} className="break-words">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           ) : isPythonMissing ? (
             <div className="rounded border border-yellow-600/40 bg-yellow-950/30 p-3 space-y-2">
@@ -357,11 +405,27 @@ export default function AiToolsSetupModal() {
             </div>
           )}
 
+          {hasActivityConsole && !aiToolsStatus.installInProgress ? (
+            <div className="rounded-xl border border-neutral-800 bg-black px-3 py-3 font-mono text-[11px] text-green-300">
+              <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-neutral-500">
+                <span>Latest Installer Activity</span>
+                <span>{formatElapsed(aiToolsStatus.elapsedMs)}</span>
+              </div>
+              <div className="max-h-32 space-y-1 overflow-y-auto">
+                {activityLines.map((line, index) => (
+                  <div key={`${index}-${line}`} className="break-words">
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <div className="border-t border-neutral-800 pt-3 space-y-2">
             <p className="text-xs text-daw-text-secondary leading-relaxed">
               {isInstallComplete
                 ? "AI Tools finished installing in this session. You can close this window and continue working."
-                : "After the runtime is ready, OpenStudio will continue the rest of the AI tools setup in the background. You can keep using the app while that runs."}
+                : "OpenStudio keeps the app responsive while setup runs. This window now shows the live install activity, current phase, and long-download hints."}
             </p>
           </div>
         </div>
@@ -382,11 +446,11 @@ export default function AiToolsSetupModal() {
         ) : null}
         <Button
           variant="primary"
-          onClick={() => void handleRetry()}
-          disabled={aiToolsStatus.installInProgress || isInstallComplete}
+          onClick={() => void (isInstallComplete ? closeAiToolsSetup() : handleRetry())}
+          disabled={aiToolsStatus.installInProgress}
         >
           {isInstallComplete
-            ? "AI Tools Ready"
+            ? "Continue"
             : aiToolsStatus.installInProgress
               ? "Installing..."
               : requiresExternalPython && isPythonMissing

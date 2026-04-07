@@ -114,8 +114,7 @@ export function Modal({
               className={classNames(
                 'bg-daw-panel border border-daw-border rounded-lg shadow-xl',
                 modalSizeStyles[size],
-                fullHeight && 'max-h-[90vh]',
-                'overflow-y-auto',
+                fullHeight ? 'flex max-h-[90vh] flex-col overflow-hidden' : 'overflow-y-auto',
                 className
               )}
             >
@@ -140,7 +139,9 @@ export function Modal({
               )}
 
               {/* Content */}
-              <div className="p-4">{children}</div>
+              <div className={classNames(fullHeight ? 'flex min-h-0 flex-1 flex-col' : 'p-4')}>
+                {children}
+              </div>
 
               {/* Footer */}
               {footer && (

@@ -21,6 +21,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ LOG_PATH: Path | None = None
 SESSION_ID = ""
 RUNTIME_CANDIDATE = ""
 FALLBACK_ATTEMPTED = False
+START_TIME_MONOTONIC = time.monotonic()
 
 
 class InstallerStepError(Exception):
@@ -80,6 +82,7 @@ def emit(state: str, progress: float, **kwargs) -> None:
     payload["fallbackAttempted"] = FALLBACK_ATTEMPTED
     payload.update(kwargs)
     payload.setdefault("lastPhase", state)
+    payload.setdefault("elapsedMs", int((time.monotonic() - START_TIME_MONOTONIC) * 1000))
     if LOG_PATH is not None and "detailLogPath" not in payload:
         payload["detailLogPath"] = str(LOG_PATH)
     print(json.dumps(payload), flush=True)
@@ -161,6 +164,11 @@ def run_step(
     build_runtime_mode: str,
     cwd: Path | None = None,
     raise_on_error: bool = False,
+    step_label: str | None = None,
+    step_index: int = 0,
+    step_count: int = 0,
+    download_hint: str = "",
+    is_large_download: bool = False,
 ) -> None:
     log_event(
         "installer",
@@ -174,6 +182,11 @@ def run_step(
         state,
         progress,
         message=description,
+        stepLabel=step_label or description,
+        stepIndex=step_index,
+        stepCount=step_count,
+        downloadHint=download_hint,
+        isLargeDownload=is_large_download,
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
@@ -235,6 +248,11 @@ def stream_step(
     build_runtime_mode: str,
     cwd: Path | None = None,
     raise_on_error: bool = False,
+    step_label: str | None = None,
+    step_index: int = 0,
+    step_count: int = 0,
+    download_hint: str = "",
+    is_large_download: bool = False,
 ) -> None:
     log_event(
         "installer",
@@ -248,6 +266,11 @@ def stream_step(
         state,
         progress,
         message=description,
+        stepLabel=step_label or description,
+        stepIndex=step_index,
+        stepCount=step_count,
+        downloadHint=download_hint,
+        isLargeDownload=is_large_download,
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
@@ -273,6 +296,21 @@ def stream_step(
                 continue
             recent_lines.append(line)
             write_log(line)
+            emit(
+                state,
+                progress,
+                message=description,
+                stepLabel=step_label or description,
+                stepIndex=step_index,
+                stepCount=step_count,
+                downloadHint=download_hint,
+                isLargeDownload=is_large_download,
+                activityLines=list(recent_lines),
+                installSource=install_source,
+                requiresExternalPython=requires_external_python,
+                pythonDetected=python_detected,
+                buildRuntimeMode=build_runtime_mode,
+            )
         return_code = process.wait()
 
     write_log(f"[exitCode] {return_code}")
@@ -509,6 +547,9 @@ def apply_backend_install_plan(
         "installing_backend",
         0.74,
         message=f"Installing the {backend_requested} AI backend",
+        stepLabel=f"Installing the {backend_requested} AI backend",
+        stepIndex=1 if steps else 0,
+        stepCount=len(steps),
         backendRequested=backend_requested,
         installPlanId=plan_id,
         packageSource=package_source,
@@ -521,6 +562,9 @@ def apply_backend_install_plan(
     for index, step in enumerate(steps, start=1):
         step_type = str(step.get("type", "")).strip()
         description = str(step.get("description", f"Applying backend install step {index}")).strip()
+        step_label = str(step.get("stepLabel", description)).strip() or description
+        download_hint = str(step.get("downloadHint", "")).strip()
+        is_large_download = bool(step.get("isLargeDownload", False))
         if step_type == "pip_install":
             command: list[str] = [str(runtime_python), "-m", "pip", "install", "--upgrade"]
             index_url = str(step.get("indexUrl", "")).strip()
@@ -555,6 +599,11 @@ def apply_backend_install_plan(
                 build_runtime_mode=build_runtime_mode,
                 cwd=runtime_root,
                 raise_on_error=True,
+                step_label=step_label,
+                step_index=index,
+                step_count=len(steps),
+                download_hint=download_hint,
+                is_large_download=is_large_download,
             )
         elif step_type == "pip_uninstall":
             packages = step.get("packages", [])
@@ -580,6 +629,11 @@ def apply_backend_install_plan(
                 build_runtime_mode=build_runtime_mode,
                 cwd=runtime_root,
                 raise_on_error=True,
+                step_label=step_label,
+                step_index=index,
+                step_count=len(steps),
+                download_hint=download_hint,
+                is_large_download=is_large_download,
             )
         else:
             fail(
@@ -784,6 +838,11 @@ def download_model(
         "downloading_model",
         0.82,
         message="Downloading the stem separation model",
+        stepLabel="Downloading the stem separation model",
+        stepIndex=1,
+        stepCount=1,
+        downloadHint="The stem model download can take a while on slower connections.",
+        isLargeDownload=True,
         installSource=install_source,
         requiresExternalPython=requires_external_python,
         pythonDetected=python_detected,
@@ -834,6 +893,11 @@ def download_model(
             error_code="model_download_failed",
             python_detected=python_detected,
             build_runtime_mode=build_runtime_mode,
+            step_label="Downloading the stem separation model",
+            step_index=1,
+            step_count=1,
+            download_hint="The stem model download can take a while on slower connections.",
+            is_large_download=True,
         )
 
     model_path = models_dir / model_name
@@ -866,6 +930,7 @@ def download_model(
 
 def main() -> None:
     global LOG_PATH, SESSION_ID, RUNTIME_CANDIDATE, FALLBACK_ATTEMPTED
+    global START_TIME_MONOTONIC
 
     parser = argparse.ArgumentParser(description="Install OpenStudio AI tools")
     parser.add_argument("--runtime-root", required=True, help="Directory for the prepared AI runtime")
@@ -888,6 +953,7 @@ def main() -> None:
     SESSION_ID = args.session_id
     RUNTIME_CANDIDATE = args.runtime_candidate
     FALLBACK_ATTEMPTED = bool(args.fallback_attempted)
+    START_TIME_MONOTONIC = time.monotonic()
 
     if LOG_PATH is not None:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)

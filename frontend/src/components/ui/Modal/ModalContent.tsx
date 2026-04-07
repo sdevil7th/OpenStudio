@@ -19,5 +19,5 @@ import { ModalContentProps } from './Modal.types';
  * ```
  */
 export function ModalContent({ children, className }: ModalContentProps) {
-  return <div className={classNames('p-4', className)}>{children}</div>;
+  return <div className={classNames('min-h-0 flex-1 overflow-y-auto p-4', className)}>{children}</div>;
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include <thread>
 
 /**
  * StemSeparator — Source separation via Python subprocess (BS-RoFormer).
@@ -24,6 +25,11 @@ public:
     {
         juce::String state { "idle" };
         float progress = 0.0f;
+        int stepIndex = 0;
+        int stepCount = 0;
+        juce::int64 elapsedMs = 0;
+        juce::int64 bytesDownloaded = 0;
+        juce::int64 bytesTotal = 0;
         bool available = false;
         bool installerAvailable = false;
         bool pythonDetected = false;
@@ -32,14 +38,20 @@ public:
         bool modelInstalled = false;
         bool installInProgress = false;
         bool requiresExternalPython = false;
+        bool isLargeDownload = false;
         juce::String message;
         juce::String error;
         juce::String errorCode;
+        juce::String statusWarning;
+        juce::String statusWarningCode;
         juce::String detailLogPath;
         juce::String helpUrl;
         juce::String installSource { "downloadedRuntime" };
         juce::String buildRuntimeMode { "downloaded-runtime" };
+        juce::String stepLabel;
+        juce::String downloadHint;
         juce::StringArray supportedBackends;
+        juce::StringArray activityLines;
         juce::String selectedBackend { "cpu" };
         juce::String runtimeVersion;
         juce::String modelVersion { "BS-Roformer-SW.ckpt" };
@@ -191,6 +203,12 @@ private:
     /** Poll a running AI tools install and refresh the cached status. */
     void pollInstallProgress();
 
+    /** Start the dedicated background monitor for an active AI tools install. */
+    void startInstallMonitor();
+
+    /** Stop the dedicated background monitor if one is running. */
+    void stopInstallMonitor();
+
     /** Build the current AI tools status object using already-resolved values. */
     AiToolsStatus buildAiToolsStatus (const juce::File& systemPython,
                                       const juce::File& script,
@@ -252,8 +270,10 @@ private:
     double installLaunchTimeMs = 0.0;
     double installFirstOutputTimeMs = 0.0;
     double installLastOutputTimeMs = 0.0;
+    double installLastHeartbeatTimeMs = 0.0;
     bool installSawTerminalStatus = false;
     bool installFallbackAttempted = false;
+    bool installOutputTimeoutLogged = false;
     SeparationProgress lastProgress;
     mutable AiToolsStatus lastAiToolsStatus;
     mutable juce::CriticalSection aiToolsStatusLock;
@@ -261,6 +281,9 @@ private:
     mutable bool initialStatusPrepared = false;
     std::atomic<bool> aiToolsInstallWorkInProgress { false };
     std::atomic<bool> aiToolsCancelRequested { false };
+    std::atomic<bool> aiToolsInstallMonitorStopRequested { false };
+    std::atomic<bool> aiToolsInstallMonitorRunning { false };
+    std::unique_ptr<std::thread> aiToolsInstallMonitorThread;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StemSeparator)
 };

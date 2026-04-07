@@ -925,7 +925,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       usePitchEditorStore.getState().open(trackId, clipId, fxIndex);
     },
     closePitchEditor: () => {
-      set({ showPitchEditor: false, pitchEditorTrackId: null, pitchEditorClipId: null });
+      set({ showPitchEditor: false, pitchEditorTrackId: null, pitchEditorClipId: null, pitchEditorFxIndex: 0 });
       usePitchEditorStore.getState().close();
     },
     setLowerZoneHeight: (h) => set({ lowerZoneHeight: Math.max(150, Math.min(600, h)) }),

@@ -227,23 +227,34 @@ export interface AiToolsStatus {
       | "error"
     | "cancelled";
   progress: number;
+  stepIndex?: number;
+  stepCount?: number;
+  elapsedMs?: number;
+  bytesDownloaded?: number;
+  bytesTotal?: number;
   available: boolean;
   installerAvailable: boolean;
   pythonDetected: boolean;
     scriptAvailable: boolean;
     runtimeInstalled: boolean;
     modelInstalled: boolean;
-    installInProgress: boolean;
-    requiresExternalPython: boolean;
-    message?: string;
-    error?: string;
-    errorCode?: string;
-    detailLogPath?: string;
-    helpUrl?: string;
-    installSource?: "downloadedRuntime" | "externalPython" | "none";
-    buildRuntimeMode?: "downloaded-runtime" | "unbundled-dev";
-    supportedBackends?: string[];
-    selectedBackend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+     installInProgress: boolean;
+     requiresExternalPython: boolean;
+     isLargeDownload?: boolean;
+     message?: string;
+     error?: string;
+     errorCode?: string;
+     statusWarning?: string;
+     statusWarningCode?: string;
+     detailLogPath?: string;
+     helpUrl?: string;
+     installSource?: "downloadedRuntime" | "externalPython" | "none";
+     buildRuntimeMode?: "downloaded-runtime" | "unbundled-dev";
+     stepLabel?: string;
+     downloadHint?: string;
+     supportedBackends?: string[];
+     activityLines?: string[];
+     selectedBackend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
     runtimeVersion?: string;
     modelVersion?: string;
     verificationMode?: "in-process" | "subprocess";
@@ -1074,6 +1085,7 @@ declare global {
         minimizeWindow?: () => Promise<void>;
         maximizeWindow?: () => Promise<boolean>; // returns new isMaximized state
         closeWindow?: () => Promise<void>;
+        quitApplication?: () => Promise<void>;
         isWindowMaximized?: () => Promise<boolean>;
         startWindowDrag?: () => Promise<void>;
         openMixerWindow?: (bounds?: Partial<WindowBounds>) => Promise<boolean>;
@@ -3690,6 +3702,15 @@ class NativeBridge {
     }
   }
 
+  async quitApplication(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.quitApplication) {
+      await window.__JUCE__.backend.quitApplication();
+      return;
+    }
+
+    await this.closeWindow();
+  }
+
   async isWindowMaximized(): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.isWindowMaximized) {
       return await window.__JUCE__.backend.isWindowMaximized();
@@ -3761,6 +3782,14 @@ class NativeBridge {
 
   onNativeGlobalShortcut(callback: (event: NativeGlobalShortcutEvent) => void): () => void {
     return this.subscribe("nativeGlobalShortcut", callback);
+  }
+
+  onAppCloseRequested(callback: () => void): () => void {
+    return this.subscribe("appCloseRequested", () => callback());
+  }
+
+  onAiToolsStatusUpdate(callback: (status: AiToolsStatus) => void): () => void {
+    return this.subscribe("aiToolsStatusUpdate", callback);
   }
 
   // Sprint 16: Performance + Audio Quality

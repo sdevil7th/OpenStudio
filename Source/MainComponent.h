@@ -65,6 +65,7 @@ public:
     void resized() override;
 
     void timerCallback() override;
+    void requestFrontendAppClose();
 
     static void broadcastEventToAll(const juce::String& eventId, const juce::var& payload = {});
     static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
@@ -132,6 +133,8 @@ private:
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
     StartupRepairAction startupRepairAction = StartupRepairAction::none;
+    juce::String lastAiToolsStatusDigest;
+    double lastAiToolsStatusEmitMs = 0.0;
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

@@ -12,7 +12,8 @@ import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
-import { initialTransport } from "../useDAWStore";
+import { createFreshProjectDocumentState } from "../useDAWStore";
+import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "meterLevels", "peakLevels", "masterLevel", "automatedParamValues",
@@ -46,42 +47,269 @@ function projectJsonReplacer(key: string, value: unknown): unknown {
   return value;
 }
 
+function buildProjectResetState() {
+  const freshProjectState = createFreshProjectDocumentState();
+  return {
+    ...freshProjectState,
+    showPluginBrowser: false,
+    pluginBrowserTrackId: null,
+    showEnvelopeManager: false,
+    envelopeManagerTrackId: null,
+    showChannelStripEQ: false,
+    channelStripEQTrackId: null,
+    showTrackRouting: false,
+    trackRoutingTrackId: null,
+    showPianoRoll: false,
+    pianoRollTrackId: null,
+    pianoRollClipId: null,
+    showPitchEditor: false,
+    pitchEditorTrackId: null,
+    pitchEditorClipId: null,
+    pitchEditorFxIndex: 0,
+    showClipProperties: false,
+    showDynamicSplit: false,
+    dynamicSplitClipId: null,
+    showCrossfadeEditor: false,
+    crossfadeEditorClipIds: null,
+    showClipLauncher: false,
+    showStemSeparation: false,
+    stemSepTrackId: null,
+    stemSepClipId: null,
+    stemSepClipName: "",
+    stemSepClipDuration: 0,
+    showProjectCompare: false,
+    projectCompareData: null,
+    showRegionRenderMatrix: false,
+    showUnsavedChangesDialog: false,
+    pendingProjectAction: null,
+    pendingProjectActionLabel: "",
+  };
+}
+
+function buildSerializedProjectData(
+  state: any,
+  serializedTracks: any[],
+  masterFXPaths: string[],
+  masterFXStates: string[],
+) {
+  return {
+    version: "1.1.0",
+    savedAt: Date.now(),
+    projectName: state.projectName,
+    projectNotes: state.projectNotes,
+    projectSampleRate: state.projectSampleRate,
+    projectBitDepth: state.projectBitDepth,
+    processingPrecision: state.processingPrecision,
+    tempo: state.transport.tempo,
+    timeSignature: state.timeSignature,
+    metronomeEnabled: state.metronomeEnabled,
+    metronomeVolume: state.metronomeVolume,
+    metronomeAccentBeats: state.metronomeAccentBeats,
+    metronomeTrackId: state.metronomeTrackId,
+    projectRange: state.projectRange,
+    markers: state.markers,
+    regions: state.regions,
+    tempoMarkers: state.tempoMarkers,
+    masterVolume: state.masterVolume,
+    masterPan: state.masterPan,
+    isMasterMuted: state.isMasterMuted,
+    masterMono: state.masterMono,
+    masterAutomationLanes: state.masterAutomationLanes,
+    showMasterAutomation: state.showMasterAutomation,
+    masterAutomationEnabled: state.masterAutomationEnabled,
+    suspendedMasterAutomationState: state.suspendedMasterAutomationState,
+    tracks: serializedTracks,
+    masterFXPaths,
+    masterFXStates,
+    mixerSnapshots: state.mixerSnapshots,
+    trackGroups: state.trackGroups,
+    clipLauncher: state.clipLauncher,
+    renderMetadata: state.renderMetadata,
+    secondaryOutputEnabled: state.secondaryOutputEnabled,
+    secondaryOutputFormat: state.secondaryOutputFormat,
+    secondaryOutputBitDepth: state.secondaryOutputBitDepth,
+    onlineRender: state.onlineRender,
+    addToProjectAfterRender: state.addToProjectAfterRender,
+    projectAuthor: state.projectAuthor,
+    projectRevisionNotes: state.projectRevisionNotes,
+    undoHistory: commandManager.serialize(),
+  };
+}
+
+async function teardownCurrentProject(get: GetFn, set: SetFn) {
+  const freshProjectState = createFreshProjectDocumentState();
+  await get().stop();
+  await nativeBridge.closeAllPluginWindows().catch(() => false);
+
+  if (typeof get().closePitchEditor === "function")
+    get().closePitchEditor();
+  if (typeof get().closePianoRoll === "function")
+    get().closePianoRoll();
+  if (typeof get().closePluginBrowser === "function")
+    get().closePluginBrowser();
+  if (typeof get().closeEnvelopeManager === "function")
+    get().closeEnvelopeManager();
+  if (typeof get().closeChannelStripEQ === "function")
+    get().closeChannelStripEQ();
+  if (typeof get().closeTrackRouting === "function")
+    get().closeTrackRouting();
+  if (typeof get().closeStemSeparation === "function")
+    get().closeStemSeparation();
+  if (typeof get().closeDynamicSplit === "function")
+    get().closeDynamicSplit();
+  if (typeof get().closeCrossfadeEditor === "function")
+    get().closeCrossfadeEditor();
+
+  resetSyncCache();
+
+  const tracks = [...get().tracks];
+  for (let i = tracks.length - 1; i >= 0; i--) {
+    await get().removeTrack(tracks[i].id);
+  }
+
+  set(buildProjectResetState());
+  await nativeBridge.setProcessingPrecision(freshProjectState.processingPrecision).catch(logBridgeError("sync"));
+  await nativeBridge.setTempo(freshProjectState.transport.tempo).catch(logBridgeError("sync"));
+  await nativeBridge.setTimeSignature(
+    freshProjectState.timeSignature.numerator,
+    freshProjectState.timeSignature.denominator,
+  ).catch(logBridgeError("sync"));
+  await nativeBridge.setMetronomeEnabled(false).catch(logBridgeError("sync"));
+  await nativeBridge.setMetronomeAccentBeats(freshProjectState.metronomeAccentBeats).catch(logBridgeError("sync"));
+  await nativeBridge.setMetronomeVolume(freshProjectState.metronomeVolume).catch(logBridgeError("sync"));
+  await nativeBridge.setMasterVolume(freshProjectState.masterVolume).catch(logBridgeError("sync"));
+  await nativeBridge.setMasterPan(freshProjectState.masterPan).catch(logBridgeError("sync"));
+  await nativeBridge.setMasterMono(Boolean(freshProjectState.masterMono)).catch(logBridgeError("sync"));
+  syncTempoMarkersToBackend([]);
+  for (const lane of freshProjectState.masterAutomationLanes) {
+    syncAutomationLaneToBackend("master", lane);
+  }
+  commandManager.clear();
+}
+
+async function performPendingProjectAction(action: any, get: GetFn) {
+  if (!action) return false;
+
+  switch (action.type) {
+    case "newProject":
+    case "closeProject":
+      await get().newProject();
+      return true;
+    case "openProject":
+      return await get().loadProject(action.path, action.options);
+    case "quit":
+      await nativeBridge.quitApplication();
+      return true;
+    case "loadTemplate":
+      get().loadTemplate(action.index);
+      return true;
+    default:
+      return false;
+  }
+}
+
 export const projectActions = (set: SetFn, get: GetFn) => ({
     newProject: async () => {
-      // Stop playback
-      await get().stop();
+      await teardownCurrentProject(get, set);
+    },
 
-      // Close all open plugin editor windows before removing tracks
-      // to prevent dangling pointers / use-after-free crashes
-      await nativeBridge.closeAllPluginWindows();
+    requestNewProject: async () => {
+      const action = { type: "newProject" };
+      if (!get().isModified)
+        return performPendingProjectAction(action, get);
 
-      // Reset sync cache (Sprint 16.3)
-      resetSyncCache();
+      set({
+        showUnsavedChangesDialog: true,
+        pendingProjectAction: action,
+        pendingProjectActionLabel: "before creating a new project",
+      });
+      return true;
+    },
 
-      // Remove all tracks (reverse order to be safe)
-      const tracks = get().tracks;
-      for (let i = tracks.length - 1; i >= 0; i--) {
-        await get().removeTrack(tracks[i].id);
+    requestOpenProject: async (path, options) => {
+      const action = { type: "openProject", path, options };
+      if (!get().isModified)
+        return performPendingProjectAction(action, get);
+
+      set({
+        showUnsavedChangesDialog: true,
+        pendingProjectAction: action,
+        pendingProjectActionLabel: "before opening another project",
+      });
+      return true;
+    },
+
+    requestCloseProject: async () => {
+      const action = { type: "closeProject" };
+      if (!get().isModified)
+        return performPendingProjectAction(action, get);
+
+      set({
+        showUnsavedChangesDialog: true,
+        pendingProjectAction: action,
+        pendingProjectActionLabel: "before closing the current project",
+      });
+      return true;
+    },
+
+    requestQuit: async () => {
+      const action = { type: "quit" };
+      if (!get().isModified)
+        return performPendingProjectAction(action, get);
+
+      set({
+        showUnsavedChangesDialog: true,
+        pendingProjectAction: action,
+        pendingProjectActionLabel: "before closing OpenStudio",
+      });
+      return true;
+    },
+
+    requestLoadTemplate: async (index) => {
+      const action = { type: "loadTemplate", index };
+      if (!get().isModified)
+        return performPendingProjectAction(action, get);
+
+      set({
+        showUnsavedChangesDialog: true,
+        pendingProjectAction: action,
+        pendingProjectActionLabel: "before loading a project template",
+      });
+      return true;
+    },
+
+    dismissUnsavedChangesDialog: () =>
+      set({
+        showUnsavedChangesDialog: false,
+        pendingProjectAction: null,
+        pendingProjectActionLabel: "",
+      }),
+
+    resolveUnsavedChanges: async (choice) => {
+      const pendingAction = get().pendingProjectAction;
+      if (!pendingAction) {
+        get().dismissUnsavedChangesDialog();
+        return;
+      }
+
+      if (choice === "cancel") {
+        get().dismissUnsavedChangesDialog();
+        return;
+      }
+
+      if (choice === "save") {
+        const saved = await get().saveProject(!get().projectPath);
+        if (!saved)
+          return;
       }
 
       set({
-        projectPath: null,
-        isModified: false,
-        transport: initialTransport,
-        tracks: [],
-        selectedTrackId: null,
-        selectedClipId: null,
-        selectedClipIds: [],
-        canUndo: false,
-        canRedo: false,
-        metronomeVolume: 0.5,
-        metronomeTrackId: null,
-        projectRange: { start: 0, end: 0 },
-        projectRevisionNotes: [],
+        showUnsavedChangesDialog: false,
+        pendingProjectAction: null,
+        pendingProjectActionLabel: "",
       });
 
-      // Reset Undo History
-      commandManager.clear();
+      await performPendingProjectAction(pendingAction, get);
     },
 
     setModified: (modified) => set({ isModified: modified }),
@@ -171,33 +399,12 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         console.warn("[saveProject] Failed to serialize master FX:", e);
       }
 
-      const projectData = {
-        version: "1.0.0",
-        savedAt: Date.now(),
-        projectName: state.projectName,
-        projectNotes: state.projectNotes,
-        projectSampleRate: state.projectSampleRate,
-        projectBitDepth: state.projectBitDepth,
-        processingPrecision: state.processingPrecision,
-        tempo: state.transport.tempo,
-        timeSignature: state.timeSignature,
-        masterVolume: state.masterVolume,
-        masterPan: state.masterPan,
-        tracks: serializedTracks,
+      const projectData = buildSerializedProjectData(
+        state,
+        serializedTracks,
         masterFXPaths,
         masterFXStates,
-        metronomeVolume: state.metronomeVolume,
-        metronomeTrackId: state.metronomeTrackId,
-        projectRange: state.projectRange,
-        mixerSnapshots: state.mixerSnapshots,
-        customShortcuts: state.customShortcuts,
-        autoSaveEnabled: state.autoSaveEnabled,
-        autoSaveIntervalMinutes: state.autoSaveIntervalMinutes,
-        autoSaveMaxVersions: state.autoSaveMaxVersions,
-        projectAuthor: state.projectAuthor,
-        projectRevisionNotes: state.projectRevisionNotes,
-        undoHistory: commandManager.serialize(),
-      };
+      );
 
       const success = await nativeBridge.saveProjectToFile(
         path,
@@ -258,6 +465,302 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       // Update projectPath and save
       set({ projectPath: newPath });
       return get().saveProject(false);
+    },
+
+    loadProject: async (path, options) => {
+      resetSyncCache();
+
+      const bypassFX = options?.bypassFX ?? false;
+      if (!path) {
+        path = await nativeBridge.showOpenDialog();
+        if (!path) return false;
+      }
+
+      const json = await nativeBridge.loadProjectFromFile(path);
+      if (!json) return false;
+
+      set({ isProjectLoading: true, projectLoadingMessage: "Parsing project..." });
+      await new Promise((r) => setTimeout(r, 0));
+
+      try {
+        const data = JSON.parse(json);
+        console.log(`[DEBUG LOAD] Parsed project. ${data.tracks?.length || 0} tracks.`);
+        for (const t of data.tracks || []) {
+          console.log(`[DEBUG LOAD] Saved track "${t.name}": inputFXPaths=${JSON.stringify(t.inputFXPaths || [])}, trackFXPaths=${JSON.stringify(t.trackFXPaths || [])}, inputFXStates=${(t.inputFXStates || []).length} states, trackFXStates=${(t.trackFXStates || []).length} states`);
+        }
+        if (data.masterFXPaths) {
+          console.log(`[DEBUG LOAD] Saved masterFXPaths=${JSON.stringify(data.masterFXPaths)}`);
+        }
+
+        set({ projectLoadingMessage: "Resetting current project..." });
+        await new Promise((r) => setTimeout(r, 0));
+
+        await get().newProject();
+        const freshProjectState = createFreshProjectDocumentState();
+        const loadedTempo = data.tempo || 120;
+        const loadedTimeSignature = data.timeSignature || freshProjectState.timeSignature;
+        const loadedMasterVolume = data.masterVolume ?? 1.0;
+        const loadedMasterPan = data.masterPan ?? 0.0;
+        const loadedProcessingPrecision =
+          data.processingPrecision || freshProjectState.processingPrecision;
+        const loadedMetronomeVolume = data.metronomeVolume ?? freshProjectState.metronomeVolume;
+        const loadedMetronomeAccentBeats =
+          Array.isArray(data.metronomeAccentBeats) && data.metronomeAccentBeats.length > 0
+            ? data.metronomeAccentBeats
+            : freshProjectState.metronomeAccentBeats;
+        const loadedMasterAutomationLanes =
+          Array.isArray(data.masterAutomationLanes) && data.masterAutomationLanes.length > 0
+            ? data.masterAutomationLanes
+            : freshProjectState.masterAutomationLanes;
+        const loadedRenderMetadata = {
+          ...freshProjectState.renderMetadata,
+          ...(data.renderMetadata || {}),
+        };
+        const loadedClipLauncher = {
+          ...freshProjectState.clipLauncher,
+          ...(data.clipLauncher || {}),
+        };
+
+        await nativeBridge.setProcessingPrecision(loadedProcessingPrecision).catch(logBridgeError("sync"));
+        await nativeBridge.setTempo(loadedTempo).catch(logBridgeError("sync"));
+        await nativeBridge.setTimeSignature(
+          loadedTimeSignature.numerator,
+          loadedTimeSignature.denominator,
+        ).catch(logBridgeError("sync"));
+        await nativeBridge.setMetronomeAccentBeats(loadedMetronomeAccentBeats).catch(logBridgeError("sync"));
+        await nativeBridge.setMetronomeVolume(loadedMetronomeVolume).catch(logBridgeError("sync"));
+        await nativeBridge.setMetronomeEnabled(Boolean(data.metronomeEnabled)).catch(logBridgeError("sync"));
+        await nativeBridge.setMasterVolume(loadedMasterVolume).catch(logBridgeError("sync"));
+        await nativeBridge.setMasterPan(loadedMasterPan).catch(logBridgeError("sync"));
+        await nativeBridge.setMasterMono(Boolean(data.masterMono)).catch(logBridgeError("sync"));
+
+        set({
+          projectName: data.projectName || "Untitled Project",
+          projectNotes: data.projectNotes || "",
+          projectSampleRate: data.projectSampleRate || 44100,
+          projectBitDepth: data.projectBitDepth || 24,
+          processingPrecision: loadedProcessingPrecision,
+          projectAuthor: data.projectAuthor || "",
+          projectRevisionNotes: data.projectRevisionNotes || [],
+          transport: { ...freshProjectState.transport, tempo: loadedTempo },
+          timeSignature: loadedTimeSignature,
+          metronomeEnabled: Boolean(data.metronomeEnabled),
+          metronomeVolume: loadedMetronomeVolume,
+          metronomeAccentBeats: loadedMetronomeAccentBeats,
+          metronomeTrackId: data.metronomeTrackId ?? null,
+          projectRange: data.projectRange || freshProjectState.projectRange,
+          markers: Array.isArray(data.markers) ? data.markers : freshProjectState.markers,
+          regions: Array.isArray(data.regions) ? data.regions : freshProjectState.regions,
+          tempoMarkers: Array.isArray(data.tempoMarkers) ? data.tempoMarkers : freshProjectState.tempoMarkers,
+          masterVolume: loadedMasterVolume,
+          masterPan: loadedMasterPan,
+          isMasterMuted: Boolean(data.isMasterMuted),
+          masterMono: Boolean(data.masterMono),
+          masterAutomationLanes: loadedMasterAutomationLanes,
+          showMasterAutomation: Boolean(data.showMasterAutomation),
+          masterAutomationEnabled:
+            typeof data.masterAutomationEnabled === "boolean"
+              ? data.masterAutomationEnabled
+              : true,
+          suspendedMasterAutomationState: data.suspendedMasterAutomationState || null,
+          mixerSnapshots: Array.isArray(data.mixerSnapshots) ? data.mixerSnapshots : [],
+          trackGroups: Array.isArray(data.trackGroups) ? data.trackGroups : [],
+          clipLauncher: loadedClipLauncher,
+          renderMetadata: loadedRenderMetadata,
+          secondaryOutputEnabled: Boolean(data.secondaryOutputEnabled),
+          secondaryOutputFormat:
+            data.secondaryOutputFormat || freshProjectState.secondaryOutputFormat,
+          secondaryOutputBitDepth:
+            data.secondaryOutputBitDepth ?? freshProjectState.secondaryOutputBitDepth,
+          onlineRender: Boolean(data.onlineRender),
+          addToProjectAfterRender: Boolean(data.addToProjectAfterRender),
+        });
+        syncTempoMarkersToBackend(
+          Array.isArray(data.tempoMarkers) ? data.tempoMarkers : [],
+        );
+        if (data.isMasterMuted) {
+          await nativeBridge.setMasterVolume(0).catch(logBridgeError("sync"));
+        }
+
+        const totalTracks = data.tracks.length;
+        for (let ti = 0; ti < totalTracks; ti++) {
+          const trackData = data.tracks[ti];
+          set({ projectLoadingMessage: `Loading track ${ti + 1}/${totalTracks}: ${trackData.name}` });
+          await new Promise((r) => setTimeout(r, 0));
+
+          console.log("Loading track:", trackData.name, trackData.id);
+
+          try {
+            await nativeBridge.addTrack(trackData.id);
+            await nativeBridge.setTrackVolume(trackData.id, trackData.volumeDB);
+            await nativeBridge.setTrackPan(trackData.id, trackData.pan);
+
+            if (trackData.muted)
+              await nativeBridge.setTrackMute(trackData.id, true);
+            if (trackData.soloed)
+              await nativeBridge.setTrackSolo(trackData.id, true);
+            if (trackData.armed)
+              await nativeBridge.setTrackRecordArm(trackData.id, true);
+            if (trackData.monitorEnabled)
+              await nativeBridge.setTrackInputMonitoring(trackData.id, true);
+
+            const inputStartCh = trackData.inputStartChannel ?? 0;
+            const inputChCount = trackData.inputChannelCount ?? 2;
+            await nativeBridge.setTrackInputChannels(
+              trackData.id,
+              inputStartCh,
+              inputChCount,
+            );
+
+            if (trackData.clips) {
+              for (const clip of trackData.clips) {
+                if (clip.filePath) {
+                  await nativeBridge.addPlaybackClip(
+                    trackData.id,
+                    clip.filePath,
+                    clip.startTime,
+                    clip.duration,
+                    clip.offset || 0,
+                    clip.volumeDB || 0,
+                    clip.fadeIn || 0,
+                    clip.fadeOut || 0,
+                    clip.id,
+                    clip.pitchCorrectionSourceFilePath,
+                    clip.pitchCorrectionSourceOffset,
+                  );
+                }
+              }
+            }
+
+            console.log(`[DEBUG LOAD] Track "${trackData.name}" FX data from file: bypassFX=${bypassFX}, inputFXPaths=${JSON.stringify(trackData.inputFXPaths || "MISSING")}, trackFXPaths=${JSON.stringify(trackData.trackFXPaths || "MISSING")}`);
+            let inputFxRestored = 0;
+            if (!bypassFX && trackData.inputFXPaths && trackData.inputFXPaths.length > 0) {
+              set({ projectLoadingMessage: `Restoring input FX for ${trackData.name}...` });
+              await new Promise((r) => setTimeout(r, 0));
+              for (let i = 0; i < trackData.inputFXPaths.length; i++) {
+                console.log(`[DEBUG LOAD]   Restoring input FX[${i}]: "${trackData.inputFXPaths[i]}"`);
+                const success = await nativeBridge.addTrackInputFX(trackData.id, trackData.inputFXPaths[i], false);
+                console.log(`[DEBUG LOAD]   addTrackInputFX result: ${success}`);
+                if (success) {
+                  if (trackData.inputFXStates && trackData.inputFXStates[i]) {
+                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
+                    console.log(`[DEBUG LOAD]   setPluginState(input) result: ${stateResult}`);
+                  }
+                  inputFxRestored++;
+                }
+              }
+            }
+
+            let trackFxRestored = 0;
+            if (!bypassFX && trackData.trackFXPaths && trackData.trackFXPaths.length > 0) {
+              set({ projectLoadingMessage: `Restoring track FX for ${trackData.name}...` });
+              await new Promise((r) => setTimeout(r, 0));
+              for (let i = 0; i < trackData.trackFXPaths.length; i++) {
+                console.log(`[DEBUG LOAD]   Restoring track FX[${i}]: "${trackData.trackFXPaths[i]}"`);
+                const success = await nativeBridge.addTrackFX(trackData.id, trackData.trackFXPaths[i], false);
+                console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
+                if (success) {
+                  if (trackData.trackFXStates && trackData.trackFXStates[i]) {
+                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, false, trackData.trackFXStates[i]);
+                    console.log(`[DEBUG LOAD]   setPluginState(track) result: ${stateResult}`);
+                  }
+                  trackFxRestored++;
+                }
+              }
+            }
+
+            console.log(`[DEBUG LOAD] Track "${trackData.name}" restored ${inputFxRestored} input FX and ${trackFxRestored} track FX`);
+
+            const frontendTrack: Track = {
+              ...trackData,
+              clips: trackData.clips || [],
+              midiClips: trackData.midiClips || [],
+              automationLanes: trackData.automationLanes || [],
+              meterLevel: 0,
+              peakLevel: 0,
+              clipping: false,
+              suspendedAutomationState: null,
+            };
+
+            set((state) => ({ tracks: [...state.tracks, frontendTrack] }));
+          } catch (trackError) {
+            console.error(`[DEBUG LOAD] Failed to load track "${trackData.name}"`, trackError);
+          }
+        }
+
+        let restoredMasterFxCount = 0;
+        if (!bypassFX && data.masterFXPaths && data.masterFXPaths.length > 0) {
+          set({ projectLoadingMessage: "Restoring master FX..." });
+          await new Promise((r) => setTimeout(r, 0));
+          for (let i = 0; i < data.masterFXPaths.length; i++) {
+            const success = await nativeBridge.addMasterFX(data.masterFXPaths[i]);
+            if (success && data.masterFXStates && data.masterFXStates[i]) {
+              await nativeBridge.setMasterPluginState(i, data.masterFXStates[i]);
+            }
+            if (success) {
+              restoredMasterFxCount++;
+            }
+          }
+        }
+
+        set({ masterFxCount: restoredMasterFxCount });
+        for (const lane of get().masterAutomationLanes) {
+          syncAutomationLaneToBackend("master", lane);
+        }
+
+        if (data.undoHistory) {
+          commandManager.deserialize(data.undoHistory);
+          set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+        }
+
+        set((ctx) => {
+          const newRecent = [
+            path,
+            ...ctx.recentProjects.filter((p) => p !== path),
+          ].slice(0, 10);
+
+          return {
+            projectPath: path,
+            isModified: false,
+            recentProjects: newRecent,
+          };
+        });
+        localStorage.setItem("recentProjects", JSON.stringify(get().recentProjects));
+
+        set({ projectLoadingMessage: "Checking media files..." });
+        await new Promise((r) => setTimeout(r, 0));
+        const missingFiles: Array<{ path: string; clipIds: string[] }> = [];
+        const checkedPaths = new Map<string, boolean>();
+        for (const track of get().tracks) {
+          for (const clip of track.clips) {
+            if (!clip.filePath) continue;
+            if (!checkedPaths.has(clip.filePath)) {
+              const exists = await nativeBridge.fileExists(clip.filePath).catch(() => true);
+              checkedPaths.set(clip.filePath, exists);
+            }
+            if (!checkedPaths.get(clip.filePath)) {
+              const existing = missingFiles.find((entry) => entry.path === clip.filePath);
+              if (existing) {
+                existing.clipIds.push(clip.id);
+              } else {
+                missingFiles.push({ path: clip.filePath, clipIds: [clip.id] });
+              }
+            }
+          }
+        }
+        if (missingFiles.length > 0) {
+          set({ showMissingMedia: true, missingMediaFiles: missingFiles });
+        }
+
+        set({ isProjectLoading: false, projectLoadingMessage: "" });
+        get().showToast(`Loaded project "${data.projectName || "Untitled Project"}"`, "success");
+        return true;
+      } catch (e) {
+        console.error("[loadProject]", e);
+        set({ isProjectLoading: false, projectLoadingMessage: "" });
+        get().showToast("Failed to load project: " + String(e), "error");
+        return false;
+      }
     },
 
 

@@ -169,25 +169,14 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "view.toggleUndoHistory", name: "Toggle Undo History", category: "View", shortcut: "Ctrl+Alt+Z", execute: () => s().toggleUndoHistory() },
 
     // ===== File =====
-    { id: "file.new", name: "New Project", category: "File", shortcut: "Ctrl+N", execute: () => s().newProject() },
+    { id: "file.new", name: "New Project", category: "File", shortcut: "Ctrl+N", execute: () => { void s().requestNewProject(); } },
     { id: "file.save", name: "Save Project", category: "File", shortcut: "Ctrl+S", execute: () => s().saveProject() },
     { id: "file.saveAs", name: "Save Project As...", category: "File", shortcut: "Ctrl+Shift+S", execute: () => s().saveProject(true) },
-    { id: "file.open", name: "Open Project", category: "File", shortcut: "Ctrl+O", execute: () => { void s().loadProject(); } },
-    { id: "file.closeProject", name: "Close Project", category: "File", shortcut: "Ctrl+F4", execute: () => {
-      const state = s();
-      if (state.isModified) {
-        if (confirm("Save changes before closing?")) {
-          void state.saveProject().then(() => state.newProject());
-        } else {
-          void state.newProject();
-        }
-      } else {
-        void state.newProject();
-      }
-    }},
+    { id: "file.open", name: "Open Project", category: "File", shortcut: "Ctrl+O", execute: () => { void s().requestOpenProject(); } },
+    { id: "file.closeProject", name: "Close Project", category: "File", shortcut: "Ctrl+F4", execute: () => { void s().requestCloseProject(); }},
     { id: "file.projectSettings", name: "Project Settings", category: "File", shortcut: "Alt+Enter", execute: () => s().openProjectSettings() },
     { id: "file.render", name: "Render / Export", category: "File", shortcut: "Ctrl+Alt+R", execute: () => s().openRenderModal() },
-    { id: "file.quit", name: "Quit", category: "File", shortcut: "Ctrl+Q", execute: () => { void nativeBridge.closeWindow(); } },
+    { id: "file.quit", name: "Quit", category: "File", shortcut: "Ctrl+Q", execute: () => { void s().requestQuit(); } },
     { id: "file.settings", name: "Audio Settings", category: "File", execute: () => s().openSettings() },
     { id: "project.compare", name: "Compare with Saved Version", category: "File", execute: () => { void s().compareWithSavedProject(); } },
 
@@ -214,7 +203,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "options.rippleAllTracks", name: "Ripple Editing: All Tracks", category: "Options", execute: () => s().setRippleMode("all_tracks") },
 
     // ===== New Phase 8 Actions =====
-    { id: "file.openSafeMode", name: "Open Project (Safe Mode)", category: "File", shortcut: "Ctrl+Shift+O", execute: () => { void s().loadProject(undefined, { bypassFX: true }); } },
+    { id: "file.openSafeMode", name: "Open Project (Safe Mode)", category: "File", shortcut: "Ctrl+Shift+O", execute: () => { void s().requestOpenProject(undefined, { bypassFX: true }); } },
     { id: "insert.emptyItem", name: "Insert Empty Item", category: "Insert", execute: () => {
       const state = s();
       const trackId = state.selectedTrackIds[0] || state.tracks.find((t: { type: string }) => t.type === "audio")?.id;

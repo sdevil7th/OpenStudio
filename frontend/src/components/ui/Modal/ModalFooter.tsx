@@ -24,7 +24,7 @@ import { ModalFooterProps } from './Modal.types';
  */
 export function ModalFooter({ children, className }: ModalFooterProps) {
   return (
-    <div className={classNames('flex justify-end gap-2 p-4 border-t border-daw-border', className)}>
+    <div className={classNames('sticky bottom-0 flex shrink-0 justify-end gap-2 border-t border-daw-border bg-daw-panel p-4', className)}>
       {children}
     </div>
   );

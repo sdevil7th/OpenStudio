@@ -23,9 +23,12 @@ export function MenuBar() {
     openSettings,
     openProjectSettings,
     openRenderModal,
-    newProject,
     saveProject,
-    loadProject,
+    requestNewProject,
+    requestOpenProject,
+    requestCloseProject,
+    requestQuit,
+    requestLoadTemplate,
     snapEnabled,
     toggleSnap,
     gridSize,
@@ -45,9 +48,12 @@ export function MenuBar() {
       openSettings: s.openSettings,
       openProjectSettings: s.openProjectSettings,
       openRenderModal: s.openRenderModal,
-      newProject: s.newProject,
       saveProject: s.saveProject,
-      loadProject: s.loadProject,
+      requestNewProject: s.requestNewProject,
+      requestOpenProject: s.requestOpenProject,
+      requestCloseProject: s.requestCloseProject,
+      requestQuit: s.requestQuit,
+      requestLoadTemplate: s.requestLoadTemplate,
       snapEnabled: s.snapEnabled,
       toggleSnap: s.toggleSnap,
       gridSize: s.gridSize,
@@ -185,22 +191,14 @@ export function MenuBar() {
       label: "New Project",
       shortcut: shortcut("file.new", "Ctrl+N"),
       onClick: () => {
-        if (
-          confirm(
-            "Are you sure you want to start a new project? Unsaved changes will be lost.",
-          )
-        ) {
-          newProject();
-        }
+        void requestNewProject();
       },
     },
     {
       label: "Open Project...",
       shortcut: shortcut("file.open", "Ctrl+O"),
       onClick: () => {
-        loadProject().then((success) => {
-          if (!success) console.error("Failed to load project");
-        });
+        void requestOpenProject();
       },
     },
     {
@@ -212,13 +210,7 @@ export function MenuBar() {
               ...recentProjects.map((projectPath) => ({
                 label: getFileName(projectPath),
                 onClick: async () => {
-                  const success = await loadProject(projectPath);
-                  if (!success) {
-                    console.error(
-                      "Failed to load recent project:",
-                      projectPath,
-                    );
-                  }
+                  await requestOpenProject(projectPath);
                 },
               })),
               {
@@ -285,13 +277,7 @@ export function MenuBar() {
           ...templates.map((t, i) => ({
             label: t.name,
             onClick: () => {
-              if (
-                confirm(
-                  `Load template "${t.name}"? This will replace the current project.`,
-                )
-              ) {
-                useDAWStore.getState().loadTemplate(i);
-              }
+              void requestLoadTemplate(i);
             },
           })),
           {
@@ -313,16 +299,7 @@ export function MenuBar() {
       label: "Close Project",
       shortcut: shortcut("file.closeProject", "Ctrl+F4"),
       onClick: () => {
-        const state = useDAWStore.getState();
-        if (state.isModified) {
-          if (confirm("Save changes before closing?")) {
-            state.saveProject().then(() => state.newProject());
-          } else {
-            state.newProject();
-          }
-        } else {
-          state.newProject();
-        }
+        void requestCloseProject();
       },
       dividerAfter: true,
     },
@@ -375,13 +352,7 @@ export function MenuBar() {
       label: "Open Project (Safe Mode)...",
       shortcut: shortcut("file.openSafeMode", "Ctrl+Shift+O"),
       onClick: () => {
-        useDAWStore
-          .getState()
-          .loadProject(undefined, { bypassFX: true })
-          .then((success) => {
-            if (success)
-              console.log("Project loaded in Safe Mode (FX bypassed)");
-          });
+        void useDAWStore.getState().requestOpenProject(undefined, { bypassFX: true });
       },
     },
     {
@@ -399,7 +370,7 @@ export function MenuBar() {
       label: "Quit",
       shortcut: shortcut("file.quit", "Ctrl+Q"),
       onClick: () => {
-        nativeBridge.closeWindow();
+        void requestQuit();
       },
     },
   ];

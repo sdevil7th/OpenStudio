@@ -283,7 +283,6 @@ export const routingActions = (set: SetFn, get: GetFn) => ({
       };
       set((s) => {
         const updated = [...s.mixerSnapshots, snapshot];
-        localStorage.setItem("s13_mixerSnapshots", JSON.stringify(updated));
         return { mixerSnapshots: updated, isModified: true };
       });
       get().showToast(`Mixer snapshot "${name}" saved`, "success");
@@ -365,7 +364,6 @@ export const routingActions = (set: SetFn, get: GetFn) => ({
     deleteMixerSnapshot: (index: number) => {
       set((s) => {
         const updated = s.mixerSnapshots.filter((_, i) => i !== index);
-        localStorage.setItem("s13_mixerSnapshots", JSON.stringify(updated));
         return { mixerSnapshots: updated };
       });
     },

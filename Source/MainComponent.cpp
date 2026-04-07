@@ -3749,14 +3749,22 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(juce::var());
                         if (isMainWindow())
                         {
-                            if (windowCallbacks.requestAppClose)
-                                windowCallbacks.requestAppClose();
-                            else
-                                juce::JUCEApplication::getInstance()->systemRequestedQuit();
+                            requestFrontendAppClose();
                         }
                         else if (windowCallbacks.closeMixerWindow)
                         {
                             windowCallbacks.closeMixerWindow();
+                        }
+                    })
+                    .withNativeFunction ("quitApplication", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        completion(juce::var());
+                        if (isMainWindow())
+                        {
+                            if (windowCallbacks.requestAppClose)
+                                windowCallbacks.requestAppClose();
+                            else
+                                juce::JUCEApplication::getInstance()->systemRequestedQuit();
                         }
                     })
                     .withNativeFunction ("isWindowMaximized", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -4732,6 +4740,27 @@ MainComponent::~MainComponent()
     activeInstances.removeFirstMatchingValue(this);
 }
 
+void MainComponent::requestFrontendAppClose()
+{
+    if (! isMainWindow())
+    {
+        if (windowCallbacks.closeMixerWindow)
+            windowCallbacks.closeMixerWindow();
+        return;
+    }
+
+    if (frontendStartupState == FrontendStartupState::ready)
+    {
+        emitFrontendEvent("appCloseRequested");
+        return;
+    }
+
+    if (windowCallbacks.requestAppClose)
+        windowCallbacks.requestAppClose();
+    else
+        juce::JUCEApplication::getInstance()->systemRequestedQuit();
+}
+
 void MainComponent::broadcastEventToAll(const juce::String& eventId, const juce::var& payload)
 {
     juce::Array<MainComponent*> instancesCopy;
@@ -5161,6 +5190,36 @@ void MainComponent::timerCallback()
 
             juce::Logger::writeToLog("Frontend startup state: timed-out - " + detail);
             showStartupFallback("OpenStudio timed out while starting its interface.", detail, startupRepairAction != StartupRepairAction::none);
+        }
+    }
+
+    if (isMainWindow())
+    {
+        const auto aiToolsStatus = audioEngine.getAiToolsStatus();
+        const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+        bool installInProgress = false;
+        juce::String digest;
+
+        if (auto* obj = aiToolsStatus.getDynamicObject())
+        {
+            installInProgress = static_cast<bool>(obj->getProperty("installInProgress"));
+            digest = obj->getProperty("state").toString()
+                + "|" + juce::String(static_cast<double>(obj->getProperty("progress")))
+                + "|" + obj->getProperty("message").toString()
+                + "|" + obj->getProperty("error").toString()
+                + "|" + obj->getProperty("errorCode").toString()
+                + "|" + obj->getProperty("statusWarning").toString()
+                + "|" + obj->getProperty("statusWarningCode").toString()
+                + "|" + obj->getProperty("installSessionId").toString()
+                + "|" + juce::String(static_cast<double>(obj->getProperty("elapsedMs")));
+        }
+
+        if (digest != lastAiToolsStatusDigest
+            || (installInProgress && nowMs - lastAiToolsStatusEmitMs >= 500.0))
+        {
+            emitFrontendEvent("aiToolsStatusUpdate", aiToolsStatus);
+            lastAiToolsStatusDigest = digest;
+            lastAiToolsStatusEmitMs = nowMs;
         }
     }
 

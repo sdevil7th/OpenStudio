@@ -77,6 +77,11 @@ function getStoredString(key: string, fallback = ""): string {
 const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   state: "checking",
   progress: 0,
+  stepIndex: 0,
+  stepCount: 0,
+  elapsedMs: 0,
+  bytesDownloaded: 0,
+  bytesTotal: 0,
   available: false,
   installerAvailable: false,
   pythonDetected: false,
@@ -85,9 +90,12 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   modelInstalled: false,
   installInProgress: false,
   requiresExternalPython: false,
+  isLargeDownload: false,
   message: "Checking AI tools...",
+  stepLabel: "Checking AI tools...",
   installSource: "downloadedRuntime",
   buildRuntimeMode: "downloaded-runtime",
+  activityLines: [],
   supportedBackends: ["cpu"],
   selectedBackend: "cpu",
   lastPhase: "checking",
@@ -675,6 +683,7 @@ interface DAWState {
   stemSepClipDuration: number;
   aiToolsStatus: AiToolsStatus;
   aiToolsStatusLoading: boolean;
+  aiToolsStatusLastUpdatedAt: number;
 
   // Script Console
   showScriptConsole: boolean;
@@ -703,6 +712,9 @@ interface DAWState {
   projectPath: string | null;
   isModified: boolean;
   recentProjects: string[];
+  showUnsavedChangesDialog: boolean;
+  pendingProjectAction: PendingProjectAction | null;
+  pendingProjectActionLabel: string;
 
   // Project Settings/Metadata
   showProjectSettings: boolean;
@@ -951,6 +963,13 @@ interface DAWActions {
   saveProject: (saveAs?: boolean) => Promise<boolean>;
   saveNewVersion: () => Promise<boolean>;
   loadProject: (path?: string, options?: { bypassFX?: boolean }) => Promise<boolean>;
+  requestNewProject: () => Promise<boolean>;
+  requestOpenProject: (path?: string, options?: { bypassFX?: boolean }) => Promise<boolean>;
+  requestCloseProject: () => Promise<boolean>;
+  requestQuit: () => Promise<boolean>;
+  requestLoadTemplate: (index: number) => Promise<boolean>;
+  resolveUnsavedChanges: (choice: "save" | "discard" | "cancel") => Promise<void>;
+  dismissUnsavedChangesDialog: () => void;
   setModified: (modified: boolean) => void;
   clearRecentProjects: () => void;
 
@@ -1246,6 +1265,7 @@ interface DAWActions {
   closeStemSeparation: () => void;
   reopenStemSeparation: () => void;
   refreshAiToolsStatus: (force?: boolean) => Promise<AiToolsStatus>;
+  applyAiToolsStatusUpdate: (status: AiToolsStatus) => void;
   installAiTools: () => Promise<void>;
   cancelAiToolsInstall: () => Promise<void>;
   completeStemSeparation: (sourceTrackId: string, sourceClipId: string, clipName: string,
@@ -1546,6 +1566,13 @@ interface DAWActions {
   deleteRevisionNote: (index: number) => void;
 }
 
+export type PendingProjectAction =
+  | { type: "newProject" }
+  | { type: "openProject"; path?: string; options?: { bypassFX?: boolean } }
+  | { type: "closeProject" }
+  | { type: "quit" }
+  | { type: "loadTemplate"; index: number };
+
 // ============================================
 // Default Values
 // ============================================
@@ -1633,6 +1660,103 @@ export const initialTransport: TransportState = {
   punchStart: 0,
   punchEnd: 0,
 };
+
+export function createDefaultMasterAutomationLanes(): AutomationLane[] {
+  return [
+    { id: "master-vol", param: "volume", points: [], visible: false, mode: "read", armed: false },
+    { id: "master-pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
+  ];
+}
+
+export function createDefaultRenderMetadata() {
+  return {
+    title: "",
+    artist: "",
+    album: "",
+    genre: "",
+    year: "",
+    description: "",
+    isrc: "",
+  };
+}
+
+export function createDefaultClipLauncherState() {
+  return {
+    slots: [],
+    numTracks: 0,
+    numSlots: 8,
+    quantize: "1bar",
+  };
+}
+
+/**
+ * Canonical defaults for document-scoped project state.
+ * New-project teardown and project save/load should derive from this helper
+ * so new project fields do not silently leak across sessions.
+ */
+export function createFreshProjectDocumentState(): Partial<DAWState> {
+  return {
+    tracks: [],
+    selectedTrackId: null,
+    selectedTrackIds: [],
+    lastSelectedTrackId: null,
+    selectedRegionIds: [],
+    clipboard: {
+      clip: null,
+      clips: [],
+      isCut: false,
+    },
+    transport: { ...initialTransport },
+    recordingClips: [],
+    recordingMIDIPreviews: {},
+    playStartPosition: 0,
+    timeSelection: null,
+    metronomeEnabled: false,
+    metronomeVolume: 0.5,
+    metronomeAccentBeats: [true, false, false, false],
+    metronomeTrackId: null,
+    timeSignature: { numerator: 4, denominator: 4 },
+    projectRange: { start: 0, end: 0 },
+    selectedClipId: null,
+    selectedClipIds: [],
+    selectedNoteIds: [],
+    markers: [],
+    regions: [],
+    tempoMarkers: [],
+    masterVolume: 1.0,
+    masterPan: 0.0,
+    masterLevel: 0,
+    masterFxCount: 0,
+    isMasterMuted: false,
+    masterMono: false,
+    masterAutomationLanes: createDefaultMasterAutomationLanes(),
+    showMasterAutomation: false,
+    masterAutomationEnabled: true,
+    suspendedMasterAutomationState: null,
+    projectPath: null,
+    isModified: false,
+    projectName: "Untitled Project",
+    projectNotes: "",
+    projectSampleRate: 44100,
+    projectBitDepth: 24,
+    processingPrecision: "float32",
+    mixerSnapshots: [],
+    projectAuthor: "",
+    projectRevisionNotes: [],
+    canUndo: false,
+    canRedo: false,
+    trackGroups: [],
+    renderMetadata: createDefaultRenderMetadata(),
+    secondaryOutputEnabled: false,
+    secondaryOutputFormat: "mp3",
+    secondaryOutputBitDepth: 16,
+    onlineRender: false,
+    addToProjectAfterRender: false,
+    clipLauncher: createDefaultClipLauncherState(),
+    showMissingMedia: false,
+    missingMediaFiles: [],
+  };
+}
 
 // ============================================
 // ============================================
@@ -1803,10 +1927,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     masterFxCount: 0,
     isMasterMuted: false,
     masterMono: false,
-    masterAutomationLanes: [
-      { id: "master-vol", param: "volume", points: [], visible: false, mode: "read", armed: false },
-      { id: "master-pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
-    ],
+    masterAutomationLanes: createDefaultMasterAutomationLanes(),
     showMasterAutomation: false,
     masterAutomationEnabled: true,
     suspendedMasterAutomationState: null,
@@ -1863,6 +1984,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     stemSepClipDuration: 0,
     aiToolsStatus: DEFAULT_AI_TOOLS_STATUS,
     aiToolsStatusLoading: true,
+    aiToolsStatusLastUpdatedAt: Date.now(),
     showPianoRoll: false,
     pianoRollTrackId: null,
     pianoRollClipId: null,
@@ -1887,6 +2009,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         return [];
       }
     })(),
+    showUnsavedChangesDialog: false,
+    pendingProjectAction: null,
+    pendingProjectActionLabel: "",
 
     // Project Settings/Metadata
     showProjectSettings: false,
@@ -1960,7 +2085,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // Phase 10: Render Pipeline Expansion
     selectedRegionIds: [],
-    renderMetadata: { title: "", artist: "", album: "", genre: "", year: "", description: "", isrc: "" },
+    renderMetadata: createDefaultRenderMetadata(),
     secondaryOutputEnabled: false,
     secondaryOutputFormat: "mp3",
     secondaryOutputBitDepth: 16,
@@ -2043,12 +2168,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showStepSequencer: false,
 
     // Phase 4.1: Clip Launcher
-    clipLauncher: {
-      slots: [],
-      numTracks: 0,
-      numSlots: 8,
-      quantize: "1bar",
-    },
+    clipLauncher: createDefaultClipLauncherState(),
     showClipLauncher: false,
     showMissingMedia: false,
     missingMediaFiles: [],
@@ -2078,7 +2198,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showCrosshair: false,
 
     // Mixer Snapshots
-    mixerSnapshots: getStoredJSON("s13_mixerSnapshots", []),
+    mixerSnapshots: [],
 
     // Project Templates
     projectTemplates: getStoredJSON("s13_projectTemplates", []),
@@ -2117,19 +2237,88 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           ? await nativeBridge.refreshAiToolsStatus()
           : await nativeBridge.getAiToolsStatus();
 
-        set({ aiToolsStatus: nextStatus, aiToolsStatusLoading: false });
-        return nextStatus;
+        const reconciledStatus =
+          nextStatus.available || nextStatus.state === "ready"
+            ? {
+                ...nextStatus,
+                state: "ready" as const,
+                installInProgress: false,
+                available: true,
+                message: nextStatus.message || "AI tools are ready.",
+                error: undefined,
+                errorCode: undefined,
+                terminalReason: undefined,
+                statusWarning: undefined,
+                statusWarningCode: undefined,
+              }
+            : nextStatus;
+
+        set({
+          aiToolsStatus: reconciledStatus,
+          aiToolsStatusLoading: false,
+          aiToolsStatusLastUpdatedAt: Date.now(),
+        });
+        return reconciledStatus;
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+
+        if (currentStatus.installInProgress) {
+          const fallbackStatus: AiToolsStatus = {
+            ...currentStatus,
+            statusWarning: "OpenStudio temporarily lost contact with the AI installer, but setup is still running.",
+            statusWarningCode: "status_refresh_failed",
+            message: currentStatus.message || "Installing AI tools...",
+          };
+          set({
+            aiToolsStatus: fallbackStatus,
+            aiToolsStatusLoading: false,
+            aiToolsStatusLastUpdatedAt: Date.now(),
+          });
+          return fallbackStatus;
+        }
+
         const fallbackStatus: AiToolsStatus = {
           ...currentStatus,
           state: "error",
           installInProgress: false,
           message: "Failed to refresh AI tools status.",
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
         };
-        set({ aiToolsStatus: fallbackStatus, aiToolsStatusLoading: false });
+        set({
+          aiToolsStatus: fallbackStatus,
+          aiToolsStatusLoading: false,
+          aiToolsStatusLastUpdatedAt: Date.now(),
+        });
         return fallbackStatus;
       }
+    },
+    applyAiToolsStatusUpdate: (status) => {
+      const currentStatus = get().aiToolsStatus;
+      const nextStatus =
+        status.available || status.state === "ready"
+          ? {
+              ...currentStatus,
+              ...status,
+              state: "ready" as const,
+              available: true,
+              installInProgress: false,
+              error: undefined,
+              errorCode: undefined,
+              terminalReason: undefined,
+              statusWarning: undefined,
+              statusWarningCode: undefined,
+              message: status.message || "AI tools are ready.",
+            }
+          : {
+              ...currentStatus,
+              ...status,
+            };
+
+      set({
+        aiToolsStatus: nextStatus,
+        aiToolsStatusLoading: false,
+        aiToolsStatusLastUpdatedAt: Date.now(),
+      });
     },
     installAiTools: async () => {
         const currentStatus = get().aiToolsStatus;
@@ -2152,17 +2341,29 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           installInProgress: true,
           available: false,
           error: undefined,
+          statusWarning: undefined,
+          statusWarningCode: undefined,
           message:
             currentStatus.buildRuntimeMode === "downloaded-runtime"
               ? "Checking OpenStudio AI runtime downloads..."
               : "Preparing AI tools installation...",
+          stepLabel:
+            currentStatus.buildRuntimeMode === "downloaded-runtime"
+              ? "Checking OpenStudio AI runtime downloads..."
+              : "Preparing AI tools installation...",
+          activityLines: [
+            currentStatus.buildRuntimeMode === "downloaded-runtime"
+              ? "Checking OpenStudio AI runtime downloads..."
+              : "Preparing AI tools installation...",
+          ],
         },
+        aiToolsStatusLastUpdatedAt: Date.now(),
       });
 
       try {
         const result = await nativeBridge.installAiTools();
         if (result.status) {
-          set({ aiToolsStatus: result.status, aiToolsStatusLoading: false });
+          get().applyAiToolsStatusUpdate(result.status);
         } else {
           await get().refreshAiToolsStatus(true);
         }
@@ -2172,6 +2373,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        if (get().aiToolsStatus.installInProgress) {
+          set({
+            aiToolsStatus: {
+              ...get().aiToolsStatus,
+              statusWarning: "The AI installer is still running in the background. OpenStudio will keep listening for progress.",
+              statusWarningCode: "bridge_timeout",
+            },
+            aiToolsStatusLoading: false,
+            aiToolsStatusLastUpdatedAt: Date.now(),
+          });
+          return;
+        }
         set({
           aiToolsStatus: {
             ...get().aiToolsStatus,
@@ -2181,6 +2394,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             error: message,
           },
           aiToolsStatusLoading: false,
+          aiToolsStatusLastUpdatedAt: Date.now(),
         });
         get().showToast(message, "error");
       }
@@ -2260,322 +2474,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         localStorage.setItem("s13_trackTemplates", JSON.stringify(templates));
         return { trackTemplates: templates };
       });
-    },
-
-    loadProject: async (path, options) => {
-      // Reset sync cache on project load (Sprint 16.3)
-      resetSyncCache();
-
-      const bypassFX = options?.bypassFX ?? false;
-      if (!path) {
-        path = await nativeBridge.showOpenDialog();
-        if (!path) return false;
-      }
-
-      const json = await nativeBridge.loadProjectFromFile(path);
-      if (!json) return false;
-
-      set({ isProjectLoading: true, projectLoadingMessage: "Parsing project..." });
-      // Yield to let React render the loading overlay
-      await new Promise((r) => setTimeout(r, 0));
-
-      try {
-        const data = JSON.parse(json);
-        console.log(`[DEBUG LOAD] Parsed project. ${data.tracks?.length || 0} tracks.`);
-        // Log what FX data exists in the saved file for each track
-        for (const t of data.tracks || []) {
-          console.log(`[DEBUG LOAD] Saved track "${t.name}": inputFXPaths=${JSON.stringify(t.inputFXPaths || [])}, trackFXPaths=${JSON.stringify(t.trackFXPaths || [])}, inputFXStates=${(t.inputFXStates || []).length} states, trackFXStates=${(t.trackFXStates || []).length} states`);
-        }
-        if (data.masterFXPaths) {
-          console.log(`[DEBUG LOAD] Saved masterFXPaths=${JSON.stringify(data.masterFXPaths)}`);
-        }
-
-        set({ projectLoadingMessage: "Resetting current project..." });
-        await new Promise((r) => setTimeout(r, 0));
-
-        // Reset current project
-        await get().newProject(); // Clears everything
-
-        // Restore Project Metadata
-        if (data.projectName) get().setProjectName(data.projectName);
-        if (data.projectNotes) get().setProjectNotes(data.projectNotes);
-        if (data.projectSampleRate) get().setProjectSampleRate(data.projectSampleRate);
-        if (data.projectBitDepth) get().setProjectBitDepth(data.projectBitDepth);
-        if (data.processingPrecision)
-          await get().setProcessingPrecision(data.processingPrecision);
-
-        // Restore Collaborative Metadata
-        if (data.projectAuthor) set({ projectAuthor: data.projectAuthor });
-        if (data.projectRevisionNotes) set({ projectRevisionNotes: data.projectRevisionNotes });
-
-        // Restore Global Settings
-        get().setTempo(data.tempo || 120);
-        if (data.timeSignature) {
-          get().setTimeSignature(
-            data.timeSignature.numerator,
-            data.timeSignature.denominator,
-          );
-        }
-        get().setMasterVolume(data.masterVolume ?? 1.0);
-        get().setMasterPan(data.masterPan ?? 0.0);
-
-        // Restore metronome and project range
-        if (data.metronomeVolume !== undefined) {
-          set({ metronomeVolume: data.metronomeVolume });
-          nativeBridge.setMetronomeVolume(data.metronomeVolume);
-        }
-        if (data.projectRange) {
-          set({ projectRange: data.projectRange });
-        }
-        if (data.metronomeTrackId) {
-          set({ metronomeTrackId: data.metronomeTrackId });
-        }
-
-        // Restore Tracks
-        const totalTracks = data.tracks.length;
-        for (let ti = 0; ti < totalTracks; ti++) {
-          const trackData = data.tracks[ti];
-          set({ projectLoadingMessage: `Loading track ${ti + 1}/${totalTracks}: ${trackData.name}` });
-          await new Promise((r) => setTimeout(r, 0));
-
-          console.log("Loading track:", trackData.name, trackData.id);
-
-          try {
-            // 1. Create track in backend using explicit ID
-            await nativeBridge.addTrack(trackData.id);
-
-            // 2. Restore track properties in backend
-            await nativeBridge.setTrackVolume(trackData.id, trackData.volumeDB);
-            await nativeBridge.setTrackPan(trackData.id, trackData.pan);
-
-            // Backend defaults are unmuted/unsoloed/unarmed
-            if (trackData.muted)
-              await nativeBridge.setTrackMute(trackData.id, true);
-            if (trackData.soloed)
-              await nativeBridge.setTrackSolo(trackData.id, true);
-            if (trackData.armed)
-              await nativeBridge.setTrackRecordArm(trackData.id, true);
-            if (trackData.monitorEnabled)
-              await nativeBridge.setTrackInputMonitoring(trackData.id, true);
-
-            // Restore input channel configuration (mono/stereo)
-            const inputStartCh = trackData.inputStartChannel ?? 0;
-            const inputChCount = trackData.inputChannelCount ?? 2;
-            await nativeBridge.setTrackInputChannels(
-              trackData.id,
-              inputStartCh,
-              inputChCount,
-            );
-
-            // 3. Restore Clips (Backend)
-            if (trackData.clips) {
-              for (const clip of trackData.clips) {
-                if (clip.filePath) {
-                  await nativeBridge.addPlaybackClip(
-                    trackData.id,
-                    clip.filePath,
-                    clip.startTime,
-                    clip.duration,
-                    clip.offset || 0,
-                    clip.volumeDB || 0,
-                    clip.fadeIn || 0,
-                    clip.fadeOut || 0,
-                    clip.id,
-                    clip.pitchCorrectionSourceFilePath,
-                    clip.pitchCorrectionSourceOffset,
-                  );
-                }
-              }
-            }
-
-            // 4. Restore FX Plugins (skipped in Recovery Mode)
-            console.log(`[DEBUG LOAD] Track "${trackData.name}" FX data from file: bypassFX=${bypassFX}, inputFXPaths=${JSON.stringify(trackData.inputFXPaths || "MISSING")}, trackFXPaths=${JSON.stringify(trackData.trackFXPaths || "MISSING")}`);
-            let inputFxRestored = 0;
-            if (!bypassFX && trackData.inputFXPaths && trackData.inputFXPaths.length > 0) {
-              set({ projectLoadingMessage: `Restoring input FX for ${trackData.name}...` });
-              await new Promise((r) => setTimeout(r, 0));
-              for (let i = 0; i < trackData.inputFXPaths.length; i++) {
-                console.log(`[DEBUG LOAD]   Restoring input FX[${i}]: "${trackData.inputFXPaths[i]}"`);
-                const success = await nativeBridge.addTrackInputFX(trackData.id, trackData.inputFXPaths[i], false);
-                console.log(`[DEBUG LOAD]   addTrackInputFX result: ${success}`);
-                if (success) {
-                  if (trackData.inputFXStates && trackData.inputFXStates[i]) {
-                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
-                    console.log(`[DEBUG LOAD]   setPluginState(input) result: ${stateResult}`);
-                  }
-                  inputFxRestored++;
-                }
-              }
-            }
-
-            let trackFxRestored = 0;
-            if (!bypassFX && trackData.trackFXPaths && trackData.trackFXPaths.length > 0) {
-              set({ projectLoadingMessage: `Restoring track FX for ${trackData.name}...` });
-              await new Promise((r) => setTimeout(r, 0));
-              for (let i = 0; i < trackData.trackFXPaths.length; i++) {
-                console.log(`[DEBUG LOAD]   Restoring track FX[${i}]: "${trackData.trackFXPaths[i]}"`);
-                const success = await nativeBridge.addTrackFX(trackData.id, trackData.trackFXPaths[i], false);
-                console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
-                if (success) {
-                  if (trackData.trackFXStates && trackData.trackFXStates[i]) {
-                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, false, trackData.trackFXStates[i]);
-                    console.log(`[DEBUG LOAD]   setPluginState(track) result: ${stateResult}`);
-                  }
-                  trackFxRestored++;
-                }
-              }
-            }
-
-            console.log(`[DEBUG LOAD] Track "${trackData.name}" RESULT: restored ${inputFxRestored} input FX, ${trackFxRestored} track FX`);
-
-            // Ensure saved track data has correct defaults for store state
-            trackData.inputType = trackData.inputType || (inputChCount === 1 ? "mono" : "stereo");
-            trackData.inputStartChannel = inputStartCh;
-            trackData.inputChannelCount = inputChCount;
-            trackData.inputFxCount = inputFxRestored;
-            trackData.trackFxCount = trackFxRestored;
-            // Ensure runtime fields exist
-            trackData.meterLevel = trackData.meterLevel ?? 0;
-            trackData.peakLevel = trackData.peakLevel ?? 0;
-            trackData.clipping = trackData.clipping ?? false;
-            trackData.volume = trackData.volume ?? (trackData.volumeDB <= -60 ? 0 : Math.pow(10, trackData.volumeDB / 20));
-          } catch (err) {
-            console.error(`Failed to restore track ${trackData.name}`, err);
-          }
-        }
-
-        // 5. Restore Master FX Plugins
-        let masterFxRestored = 0;
-        if (!bypassFX && data.masterFXPaths && data.masterFXPaths.length > 0) {
-          set({ projectLoadingMessage: "Restoring master FX..." });
-          await new Promise((r) => setTimeout(r, 0));
-          for (let i = 0; i < data.masterFXPaths.length; i++) {
-            const success = await nativeBridge.addMasterFX(data.masterFXPaths[i]);
-            if (success) {
-              if (data.masterFXStates && data.masterFXStates[i]) {
-                await nativeBridge.setMasterPluginState(i, data.masterFXStates[i]);
-              }
-              masterFxRestored++;
-            }
-          }
-        }
-
-        set({ projectLoadingMessage: "Finalizing...", masterFxCount: masterFxRestored });
-        await new Promise((r) => setTimeout(r, 0));
-
-        // Normalize tracks — fill missing fields from defaults for old project files
-        const normalizedTracks = (data.tracks || []).map((t: any) => {
-          const defaults = createDefaultTrack(t.id, t.name, t.color);
-          return {
-            ...defaults,
-            ...t,
-            clips: (t.clips || []).map((c: any) => ({ ...c, offset: c.offset ?? 0 })),
-            midiClips: t.midiClips ?? [],
-            sends: t.sends ?? [],
-            automationLanes: (t.automationLanes ?? defaults.automationLanes).map((l: any) => ({
-              ...l,
-              mode: l.mode ?? "read",
-              armed: l.armed ?? false,
-            })),
-            takes: t.takes ?? [],
-            meterLevel: 0,
-            peakLevel: 0,
-            clipping: false,
-          };
-        });
-
-        // Update Store State
-        set((state) => ({
-          tracks: normalizedTracks,
-          projectPath: path,
-          isModified: false,
-          transport: { ...state.transport, tempo: data.tempo || 120 },
-          timeSignature: data.timeSignature || { numerator: 4, denominator: 4 },
-          masterVolume: data.masterVolume ?? 1.0,
-          masterPan: data.masterPan ?? 0.0,
-          metronomeVolume: data.metronomeVolume ?? 0.5,
-          metronomeTrackId: data.metronomeTrackId ?? null,
-          projectRange: data.projectRange ?? { start: 0, end: 120 },
-          mixerSnapshots: data.mixerSnapshots ?? [],
-        }));
-
-        // Persist loaded mixer snapshots to localStorage
-        if (data.mixerSnapshots && data.mixerSnapshots.length > 0) {
-          localStorage.setItem("s13_mixerSnapshots", JSON.stringify(data.mixerSnapshots));
-        }
-
-        // Restore custom shortcuts and auto-save settings from project
-        if (data.customShortcuts && typeof data.customShortcuts === "object") {
-          set({ customShortcuts: data.customShortcuts });
-          localStorage.setItem("s13_customShortcuts", JSON.stringify(data.customShortcuts));
-        }
-        if (data.autoSaveEnabled !== undefined) {
-          set({
-            autoSaveEnabled: data.autoSaveEnabled,
-            autoSaveIntervalMinutes: data.autoSaveIntervalMinutes ?? 5,
-            autoSaveMaxVersions: data.autoSaveMaxVersions ?? 3,
-          });
-        }
-
-        // Restore undo history metadata (display-only — pre-save commands
-        // cannot be re-executed, but the history panel will show them)
-        if (data.undoHistory) {
-          commandManager.deserialize(data.undoHistory);
-          set({
-            canUndo: commandManager.canUndo(),
-            canRedo: commandManager.canRedo(),
-          });
-        }
-
-        set((ctx) => {
-          const newRecent = [
-            path!,
-            ...ctx.recentProjects.filter((p) => p !== path),
-          ].slice(0, 10);
-          return {
-            projectPath: path,
-            isModified: false,
-            recentProjects: newRecent,
-          };
-        });
-        localStorage.setItem(
-          "recentProjects",
-          JSON.stringify(get().recentProjects),
-        );
-
-        // Check for missing media files
-        set({ projectLoadingMessage: "Checking media files..." });
-        await new Promise((r) => setTimeout(r, 0));
-        const missingFiles: Array<{ path: string; clipIds: string[] }> = [];
-        const checkedPaths = new Map<string, boolean>();
-        for (const track of get().tracks) {
-          for (const clip of track.clips) {
-            if (!clip.filePath) continue;
-            if (!checkedPaths.has(clip.filePath)) {
-              const exists = await nativeBridge.fileExists(clip.filePath).catch(() => true);
-              checkedPaths.set(clip.filePath, exists);
-            }
-            if (!checkedPaths.get(clip.filePath)) {
-              const existing = missingFiles.find((f) => f.path === clip.filePath);
-              if (existing) {
-                existing.clipIds.push(clip.id);
-              } else {
-                missingFiles.push({ path: clip.filePath, clipIds: [clip.id] });
-              }
-            }
-          }
-        }
-        if (missingFiles.length > 0) {
-          set({ showMissingMedia: true, missingMediaFiles: missingFiles });
-        }
-
-        set({ isProjectLoading: false, projectLoadingMessage: "" });
-        return true;
-      } catch (e) {
-        console.error("Failed to parse project file", e);
-        set({ isProjectLoading: false, projectLoadingMessage: "" });
-        return false;
-      }
     },
 
     clearRecentProjects: () => {
