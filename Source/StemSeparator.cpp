@@ -1407,7 +1407,7 @@ juce::var StemSeparator::installAiTools()
                 const auto& candidate = runtimeCandidates.getReference(candidateIndex);
                 selectedRuntimeCandidate = candidate.key;
                 selectedBackendRequested = candidate.backendRequested;
-                selectedBackendInstallPlanFile = {};
+                selectedBackendInstallPlanFile = juce::File();
                 fallbackAttempted = candidateIndex > 0;
 
                 appendAiToolsLogLine(makeAiLogEvent("installer", "selection", "runtime_candidate_selected", sessionId,
