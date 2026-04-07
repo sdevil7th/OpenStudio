@@ -147,6 +147,14 @@ jobs:
           name: macos-arm64-ai-runtime
           path: dist/ai-runtime
 
+      - name: Verify downloaded AI runtime artifacts
+        shell: bash
+        run: |
+          test -f "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip"
+          test -f "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
+          test -f "dist/ai-runtime/reports/windows-base-size-report.json"
+          test -f "dist/ai-runtime/reports/macos-arm64-size-report.json"
+
       - name: Publish AI runtime release
         uses: softprops/action-gh-release@v2
         with:
@@ -159,5 +167,5 @@ jobs:
           files: |
             dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip
             dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
-            dist/ai-runtime/windows-base-size-report.json
-            dist/ai-runtime/macos-arm64-size-report.json
+            dist/ai-runtime/reports/windows-base-size-report.json
+            dist/ai-runtime/reports/macos-arm64-size-report.json
