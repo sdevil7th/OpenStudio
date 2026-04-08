@@ -67,9 +67,9 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\OpenStudio"
-Type: filesandordirs; Name: "{appdata}\OpenStudio"
+Type: filesandordirs; Name: "{userappdata}\OpenStudio"
 Type: filesandordirs; Name: "{localappdata}\Studio13"
-Type: filesandordirs; Name: "{appdata}\Studio13"
+Type: filesandordirs; Name: "{userappdata}\Studio13"
 
 [Code]
 var
