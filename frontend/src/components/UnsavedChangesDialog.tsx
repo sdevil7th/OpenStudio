@@ -7,6 +7,7 @@ export function UnsavedChangesDialog() {
     showUnsavedChangesDialog,
     pendingProjectActionLabel,
     projectName,
+    projectPath,
     resolveUnsavedChanges,
     dismissUnsavedChangesDialog,
   } = useDAWStore(
@@ -14,12 +15,21 @@ export function UnsavedChangesDialog() {
       showUnsavedChangesDialog: state.showUnsavedChangesDialog,
       pendingProjectActionLabel: state.pendingProjectActionLabel,
       projectName: state.projectName,
+      projectPath: state.projectPath,
       resolveUnsavedChanges: state.resolveUnsavedChanges,
       dismissUnsavedChangesDialog: state.dismissUnsavedChangesDialog,
     })),
   );
 
-  const displayName = projectName?.trim() || "Untitled Project";
+  // Prefer the explicit project name only if it's not the generic default placeholder.
+  // A saved project with no explicit name will have projectName = "Untitled Project" in the store,
+  // so we fall through to derive the name from the file path instead.
+  const trimmedName = projectName?.trim();
+  const hasRealName = trimmedName && trimmedName !== "Untitled Project";
+  const displayName =
+    (hasRealName ? trimmedName : null) ||
+    (projectPath ? projectPath.split(/[\\/]/).pop()?.replace(/\.osproj$/i, "") : null) ||
+    "Untitled Project";
 
   return (
     <Modal

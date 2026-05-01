@@ -22,6 +22,7 @@
 #include "PolyPitchDetector.h"
 #include "PolyResynthesizer.h"
 #include "StemSeparator.h"
+#include "AITrackEngine.h"
 #include <vector>
 #include <memory>
 // ... (skip lines) ...
@@ -61,7 +62,7 @@ public:
                                    float* const* outputChannelData, int numOutputChannels,
                                    int numSamples, bool hybrid64PostChainActive);
     void applyMasterGainPanMono (float* const* outputChannelData, int numOutputChannels,
-                                 int numSamples, double currentSamplePosition,
+                                 int numSamples, double currentTimeSeconds,
                                  bool hybrid64PostChainActive);
 
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
@@ -263,14 +264,32 @@ public:
     bool renderProject(const juce::String& source, double startTime, double endTime,
                        const juce::String& filePath, const juce::String& format,
                        double renderSampleRate, int bitDepth, int numChannels,
-                       bool normalize, bool addTail, double tailLengthMs);
+                       bool normalize, bool addTail, double tailLengthMs,
+                       bool includeMetronome = false);
+    juce::var capturePitchAuditionPlayback(const juce::String& trackId,
+                                           const juce::String& clipId,
+                                           double startTime,
+                                           double duration,
+                                           const juce::String& filePath,
+                                           double sampleRate = 44100.0,
+                                           bool offlineRenderMode = true);
+    juce::var capturePitchBakedContext(const juce::String& sourceFile,
+                                       double startSec,
+                                       double durationSec,
+                                       const juce::String& filePath);
+    juce::var comparePitchDebugAudioFiles(const juce::String& referenceFile,
+                                          const juce::String& candidateFile,
+                                          double captureStartClipSec,
+                                          double noteStartClipSec,
+                                          double noteEndClipSec);
 
     // Render with dither/noise shaping (Phase 9E)
     bool renderProjectWithDither(const juce::String& source, double startTime, double endTime,
                                  const juce::String& filePath, const juce::String& format,
                                  double renderSampleRate, int bitDepth, int numChannels,
                                  bool normalize, bool addTail, double tailLengthMs,
-                                 const juce::String& ditherType);
+                                 const juce::String& ditherType,
+                                 bool includeMetronome = false);
 
     // Plugin Delay Compensation (PDC)
     void recalculatePDC();
@@ -441,16 +460,28 @@ public:
     juce::var getPitchHistory(const juce::String& trackId, int fxIndex, int numFrames);
 
     // Pitch Corrector bridge methods (graphical mode)
-    juce::var analyzePitchContour(const juce::String& trackId, const juce::String& clipId);
-    juce::var analyzePitchContourDirect(const juce::String& filePath, double offset, double duration, const juce::String& clipId);
+    juce::var analyzePitchContour(const juce::String& trackId, const juce::String& clipId,
+                                  std::function<bool()> shouldCancel = {});
+    juce::var analyzePitchContourDirect(const juce::String& filePath, double offset, double duration,
+                                        const juce::String& clipId,
+                                        std::function<bool()> shouldCancel = {});
     juce::var applyPitchCorrection(const juce::String& trackId, const juce::String& clipId,
                                    const juce::var& notesJson, const juce::var& framesJson = juce::var(),
                                    float globalFormantSemitones = 0.0f,
-                                   std::optional<double> windowStartSec = std::nullopt,
-                                   std::optional<double> windowEndSec = std::nullopt,
-                                   const juce::String& renderMode = "single",
-                                   std::function<bool()> shouldCancel = {});
+                                    std::optional<double> windowStartSec = std::nullopt,
+                                    std::optional<double> windowEndSec = std::nullopt,
+                                    const juce::String& renderMode = "single",
+                                    std::function<bool()> shouldCancel = {},
+                                    double jobStartDelayMs = 0.0,
+                                    int previewRenderGenerationToken = 0);
     juce::var previewPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& notesJson);
+    juce::var startPitchScrubPreview(const juce::String& trackId, const juce::String& clipId,
+                                     const juce::var& noteJson, const juce::var& framesJson = juce::var());
+    bool updatePitchScrubPreview(const juce::String& clipId, float pitchRatio);
+    bool stopPitchScrubPreview(const juce::String& clipId);
+    juce::var getPitchScrubPreviewStatus(const juce::String& clipId = {});
+    juce::var getPitchPreviewRoutingStatus(const juce::String& clipId = {});
+    juce::var getExternalPitchRendererStatus() const;
 
     // Polyphonic pitch detection (Phase 6)
     juce::var analyzePolyphonic(const juce::String& trackId, const juce::String& clipId);
@@ -467,10 +498,16 @@ public:
     juce::var getAiToolsStatus();
     juce::var refreshAiToolsStatus();
     juce::var installAiTools();
+    juce::var resetAiTools();
     juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
     juce::var getStemSeparationProgress();
     void cancelStemSeparation();
     void cancelAiToolsInstall();
+    juce::var startAIGeneration(const juce::String& trackId,
+                                const juce::String& workflowId,
+                                const juce::String& paramsJSON);
+    juce::var getAIGenerationProgress();
+    void cancelAIGeneration();
 
     // ARA Plugin Hosting (Phase 9)
     juce::var initializeARAForTrack(const juce::String& trackId, int fxIndex);
@@ -622,7 +659,14 @@ private:
     int inputLatencySamples = 0;  // Device input latency for recording compensation
     std::atomic<double> lastAudioBlockWallTimeMs { 0.0 };
     std::atomic<double> lastAudioBlockDurationMs { 0.0 };
+    std::atomic<double> lastAudioCallbackProcessMs { 0.0 };
+    std::atomic<double> maxAudioCallbackProcessMs { 0.0 };
     std::atomic<uint64> audioCallbackCounter { 0 };
+    std::atomic<uint64> audioCallbackDeadlineMissCount { 0 };
+    std::atomic<uint64> audioCallbackScopedNoDenormalsCount { 0 };
+    std::atomic<int> audioCallbackTrackBufferResizeCount { 0 };
+    std::atomic<int> audioCallbackPitchScrubBufferResizeCount { 0 };
+    std::atomic<int> audioCallbackSidechainBufferResizeCount { 0 };
     std::atomic<bool> firstCallbackAfterTransportStartPending { false };
     std::atomic<bool> pendingRecordStartCapture { false };  // Audio thread captures start time
     double tempo = 120.0;  // BPM (global default / fallback)
@@ -737,6 +781,7 @@ private:
     juce::AudioBuffer<float> reusableTrackBuffer;
     juce::AudioBuffer<float> reusableMasterBuffer;
     juce::AudioBuffer<double> reusableMasterBufferDouble;
+    juce::AudioBuffer<float> reusablePitchScrubBuffer;
     juce::AudioBuffer<float> masterFXFallbackBuffer;
     juce::AudioBuffer<float> monitoringFXFallbackBuffer;
     std::atomic<int> masterFXFallbackReuseCount { 0 };
@@ -793,6 +838,8 @@ private:
     int spectrumWritePos { 0 };
     bool spectrumReady { false };
     juce::CriticalSection spectrumLock;
+    std::atomic<uint64> spectrumFftPublishCount { 0 };
+    std::atomic<uint64> spectrumFftLockMissCount { 0 };
 
     // Polyphonic Pitch Detection (Phase 6) — lazy-loaded
     PolyPitchDetector polyPitchDetector;
@@ -805,6 +852,7 @@ private:
 
     // Source Separation (Phase 8 + Phase 10) — Python subprocess
     StemSeparator stemSeparator;
+    AITrackEngine aiTrackEngine;
 
     // Stem file cache: hash(filePath+offset+duration) -> stem files (name -> path)
     std::map<juce::String, juce::StringPairArray> stemFileCache;

@@ -18,6 +18,43 @@
 class SignalsmithShifter
 {
 public:
+    enum class PitchOnlyFormantMode
+    {
+        LegacyNatural,
+        NeutralPreserve
+    };
+
+    /**
+     * Simple ce33-family pitch-only baseline.
+     *
+     * Uses a broad Signalsmith window with neutral pitch-only formant
+     * preservation and no note-core recovery layer. This exists only as an
+     * architecture baseline for the real app-path bakeoff.
+     */
+    static std::vector<std::vector<float>> processPitchOnlyCe33Base (
+        const float* const* input,
+        int numChannels,
+        int numSamples,
+        double sampleRate,
+        const std::vector<float>& ratios,
+        PitchOnlyFormantMode formantMode = PitchOnlyFormantMode::NeutralPreserve);
+
+    /**
+     * Stable pitch-only base renderer used by the note-local pitch editor path.
+     *
+     * This keeps pitch-only behavior separate from explicit formant rendering:
+     * detectedPitchHz is forwarded as F0 guidance, never as formant ratios.
+     * Empty formant ratios keep the vocal colour anchored while shifting only
+     * the edited note island.
+     */
+    static std::vector<std::vector<float>> processPitchOnlyBase (
+        const float* const* input,
+        int numChannels,
+        int numSamples,
+        double sampleRate,
+        const std::vector<float>& ratios,
+        const std::vector<float>& detectedPitchHz = {});
+
     /**
      * Process audio with per-sample pitch ratios.
      *
@@ -41,5 +78,6 @@ public:
         double sampleRate,
         const std::vector<float>& ratios,
         const std::vector<float>& formantRatios = {},
-        const std::vector<float>& detectedPitchHz = {});
+        const std::vector<float>& detectedPitchHz = {},
+        PitchOnlyFormantMode pitchOnlyFormantMode = PitchOnlyFormantMode::NeutralPreserve);
 };

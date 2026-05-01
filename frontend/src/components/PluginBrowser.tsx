@@ -275,7 +275,7 @@ function getPluginGroupId(plugin: { category: string; isInstrument: boolean }): 
 interface PluginBrowserProps {
   trackId: string;
   targetChain: "input" | "track" | "master" | "instrument";
-  trackType?: "audio" | "midi" | "instrument" | "bus";
+  trackType?: "audio" | "midi" | "instrument" | "bus" | "ai";
   onClose: () => void;
   embedded?: boolean;
 }

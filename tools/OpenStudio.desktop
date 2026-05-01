@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=OpenStudio
+GenericName=Digital Audio Workstation
+Comment=Professional audio recording and editing
+Exec=OpenStudio %f
+Icon=OpenStudio
+Type=Application
+Categories=AudioVideo;Audio;Music;
+MimeType=application/x-openstudio-project;
+StartupWMClass=OpenStudio
+Keywords=DAW;audio;recording;mixing;music;studio;

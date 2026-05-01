@@ -14,6 +14,7 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
 import { createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
+import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../../data/aiWorkflows";
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "meterLevels", "peakLevels", "masterLevel", "automatedParamValues",
@@ -125,6 +126,7 @@ function buildSerializedProjectData(
     trackGroups: state.trackGroups,
     clipLauncher: state.clipLauncher,
     renderMetadata: state.renderMetadata,
+    renderDialogOptions: state.renderDialogOptions,
     secondaryOutputEnabled: state.secondaryOutputEnabled,
     secondaryOutputFormat: state.secondaryOutputFormat,
     secondaryOutputBitDepth: state.secondaryOutputBitDepth,
@@ -375,6 +377,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             inputChannel: track.inputChannel,
             clips: track.clips,
             midiClips: track.midiClips,
+            icon: track.icon,
+            aiWorkflow: track.aiWorkflow,
+            aiWorkflowParams: track.aiWorkflowParams,
             inputFXPaths,
             inputFXStates,
             trackFXPaths,
@@ -516,6 +521,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           ...freshProjectState.renderMetadata,
           ...(data.renderMetadata || {}),
         };
+        const loadedRenderDialogOptions = {
+          ...freshProjectState.renderDialogOptions,
+          ...(data.renderDialogOptions || {}),
+        };
         const loadedClipLauncher = {
           ...freshProjectState.clipLauncher,
           ...(data.clipLauncher || {}),
@@ -567,6 +576,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           trackGroups: Array.isArray(data.trackGroups) ? data.trackGroups : [],
           clipLauncher: loadedClipLauncher,
           renderMetadata: loadedRenderMetadata,
+          renderDialogOptions: loadedRenderDialogOptions,
           secondaryOutputEnabled: Boolean(data.secondaryOutputEnabled),
           secondaryOutputFormat:
             data.secondaryOutputFormat || freshProjectState.secondaryOutputFormat,
@@ -673,6 +683,121 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
             const frontendTrack: Track = {
               ...trackData,
+              aiWorkflow:
+                trackData.type === "ai"
+                  ? trackData.aiWorkflow || "text-to-music"
+                  : trackData.aiWorkflow,
+              aiWorkflowParams:
+                trackData.type === "ai"
+                  ? normalizeWorkflowParams(
+                      trackData.aiWorkflow || "text-to-music",
+                      trackData.aiWorkflowParams || getDefaultWorkflowParams(trackData.aiWorkflow || "text-to-music"),
+                    )
+                  : trackData.aiWorkflowParams,
+              aiGenerationState:
+                trackData.type === "ai"
+                  ? "idle"
+                  : trackData.aiGenerationState,
+              aiGenerationProgress:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationProgress,
+              aiGenerationError:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationError,
+              aiGenerationPhase:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationPhase,
+              aiGenerationMessage:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationMessage,
+              aiGenerationBackend:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationBackend,
+              aiGenerationElapsedMs:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationElapsedMs,
+              aiGenerationHeartbeatTs:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationHeartbeatTs,
+              aiGenerationPhaseProgress:
+                trackData.type === "ai"
+                  ? undefined
+                  : trackData.aiGenerationPhaseProgress,
+              aiGenerationEtaMs:
+                trackData.type === "ai"
+                  ? undefined
+                  : trackData.aiGenerationEtaMs,
+              aiGenerationRunMode:
+                trackData.type === "ai"
+                  ? undefined
+                  : trackData.aiGenerationRunMode,
+              aiGenerationRuntimeProfile:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationRuntimeProfile,
+              aiGenerationLmModel:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationLmModel,
+              aiGenerationStatusNote:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationStatusNote,
+              aiGenerationFailureKind:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationFailureKind,
+              aiGenerationSessionMode:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationSessionMode,
+              aiGenerationWorkerExitCode:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationWorkerExitCode,
+              aiGenerationLastStdoutLine:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationLastStdoutLine,
+              aiGenerationLastStderrLine:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationLastStderrLine,
+              aiGenerationAttemptMode:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationAttemptMode,
+              aiGenerationAttemptIndex:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationAttemptIndex,
+              aiGenerationProtocolVersion:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationProtocolVersion,
+              aiGenerationScriptVersion:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationScriptVersion,
+              aiGenerationRequestId:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationRequestId,
+              aiGenerationPriorFailure:
+                trackData.type === "ai"
+                  ? ""
+                  : trackData.aiGenerationPriorFailure,
+              aiGenerationLastProgressAgeMs:
+                trackData.type === "ai"
+                  ? 0
+                  : trackData.aiGenerationLastProgressAgeMs,
               clips: trackData.clips || [],
               midiClips: trackData.midiClips || [],
               automationLanes: trackData.automationLanes || [],

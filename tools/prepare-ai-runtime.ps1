@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("windows", "macos")]
+    [ValidateSet("windows", "macos", "linux")]
     [string]$Platform,
 
     [Parameter(Mandatory = $true)]
@@ -17,10 +17,13 @@ param(
     [string]$RuntimeFamily = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$WindowsTorchIndexUrl = "https://download.pytorch.org/whl/cu121",
+    [string]$WindowsTorchIndexUrl = "https://download.pytorch.org/whl/cu128",
 
     [Parameter(Mandatory = $false)]
-    [string[]]$WindowsTorchPackages = @("torch", "torchvision", "torchaudio"),
+    [string[]]$WindowsTorchPackages = @("torch==2.8.0", "torchvision==0.23.0", "torchaudio==2.8.0"),
+
+    [Parameter(Mandatory = $false)]
+    [string]$WindowsAccelerationManifestPath = "tools/windows-ai-acceleration-manifest.json",
 
     [Parameter(Mandatory = $false)]
     [string]$ExpectedRuntimeVersion = "",
@@ -29,7 +32,7 @@ param(
     [string]$StandaloneReleaseTag = "20260325",
 
     [Parameter(Mandatory = $false)]
-    [string]$StandalonePythonVersion = "3.10.20",
+    [string]$StandalonePythonVersion = "3.11.9",
 
     [Parameter(Mandatory = $false)]
     [ValidateSet("install_only", "install_only_stripped")]
@@ -210,7 +213,7 @@ function Resolve-RuntimePython {
 function Get-TargetArchitecture {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("windows", "macos")]
+        [ValidateSet("windows", "macos", "linux")]
         [string]$TargetPlatform,
 
         [Parameter(Mandatory = $false)]
@@ -235,7 +238,7 @@ function Get-TargetArchitecture {
 function Get-StandaloneTargetTriple {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("windows", "macos")]
+        [ValidateSet("windows", "macos", "linux")]
         [string]$TargetPlatform,
 
         [Parameter(Mandatory = $true)]
@@ -244,10 +247,12 @@ function Get-StandaloneTargetTriple {
     )
 
     switch ("$TargetPlatform/$TargetArchitecture") {
-        "windows/x64" { return "x86_64-pc-windows-msvc" }
+        "windows/x64"  { return "x86_64-pc-windows-msvc" }
         "windows/arm64" { return "aarch64-pc-windows-msvc" }
-        "macos/x64" { return "x86_64-apple-darwin" }
-        "macos/arm64" { return "aarch64-apple-darwin" }
+        "macos/x64"    { return "x86_64-apple-darwin" }
+        "macos/arm64"  { return "aarch64-apple-darwin" }
+        "linux/x64"    { return "x86_64-unknown-linux-gnu" }
+        "linux/arm64"  { return "aarch64-unknown-linux-gnu" }
         default { throw "Unsupported runtime target combination '$TargetPlatform/$TargetArchitecture'." }
     }
 }
@@ -713,6 +718,14 @@ try {
         Invoke-LoggedStep -Description "Installing AI runtime requirements into standalone runtime" -Command $pipInstallArguments
     }
 
+    $windowsAccelerationManifest = $null
+    if ($Platform -eq "windows" -and -not [string]::IsNullOrWhiteSpace($WindowsAccelerationManifestPath)) {
+        $resolvedWindowsAccelerationManifestPath = Resolve-AbsolutePath -PathValue $WindowsAccelerationManifestPath
+        if (Test-Path $resolvedWindowsAccelerationManifestPath) {
+            $windowsAccelerationManifest = ConvertFrom-JsonCompat -Json (Get-Content -Path $resolvedWindowsAccelerationManifestPath -Raw) -AsHashtable
+        }
+    }
+
     if ($resolvedRuntimeFamily -eq "windows-cuda-x64") {
         $windowsTorchInstallArguments = @(
             $runtimePython,
@@ -724,6 +737,74 @@ try {
             $WindowsTorchIndexUrl
         ) + $WindowsTorchPackages
         Invoke-LoggedStep -Description "Installing CUDA-capable PyTorch wheels for Windows AI runtime" -Command $windowsTorchInstallArguments
+
+        if ($null -ne $windowsAccelerationManifest) {
+            $targetNode = $windowsAccelerationManifest["target"]
+            $tritonNode = $targetNode["tritonWindows"]
+            $flashAttnNode = $targetNode["flashAttn"]
+            $tritonPackage = [string]$tritonNode["package"]
+            if (-not [string]::IsNullOrWhiteSpace($tritonPackage)) {
+                Invoke-LoggedStep -Description "Installing Triton for the Windows ACE-Step runtime" -Command @(
+                    $runtimePython,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    $tritonPackage
+                )
+            }
+
+            $flashAttnUrl = [string]$flashAttnNode["url"]
+            $flashAttnSha256 = ([string]$flashAttnNode["sha256"]).ToLowerInvariant()
+            $flashAttnFileName = [string]$flashAttnNode["fileName"]
+            if (-not [string]::IsNullOrWhiteSpace($flashAttnUrl) -and -not [string]::IsNullOrWhiteSpace($flashAttnFileName)) {
+                $pinnedWheelDir = Join-Path $resolvedRuntimeRoot ".openstudio-pinned-wheels"
+                New-Item -ItemType Directory -Force -Path $pinnedWheelDir | Out-Null
+                $flashAttnWheelPath = Join-Path $pinnedWheelDir $flashAttnFileName
+                Invoke-DownloadFile -Url $flashAttnUrl -DestinationPath $flashAttnWheelPath
+                $actualFlashAttnHash = (Get-FileHash -Algorithm SHA256 -Path $flashAttnWheelPath).Hash.ToLowerInvariant()
+                if ($actualFlashAttnHash -ne $flashAttnSha256) {
+                    throw "Flash Attention wheel checksum mismatch. Expected '$flashAttnSha256' but found '$actualFlashAttnHash'."
+                }
+
+                Invoke-LoggedStep -Description "Installing Flash Attention for the Windows ACE-Step runtime" -Command @(
+                    $runtimePython,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-deps",
+                    $flashAttnWheelPath
+                )
+            }
+        }
+    }
+
+    if ($Platform -eq "windows" -and $resolvedRuntimeFamily -ne "windows-base-x64") {
+        $aceStepSourceRoot = Join-Path $resolvedRuntimeRoot "ace-step-v1.5-source"
+        Invoke-LoggedStep -Description "Preparing the ACE-Step 1.5 runtime source" -Command @(
+            $runtimePython,
+            "-c",
+            @"
+from pathlib import Path
+from huggingface_hub import snapshot_download
+source_root = Path(r'$aceStepSourceRoot')
+source_root.mkdir(parents=True, exist_ok=True)
+snapshot_download(
+    repo_id=r'ACE-Step/Ace-Step-v1.5',
+    repo_type='space',
+    local_dir=str(source_root),
+)
+print('ok')
+"@
+        )
+        Invoke-LoggedStep -Description "Installing the ACE-Step 1.5 runtime bridge into the standalone runtime" -Command @(
+            $runtimePython,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            $aceStepSourceRoot
+        )
     }
 
     Optimize-RuntimePayload -RuntimeRootPath $resolvedRuntimeRoot -TargetPlatform $Platform -ResolvedRuntimeFamily $resolvedRuntimeFamily

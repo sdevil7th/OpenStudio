@@ -84,7 +84,7 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
  *
  * 1. Compute difference function d(tau)
  * 2. Compute cumulative mean normalized difference d'(tau)
- * 3. Find first minimum below threshold (pYIN approach)
+ * 3. Find first minimum below threshold (classic YIN first-dip heuristic)
  * 4. Parabolic interpolation for sub-sample accuracy
  */
 float PitchDetector::runYIN(const float* frame, int size)
@@ -133,7 +133,7 @@ float PitchDetector::runYIN(const float* frame, int size)
 
             bestTau = tau;
             bestVal = yinBuffer[static_cast<size_t>(tau)];
-            break; // Take first minimum below threshold (pYIN heuristic)
+            break; // Take first minimum below threshold (YIN first-dip heuristic)
         }
     }
 

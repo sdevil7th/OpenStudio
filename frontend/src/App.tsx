@@ -15,6 +15,7 @@ import {
   publishCurrentMixerUISnapshot,
   startMixerUISync,
 } from "./utils/mixerWindowSync";
+import { maybeRunPitchRegressionDriver } from "./utils/pitchRegressionDriver";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { TimelineRuler } from "./components/TimelineRuler";
@@ -156,6 +157,7 @@ function App() {
     showMasterAutomation,
     showStemSeparation,
     showAiToolsSetup,
+    closeAiToolsSetup,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
@@ -224,6 +226,7 @@ function App() {
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
       showAiToolsSetup: state.showAiToolsSetup,
+      closeAiToolsSetup: state.closeAiToolsSetup,
     }))
   );
 
@@ -259,6 +262,10 @@ function App() {
   const isProjectLoading = useDAWStore((state) => state.isProjectLoading);
   const projectLoadingMessage = useDAWStore((state) => state.projectLoadingMessage);
 
+  useEffect(() => {
+    void maybeRunPitchRegressionDriver();
+  }, []);
+
   // Toast notification state
   const toastVisible = useDAWStore((state) => state.toastVisible);
   const toastMessage = useDAWStore((state) => state.toastMessage);
@@ -275,7 +282,21 @@ function App() {
   const showToast = useDAWStore((state) => state.showToast);
   const previousAiToolsStateRef = useRef(aiToolsStatus.state);
   const previousAiToolsInstallInProgressRef = useRef(aiToolsStatus.installInProgress);
-  const [showAiToolsInstallBlocker, setShowAiToolsInstallBlocker] = useState(false);
+  const hasNativeMusicProfile =
+    (aiToolsStatus.musicGenerationAvailableProfiles ?? []).length === 0
+    || (aiToolsStatus.musicGenerationAvailableProfiles ?? []).includes("native-xl-turbo");
+  const previousAiToolsFullReadyRef = useRef(Boolean(
+    aiToolsStatus.musicGenerationReady
+    && aiToolsStatus.musicGenerationLayoutValid
+    && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
+    && hasNativeMusicProfile,
+  ));
+  const [aiToolsInstallStatusStale, setAiToolsInstallStatusStale] = useState(false);
+  const aiToolsHasByteProgress = (aiToolsStatus.bytesTotal ?? 0) > 0 && (aiToolsStatus.bytesDownloaded ?? 0) >= 0;
+  const aiToolsVisualProgressRatio = aiToolsHasByteProgress
+    ? Math.max(0, Math.min((aiToolsStatus.bytesDownloaded ?? 0) / Math.max(aiToolsStatus.bytesTotal ?? 1, 1), 1))
+    : Math.max(0, Math.min(aiToolsStatus.progress ?? 0, 1));
+  const aiToolsVisualProgressPercent = Math.round(aiToolsVisualProgressRatio * 100);
 
   useEffect(() => startMixerUISync(), []);
 
@@ -292,7 +313,7 @@ function App() {
   }, [applyAiToolsStatusUpdate]);
 
   useEffect(() => {
-    const shouldPollAiToolsStatus = aiToolsStatus.state === "checking";
+    const shouldPollAiToolsStatus = aiToolsStatus.state === "checking" || aiToolsStatus.installInProgress;
 
     if (!shouldPollAiToolsStatus) {
       return;
@@ -300,29 +321,50 @@ function App() {
 
     const timer = window.setInterval(() => {
       void refreshAiToolsStatus();
-    }, 1500);
+    }, aiToolsStatus.installInProgress ? 2000 : 1500);
 
     return () => window.clearInterval(timer);
   }, [aiToolsStatus.installInProgress, aiToolsStatus.state, refreshAiToolsStatus]);
 
   useEffect(() => {
     if (!aiToolsStatus.installInProgress) {
-      setShowAiToolsInstallBlocker(false);
+      setAiToolsInstallStatusStale(false);
       return;
     }
 
     const timer = window.setInterval(() => {
       const staleMs = Date.now() - aiToolsStatusLastUpdatedAt;
-      setShowAiToolsInstallBlocker(staleMs >= 8000);
+      const isStale = staleMs >= 8000;
+      setAiToolsInstallStatusStale(isStale);
+      if (isStale) {
+        void refreshAiToolsStatus();
+      }
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [aiToolsStatus.installInProgress, aiToolsStatusLastUpdatedAt]);
+  }, [aiToolsStatus.installInProgress, aiToolsStatusLastUpdatedAt, refreshAiToolsStatus]);
 
   useEffect(() => {
     const previousState = previousAiToolsStateRef.current;
     const previousInstallInProgress = previousAiToolsInstallInProgressRef.current;
+    const previousFullReady = previousAiToolsFullReadyRef.current;
     const currentState = aiToolsStatus.state;
+    const currentFullReady = Boolean(
+      currentState === "ready"
+      && aiToolsStatus.musicGenerationReady
+      && aiToolsStatus.musicGenerationLayoutValid
+      && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
+      && hasNativeMusicProfile,
+    );
+    const currentPartialReady = Boolean(
+      currentState === "ready"
+      && (
+        !aiToolsStatus.musicGenerationReady
+        || !aiToolsStatus.musicGenerationLayoutValid
+        || !(aiToolsStatus.musicGenerationPerformanceReady ?? true)
+        || !hasNativeMusicProfile
+      ),
+    );
     const installAttemptStates = new Set([
       "checking",
       "fetching_runtime_manifest",
@@ -336,10 +378,28 @@ function App() {
       "downloading_model",
     ]);
     const wasInstallAttempt = previousInstallInProgress || installAttemptStates.has(previousState);
+    const readyStateChanged = previousState !== currentState;
+    const fullReadyChanged = previousFullReady !== currentFullReady;
 
-    if (previousState !== currentState) {
-      if (currentState === "ready") {
+    if (readyStateChanged || fullReadyChanged) {
+      if (currentFullReady && (readyStateChanged || !previousFullReady)) {
         showToast("AI tools are ready", "success");
+        if (wasInstallAttempt) {
+          closeAiToolsSetup();
+        }
+      } else if (currentPartialReady && readyStateChanged) {
+        showToast(
+          (!hasNativeMusicProfile
+            ? "Stem separation is ready, but the OpenStudio ACE split profile is still missing required music-generation assets."
+            : "")
+            ||
+          aiToolsStatus.musicGenerationPerformanceStatusMessage
+            || "Stem separation is ready, but music generation is not fully ready yet.",
+          "info",
+        );
+        if (wasInstallAttempt) {
+          openAiToolsSetup();
+        }
       } else if (currentState === "error" && aiToolsStatus.error) {
         showToast(aiToolsStatus.error, "error");
         if (wasInstallAttempt) {
@@ -357,7 +417,21 @@ function App() {
 
     previousAiToolsStateRef.current = currentState;
     previousAiToolsInstallInProgressRef.current = aiToolsStatus.installInProgress;
-  }, [aiToolsStatus.error, aiToolsStatus.installInProgress, aiToolsStatus.state, openAiToolsSetup, showToast]);
+    previousAiToolsFullReadyRef.current = currentFullReady;
+  }, [
+    aiToolsStatus.error,
+    aiToolsStatus.installInProgress,
+    aiToolsStatus.musicGenerationAvailableProfiles,
+    aiToolsStatus.musicGenerationLayoutValid,
+    aiToolsStatus.musicGenerationPerformanceReady,
+    aiToolsStatus.musicGenerationPerformanceStatusMessage,
+    aiToolsStatus.musicGenerationReady,
+    aiToolsStatus.state,
+    closeAiToolsSetup,
+    hasNativeMusicProfile,
+    openAiToolsSetup,
+    showToast,
+  ]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.subscribe("mixerWindowClosed", (data) => {
@@ -911,6 +985,12 @@ function App() {
           label: "Add Instrument Track",
           onClick: () => {
             void createTrackOfType("instrument");
+          },
+        },
+        {
+          label: "Add AI Track",
+          onClick: () => {
+            void createTrackOfType("ai");
           },
         },
         {
@@ -1600,49 +1680,6 @@ function App() {
       )}
 
       {/* File Drop Overlay — shown when dragging files from OS file explorer */}
-      {showAiToolsInstallBlocker && (
-        <div className="fixed inset-0 z-[10002] flex items-center justify-center bg-black/75 backdrop-blur-sm">
-          <div className="w-[min(52rem,calc(100vw-2rem))] rounded-2xl border border-daw-accent/30 bg-neutral-950 shadow-2xl">
-            <div className="border-b border-neutral-800 px-5 py-4">
-              <p className="text-base font-semibold text-white">Installing AI Tools</p>
-              <p className="mt-1 text-sm text-neutral-300">
-                OpenStudio is still preparing large AI components. Progress is being monitored in the background.
-              </p>
-            </div>
-            <div className="space-y-4 p-5">
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-neutral-200">{aiToolsStatus.stepLabel || aiToolsStatus.message || "Installing AI Tools..."}</span>
-                  <span className="text-neutral-400">
-                    {Math.max(0, Math.round((aiToolsStatus.progress ?? 0) * 100))}%
-                  </span>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
-                  <div
-                    className="h-full rounded-full bg-daw-accent transition-all duration-300"
-                    style={{ width: `${Math.max(6, Math.min((aiToolsStatus.progress ?? 0) * 100, 100))}%` }}
-                  />
-                </div>
-              </div>
-              <div className="grid gap-2 text-xs text-neutral-400 sm:grid-cols-3">
-                <span>Phase: <span className="text-neutral-200">{aiToolsStatus.lastPhase || aiToolsStatus.state}</span></span>
-                <span>Elapsed: <span className="text-neutral-200">{Math.max(0, Math.round((aiToolsStatus.elapsedMs ?? 0) / 1000))}s</span></span>
-                <span>Session: <span className="text-neutral-200">{aiToolsStatus.installSessionId || "n/a"}</span></span>
-              </div>
-              <div className="rounded-xl border border-neutral-800 bg-black px-4 py-3 font-mono text-xs text-green-300">
-                <div className="max-h-56 space-y-1 overflow-y-auto">
-                  {(aiToolsStatus.activityLines?.length ? aiToolsStatus.activityLines : [aiToolsStatus.message || "Installing AI Tools..."]).map((line, index) => (
-                    <div key={`${index}-${line}`} className="break-words">
-                      {line}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {isDraggingFiles && (
         <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
           <div className="flex flex-col items-center gap-3 px-8 py-6 rounded-xl border-2 border-dashed border-daw-accent bg-neutral-900/90 shadow-2xl">
@@ -1693,15 +1730,19 @@ function App() {
               <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
                 <div
                   className="h-full rounded-full bg-daw-accent transition-all duration-300"
-                  style={{ width: `${Math.max(6, Math.min((aiToolsStatus.progress ?? 0) * 100, 100))}%` }}
+                  style={{ width: `${Math.max(6, Math.min(aiToolsVisualProgressPercent, 100))}%` }}
                 />
               </div>
               <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
                 <span>{aiToolsStatus.stepLabel || aiToolsStatus.message || "Preparing optional AI tools..."}</span>
-                <span>{Math.round((aiToolsStatus.progress ?? 0) * 100)}%</span>
+                <span>{aiToolsVisualProgressPercent}%</span>
               </div>
               {aiToolsStatus.statusWarning ? (
                 <p className="mt-2 text-[11px] text-yellow-300">{aiToolsStatus.statusWarning}</p>
+              ) : aiToolsInstallStatusStale ? (
+                <p className="mt-2 text-[11px] text-yellow-300">
+                  Progress updates are delayed, but OpenStudio is still checking the installer in the background.
+                </p>
               ) : null}
             </div>
 

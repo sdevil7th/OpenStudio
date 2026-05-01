@@ -1,3 +1,5 @@
+import { normalizeWorkflowParams } from "../data/aiWorkflows";
+
 // Type definitions for the JUCE backend
 const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
 
@@ -39,6 +41,8 @@ export interface PitchNoteData {
   id: string;
   startTime: number;
   endTime: number;
+  effectiveStartTime?: number; // note body + rendered shoulder span, clip-relative seconds
+  effectiveEndTime?: number;   // note body + rendered shoulder span, clip-relative seconds
   detectedPitch: number;      // MIDI note (fractional)
   correctedPitch: number;     // MIDI note (fractional)
   driftCorrectionAmount: number; // 0-1
@@ -49,7 +53,24 @@ export interface PitchNoteData {
   formantShift: number;       // semitones
   gain: number;               // dB
   voiced: boolean;            // true = pitched vocal, false = unvoiced (sibilant/breath)
+  wordGroupId?: string;       // editable word/phrase group; fragments in the same group move together
+  entryBoundaryKind?: "unknown" | "hard_word_like" | "soft_legato" | "internal_bend" | "internal_vibrato" | string;
+  exitBoundaryKind?: "unknown" | "hard_word_like" | "soft_legato" | "internal_bend" | "internal_vibrato" | string;
+  entryBoundaryReason?: string;
+  exitBoundaryReason?: string;
+  entryBoundaryScore?: number;
+  exitBoundaryScore?: number;
   pitchDrift: number[];       // per-frame deviation from note center
+}
+
+export interface PitchBoundaryCandidateData {
+  id: string;
+  sourceNoteId?: string;
+  time: number;
+  kind: "unknown" | "hard_word_like" | "soft_legato" | "internal_bend" | "internal_vibrato" | string;
+  reason?: string;
+  score?: number;
+  destructiveSplitAllowed?: boolean;
 }
 
 export interface PitchContourData {
@@ -64,6 +85,7 @@ export interface PitchContourData {
     voiced: boolean[];
   };
   notes: PitchNoteData[];
+  boundaryCandidates?: PitchBoundaryCandidateData[];
 }
 
 export interface ClipPitchPreviewPayload {
@@ -75,9 +97,437 @@ export interface ClipPitchPreviewPayload {
   globalFormantSemitones?: number;
   previewStartSec?: number;
   previewEndSec?: number;
+  allowReplacingCorrectedSource?: boolean;
 }
 
-export type PitchCorrectionRenderMode = "single" | "preview_segment" | "full_clip_hq";
+export type PitchCorrectionRenderMode = "single" | "preview_segment" | "full_clip_hq" | "note_hq";
+export type PitchRegressionJobType = "render" | "analysis" | "scrub" | "export" | "clean_export" | "audition";
+
+export interface PitchScrubPreviewStatus {
+  active: boolean;
+  releasePending?: boolean;
+  audible?: boolean;
+  previewArmed?: boolean;
+  firstCallbackServiced?: boolean;
+  firstDragAudible?: boolean;
+  trackId?: string;
+  clipId?: string;
+  pitchRatio?: number;
+  basePitchHz?: number;
+  currentGain?: number;
+  targetGain?: number;
+  repeatStability?: number;
+  lastPeak?: number;
+  loopDurationMs?: number;
+  lastRenderWallTimeMs?: number;
+  mixedCallbackCount?: number;
+  mixedSampleCount?: number;
+  renderMethod?: string;
+}
+
+export interface PitchPreviewRoutingStatus {
+  scrubPreviewActive: boolean;
+  clipLivePreviewActive: boolean;
+  renderedSegmentActive: boolean;
+  correctedSourceActive: boolean;
+  monitorMode: "none" | "scrub" | "clip_live_preview" | "rendered_segment" | "corrected_source" | string;
+}
+
+export interface PitchPlaybackRouteTraceEntry {
+  blockIndex?: number;
+  projectTimeSec?: number;
+  sourceType?: "none" | "original" | "corrected_source" | "rendered_segment" | string;
+  audioFile?: string;
+  clipTimeSec?: number;
+  playbackOffsetSec?: number;
+  renderedSegmentActiveAtTime?: boolean;
+  correctedSourceActiveAtTime?: boolean;
+}
+
+export interface ExternalPitchRendererStatus {
+  selectedRenderer: "rubberband_hq" | "native_hq_v4" | "unavailable" | string;
+  selectedBackendId?: string;
+  pitchRenderStrategy: string;
+  pitchRenderProductPath?: "preview" | "offline_hq" | "ara_plugin" | string;
+  backendId?: string;
+  displayName?: string;
+  productPath?: string;
+  capabilities?: Record<string, unknown>;
+  available?: boolean;
+  integrationKind?: string;
+  promotionStatus?: string;
+  selectedReason?: string;
+  backendStatuses?: ExternalPitchRendererStatus[];
+  externalPitchRendererAvailable: boolean;
+  externalPitchRendererPath?: string;
+  executablePath?: string;
+  version?: string;
+  failureCode?: string;
+  failureMessage?: string;
+  diagnostics?: unknown;
+  overridePath?: string;
+  overridePathExists?: boolean;
+  versionProbeSucceeded?: boolean;
+  versionProbeExitCode?: number;
+  versionProbeOutput?: string;
+}
+
+export interface PitchRegressionJob {
+  jobType?: PitchRegressionJobType;
+  projectFixturePath?: string;
+  sourceAudioPath: string;
+  referenceAudioPath?: string;
+  trackId?: string;
+  clipId: string;
+  renderMode?: PitchCorrectionRenderMode;
+  globalFormantSemitones?: number;
+  targetShiftSemitones?: number | null;
+  notes?: PitchNoteData[];
+  frames?: PitchContourData["frames"];
+  windowStartSec?: number;
+  windowEndSec?: number;
+  noteBodyStartSec?: number;
+  noteBodyEndSec?: number;
+  entryWindowSec?: number;
+  exitWindowSec?: number;
+  neighborWindowSec?: number;
+  analysisOffsetSec?: number;
+  analysisDurationSec?: number;
+  expectedNotes?: PitchNoteData[];
+  scrubUpdatePitchRatio?: number;
+  scrubWaitMs?: number;
+  scrubRepeatCount?: number;
+  scrubTransportCycle?: boolean;
+  scrubSelectionChange?: boolean;
+  exportOutputPath?: string;
+  auditionStartSec?: number;
+  auditionDurationSec?: number;
+  auditionPlaybackOutputPath?: string;
+  auditionExportOutputPath?: string;
+  resultJsonPath: string;
+  label?: string;
+}
+
+export interface PitchAuditionCaptureResult {
+  success: boolean;
+  trackId?: string;
+  clipId?: string;
+  filePath?: string;
+  startSec?: number;
+  durationSec?: number;
+  sampleRate?: number;
+  peak?: number;
+  rms?: number;
+  source?: string;
+  offlineRenderMode?: boolean;
+  routeTrace?: PitchPlaybackRouteTraceEntry[];
+  error?: string;
+}
+
+export interface PitchAppFinalParityReport {
+  parityPassed?: boolean;
+  residualRelativeDb?: number | null;
+  entryResidualRelativeDb?: number | null;
+  shortRmsEnvelopeCorrelation?: number | null;
+  activeStartDeltaMs?: number | null;
+  bakedContextPath?: string;
+  appPlaybackContextPath?: string;
+  [key: string]: unknown;
+}
+
+export interface PitchAppFinalCaptureResult {
+  success: boolean;
+  trackId?: string;
+  clipId?: string;
+  capture?: PitchAuditionCaptureResult;
+  livePlaybackCapture?: PitchAuditionCaptureResult;
+  offlineRenderCapture?: PitchAuditionCaptureResult;
+  bakedCorrectedCapture?: PitchAuditionCaptureResult;
+  bakedCorrectedPath?: string;
+  livePlaybackPath?: string;
+  offlineRenderPath?: string;
+  comparisonReportPath?: string;
+  bakedVsLiveParityReport?: PitchAppFinalParityReport;
+  bakedVsOfflineParityReport?: PitchAppFinalParityReport;
+  liveVsOfflineParityReport?: PitchAppFinalParityReport;
+  routeBefore?: PitchPreviewRoutingStatus;
+  routeAfter?: PitchPreviewRoutingStatus;
+  routeReportPath?: string;
+  routeReportWritten?: boolean;
+  capturedAt?: string;
+  metadata?: unknown;
+}
+
+export interface PitchRegressionResult {
+  success: boolean;
+  jobType?: PitchRegressionJobType;
+  outputFile?: string;
+  pitchCorrectionOutputFile?: string;
+  exportOutputFile?: string;
+  auditionPlaybackOutputFile?: string;
+  auditionExportOutputFile?: string;
+  auditionStartSec?: number;
+  auditionDurationSec?: number;
+  auditionCapture?: PitchAuditionCaptureResult;
+  appFinalCapture?: PitchAppFinalCaptureResult;
+  appFinalBakedCapture?: PitchAuditionCaptureResult;
+  appFinalParityReport?: PitchAppFinalParityReport;
+  appFinalRouteReportPath?: string;
+  appFinalBakedContextPath?: string;
+  appFinalPlaybackContextPath?: string;
+  appFinalParityReportPath?: string;
+  clipId?: string;
+  requestId?: string;
+  renderMode?: PitchCorrectionRenderMode;
+  targetShiftSemitones?: number | null;
+  actualRequestedShiftSemitones?: number | null;
+  requestedShiftErrorCents?: number | null;
+  referenceVsOriginalCents?: number | null;
+  chromaticSnapBypassed?: boolean;
+  postApplyRouteStatus?: PitchPreviewRoutingStatus;
+  requestedRendererBranch?: string;
+  actualRendererBranch?: string;
+  pitchOnlyRecoveryPath?: string;
+  pitchOnlyNeutralFormantUsed?: boolean;
+  processingMode?: string;
+  formantCurveUsed?: boolean;
+  explicitFormantRequested?: boolean;
+  pitchOnlyFormantSuppressed?: boolean;
+  usedFallback?: boolean;
+  fallbackReason?: string;
+  hardFailReason?: string;
+  pitchRenderStrategy?: string;
+  pitchRenderProductPath?: string;
+  pitchRenderBackendId?: string;
+  pitchRenderBackendVersion?: string;
+  pitchRenderBackendFailureCode?: string;
+  pitchRenderBackendCapabilities?: unknown;
+  pitchRenderBackendDiagnostics?: unknown;
+  pitchRenderBackendFallbackUsed?: boolean;
+  pitchRenderCommitPolicy?: string;
+  pitchRenderDryProtectedSamples?: number;
+  pitchRenderContextDurationSec?: number;
+  pitchRenderCommitDurationSec?: number;
+  pitchRenderBackendProbeCached?: boolean;
+  pitchRenderJobStartDelayMs?: number;
+  pitchRenderDirection?: string;
+  downshiftFormantGuardUsed?: boolean;
+  downshiftFormantGuardAlpha?: number;
+  noteHqEffectiveStartSec?: number;
+  noteHqEffectiveEndSec?: number;
+  noteHqContextStartSec?: number;
+  noteHqContextEndSec?: number;
+  noteHqAudibleCommitStartSec?: number;
+  noteHqAudibleCommitEndSec?: number;
+  noteHqPreBodyDryProtectedSamples?: number;
+  noteHqEntryInsideBodyFadeMs?: number;
+  noteHqExitLeadInMs?: number;
+  noteHqEntryBridgeStartSec?: number;
+  noteHqEntryBridgeEndSec?: number;
+  noteHqEntryBridgeWetLagMs?: number;
+  noteHqEntryBridgeEnvelopeGainDb?: number;
+  noteHqEntryBridgeUsed?: boolean;
+  noteHqEntryTransientDryPreservedMs?: number;
+  pitchOnlyEntrySimpleHandoffUsed?: boolean;
+  pitchOnlyEntrySafeHandoffUsed?: boolean;
+  pitchOnlyEntryDryHoldMs?: number;
+  pitchOnlyEntrySafeBridgeMs?: number;
+  pitchOnlyEntryWetAlignmentMs?: number;
+  pitchOnlyEntryWetGainDb?: number;
+  pitchOnlyEntryWetVsDryRmsDb?: number;
+  pitchOnlyEntryEqualPowerBlendUsed?: boolean;
+  pitchOnlyEntryRmsContinuityUsed?: boolean;
+  pitchOnlyEntryRmsContinuityGainDb?: number;
+  pitchOnlyEntryRmsContinuityMs?: number;
+  pitchOnlyEntryPhaseSafeUsed?: boolean;
+  pitchOnlyEntryWetAlignmentAccepted?: boolean;
+  pitchOnlyEntryFirstCycleCorrelation?: number;
+  pitchOnlyEntryZeroCrossOffsetMs?: number;
+  pitchOnlyEntryBridgeGainRampDb?: number;
+  pitchOnlyDownshiftCoreEnvelopePassUsed?: boolean;
+  pitchOnlyDownshiftCoreRmsTrimDb?: number;
+  pitchOnlyDownshiftCoreEnvelopeMaxDb?: number;
+  pitchOnlyDownshiftCoreEnvelopeFrames?: number;
+  pitchOnlyEntryWetLagMs?: number;
+  pitchOnlyEntryBridgeDurationMs?: number;
+  pitchOnlyExitDryRestoreUsed?: boolean;
+  pitchOnlyExitDryRestoreStartSec?: number;
+  pitchOnlyExitDryRestoreEndSec?: number;
+  noteHqEntryBoundaryKind?: string;
+  noteHqExitBoundaryKind?: string;
+  noteHqEntryBoundaryScore?: number;
+  noteHqExitBoundaryScore?: number;
+  noteHqRendererEntryBoundaryKind?: string;
+  noteHqRendererExitBoundaryKind?: string;
+  noteHqEditIslandCount?: number;
+  noteHqEditedNoteCount?: number;
+  noteHqEntryPitchHandoffUsed?: boolean;
+  noteHqEntryPitchHandoffStartSec?: number;
+  noteHqEntryPitchHandoffEndSec?: number;
+  noteHqEntryPitchHandoffPreMs?: number;
+  noteHqEntryPitchHandoffBodyMs?: number;
+  noteHqEntryPitchSlopeJumpStPerSec?: number;
+  noteHqEntryPitchAccelerationLimited?: boolean;
+  rubberBandQualityPromoted?: boolean;
+  phraseHqRenderUsed?: boolean;
+  phraseHqExpandedToFullClip?: boolean;
+  phraseHqExternalUsed?: boolean;
+  phraseHqExternalRendererPath?: string;
+  phraseHqStartSec?: number;
+  phraseHqEndSec?: number;
+  externalPitchRendererAvailable?: boolean;
+  bridgeUsed?: boolean;
+  bridgeFallbackUsed?: boolean;
+  bridgeStartSec?: number;
+  bridgeLengthMs?: number;
+  bridgeAlignmentLagSamples?: number;
+  bridgeCorrelationScore?: number;
+  bridgeGainDeltaDb?: number;
+  bodyReplacementUsed?: boolean;
+  bodyReplacementFallbackUsed?: boolean;
+  entryLockStartSec?: number;
+  entryLockLengthMs?: number;
+  exitLockStartSec?: number;
+  renderedBodyStartSec?: number;
+  renderedBodyEndSec?: number;
+  islandNativeUsed?: boolean;
+  islandNativeFallbackUsed?: boolean;
+  islandRenderStartSec?: number;
+  islandRenderEndSec?: number;
+  transientMaskPeak?: number;
+  voicedCoreMaskPeak?: number;
+  hpssUsed?: boolean;
+  hpssFallbackUsed?: boolean;
+  harmonicMaskPeak?: number;
+  aperiodicMaskPeak?: number;
+  spectralEnvelopeCorrectionUsed?: boolean;
+  pitchOnlyCoreTimbreCorrectionUsed?: boolean;
+  pitchOnlyCoreEnvelopeMix?: number;
+  pitchOnlyCoreRmsTrimDb?: number;
+  pitchOnlyCoreEnvelopeLifter?: number;
+  pitchOnlyEntryTimbreCorrectionUsed?: boolean;
+  pitchOnlyEntryRmsTrimDb?: number;
+  pitchOnlyEntryTiltDb?: number;
+  pitchOnlyEntryHandoffUsed?: boolean;
+  pitchOnlyExitHandoffUsed?: boolean;
+  vocalSourceFilterUsed?: boolean;
+  vocalSourceFilterVoicedCoverage?: number;
+  vocalSourceFilterResidualMix?: number;
+  vocalSourceFilterFallbackUsed?: boolean;
+  vocalSourceFilterFallbackReason?: string;
+  vocalSourceFilterEntryDryMs?: number;
+  vocalSourceFilterExitDryMs?: number;
+  wsolaUsed?: boolean;
+  wsolaFallbackUsed?: boolean;
+  wsolaEntryLagSamples?: number;
+  wsolaExitLagSamples?: number;
+  wsolaCorrelationScore?: number;
+  phaseLockUsed?: boolean;
+  phaseLockFallbackUsed?: boolean;
+  phaseAlignedEntry?: boolean;
+  phaseAlignedExit?: boolean;
+  phasePeakCount?: number;
+  transitionHqUsed?: boolean;
+  transitionHqFallbackUsed?: boolean;
+  transitionStartSec?: number;
+  transitionEndSec?: number;
+  transitionTransientPeak?: number;
+  transitionVoicedCorePeak?: number;
+  transitionResidualPeak?: number;
+  transitionEnvelopeCorrectionUsed?: boolean;
+  engineV2Used?: boolean;
+  engineV2FallbackUsed?: boolean;
+  engineV2TransitionCount?: number;
+  engineV2TransitionStartSec?: number;
+  engineV2TransitionEndSec?: number;
+  engineV2HarmonicSupportPeak?: number;
+  engineV2ResidualSupportPeak?: number;
+  engineV2EnvelopeSupportPeak?: number;
+  transientBypassUsed?: boolean;
+  residualCarryUsed?: boolean;
+  cepstralCutoffUsed?: number;
+  fftSizeUsed?: number;
+  hopSizeUsed?: number;
+  immediateLeftNeighborUsed?: boolean;
+  immediateRightNeighborUsed?: boolean;
+  leftNeighborSamplesRendered?: number;
+  rightNeighborSamplesRendered?: number;
+  leftNeighborSmoothMs?: number;
+  rightNeighborSmoothMs?: number;
+  nonImmediateNeighborTouched?: boolean;
+  entryAlignmentOffsetMs?: number;
+  exitAlignmentOffsetMs?: number;
+  firstVoicedCyclesEntryUsed?: boolean;
+  firstVoicedCyclesExitUsed?: boolean;
+  v3TransitionPairUsed?: boolean;
+  v3ContinuousRenderUsed?: boolean;
+  v3EntryAnchorMs?: number;
+  v3ExitAnchorMs?: number;
+  v3FirstCyclesEntryCount?: number;
+  v3FirstCyclesExitCount?: number;
+  v3ShellDurationMs?: number;
+  v3BodyDurationMs?: number;
+  v3ResidualMix?: number;
+  v3FormantMode?: string;
+  v3NeighborLeftOverlapMs?: number;
+  v3NeighborRightOverlapMs?: number;
+  elapsedMs?: number;
+  outputDurationSec?: number;
+  error?: string;
+  comparison?: unknown;
+  sourceAudioPath?: string;
+  referenceAudioPath?: string;
+  windowStartSec?: number;
+  windowEndSec?: number;
+  noteBodyStartSec?: number;
+  noteBodyEndSec?: number;
+  entryWindowSec?: number;
+  exitWindowSec?: number;
+  neighborWindowSec?: number;
+  previewCoverageStartSec?: number;
+  previewCoverageEndSec?: number;
+  candidateCoverageStartSec?: number;
+  candidateCoverageEndSec?: number;
+  label?: string;
+  analysisSummary?: unknown;
+  analysisResult?: PitchContourData;
+  scrubPreviewAudible?: boolean;
+  scrubPreviewStartLatencyMs?: number | null;
+  scrubPreviewStopLatencyMs?: number | null;
+  scrubPreviewMixedCallbackCount?: number;
+  scrubPreviewMixedSampleCount?: number;
+  scrubPreviewLastPeak?: number | null;
+  scrubPreviewFirstDragAudible?: boolean;
+  scrubPreviewRepeatStability?: number | null;
+  scrubPreviewScenarioCount?: number;
+  scrubPreviewScenarioPassCount?: number;
+  scrubPreviewRepeatedDragAudible?: boolean;
+  scrubPreviewAfterTransportCycleAudible?: boolean;
+  scrubPreviewSelectionChangeAudible?: boolean;
+  scrubPreviewSelectionChangeRequested?: boolean;
+  scrubPreviewInputNoteCount?: number;
+  scrubPreviewContourNoteCount?: number;
+  scrubPreviewAlternateNoteFound?: boolean;
+  scrubPreviewScenarioNames?: string[];
+  scrubPreviewScenarioResults?: Array<{
+    name: string;
+    audible: boolean;
+    firstDragAudible?: boolean;
+    startLatencyMs?: number | null;
+    stopLatencyMs?: number | null;
+    repeatStability?: number | null;
+    lastPeak?: number | null;
+  }>;
+  scrubPreviewStatus?: PitchScrubPreviewStatus;
+}
+
+export interface PitchCorrectionCompletionData extends PitchRegressionResult {
+  clipId: string;
+  success: boolean;
+  restored?: boolean;
+  cancelled?: boolean;
+  swapDeferred?: boolean;
+}
 
 // Polyphonic pitch detection types (Phase 6)
 export interface PolyNoteData {
@@ -264,14 +714,79 @@ export interface AiToolsStatus {
     lastPhase?: string;
     terminalReason?: string;
     fallbackAttempted?: boolean;
-    restartRequired?: boolean;
+  restartRequired?: boolean;
+  aceStepVersion?: string | null;
+  musicGenerationReady?: boolean;
+  musicGenerationLayoutValid?: boolean;
+  musicGenerationModelId?: string | null;
+  musicGenerationModelRepoId?: string | null;
+  musicGenerationSharedRepoId?: string | null;
+  musicGenerationCheckpointRoot?: string | null;
+  musicGenerationStatusMessage?: string;
+  musicGenerationFailureCode?: string;
+  musicGenerationPerformanceReady?: boolean;
+  musicGenerationPerformanceStatusMessage?: string;
+  musicGenerationRuntimeProfiles?: Record<string, unknown>;
+  musicGenerationAvailableProfiles?: string[];
+  musicGenerationUnavailableProfiles?: Array<Record<string, unknown>>;
+  musicGenerationDefaultProfile?: string;
+  musicGenerationWarmSessionCapable?: boolean;
   }
+
+export interface AIGenerationProgress {
+  state:
+    | "idle"
+    | "loading"
+    | "generating"
+    | "writing"
+    | "done"
+    | "error"
+    | "cancelled";
+  progress: number;
+  phase?: string;
+  message?: string;
+  backend?: string;
+  outputFile?: string;
+  error?: string;
+  elapsedMs?: number;
+  heartbeatTs?: number;
+  phaseProgress?: number;
+  etaMs?: number;
+  runMode?: "cold" | "warm";
+  runtimeProfile?: string;
+  lmModel?: string;
+  statusNote?: string;
+  failureKind?: string;
+  sessionMode?: "persistent" | "oneshot" | "oneshot-fallback" | string;
+  workerExitCode?: number;
+  lastStdoutLine?: string;
+  lastStderrLine?: string;
+  attemptMode?: "lm_dit" | "dit_only" | "dit_only_retry" | string;
+  attemptIndex?: number;
+  protocolVersion?: number;
+  scriptVersion?: string;
+  requestId?: string;
+  priorFailure?: string;
+  lastProgressAgeMs?: number;
+  tracePath?: string;
+  failureDetail?: string;
+  lmBackend?: string;
+  lmStage?: string;
+}
 
 export interface InstallAiToolsResponse {
   started: boolean;
   error?: string;
   message?: string;
   status?: AiToolsStatus;
+}
+
+export interface ResetAiToolsResponse {
+  success: boolean;
+  error?: string;
+  message?: string;
+  status?: AiToolsStatus;
+  deletedPaths?: string[];
 }
 
 export interface ARAPluginInfo {
@@ -385,6 +900,14 @@ export interface AudioDebugSnapshot {
   blockSize: number;
   playbackClipCount: number;
   activeOutputChannels: number;
+  lastAudioCallbackProcessMs?: number;
+  maxAudioCallbackProcessMs?: number;
+  audioCallbackDeadlineMissCount?: number;
+  audioCallbackTrackBufferResizeCount?: number;
+  audioCallbackPitchScrubBufferResizeCount?: number;
+  audioCallbackSidechainBufferResizeCount?: number;
+  spectrumFftPublishCount?: number;
+  spectrumFftLockMissCount?: number;
   postTrackPlaybackPeak: number;
   postMonitoringInputPeak: number;
   postMasterFxPeak: number;
@@ -724,7 +1247,7 @@ declare global {
         // Track Type Management (Phase 2)
         setTrackType?: (
           trackId: string,
-          type: "audio" | "midi" | "instrument",
+          type: "audio" | "midi" | "instrument" | "ai",
         ) => Promise<boolean>;
         setTrackMIDIInput?: (
           trackId: string,
@@ -749,6 +1272,8 @@ declare global {
         ) => Promise<boolean>;
         loadProjectFromFile?: (filePath: string) => Promise<string>;
         consumePendingLaunchProjectPath?: () => Promise<string>;
+        getPitchRegressionJob?: () => Promise<PitchRegressionJob | null>;
+        completePitchRegressionJob?: (result: PitchRegressionResult) => Promise<boolean>;
 
         // Plugin State Serialization (F2)
         getPluginState?: (
@@ -828,18 +1353,26 @@ declare global {
         saveDroppedFile?: (fileName: string, base64Data: string) => Promise<string>;
 
         // Render/Export (F3)
-        showRenderSaveDialog?: (defaultFileName: string, formatExtension: string) => Promise<string>;
+        showRenderSaveDialog?: (defaultFileName: string, formatExtension: string, initialDirectory?: string) => Promise<string>;
         renderProject?: (
           source: string, startTime: number, endTime: number,
           filePath: string, format: string, sampleRate: number,
           bitDepth: number, channels: number, normalize: boolean,
-          addTail: boolean, tailLength: number,
+          addTail: boolean, tailLength: number, includeMetronome?: boolean,
         ) => Promise<boolean>;
+        capturePitchAuditionPlayback?: (
+          trackId: string, clipId: string, startTime: number, duration: number,
+          filePath: string, sampleRate?: number, offlineRenderMode?: boolean,
+        ) => Promise<PitchAuditionCaptureResult>;
+        capturePitchAppFinalContext?: (
+          trackId: string, clipId: string, startTime: number, duration: number,
+          wavPath: string, routeJsonPath: string, sampleRate?: number, metadata?: unknown,
+        ) => Promise<PitchAppFinalCaptureResult>;
         renderProjectWithDither?: (
           source: string, startTime: number, endTime: number,
           filePath: string, format: string, sampleRate: number,
           bitDepth: number, channels: number, normalize: boolean,
-          addTail: boolean, tailLength: number, ditherType: string,
+          addTail: boolean, tailLength: number, ditherType: string, includeMetronome?: boolean,
         ) => Promise<boolean>;
 
         // Phase 9: Audio Engine Enhancements
@@ -1042,9 +1575,17 @@ declare global {
         setPitchCorrectionBypass?: (trackId: string, clipId: string, bypass: boolean) => Promise<void>;
 
         // Real-time pitch preview (Phase 7.5)
+        startPitchScrubPreview?: (trackId: string, clipId: string, noteJson: string, framesJson?: string) => Promise<{ success: boolean }>;
+        updatePitchScrubPreview?: (clipId: string, pitchRatio: number) => Promise<boolean>;
+        stopPitchScrubPreview?: (clipId: string) => Promise<boolean>;
+        getPitchScrubPreviewStatus?: (clipId?: string) => Promise<PitchScrubPreviewStatus>;
+        getPitchPreviewRoutingStatus?: (clipId?: string) => Promise<PitchPreviewRoutingStatus>;
+        getExternalPitchRendererStatus?: () => Promise<ExternalPitchRendererStatus>;
         setClipPitchPreview?: (clipId: string, payload: ClipPitchPreviewPayload) => Promise<boolean>;
         clearClipPitchPreview?: (clipId: string) => Promise<boolean>;
         clearClipRenderedPreviewSegments?: (clipId: string) => Promise<boolean>;
+        clearAllPitchPreviewRoutes?: (clipId?: string) => Promise<boolean>;
+        clearPitchPreviewRoutesForCorrectedSources?: () => Promise<number>;
 
         // Source Separation (Phase 8 + Phase 10)
         separateStems?: (trackId: string, clipId: string) => Promise<StemSeparationResult>;
@@ -1052,10 +1593,14 @@ declare global {
         getAiToolsStatus?: () => Promise<AiToolsStatus>;
         refreshAiToolsStatus?: () => Promise<AiToolsStatus>;
         installAiTools?: () => Promise<InstallAiToolsResponse>;
+        resetAiTools?: () => Promise<ResetAiToolsResponse>;
         separateStemsAsync?: (trackId: string, clipId: string, optionsJSON: string) => Promise<{ started: boolean; error?: string; cached?: boolean }>;
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
         cancelAiToolsInstall?: () => Promise<void>;
+        startAIGeneration?: (trackId: string, workflowId: string, paramsJSON: string) => Promise<{ started: boolean; error?: string }>;
+        getAIGenerationProgress?: () => Promise<AIGenerationProgress>;
+        cancelAIGeneration?: () => Promise<void>;
 
         // ARA Plugin Hosting (Phase 9)
         initializeARA?: (trackId: string, fxIndex: number) => Promise<{ success: boolean; error?: string }>;
@@ -1189,7 +1734,7 @@ class NativeBridge {
 
   // Subscribe to pitch correction completion events (emitted when WORLD vocoder finishes).
   // Returns an unsubscribe function (or no-op in dev mode).
-  onPitchCorrectionComplete(callback: (data: { clipId: string; success: boolean; outputFile?: string; requestId?: string; restored?: boolean; renderMode?: PitchCorrectionRenderMode; cancelled?: boolean; swapDeferred?: boolean }) => void): () => void {
+  onPitchCorrectionComplete(callback: (data: PitchCorrectionCompletionData) => void): () => void {
     const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener(
@@ -1663,6 +2208,14 @@ class NativeBridge {
       blockSize: 512,
       playbackClipCount: 0,
       activeOutputChannels: 0,
+      lastAudioCallbackProcessMs: 0,
+      maxAudioCallbackProcessMs: 0,
+      audioCallbackDeadlineMissCount: 0,
+      audioCallbackTrackBufferResizeCount: 0,
+      audioCallbackPitchScrubBufferResizeCount: 0,
+      audioCallbackSidechainBufferResizeCount: 0,
+      spectrumFftPublishCount: 0,
+      spectrumFftLockMissCount: 0,
       postTrackPlaybackPeak: 0,
       postMonitoringInputPeak: 0,
       postMasterFxPeak: 0,
@@ -2442,7 +2995,7 @@ class NativeBridge {
   // Track Type Management (Phase 2)
   async setTrackType(
     trackId: string,
-    type: "audio" | "midi" | "instrument",
+    type: "audio" | "midi" | "instrument" | "ai",
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTrackType) {
       return await window.__JUCE__.backend.setTrackType(trackId, type);
@@ -2585,10 +3138,31 @@ class NativeBridge {
     return "";
   }
 
+  async getPitchRegressionJob(): Promise<PitchRegressionJob | null> {
+    if (this.isNative && window.__JUCE__?.backend.getPitchRegressionJob) {
+      const raw = await window.__JUCE__.backend.getPitchRegressionJob();
+      if (!raw) {
+        return null;
+      }
+      if (typeof raw === "string") {
+        return JSON.parse(raw) as PitchRegressionJob;
+      }
+      return raw as PitchRegressionJob;
+    }
+    return null;
+  }
+
+  async completePitchRegressionJob(result: PitchRegressionResult): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.completePitchRegressionJob) {
+      return await window.__JUCE__.backend.completePitchRegressionJob(result);
+    }
+    return false;
+  }
+
   // Render/Export (F3)
-  async showRenderSaveDialog(defaultFileName: string, formatExtension: string): Promise<string> {
+  async showRenderSaveDialog(defaultFileName: string, formatExtension: string, initialDirectory?: string): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.showRenderSaveDialog) {
-      return await window.__JUCE__.backend.showRenderSaveDialog(defaultFileName, formatExtension);
+      return await window.__JUCE__.backend.showRenderSaveDialog(defaultFileName, formatExtension, initialDirectory);
     }
     console.log("[NativeBridge] Mock showRenderSaveDialog");
     return "";
@@ -2606,9 +3180,10 @@ class NativeBridge {
     normalize: boolean;
     addTail: boolean;
     tailLength: number;
+    includeMetronome?: boolean;
   }): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.renderProject) {
-      return await window.__JUCE__.backend.renderProject(
+      const success = await window.__JUCE__.backend.renderProject(
         options.source,
         options.startTime,
         options.endTime,
@@ -2619,8 +3194,15 @@ class NativeBridge {
         options.channels,
         options.normalize,
         options.addTail,
-        options.tailLength
+        options.tailLength,
+        options.includeMetronome ?? false,
       );
+      if (success) {
+        const dot = options.filePath.lastIndexOf(".");
+        const reportPath = `${dot > 0 ? options.filePath.slice(0, dot) : options.filePath}_render_route_report.json`;
+        console.log(`[NativeBridge] Render route report: ${reportPath}`);
+      }
+      return success;
     }
     console.log(
       `[NativeBridge] Mock renderProject: ${options.filePath} (${options.format}, ${options.startTime}-${options.endTime}s)`,
@@ -2629,6 +3211,54 @@ class NativeBridge {
     return new Promise((resolve) => {
       setTimeout(() => resolve(true), 2000);
     });
+  }
+
+  async capturePitchAuditionPlayback(options: {
+    trackId: string;
+    clipId: string;
+    startTime: number;
+    duration: number;
+    filePath: string;
+    sampleRate?: number;
+    offlineRenderMode?: boolean;
+  }): Promise<PitchAuditionCaptureResult | null> {
+    if (this.isNative && window.__JUCE__?.backend.capturePitchAuditionPlayback) {
+      return await window.__JUCE__.backend.capturePitchAuditionPlayback(
+        options.trackId,
+        options.clipId,
+        options.startTime,
+        options.duration,
+        options.filePath,
+        options.sampleRate ?? 44100,
+        options.offlineRenderMode ?? true,
+      );
+    }
+    return { success: false, error: "Pitch audition capture is only available in the native app." };
+  }
+
+  async capturePitchAppFinalContext(options: {
+    trackId: string;
+    clipId: string;
+    startTime: number;
+    duration: number;
+    wavPath: string;
+    routeJsonPath: string;
+    sampleRate?: number;
+    metadata?: unknown;
+  }): Promise<PitchAppFinalCaptureResult | null> {
+    if (this.isNative && window.__JUCE__?.backend.capturePitchAppFinalContext) {
+      return await window.__JUCE__.backend.capturePitchAppFinalContext(
+        options.trackId,
+        options.clipId,
+        options.startTime,
+        options.duration,
+        options.wavPath,
+        options.routeJsonPath,
+        options.sampleRate ?? 44100,
+        options.metadata ?? {},
+      );
+    }
+    return { success: false };
   }
 
   async renderProjectWithDither(options: {
@@ -2644,9 +3274,10 @@ class NativeBridge {
     addTail: boolean;
     tailLength: number;
     ditherType: string;
+    includeMetronome?: boolean;
   }): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.renderProjectWithDither) {
-      return await window.__JUCE__.backend.renderProjectWithDither(
+      const success = await window.__JUCE__.backend.renderProjectWithDither(
         options.source,
         options.startTime,
         options.endTime,
@@ -2659,7 +3290,14 @@ class NativeBridge {
         options.addTail,
         options.tailLength,
         options.ditherType,
+        options.includeMetronome ?? false,
       );
+      if (success) {
+        const dot = options.filePath.lastIndexOf(".");
+        const reportPath = `${dot > 0 ? options.filePath.slice(0, dot) : options.filePath}_render_route_report.json`;
+        console.log(`[NativeBridge] Render route report: ${reportPath}`);
+      }
+      return success;
     }
     // Fallback to non-dither render
     return this.renderProject(options);
@@ -4076,6 +4714,18 @@ class NativeBridge {
     return false;
   }
 
+  async clearAllPitchPreviewRoutes(clipId?: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.clearAllPitchPreviewRoutes)
+      return await window.__JUCE__.backend.clearAllPitchPreviewRoutes(clipId ?? "");
+    return false;
+  }
+
+  async clearPitchPreviewRoutesForCorrectedSources(): Promise<number> {
+    if (this.isNative && window.__JUCE__?.backend.clearPitchPreviewRoutesForCorrectedSources)
+      return await window.__JUCE__.backend.clearPitchPreviewRoutesForCorrectedSources();
+    return 0;
+  }
+
   // ==================== Polyphonic Pitch Detection (Phase 6) ====================
 
   async analyzePolyphonic(trackId: string, clipId: string, options?: { noteThreshold?: number; onsetThreshold?: number; minDurationMs?: number }): Promise<PolyAnalysisResult | null> {
@@ -4114,6 +4764,47 @@ class NativeBridge {
   async setPitchCorrectionBypass(trackId: string, clipId: string, bypass: boolean): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.setPitchCorrectionBypass)
       await window.__JUCE__.backend.setPitchCorrectionBypass(trackId, clipId, bypass);
+  }
+
+  async startPitchScrubPreview(trackId: string, clipId: string, note: PitchNoteData, frames?: PitchContourData["frames"]): Promise<{ success: boolean } | null> {
+    if (this.isNative && window.__JUCE__?.backend.startPitchScrubPreview)
+      return await window.__JUCE__.backend.startPitchScrubPreview(
+        trackId,
+        clipId,
+        JSON.stringify(note),
+        frames ? JSON.stringify(frames) : undefined,
+      );
+    return null;
+  }
+
+  async updatePitchScrubPreview(clipId: string, pitchRatio: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.updatePitchScrubPreview)
+      return await window.__JUCE__.backend.updatePitchScrubPreview(clipId, pitchRatio);
+    return false;
+  }
+
+  async stopPitchScrubPreview(clipId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.stopPitchScrubPreview)
+      return await window.__JUCE__.backend.stopPitchScrubPreview(clipId);
+    return false;
+  }
+
+  async getPitchScrubPreviewStatus(clipId?: string): Promise<PitchScrubPreviewStatus | null> {
+    if (this.isNative && window.__JUCE__?.backend.getPitchScrubPreviewStatus)
+      return await window.__JUCE__.backend.getPitchScrubPreviewStatus(clipId);
+    return null;
+  }
+
+  async getPitchPreviewRoutingStatus(clipId?: string): Promise<PitchPreviewRoutingStatus | null> {
+    if (this.isNative && window.__JUCE__?.backend.getPitchPreviewRoutingStatus)
+      return await window.__JUCE__.backend.getPitchPreviewRoutingStatus(clipId);
+    return null;
+  }
+
+  async getExternalPitchRendererStatus(): Promise<ExternalPitchRendererStatus | null> {
+    if (this.isNative && window.__JUCE__?.backend.getExternalPitchRendererStatus)
+      return await window.__JUCE__.backend.getExternalPitchRendererStatus();
+    return null;
   }
 
   /** Set real-time pitch/formant preview state for a clip */
@@ -4168,6 +4859,15 @@ class NativeBridge {
         selectedBackend: "cpu",
         lastPhase: "runtimeMissing",
         restartRequired: false,
+        aceStepVersion: null,
+        musicGenerationReady: false,
+        musicGenerationLayoutValid: false,
+        musicGenerationPerformanceReady: true,
+        musicGenerationModelId: "acestep-v15-xl-turbo",
+        musicGenerationModelRepoId: "ACE-Step/acestep-v15-xl-turbo",
+        musicGenerationSharedRepoId: "ACE-Step/Ace-Step1.5",
+        musicGenerationCheckpointRoot: null,
+        musicGenerationPerformanceStatusMessage: "",
       };
   }
 
@@ -4187,6 +4887,18 @@ class NativeBridge {
     return {
       started: false,
       error: "AI tools installation is unavailable in the web preview.",
+      status: await this.getAiToolsStatus(),
+    };
+  }
+
+  async resetAiTools(): Promise<ResetAiToolsResponse> {
+    if (this.isNative && window.__JUCE__?.backend.resetAiTools) {
+      return await window.__JUCE__.backend.resetAiTools();
+    }
+
+    return {
+      success: false,
+      error: "AI tools reset is unavailable in the web preview.",
       status: await this.getAiToolsStatus(),
     };
   }
@@ -4214,6 +4926,36 @@ class NativeBridge {
   async cancelAiToolsInstall(): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.cancelAiToolsInstall)
       return await window.__JUCE__.backend.cancelAiToolsInstall();
+  }
+
+  async startAIGeneration(
+    trackId: string,
+    workflowId: string,
+    params: Record<string, unknown>,
+  ): Promise<{ started: boolean; error?: string }> {
+    const normalizedParams = normalizeWorkflowParams(workflowId, params);
+    if (this.isNative && window.__JUCE__?.backend.startAIGeneration) {
+      return await window.__JUCE__.backend.startAIGeneration(
+        trackId,
+        workflowId,
+        JSON.stringify(normalizedParams),
+      );
+    }
+    console.log("[NativeBridge] Mock startAIGeneration:", trackId, workflowId, normalizedParams);
+    return { started: false, error: "AI generation is only available in the native app." };
+  }
+
+  async getAIGenerationProgress(): Promise<AIGenerationProgress> {
+    if (this.isNative && window.__JUCE__?.backend.getAIGenerationProgress) {
+      return await window.__JUCE__.backend.getAIGenerationProgress();
+    }
+    return { state: "idle", progress: 0 };
+  }
+
+  async cancelAIGeneration(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.cancelAIGeneration) {
+      return await window.__JUCE__.backend.cancelAIGeneration();
+    }
   }
 
   // ==================== Phase 9: ARA Plugin Hosting ====================

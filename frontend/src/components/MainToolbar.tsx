@@ -16,7 +16,7 @@ import {
   Cpu,
 } from "lucide-react";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
-import { getActionShortcut, getActionShortcutScopeLabel } from "../store/actionRegistry";
+import { getDisplayShortcut, getActionShortcutScopeLabel } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
@@ -32,15 +32,15 @@ export function MainToolbar({
   onToggleMixer,
   showMixer,
 }: MainToolbarProps) {
-  const mixerShortcut = getActionShortcut("view.toggleMixer") ?? "Ctrl+M";
-  const loopShortcut = getActionShortcut("transport.loop") ?? "L";
-  const recordShortcut = getActionShortcut("transport.record") ?? "Ctrl+R";
-  const undoShortcut = getActionShortcut("edit.undo") ?? "Ctrl+Z";
-  const redoShortcut = getActionShortcut("edit.redo") ?? "Ctrl+Shift+Z";
-  const selectToolShortcut = getActionShortcut("tools.selectTool") ?? "V";
-  const splitToolShortcut = getActionShortcut("tools.splitTool") ?? "B";
-  const muteToolShortcut = getActionShortcut("tools.muteTool") ?? "X";
-  const smartToolShortcut = getActionShortcut("tools.smartTool") ?? "Y";
+  const mixerShortcut = getDisplayShortcut("view.toggleMixer") ?? "Ctrl+M";
+  const loopShortcut = getDisplayShortcut("transport.loop") ?? "L";
+  const recordShortcut = getDisplayShortcut("transport.record") ?? "Ctrl+R";
+  const undoShortcut = getDisplayShortcut("edit.undo") ?? "Ctrl+Z";
+  const redoShortcut = getDisplayShortcut("edit.redo") ?? "Ctrl+Shift+Z";
+  const selectToolShortcut = getDisplayShortcut("tools.selectTool") ?? "V";
+  const splitToolShortcut = getDisplayShortcut("tools.splitTool") ?? "B";
+  const muteToolShortcut = getDisplayShortcut("tools.muteTool") ?? "X";
+  const smartToolShortcut = getDisplayShortcut("tools.smartTool") ?? "Y";
   const timelineScopeLabel = getActionShortcutScopeLabel("timeline");
   const {
     isPlaying,

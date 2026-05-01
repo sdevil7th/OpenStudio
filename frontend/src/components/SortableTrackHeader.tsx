@@ -5,6 +5,7 @@ import { ChevronRight, ChevronDown } from "lucide-react";
 import { Track, useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { TrackHeader } from "./TrackHeader";
+import { AITrackHeader } from "./AITrackHeader";
 import { TRACK_COLORS } from "./ColorPicker";
 import { useContextMenu, MenuItem } from "./ContextMenu";
 
@@ -371,7 +372,11 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
             </button>
           )}
           <div className="flex-1 min-w-0">
-            <TrackHeader track={track} isSelected={isSelected} />
+            {track.type === "ai" ? (
+              <AITrackHeader track={track} isSelected={isSelected} />
+            ) : (
+              <TrackHeader track={track} isSelected={isSelected} />
+            )}
           </div>
         </div>
       </div>

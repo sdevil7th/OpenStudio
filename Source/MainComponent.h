@@ -57,7 +57,8 @@ public:
                   AppUpdater& appUpdaterIn,
                   StartupMode startupModeIn,
                   WindowRole roleIn,
-                  WindowCallbacks callbacksIn = {});
+                  WindowCallbacks callbacksIn = {},
+                  const juce::String& pitchRegressionJobPathIn = {});
     ~MainComponent() override;
 
     //==============================================================================
@@ -80,6 +81,8 @@ private:
     void startDesktopWindowDrag();
     void emitFrontendEvent(const juce::String& eventId, const juce::var& payload = {});
     bool isMainWindow() const;
+    bool loadPackagedFrontend();
+    bool tryFallbackToPackagedFrontendAfterLocalTimeout();
     void beginFrontendStartupWatchdog(const juce::String& targetUrl);
     void showStartupOverlay(const juce::String& title, const juce::String& detail);
     void hideStartupOverlay();
@@ -93,6 +96,8 @@ private:
     void repairInstalledApplication();
     void repairWindowsPrerequisites();
     juce::var buildStartupDiagnostics() const;
+    void initializePitchRegressionJob(const juce::String& pitchRegressionJobPathIn);
+    bool completePitchRegressionJob(const juce::var& result);
 
     //==============================================================================
     // Your private member variables go here...
@@ -115,16 +120,23 @@ private:
 
     // Async pitch analysis state
     std::atomic<bool> pitchAnalysisRunning { false };
+    std::atomic<bool> pitchNoteHqPriorityActive { false };
+    std::atomic<int> pitchAnalysisGeneration { 0 };
+    std::atomic<int> pitchNoteHqPriorityGeneration { 0 };
+    juce::ThreadPool pitchAnalysisPool { 1 };
     juce::var lastPitchAnalysisResult;  // Cached result for fetch-after-event pattern
     juce::CriticalSection pitchResultLock;
 
     // Background thread for pitch correction (1 slot — serialises apply calls)
     juce::ThreadPool previewSegmentPool { 2 };
+    juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
     juce::CriticalSection pitchCorrectionJobLock;
     juce::String activePreviewRequestGroup;
+    juce::String activeNoteRenderRequestGroup;
     juce::String activeFullClipRequestGroup;
     std::atomic<int> previewRenderGeneration { 0 };
+    std::atomic<int> noteRenderGeneration { 0 };
     std::atomic<int> fullClipRenderGeneration { 0 };
     FrontendStartupState frontendStartupState = FrontendStartupState::idle;
     juce::String frontendStartupTargetUrl;
@@ -132,9 +144,16 @@ private:
     juce::uint32 frontendStartupNavigationTicks = 0;
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
+    bool attemptedPackagedFrontendFallbackAfterLocalTimeout = false;
     StartupRepairAction startupRepairAction = StartupRepairAction::none;
     juce::String lastAiToolsStatusDigest;
     double lastAiToolsStatusEmitMs = 0.0;
+    juce::File pitchRegressionJobFile;
+    juce::var pitchRegressionJob;
+    bool pitchRegressionJobConsumed = false;
+    bool pitchRegressionJobCompleted = false;
+    juce::CriticalSection pitchRegressionNativeResultLock;
+    juce::var lastPitchRegressionNativeResult;
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

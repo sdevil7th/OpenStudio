@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "label": "pitchOrg_plus4_formant_smoke",
+      "sourceAudioPath": "D:/test projects/pitchOrg.wav",
+      "referenceAudioPath": "D:/test projects/pitchOrg+4s.wav",
+      "notesJsonPath": "../example_plus4_notes.json",
+      "targetShiftSemitones": 4.0,
+      "renderMode": "note_hq",
+      "rendererBranch": "pitch_only_adaptive_selector",
+      "entryWindowSec": 0.08,
+      "exitWindowSec": 0.08,
+      "neighborWindowSec": 0.12
+    },
+    {
+      "label": "pitchTest_plus4_formant_smoke",
+      "sourceAudioPath": "D:/test projects/pitchTestOrg.wav",
+      "referenceAudioPath": "D:/test projects/pitchTestOrg+4s.wav",
+      "notesJsonPath": "../example_pitchTest_plus4_notes.json",
+      "targetShiftSemitones": 4.0,
+      "renderMode": "note_hq",
+      "rendererBranch": "pitch_only_adaptive_selector",
+      "entryWindowSec": 0.08,
+      "exitWindowSec": 0.08,
+      "neighborWindowSec": 0.12
+    }
+  ]
+}

@@ -28,6 +28,7 @@ import {
   snapToGrid,
   calculateGridInterval,
 } from "../utils/snapToGrid";
+import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
 import {
   fadeInCurvePoints,
   fadeOutCurvePoints,
@@ -319,7 +320,7 @@ export function Timeline({
 
   // Ruler interaction state (ref-based to avoid stale closures in global listeners)
   const rulerDragRef = useRef<{
-    type: "handle" | "range-create" | "pending"; // pending = mousedown, not yet determined
+    type: "handle-pending" | "handle-drag" | "range-create" | "pending"; // pending = mousedown, not yet determined
     handle?: "start" | "end";
     startX: number; // pixel X at mousedown (relative to ruler canvas)
     startTime: number; // time at mousedown
@@ -361,6 +362,7 @@ export function Timeline({
     gridSize,
     timeSelection,
     setTimeSelection,
+    clearTimeSelection,
     openPianoRoll,
     addMIDIClip,
     addEmptyClip,
@@ -416,6 +418,7 @@ export function Timeline({
       gridSize: state.gridSize,
       timeSelection: state.timeSelection,
       setTimeSelection: state.setTimeSelection,
+      clearTimeSelection: state.clearTimeSelection,
       openPianoRoll: state.openPianoRoll,
       addMIDIClip: state.addMIDIClip,
       addEmptyClip: state.addEmptyClip,
@@ -577,6 +580,13 @@ export function Timeline({
   // Refs for ruler drag to avoid stale closures in global listeners
   const projectRangeRef = useRef(projectRange);
   projectRangeRef.current = projectRange;
+  const shouldUseSnapRef = useRef(snapEnabled);
+  shouldUseSnapRef.current = snapEnabled;
+
+  const isSnapActive = useCallback((ctrlBypass = false) => {
+    return shouldUseSnapRef.current && !ctrlBypass;
+  }, []);
+
   const snapEnabledRef = useRef(snapEnabled);
   snapEnabledRef.current = snapEnabled;
   const gridSizeRef = useRef(gridSize);
@@ -930,6 +940,7 @@ export function Timeline({
 
   // ── Ruler interaction: click = seek, drag = set range, drag handle = adjust range ──
   const RANGE_HANDLE_HIT_PX = 8;
+  const RANGE_HANDLE_VISUAL_HEIGHT_PX = 8;
   const DRAG_THRESHOLD_PX = 4; // Movement needed to distinguish drag from click
 
   const handleRulerMouseDown = (e: KonvaEvent) => {
@@ -937,20 +948,30 @@ export function Timeline({
     const pointerPos = stage.getPointerPosition();
     if (!pointerPos) return;
 
-    const clickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    const clickedTime = getRulerClickSnapTime({
+      time: rawClickedTime,
+      pixelsPerSecond: pixelsPerSecondRef.current,
+      tempo: tempoRef.current,
+      timeSignature: timeSignatureRef.current,
+      gridSize: gridSizeRef.current,
+      snapEnabled: shouldUseSnapRef.current,
+      ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
+    });
 
-    // Check if clicking near a range handle (anywhere in ruler height)
+    // Check if clicking near a range handle inside the visible marker zone.
     const startX = projectRange.start * pixelsPerSecond - scrollX;
     const endX = projectRange.end * pixelsPerSecond - scrollX;
+    const inHandleZone = pointerPos.y <= RANGE_HANDLE_VISUAL_HEIGHT_PX;
 
     // Prefer end handle when both overlap (both at 0)
-    if (Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
-      rulerDragRef.current = { type: "handle", handle: "end", startX: pointerPos.x, startTime: clickedTime };
+    if (inHandleZone && Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
+      rulerDragRef.current = { type: "handle-pending", handle: "end", startX: pointerPos.x, startTime: clickedTime };
       setRulerDragging(true);
       return;
     }
-    if (Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
-      rulerDragRef.current = { type: "handle", handle: "start", startX: pointerPos.x, startTime: clickedTime };
+    if (inHandleZone && Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
+      rulerDragRef.current = { type: "handle-pending", handle: "start", startX: pointerPos.x, startTime: clickedTime };
       setRulerDragging(true);
       return;
     }
@@ -975,7 +996,10 @@ export function Timeline({
       return;
     }
 
-    // Not on a handle — record as pending (will become seek or range-create on mouseup/move)
+    // Not on a handle — plain click clears any existing time selection and seeks
+    if (useDAWStore.getState().timeSelection) {
+      clearTimeSelection();
+    }
     rulerDragRef.current = { type: "pending", startX: pointerPos.x, startTime: clickedTime };
   };
 
@@ -1062,11 +1086,18 @@ export function Timeline({
       const range = projectRangeRef.current;
 
       // Apply snap-to-grid if enabled
-      if (snapEnabledRef.current) {
+      if (isSnapActive(Boolean(e.ctrlKey || e.metaKey))) {
         time = snapToGrid(time, tempoRef.current, timeSignatureRef.current, gridSizeRef.current);
       }
 
-      if (drag.type === "handle") {
+      if (drag.type === "handle-pending") {
+        if (Math.abs(pointerX - drag.startX) <= DRAG_THRESHOLD_PX) {
+          return;
+        }
+        drag.type = "handle-drag";
+      }
+
+      if (drag.type === "handle-drag") {
         // Dragging an existing handle
         if (drag.handle === "start") {
           setProjectRange(Math.min(time, range.end), range.end);
@@ -1080,7 +1111,7 @@ export function Timeline({
           drag.type = "range-create";
           // Snap the drag start time too
           let startTime = drag.startTime;
-          if (snapEnabledRef.current) {
+          if (isSnapActive(Boolean(e.ctrlKey || e.metaKey))) {
             startTime = snapToGrid(startTime, tempoRef.current, timeSignatureRef.current, gridSizeRef.current);
             drag.startTime = startTime;
           }
@@ -1101,6 +1132,11 @@ export function Timeline({
       if (drag.type === "pending") {
         // No significant movement — this was a click, so seek
         seekTo(drag.startTime);
+      } else if (drag.type === "handle-pending") {
+        if (useDAWStore.getState().timeSelection) {
+          clearTimeSelection();
+        }
+        seekTo(drag.startTime);
       }
 
       rulerDragRef.current = null;
@@ -1113,7 +1149,7 @@ export function Timeline({
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [seekTo, setProjectRange]);
+  }, [clearTimeSelection, seekTo, setProjectRange]);
 
   // Handle mouse move for time selection / razor edit dragging (on main stage)
   const handleStageMouseMove = (e: KonvaEvent) => {
@@ -2242,7 +2278,7 @@ export function Timeline({
       let newStartTime = rawStartTime;
 
       // Apply snap-to-grid if enabled
-      if (snapEnabled) {
+      if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
         newStartTime = snapToGrid(newStartTime, tempo, timeSignature, gridSize);
       }
 
@@ -2252,7 +2288,7 @@ export function Timeline({
       const targetTY = trackYs[Math.max(0, targetTrackIdx)] ?? 0;
 
       // Update snap ghost preview: show semi-transparent rect at snapped position
-      if (snapEnabled && Math.abs(newStartTime - rawStartTime) > 0.001) {
+      if (isSnapActive(Boolean(e.evt?.ctrlKey)) && Math.abs(newStartTime - rawStartTime) > 0.001) {
         const ghostScreenX = newStartTime * pixelsPerSecond - scrollX;
         const targetTrack = tracks[Math.max(0, Math.min(targetTrackIdx, tracks.length - 1))];
         const targetMetrics = targetTrack
@@ -2479,7 +2515,7 @@ export function Timeline({
         const stage = e.target.getStage();
         const pointerPos = stage.getPointerPosition();
         let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
-        if (snapEnabled) {
+        if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
           splitTime = snapToGrid(splitTime, tempo, timeSignature, gridSize);
         }
         splitClipAtPosition(clip.id, splitTime);
@@ -2637,7 +2673,7 @@ export function Timeline({
         );
 
         // Apply snap-to-grid if enabled
-        if (snapEnabled) {
+        if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
           newStartTime = snapToGrid(newStartTime, tempo, timeSignature, gridSize);
         }
 
@@ -2661,7 +2697,7 @@ export function Timeline({
         }
 
         // Apply snap-to-grid to end time (start + duration) if enabled
-        if (snapEnabled) {
+        if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
           const endTime = clip.startTime + newDuration;
           const snappedEndTime = snapToGrid(
             endTime,
@@ -3377,7 +3413,7 @@ export function Timeline({
         const stage = e.target.getStage();
         const pointerPos = stage.getPointerPosition();
         let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
-        if (snapEnabled) {
+        if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
           splitTime = snapToGrid(splitTime, tempo, timeSignature, gridSize);
         }
         splitMIDIClipAtPosition(clip.id, splitTime);
@@ -4792,6 +4828,12 @@ export function Timeline({
                     label: "Add MIDI Track",
                     onClick: () => {
                       void createTrackOfType("midi");
+                    },
+                  },
+                  {
+                    label: "Add AI Track",
+                    onClick: () => {
+                      void createTrackOfType("ai");
                     },
                   },
                 ]

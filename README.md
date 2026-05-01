@@ -124,9 +124,10 @@ flowchart TD
         direction TB
         YIN[PitchAnalyzer\nYIN Detection · Note Segmentation]
         NOTES[PitchNotes\npitch · formant · vibrato · drift per note]
-        RSYNTH[PitchResynthesizer\nbuildCorrectionCurve · buildFormantCurve]
-        SS[SignalsmithShifter\nper-block setTransposeFactor · setFormantFactor]
-        XF[Crossfade Splice\n512-sample overlap-add]
+        BACKEND[PitchRenderBackend\npreview · offline_hq · ara_plugin]
+        RB[Rubber Band HQ\nbenchmark-gated phrase/clip render]
+        NATIVE[Native HQ v4\nreserved fallback lane]
+        SS[SignalsmithShifter\nlive scrub/fast preview]
     end
 
     subgraph Polyphonic Path
@@ -140,7 +141,9 @@ flowchart TD
         RTFX[PitchCorrector\nper-block · key/scale-aware\nSignalsmithStretch presetCheaper]
     end
 
-    AUDIO --> YIN --> NOTES --> RSYNTH --> SS --> XF --> OUT[Corrected Audio File\nreplaceClipAudioFile]
+    AUDIO --> YIN --> NOTES --> BACKEND --> RB --> OUT[Corrected Audio File\nreplaceClipAudioFile]
+    BACKEND --> NATIVE
+    BACKEND --> SS --> SPEAKERS
     AUDIO --> POLY --> MASKS --> SPECSHIFT --> OUT
     AUDIO --> RTFX --> SPEAKERS[Live Output]
 ```
@@ -207,7 +210,8 @@ sequenceDiagram
     UI->>NB: applyPitchCorrection(trackId, clipId, notes)
     NB->>MC: backend.applyPitchCorrection(json)
     MC->>AE: applyPitchCorrection(...)
-    AE->>AE: PitchResynthesizer → SignalsmithShifter
+    AE->>AE: PitchRenderBackend -> rubberband_hq bakeoff
+    AE->>AE: fallback to frozen adaptive selector if HQ unavailable
     AE->>AE: replaceClipAudioFile(newPath)
     AE-->>MC: newFilePath
     MC-->>UI: newFilePath (React re-renders waveform)
@@ -241,7 +245,7 @@ sequenceDiagram
 ### Pitch Editor
 - **Graphical pitch editor** (Melodyne/VariAudio-style) — analyze, display, and redraw pitch curves per note
 - **Real-time auto-tune** corrector (built-in pitch corrector FX) — key/scale-aware, inserted as an FX plugin
-- **Signalsmith Stretch** (MIT) as the default pitch engine — native stereo, formant-preserving, offline quality
+- **PitchRenderBackend** product path - Signalsmith Stretch for scrub/fast preview, `rubberband_hq` as the benchmark-gated open-source offline HQ phrase/clip renderer, and `native_hq_v4` as the reserved Studio13-owned fallback lane if Rubber Band fails quality gates
 - **Polyphonic pitch detection** via Spotify's Basic-Pitch ONNX model
 - Formant shift, vibrato, drift, and transition controls per note
 
@@ -327,7 +331,7 @@ python build.py prod
 |---------|---------|
 | [JUCE 8](https://juce.com/) | Audio engine, plugin hosting, WebBrowserComponent |
 | [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) | MIT — pitch shifting with formant preservation |
-| [RubberBand](https://breakfastquay.com/rubberband/) | R3 engine, alternative pitch shifter |
+| [RubberBand](https://breakfastquay.com/rubberband/) | GPL/commercial - benchmark-gated offline HQ pitch renderer |
 | [YSFX](https://github.com/jpcima/ysfx) | JSFX / Lua script processor |
 | [ONNX Runtime](https://onnxruntime.ai/) | Basic-Pitch polyphonic pitch detection |
 | [sol2](https://github.com/ThePhD/sol2) | Lua scripting engine bindings |

@@ -22,10 +22,10 @@ enum class AutomationMode
     Latch   // Record on touch, continue writing last value after release
 };
 
-// A single automation point (time + value)
+// A single automation point (timeline time + value)
 struct AutomationPoint
 {
-    double timeSamples;  // Position in samples (absolute timeline position)
+    double timeSeconds;  // Absolute timeline position in seconds
     float value;         // Normalised 0.0–1.0 for most params, or raw dB for volume
 };
 
@@ -45,10 +45,10 @@ public:
     void setPoints(std::vector<AutomationPoint> newPoints);
 
     // Add a single point (for recording). Keeps list sorted.
-    void addPoint(double timeSamples, float value);
+    void addPoint(double timeSeconds, float value);
 
     // Remove points in a time range (for automation trim / delete)
-    void removePointsInRange(double startSample, double endSample);
+    void removePointsInRange(double startTimeSeconds, double endTimeSeconds);
 
     // Clear all points
     void clear();
@@ -78,12 +78,12 @@ public:
     // Evaluate automation value at a single sample position.
     // Returns the interpolated value, or defaultValue if no points / mode is Off.
     // Uses ScopedTryLock — returns defaultValue if lock is held (message thread writing).
-    float eval(double timeSamples) const;
+    float eval(double timeSeconds) const;
 
     // Batch evaluate: fill outputBuffer with per-sample values for a block.
-    // startSample = timeline position of first sample in block.
+    // startTimeSeconds = timeline position of first sample in block.
     // Much more efficient than calling eval() per sample — uses cached search position.
-    void evalBlock(double startSample, double sampleRate, int numSamples, float* outputBuffer) const;
+    void evalBlock(double startTimeSeconds, double sampleRate, int numSamples, float* outputBuffer) const;
 
     // Should the audio thread apply automation right now?
     // Read mode: always. Touch: only when NOT touching. Latch: when NOT touching.
@@ -95,7 +95,7 @@ public:
     bool shouldRecord() const;
 
 private:
-    // Points — sorted by timeSamples, protected by lock
+    // Points — sorted by timeSeconds, protected by lock
     std::vector<AutomationPoint> points;
     mutable juce::CriticalSection lock;
 
@@ -106,8 +106,8 @@ private:
 
     AutomationInterpolation interpolation { AutomationInterpolation::Linear };
 
-    // Binary search helper — find index of last point at or before timeSamples
-    int findPointBefore(double timeSamples) const;
+    // Binary search helper — find index of last point at or before timeSeconds
+    int findPointBefore(double timeSeconds) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AutomationList)
 };

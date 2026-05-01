@@ -14,6 +14,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { MetronomeSettings } from "./MetronomeSettings";
 import { MetronomeIcon } from "./icons";
 import { Button, Input, TimeSignatureInput } from "./ui";
+import { formatShortcut } from "../utils/platform";
 
 function formatSMPTE(seconds: number, frameRate: number): string {
   const totalFrames = Math.floor(seconds * frameRate);
@@ -254,7 +255,7 @@ export function TransportBar() {
             active={isRecording}
             disabled={!hasArmedTracks}
             onClick={handleRecord}
-            title={hasArmedTracks ? "Record (Ctrl+R)" : "Arm a track to record"}
+            title={hasArmedTracks ? `Record (${formatShortcut("Ctrl+R")})` : "Arm a track to record"}
             aria-label={hasArmedTracks ? "Record" : "Arm a track to record"}
           >
             <Circle size={16} fill="currentColor" />

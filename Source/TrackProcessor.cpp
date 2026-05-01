@@ -99,16 +99,238 @@ static void normalizeMonoLikeBufferToDualMono(juce::AudioBuffer<float>& buffer,
         buffer.copyFrom(0, 0, buffer, 1, 0, numSamples);
 }
 
+static float backendWidthToPercent(float backendWidth)
+{
+    return juce::jlimit(0.0f, 200.0f, (juce::jlimit(-1.0f, 1.0f, backendWidth) + 1.0f) * 100.0f);
+}
+
+static float widthPercentToBackend(float widthPercent)
+{
+    return juce::jlimit(-1.0f, 1.0f, (juce::jlimit(0.0f, 200.0f, widthPercent) / 100.0f) - 1.0f);
+}
+
+static void applyStereoWidthToBuffer(juce::AudioBuffer<float>& buffer,
+                                     int bufferChannels,
+                                     int numSamples,
+                                     float widthPercent)
+{
+    if (bufferChannels < 2 || std::abs(widthPercent - 100.0f) <= 0.01f)
+        return;
+
+    const float widthFactor = widthPercent / 100.0f;
+    float* left = buffer.getWritePointer(0);
+    float* right = buffer.getWritePointer(1);
+
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const float mid = (left[sample] + right[sample]) * 0.5f;
+        const float side = (left[sample] - right[sample]) * 0.5f;
+        left[sample] = mid + side * widthFactor;
+        right[sample] = mid - side * widthFactor;
+    }
+}
+
 TrackProcessor::TrackProcessor()
      : AudioProcessor (BusesProperties()
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
+    widthAutomation.setDefaultValue(widthPercentToBackend(stereoWidth.load(std::memory_order_relaxed)));
+    preFXVolumeAutomation.setDefaultValue(0.0f);
+    preFXPanAutomation.setDefaultValue(0.0f);
+    preFXWidthAutomation.setDefaultValue(0.0f);
+    trimVolumeAutomation.setDefaultValue(0.0f);
+    muteAutomation.setDefaultValue(0.0f);
+    std::atomic_store_explicit(&pluginAutomationSnapshot,
+                               std::make_shared<const PluginAutomationRouteSnapshot>(),
+                               std::memory_order_release);
     publishRealtimeStateSnapshots();
 }
 
 TrackProcessor::~TrackProcessor()
 {
+}
+
+std::optional<std::pair<int, int>> TrackProcessor::parsePluginAutomationParameterId(const juce::String& parameterId)
+{
+    if (!parameterId.startsWith("plugin_"))
+        return std::nullopt;
+
+    auto suffix = parameterId.substring(7);
+    auto parts = juce::StringArray::fromTokens(suffix, "_", "");
+    if (parts.size() != 2)
+        return std::nullopt;
+
+    const int fxIndex = parts[0].getIntValue();
+    const int paramIndex = parts[1].getIntValue();
+    if (fxIndex < 0 || paramIndex < 0)
+        return std::nullopt;
+
+    return std::make_pair(fxIndex, paramIndex);
+}
+
+std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::findPluginAutomationRoute(const juce::String& parameterId) const
+{
+    auto snapshot = std::atomic_load_explicit(&pluginAutomationSnapshot, std::memory_order_acquire);
+    if (!snapshot)
+        return nullptr;
+
+    for (const auto& route : *snapshot)
+    {
+        if (route && route->parameterId == parameterId)
+            return route;
+    }
+
+    return nullptr;
+}
+
+std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::getOrCreatePluginAutomationRoute(const juce::String& parameterId)
+{
+    if (auto existing = findPluginAutomationRoute(parameterId))
+        return existing;
+
+    auto parsed = parsePluginAutomationParameterId(parameterId);
+    if (!parsed.has_value())
+        return nullptr;
+
+    const auto [fxIndex, paramIndex] = *parsed;
+    auto route = std::make_shared<PluginAutomationRoute>();
+    route->parameterId = parameterId;
+    route->fxIndex = fxIndex;
+    route->paramIndex = paramIndex;
+
+    const bool hasInputFx = fxIndex >= 0 && fxIndex < getNumInputFX();
+    const bool hasTrackFx = fxIndex >= 0 && fxIndex < getNumTrackFX();
+    if (!hasInputFx && !hasTrackFx)
+        return nullptr;
+
+    // The current frontend lane id does not encode whether a plugin lives in the
+    // input or track chain, so keep resolution stable once the lane is created.
+    route->isInputFX = hasInputFx;
+
+    const juce::ScopedLock sl(pluginAutomationRouteLock);
+    if (auto existing = findPluginAutomationRoute(parameterId))
+        return existing;
+
+    auto snapshot = std::atomic_load_explicit(&pluginAutomationSnapshot, std::memory_order_acquire);
+    auto nextSnapshot = std::make_shared<PluginAutomationRouteSnapshot>();
+    if (snapshot)
+        *nextSnapshot = *snapshot;
+    nextSnapshot->push_back(route);
+    std::atomic_store_explicit(&pluginAutomationSnapshot,
+                               std::static_pointer_cast<const PluginAutomationRouteSnapshot>(nextSnapshot),
+                               std::memory_order_release);
+    return route;
+}
+
+std::optional<TrackProcessor::AutomationTarget> TrackProcessor::resolveAutomationTarget(const juce::String& parameterId,
+                                                                                        bool createIfNeeded)
+{
+    AutomationTarget target;
+    if (parameterId == "volume")
+    {
+        target.kind = AutomationTarget::Kind::Volume;
+        target.list = &volumeAutomation;
+        return target;
+    }
+    if (parameterId == "pan")
+    {
+        target.kind = AutomationTarget::Kind::Pan;
+        target.list = &panAutomation;
+        return target;
+    }
+    if (parameterId == "width")
+    {
+        target.kind = AutomationTarget::Kind::Width;
+        target.list = &widthAutomation;
+        return target;
+    }
+    if (parameterId == "volume_prefx")
+    {
+        target.kind = AutomationTarget::Kind::PreFXVolume;
+        target.list = &preFXVolumeAutomation;
+        return target;
+    }
+    if (parameterId == "pan_prefx")
+    {
+        target.kind = AutomationTarget::Kind::PreFXPan;
+        target.list = &preFXPanAutomation;
+        return target;
+    }
+    if (parameterId == "width_prefx")
+    {
+        target.kind = AutomationTarget::Kind::PreFXWidth;
+        target.list = &preFXWidthAutomation;
+        return target;
+    }
+    if (parameterId == "trim_volume")
+    {
+        target.kind = AutomationTarget::Kind::TrimVolume;
+        target.list = &trimVolumeAutomation;
+        return target;
+    }
+    if (parameterId == "mute")
+    {
+        target.kind = AutomationTarget::Kind::Mute;
+        target.list = &muteAutomation;
+        return target;
+    }
+
+    auto route = createIfNeeded ? getOrCreatePluginAutomationRoute(parameterId) : findPluginAutomationRoute(parameterId);
+    if (!route)
+        return std::nullopt;
+
+    target.kind = AutomationTarget::Kind::PluginParameter;
+    target.list = route->automation.get();
+    target.isInputFX = route->isInputFX;
+    target.fxIndex = route->fxIndex;
+    target.paramIndex = route->paramIndex;
+    return target;
+}
+
+float TrackProcessor::getAutomationDefaultValue(const AutomationTarget& target) const
+{
+    switch (target.kind)
+    {
+        case AutomationTarget::Kind::Volume:
+            return getVolume();
+        case AutomationTarget::Kind::Pan:
+            return getPan();
+        case AutomationTarget::Kind::Width:
+            return widthPercentToBackend(getStereoWidth());
+        case AutomationTarget::Kind::PreFXVolume:
+        case AutomationTarget::Kind::PreFXPan:
+        case AutomationTarget::Kind::PreFXWidth:
+        case AutomationTarget::Kind::TrimVolume:
+            return 0.0f;
+        case AutomationTarget::Kind::Mute:
+            return getMute() ? 1.0f : 0.0f;
+        case AutomationTarget::Kind::PluginParameter:
+        {
+            const juce::AudioProcessor* processor = nullptr;
+            if (target.isInputFX)
+            {
+                if (target.fxIndex >= 0 && target.fxIndex < getNumInputFX())
+                    processor = getInputFXProcessor(target.fxIndex);
+            }
+            else
+            {
+                if (target.fxIndex >= 0 && target.fxIndex < getNumTrackFX())
+                    processor = getTrackFXProcessor(target.fxIndex);
+            }
+
+            if (processor == nullptr)
+                return 0.0f;
+
+            const auto& params = processor->getParameters();
+            if (target.paramIndex < 0 || target.paramIndex >= params.size() || params[target.paramIndex] == nullptr)
+                return 0.0f;
+
+            return params[target.paramIndex]->getValue();
+        }
+        default:
+            return 0.0f;
+    }
 }
 
 void TrackProcessor::publishRealtimeStateSnapshots()
@@ -132,6 +354,51 @@ void TrackProcessor::publishRealtimeStateSnapshots()
     std::atomic_store_explicit(&realtimeSidechainSnapshot, sidechainSnapshot, std::memory_order_release);
     std::atomic_store_explicit(&realtimeSendSnapshot, sendSnapshot, std::memory_order_release);
     std::atomic_store_explicit(&realtimeInstrumentSnapshot, instrumentSnapshot, std::memory_order_release);
+}
+
+void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* proc,
+                                                       bool isInputFX,
+                                                       int fxIndex,
+                                                       double blockTimeSeconds)
+{
+    if (proc == nullptr)
+        return;
+
+    auto snapshot = std::atomic_load_explicit(&pluginAutomationSnapshot, std::memory_order_acquire);
+    if (!snapshot || snapshot->empty())
+        return;
+
+    auto& params = proc->getParameters();
+    if (params.isEmpty())
+        return;
+
+    for (const auto& route : *snapshot)
+    {
+        if (!route
+            || route->isInputFX != isInputFX
+            || route->fxIndex != fxIndex
+            || route->automation == nullptr
+            || route->paramIndex < 0
+            || route->paramIndex >= params.size())
+        {
+            continue;
+        }
+
+        auto* param = params[route->paramIndex];
+        if (param == nullptr)
+            continue;
+
+        const float automatedValue = route->automation->shouldPlayback()
+            ? route->automation->eval(blockTimeSeconds)
+            : route->automation->getDefaultValue();
+        const float clampedValue = juce::jlimit(0.0f, 1.0f, automatedValue);
+        const float lastValue = route->lastAppliedValue.load(std::memory_order_relaxed);
+        if (std::isfinite(lastValue) && std::abs(lastValue - clampedValue) <= 1.0e-6f)
+            continue;
+
+        param->setValue(clampedValue);
+        route->lastAppliedValue.store(clampedValue, std::memory_order_relaxed);
+    }
 }
 
 const juce::String TrackProcessor::getName() const
@@ -354,7 +621,13 @@ bool TrackProcessor::tryProcessBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
 void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    const double trackProcessStartMs = juce::Time::getMillisecondCounterHiRes();
+    // Only time the track when ARA diagnostics are enabled and an ARA plugin is active.
+    // QueryPerformanceCounter is cheap but not free — at 32-sample blocks this fires
+    // 1500×/sec, so we avoid it for non-ARA tracks (e.g. Amplitube, S13 FX).
+    const bool isARATrack = kEnableARADebugDiagnostics
+                         && araController != nullptr
+                         && araController->isActive();
+    const double trackProcessStartMs = isARATrack ? juce::Time::getMillisecondCounterHiRes() : 0.0;
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -369,11 +642,11 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     auto sidechainSnapshot = std::atomic_load_explicit(&realtimeSidechainSnapshot, std::memory_order_acquire);
     auto sendSnapshot = std::atomic_load_explicit(&realtimeSendSnapshot, std::memory_order_acquire);
     const bool instrumentForceFloat = instrumentForceFloatOverride.load(std::memory_order_acquire);
-    const double blockStartTimeSeconds = blockSampleRate > 0.0 ? (blockStartSample / blockSampleRate) : 0.0;
+    const double blockTimeSeconds = this->blockStartTimeSeconds;
 
     if (araController != nullptr && araController->isActive())
         araController->updateTransportDebugState(araTransportPlayingDebugState.load(std::memory_order_acquire),
-                                                 blockStartTimeSeconds);
+                                                 blockTimeSeconds);
 
     // Safety: only clear channels that actually exist in the buffer
     int bufferChannels = buffer.getNumChannels();
@@ -381,7 +654,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         buffer.clear (i, 0, buffer.getNumSamples());
 
     // Apply mute first - if muted, silence and return
-    if (isMuted.load())
+    if (isMuted.load() && !ignoreStaticMuteDuringProcessing.load(std::memory_order_relaxed))
     {
         buffer.clear();
         currentRMS = 0.0f;
@@ -459,9 +732,12 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     }
 
     // Channel-safe FX processing helper
-    auto safeProcessFX = [&](juce::AudioProcessor* proc, bool forceFloat)
+    auto safeProcessFX = [&](juce::AudioProcessor* proc, bool forceFloat, bool isInputFXChain, int fxIndex)
     {
-        const double envelopeStartMs = juce::Time::getMillisecondCounterHiRes();
+        applyPluginAutomationForProcessor(proc, isInputFXChain, fxIndex, blockTimeSeconds);
+
+        // Compute isARAProcessor first so we can gate expensive QPC calls on it.
+        // For non-ARA plugins (Amplitube, S13 FX, etc.) all timing overhead is skipped.
         int pluginChannels = juce::jmax(proc->getTotalNumInputChannels(),
                                          proc->getTotalNumOutputChannels());
         const bool isARAProcessor = araController != nullptr
@@ -470,6 +746,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                                  && trackFXSnapshot
                                  && araFXIndex < static_cast<int>(trackFXSnapshot->size())
                                  && (*trackFXSnapshot)[static_cast<size_t>(araFXIndex)].get() == proc;
+        const double envelopeStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
         const bool useDoublePrecision =
             processingPrecisionMode == ProcessingPrecisionMode::Hybrid64
             && !forceFloat
@@ -538,10 +815,10 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
 
         if (!useDoublePrecision && pluginChannels == bufferChannels)
         {
-            const double processStartMs = juce::Time::getMillisecondCounterHiRes();
-            preProcessMs = processStartMs - envelopeStartMs;
+            const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+            preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
             proc->processBlock(buffer, midiMessages);
-            processDurationMs = juce::Time::getMillisecondCounterHiRes() - processStartMs;
+            processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
             // Mono plugin on stereo track: duplicate processed output to all channels
             // (matches Reaper behaviour — avoids dry right channel when plugin is mono out)
             int outCh = proc->getTotalNumOutputChannels();
@@ -550,7 +827,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 for (int ch = outCh; ch < bufferChannels; ++ch)
                     buffer.copyFrom (ch, 0, buffer, 0, 0, numSamps);
             }
-            logARAProcessDuration(juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs));
+            logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
         }
         else
         {
@@ -576,10 +853,10 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     channelPtrs[ch] = fxProcessBufferDouble.getWritePointer(ch);
 
                 juce::AudioBuffer<double> pluginBuffer(channelPtrs, expandedCh, numSamps);
-                const double processStartMs = juce::Time::getMillisecondCounterHiRes();
-                preProcessMs = processStartMs - envelopeStartMs;
+                const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+                preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
                 proc->processBlock(pluginBuffer, midiMessages);
-                processDurationMs = juce::Time::getMillisecondCounterHiRes() - processStartMs;
+                processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
 
                 if (expandedCh == 1 && bufferChannels > 1)
                 {
@@ -601,7 +878,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                             dest[sample] = static_cast<float>(src[sample]);
                     }
                 }
-                logARAProcessDuration(juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs));
+                logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
             }
             else
             {
@@ -627,10 +904,10 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     channelPtrs[ch] = fxProcessBuffer.getWritePointer(ch);
 
                 juce::AudioBuffer<float> pluginBuffer(channelPtrs, expandedCh, numSamps);
-                const double processStartMs = juce::Time::getMillisecondCounterHiRes();
-                preProcessMs = processStartMs - envelopeStartMs;
+                const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+                preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
                 proc->processBlock(pluginBuffer, midiMessages);
-                processDurationMs = juce::Time::getMillisecondCounterHiRes() - processStartMs;
+                processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
 
                 if (expandedCh == 1 && bufferChannels > 1)
                 {
@@ -642,10 +919,64 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     for (int ch = 0; ch < bufferChannels; ++ch)
                         buffer.copyFrom(ch, 0, pluginBuffer, ch < expandedCh ? ch : 0, 0, numSamps);
                 }
-                logARAProcessDuration(juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs));
+                logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
             }
         }
     };
+
+    // ===== PRE-FX AUTOMATION =====
+    const int numSamps = buffer.getNumSamples();
+    const double processingSampleRate = juce::jmax(1.0, getSampleRate());
+    const float staticPreFXVolDb = 0.0f;
+    const float staticPreFXPan = 0.0f;
+    const float staticPreFXWidth = 100.0f;
+    const bool preFXVolAutoActive = preFXVolumeAutomation.shouldPlayback() && preFXVolumeAutomation.getNumPoints() > 0;
+    const bool preFXPanAutoActive = preFXPanAutomation.shouldPlayback() && preFXPanAutomation.getNumPoints() > 0;
+    const bool preFXWidthAutoActive = preFXWidthAutomation.shouldPlayback() && preFXWidthAutomation.getNumPoints() > 0;
+
+    if (preFXVolAutoActive || preFXPanAutoActive)
+    {
+        for (int i = 0; i < numSamps; ++i)
+        {
+            const double timeSeconds = blockTimeSeconds + (static_cast<double>(i) / processingSampleRate);
+            float volDb = preFXVolAutoActive ? preFXVolumeAutomation.eval(timeSeconds) : staticPreFXVolDb;
+            float pan = preFXPanAutoActive ? preFXPanAutomation.eval(timeSeconds) : staticPreFXPan;
+            volDb = juce::jlimit(-60.0f, 12.0f, volDb);
+            pan = juce::jlimit(-1.0f, 1.0f, pan);
+
+            float leftGain = 1.0f;
+            float rightGain = 1.0f;
+            computePanLawGains(panLaw, pan, juce::Decibels::decibelsToGain(volDb), leftGain, rightGain);
+
+            if (bufferChannels >= 1)
+                buffer.setSample(0, i, buffer.getSample(0, i) * leftGain);
+            if (bufferChannels >= 2)
+                buffer.setSample(1, i, buffer.getSample(1, i) * rightGain);
+        }
+    }
+
+    if (bufferChannels >= 2)
+    {
+        if (preFXWidthAutoActive)
+        {
+            float* left = buffer.getWritePointer(0);
+            float* right = buffer.getWritePointer(1);
+            for (int i = 0; i < numSamps; ++i)
+            {
+                const double timeSeconds = blockTimeSeconds + (static_cast<double>(i) / processingSampleRate);
+                const float widthPercent = backendWidthToPercent(preFXWidthAutomation.eval(timeSeconds));
+                const float widthFactor = widthPercent / 100.0f;
+                const float mid = (left[i] + right[i]) * 0.5f;
+                const float side = (left[i] - right[i]) * 0.5f;
+                left[i] = mid + side * widthFactor;
+                right[i] = mid - side * widthFactor;
+            }
+        }
+        else
+        {
+            applyStereoWidthToBuffer(buffer, bufferChannels, numSamps, staticPreFXWidth);
+        }
+    }
 
     // Channel strip EQ (processed before plugin FX chains)
     if (channelStripEQEnabled)
@@ -666,14 +997,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                                  && inputFXPrecisionOverrideSnapshot->count(pluginIndex) > 0
                                  && inputFXPrecisionOverrideSnapshot->at(pluginIndex);
             if (plugin && !bypassed)
-                safeProcessFX(plugin.get(), forceFloat);
+                safeProcessFX(plugin.get(), forceFloat, true, pluginIndex);
         }
     }
 
     // Instrument processing lives between input FX and track FX so that
     // instrument output can be post-processed by normal track FX.
     if (currentTrackType == TrackType::Instrument && instrumentSnapshot)
-        safeProcessFX(instrumentSnapshot.get(), instrumentForceFloat);
+        safeProcessFX(instrumentSnapshot.get(), instrumentForceFloat, false, -1);
 
     // Process through track FX chain (with sidechain support)
     for (int fxIdx = 0; trackFXSnapshot && fxIdx < (int)trackFXSnapshot->size(); ++fxIdx)
@@ -705,6 +1036,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
 
         if (hasSidechain)
         {
+            applyPluginAutomationForProcessor(proc, false, fxIdx, blockTimeSeconds);
+
             // Sidechain path: expand buffer to include sidechain channels after
             // the main stereo channels.  The plugin's second input bus receives
             // the sidechain audio.
@@ -817,11 +1150,11 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         else
         {
             // No sidechain — use normal channel-safe processing
-            safeProcessFX(proc, forceFloat);
+            safeProcessFX(proc, forceFloat, false, fxIdx);
         }
     }
 
-    const double trackProcessDurationMs = juce::Time::getMillisecondCounterHiRes() - trackProcessStartMs;
+    const double trackProcessDurationMs = isARATrack ? (juce::Time::getMillisecondCounterHiRes() - trackProcessStartMs) : 0.0;
     if (kEnableARADebugDiagnostics
         && trackProcessDurationMs > 10.0
         && araController != nullptr
@@ -831,7 +1164,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             + " callback=" + juce::String(static_cast<juce::int64>(currentARAProcessDebugInfo.callbackCounter))
             + " firstCallbackAfterTransportStart=" + juce::String(currentARAProcessDebugInfo.firstCallbackAfterTransportStart ? "true" : "false")
             + " totalTrackMs=" + juce::String(trackProcessDurationMs, 2)
-            + " blockStartSeconds=" + juce::String(blockStartTimeSeconds, 3)
+            + " blockStartSeconds=" + juce::String(blockTimeSeconds, 3)
             + " numSamples=" + juce::String(buffer.getNumSamples()));
     }
 
@@ -886,19 +1219,29 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 buffer.getNumSamples());
     }
 
-    // ===== STEREO WIDTH (M/S processing) =====
-    float widthVal = stereoWidth.load(std::memory_order_relaxed);
-    if (bufferChannels >= 2 && std::abs(widthVal - 100.0f) > 0.01f)
+    // ===== POST-FX WIDTH =====
+    const bool widthAutoActive = widthAutomation.shouldPlayback() && widthAutomation.getNumPoints() > 0;
+    if (bufferChannels >= 2)
     {
-        float w = widthVal / 100.0f;  // 0.0 = mono, 1.0 = normal, 2.0 = extra wide
-        float* L = buffer.getWritePointer(0);
-        float* R = buffer.getWritePointer(1);
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        if (widthAutoActive)
         {
-            float mid  = (L[i] + R[i]) * 0.5f;
-            float side = (L[i] - R[i]) * 0.5f;
-            L[i] = mid + side * w;
-            R[i] = mid - side * w;
+            float* left = buffer.getWritePointer(0);
+            float* right = buffer.getWritePointer(1);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const double timeSeconds = blockTimeSeconds + (static_cast<double>(i) / processingSampleRate);
+                const float widthPercent = backendWidthToPercent(widthAutomation.eval(timeSeconds));
+                const float widthFactor = widthPercent / 100.0f;
+                const float mid = (left[i] + right[i]) * 0.5f;
+                const float side = (left[i] - right[i]) * 0.5f;
+                left[i] = mid + side * widthFactor;
+                right[i] = mid - side * widthFactor;
+            }
+        }
+        else
+        {
+            applyStereoWidthToBuffer(buffer, bufferChannels, buffer.getNumSamples(),
+                                     stereoWidth.load(std::memory_order_relaxed));
         }
     }
 
@@ -916,29 +1259,23 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             preFaderBuffer.copyFrom(ch, 0, buffer, ch, 0, pfSamples);
     }
 
-    // ===== AUTOMATION-AWARE GAIN APPLICATION =====
-    int numSamps = buffer.getNumSamples();
+    // ===== AUTOMATION-AWARE FADER/TAIL APPLICATION =====
     bool volAutoActive = volumeAutomation.shouldPlayback() && volumeAutomation.getNumPoints() > 0;
     bool panAutoActive = panAutomation.shouldPlayback() && panAutomation.getNumPoints() > 0;
+    bool trimAutoActive = trimVolumeAutomation.shouldPlayback() && trimVolumeAutomation.getNumPoints() > 0;
+    bool muteAutoActive = muteAutomation.shouldPlayback() && muteAutomation.getNumPoints() > 0;
 
     if (volAutoActive || panAutoActive)
     {
-        // Ensure pre-allocated automation buffer is large enough
-        if (automationGainBuffer.getNumSamples() < numSamps)
-            automationGainBuffer.setSize(2, numSamps, false, false, true);
-
-        // Evaluate volume automation (dB values) per sample, or use static fader value
         float staticVolDB = trackVolumeDB.load(std::memory_order_relaxed);
         float staticPan = trackPan.load(std::memory_order_relaxed);
 
         for (int i = 0; i < numSamps; ++i)
         {
-            double samplePos = blockStartSample + static_cast<double>(i);
+            const double timeSeconds = blockTimeSeconds + (static_cast<double>(i) / processingSampleRate);
+            float volDB = volAutoActive ? volumeAutomation.eval(timeSeconds) : staticVolDB;
+            float pan   = panAutoActive ? panAutomation.eval(timeSeconds)   : staticPan;
 
-            float volDB = volAutoActive ? volumeAutomation.eval(samplePos) : staticVolDB;
-            float pan   = panAutoActive ? panAutomation.eval(samplePos)   : staticPan;
-
-            // Clamp to safe ranges
             volDB = juce::jlimit(-60.0f, 12.0f, volDB);
             pan   = juce::jlimit(-1.0f, 1.0f, pan);
 
@@ -956,7 +1293,6 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     }
     else
     {
-        // No automation active — use pre-computed cached gains (original fast path)
         float leftGain  = cachedPanL.load(std::memory_order_relaxed);
         float rightGain = cachedPanR.load(std::memory_order_relaxed);
 
@@ -964,6 +1300,33 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             buffer.applyGain(0, 0, numSamps, leftGain);
         if (bufferChannels >= 2)
             buffer.applyGain(1, 0, numSamps, rightGain);
+    }
+
+    if (trimAutoActive)
+    {
+        for (int i = 0; i < numSamps; ++i)
+        {
+            const double timeSeconds = blockTimeSeconds + (static_cast<double>(i) / processingSampleRate);
+            const float trimDb = juce::jlimit(-60.0f, 12.0f, trimVolumeAutomation.eval(timeSeconds));
+            const float trimGain = juce::Decibels::decibelsToGain(trimDb);
+            if (bufferChannels >= 1)
+                buffer.setSample(0, i, buffer.getSample(0, i) * trimGain);
+            if (bufferChannels >= 2)
+                buffer.setSample(1, i, buffer.getSample(1, i) * trimGain);
+        }
+    }
+
+    if (muteAutoActive)
+    {
+        for (int i = 0; i < numSamps; ++i)
+        {
+            const double timeSeconds = blockTimeSeconds + (static_cast<double>(i) / processingSampleRate);
+            const bool muted = muteAutomation.eval(timeSeconds) > 0.5f;
+            if (!muted)
+                continue;
+            for (int ch = 0; ch < bufferChannels; ++ch)
+                buffer.setSample(ch, i, 0.0f);
+        }
     }
 
     // ---- REAPER-style peak metering with decimation ----
@@ -988,14 +1351,6 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         meterSampleCount = 0;
     }
 
-    if (realtimeFallbackBuffer.getNumChannels() < bufferChannels
-        || realtimeFallbackBuffer.getNumSamples() < buffer.getNumSamples())
-    {
-        realtimeFallbackBuffer.setSize(bufferChannels, buffer.getNumSamples(), false, false, true);
-    }
-
-    for (int ch = 0; ch < bufferChannels; ++ch)
-        realtimeFallbackBuffer.copyFrom(ch, 0, buffer, ch, 0, buffer.getNumSamples());
 }
 
 bool TrackProcessor::hasEditor() const
@@ -1231,7 +1586,21 @@ juce::AudioProcessor* TrackProcessor::getInputFXProcessor(int index)
     return nullptr;
 }
 
+const juce::AudioProcessor* TrackProcessor::getInputFXProcessor(int index) const
+{
+    if (index >= 0 && index < (int)inputFXPlugins.size())
+        return inputFXPlugins[index].get();
+    return nullptr;
+}
+
 juce::AudioProcessor* TrackProcessor::getTrackFXProcessor(int index)
+{
+    if (index >= 0 && index < (int)trackFXPlugins.size())
+        return trackFXPlugins[index].get();
+    return nullptr;
+}
+
+const juce::AudioProcessor* TrackProcessor::getTrackFXProcessor(int index) const
 {
     if (index >= 0 && index < (int)trackFXPlugins.size())
         return trackFXPlugins[index].get();
@@ -1613,14 +1982,14 @@ void TrackProcessor::markActiveMIDINoteState(const juce::MidiMessage& message)
 }
 
 void TrackProcessor::appendScheduledMIDIToBuffer(juce::MidiBuffer& destination,
-                                                 double blockStartTimeSeconds,
+                                                 double blockTimeSeconds,
                                                  int numSamples, double sampleRate) const
 {
     auto clips = std::atomic_load_explicit(&scheduledMIDIClips, std::memory_order_acquire);
     if (!clips || clips->empty() || sampleRate <= 0.0)
         return;
 
-    const double blockEndTimeSeconds = blockStartTimeSeconds + (static_cast<double>(numSamples) / sampleRate);
+    const double blockEndTimeSeconds = blockTimeSeconds + (static_cast<double>(numSamples) / sampleRate);
 
     for (const auto& clip : *clips)
     {
@@ -1628,16 +1997,16 @@ void TrackProcessor::appendScheduledMIDIToBuffer(juce::MidiBuffer& destination,
             continue;
 
         const double clipEndTime = clip.startTime + clip.duration;
-        if (clipEndTime <= blockStartTimeSeconds || clip.startTime >= blockEndTimeSeconds)
+        if (clipEndTime <= blockTimeSeconds || clip.startTime >= blockEndTimeSeconds)
             continue;
 
         for (const auto& event : clip.events)
         {
             const double absoluteEventTime = clip.startTime + event.timestampSeconds;
-            if (absoluteEventTime < blockStartTimeSeconds || absoluteEventTime >= blockEndTimeSeconds)
+            if (absoluteEventTime < blockTimeSeconds || absoluteEventTime >= blockEndTimeSeconds)
                 continue;
 
-            int sampleOffset = static_cast<int>(std::floor((absoluteEventTime - blockStartTimeSeconds) * sampleRate));
+            int sampleOffset = static_cast<int>(std::floor((absoluteEventTime - blockTimeSeconds) * sampleRate));
             sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1), sampleOffset);
             destination.addEvent(event.message, sampleOffset);
         }
@@ -1665,26 +2034,26 @@ bool TrackProcessor::hasQueuedMIDI() const
     return midiQueueReadIndex.load(std::memory_order_acquire) != midiQueueWriteIndex.load(std::memory_order_acquire);
 }
 
-bool TrackProcessor::hasScheduledMIDIInBlock(double blockStartTimeSeconds, int numSamples, double sampleRate) const
+bool TrackProcessor::hasScheduledMIDIInBlock(double blockTimeSeconds, int numSamples, double sampleRate) const
 {
     auto clips = std::atomic_load_explicit(&scheduledMIDIClips, std::memory_order_acquire);
     if (!clips || clips->empty() || sampleRate <= 0.0)
         return false;
 
-    const double blockEndTimeSeconds = blockStartTimeSeconds + (static_cast<double>(numSamples) / sampleRate);
+    const double blockEndTimeSeconds = blockTimeSeconds + (static_cast<double>(numSamples) / sampleRate);
     for (const auto& clip : *clips)
     {
         if (clip.events.empty())
             continue;
 
         const double clipEndTime = clip.startTime + clip.duration;
-        if (clipEndTime <= blockStartTimeSeconds || clip.startTime >= blockEndTimeSeconds)
+        if (clipEndTime <= blockTimeSeconds || clip.startTime >= blockEndTimeSeconds)
             continue;
 
         for (const auto& event : clip.events)
         {
             const double absoluteEventTime = clip.startTime + event.timestampSeconds;
-            if (absoluteEventTime >= blockStartTimeSeconds && absoluteEventTime < blockEndTimeSeconds)
+            if (absoluteEventTime >= blockTimeSeconds && absoluteEventTime < blockEndTimeSeconds)
                 return true;
         }
     }
@@ -1692,13 +2061,13 @@ bool TrackProcessor::hasScheduledMIDIInBlock(double blockStartTimeSeconds, int n
     return false;
 }
 
-void TrackProcessor::buildMidiBuffer(juce::MidiBuffer& destination, double blockStartTimeSeconds,
+void TrackProcessor::buildMidiBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
                                      int numSamples, double sampleRate, bool playing)
 {
     destination.clear();
 
     if (playing)
-        appendScheduledMIDIToBuffer(destination, blockStartTimeSeconds, numSamples, sampleRate);
+        appendScheduledMIDIToBuffer(destination, blockTimeSeconds, numSamples, sampleRate);
 
     appendQueuedMIDIToBuffer(destination, numSamples);
 
@@ -1714,7 +2083,7 @@ void TrackProcessor::buildMidiBuffer(juce::MidiBuffer& destination, double block
         markActiveMIDINoteState(metadata.getMessage());
 }
 
-bool TrackProcessor::needsProcessing(double blockStartTimeSeconds, int numSamples,
+bool TrackProcessor::needsProcessing(double blockTimeSeconds, int numSamples,
                                      double sampleRate, bool playing) const
 {
     // Instrument tracks must always be processed so they can respond to
@@ -1726,7 +2095,7 @@ bool TrackProcessor::needsProcessing(double blockStartTimeSeconds, int numSample
     if (hasQueuedMIDI())
         return true;
 
-    if (playing && hasScheduledMIDIInBlock(blockStartTimeSeconds, numSamples, sampleRate))
+    if (playing && hasScheduledMIDIInBlock(blockTimeSeconds, numSamples, sampleRate))
         return true;
 
     return false;

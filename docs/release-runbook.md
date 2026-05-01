@@ -39,8 +39,10 @@ Use this flow instead:
 8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
+   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Linux.AppImage`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-arm64.zip`
+   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-linux-x64.tar.gz`
 9. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
 The stable installer/runtime filenames are part of the public download contract. The website repo is now the only publisher of public metadata and redirects.
@@ -147,6 +149,7 @@ That publish-asset set contains:
 - `OpenStudio-ai-runtime-stable-latest.json`
 - `OpenStudio-appcast-windows-stable.xml`
 - `OpenStudio-appcast-macos-stable.xml`
+- `OpenStudio-appcast-linux-stable.xml`
 - `OpenStudio-checksums.txt`
 
 The website repo should fetch those assets after the desktop release publishes, place them into its deploy-input area, and then deploy `openstudio.org.in`.

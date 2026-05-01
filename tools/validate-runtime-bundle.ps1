@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("windows", "macos")]
+    [ValidateSet("windows", "macos", "linux")]
     [string]$Platform,
 
     [Parameter(Mandatory = $true)]
@@ -128,6 +128,23 @@ switch ($Platform) {
             }
         }
     }
+    "linux" {
+        # Linux: flat output directory (AppImage contents or raw build output)
+        $binaryPath = Join-Path $resolvedBundlePath "OpenStudio"
+        Assert-Exists -Path $binaryPath -Description "OpenStudio binary"
+
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion)) {
+            # Read version from embedded string via --version flag if the binary is executable
+            try {
+                $versionOutput = & "$binaryPath" --version 2>&1 | Select-Object -First 1
+                if ($versionOutput -notmatch [regex]::Escape($ExpectedVersion)) {
+                    Write-Warning "Linux bundle version check: expected '$ExpectedVersion', binary reported '$versionOutput'. Continuing."
+                }
+            } catch {
+                Write-Warning "Could not query Linux binary version: $_"
+            }
+        }
+    }
 }
 
 $shellCriticalRuntimeEntries = @(
@@ -140,7 +157,8 @@ $bundledFeatureEntries = @(
     @{ Source = "scripts"; Target = "scripts"; Description = "stock scripts bundle" },
     @{ Source = "resources/models/basic_pitch_nmp.onnx"; Target = "models/basic_pitch_nmp.onnx"; Description = "polyphonic pitch model" },
     @{ Source = "tools/install_ai_tools.py"; Target = "scripts/install_ai_tools.py"; Description = "AI tools installer script" },
-    @{ Source = "tools/ai_runtime_probe.py"; Target = "scripts/ai_runtime_probe.py"; Description = "AI runtime capability probe script" }
+    @{ Source = "tools/ai_runtime_probe.py"; Target = "scripts/ai_runtime_probe.py"; Description = "AI runtime capability probe script" },
+    @{ Source = "tools/generate_music.py"; Target = "scripts/generate_music.py"; Description = "music generation helper script" }
 )
 
 foreach ($entry in $shellCriticalRuntimeEntries) {

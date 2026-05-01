@@ -5,7 +5,6 @@
 #include "PitchMapper.h"
 #include "signalsmith-stretch.h"
 #include <atomic>
-#include <mutex>
 #include <vector>
 
 /**
@@ -99,11 +98,19 @@ private:
     float lastDetectedHz = 0.0f;
     float lastCorrectedHz = 0.0f;
 
-    // Pitch history for UI
+    // Pre-allocated buffers/vectors for processBlock — sized in prepareToPlay,
+    // reused every callback to avoid heap allocation on the audio thread.
+    juce::AudioBuffer<float>  dryBuffer;       // dry copy for wet/mix blend
+    std::vector<const float*> inPtrs;          // Signalsmith input channel pointers
+    std::vector<float*>       outPtrs;         // Signalsmith output channel pointers
+    juce::AudioBuffer<float>  stretchOutputBuf; // Signalsmith output staging buffer
+
+    // Pitch history for UI — lock-free single-writer (audio thread) / single-reader (UI).
+    // Audio thread writes at writePos then increments with release semantics.
+    // UI thread loads writePos with acquire, then reads older indices without a lock.
     static constexpr int maxPitchHistory = 512;
     std::vector<PitchHistoryFrame> pitchHistory;
-    int pitchHistoryWritePos = 0;
-    mutable std::mutex pitchHistoryMutex;
+    std::atomic<int> pitchHistoryWritePos { 0 };
 
     // MIDI output state
     int currentMidiNote = -1;       // Currently sounding note (-1 = none)

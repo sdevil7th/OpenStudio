@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { nativeBridge } from "../../services/NativeBridge";
+import { prepareForManualRender } from "../../utils/renderPreparation";
 
 // @ts-nocheck
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -31,7 +32,7 @@ export const renderQueueActions = (set: SetFn, get: GetFn) => ({
           ),
         }));
         try {
-          await get().syncClipsWithBackend();
+          await prepareForManualRender(get().syncClipsWithBackend, "render-queue");
           await nativeBridge.renderProject({
             source: job.options.source,
             startTime: job.options.startTime,
@@ -44,6 +45,7 @@ export const renderQueueActions = (set: SetFn, get: GetFn) => ({
             normalize: job.options.normalize,
             addTail: job.options.addTail,
             tailLength: job.options.tailLength,
+            includeMetronome: false,
           });
           set((s) => ({
             renderQueue: s.renderQueue.map((j) =>

@@ -5,6 +5,8 @@
 
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "./useDAWStore";
+import { formatShortcut } from "../utils/platform";
+import { createTrackOfType } from "../utils/trackCreation";
 
 export type ActionShortcutScope =
   | "global"
@@ -116,6 +118,9 @@ export function getRegisteredActions(): ActionDef[] {
       const trackId = crypto.randomUUID();
       state.addTrack({ id: trackId, name: `Instrument ${state.tracks.filter((t) => t.type === "instrument").length + 1}`, type: "instrument", armed: true, monitorEnabled: true });
       state.openPluginBrowser(trackId);
+    }},
+    { id: "insert.aiTrack", name: "Insert AI Track", category: "Insert", shortcut: "Ctrl+Alt+T", execute: () => {
+      void createTrackOfType("ai");
     }},
     { id: "insert.quickAddInstrument", name: "Quick Add Instrument Track", category: "Insert", shortcut: "Ctrl+Shift+I", execute: () => {
       const state = s();
@@ -387,6 +392,18 @@ export function getEffectiveActionShortcut(actionId: string): string | undefined
   }
 
   return getActionShortcut(actionId);
+}
+
+/** Platform-formatted shortcut for display (e.g. "Cmd+Z" on Mac, "Ctrl+Z" on Windows). */
+export function getDisplayShortcut(actionId: string): string | undefined {
+  const s = getActionShortcut(actionId);
+  return s ? formatShortcut(s) : undefined;
+}
+
+/** Platform-formatted effective shortcut (custom override + platform formatting) for display. */
+export function getDisplayEffectiveShortcut(actionId: string): string | undefined {
+  const s = getEffectiveActionShortcut(actionId);
+  return s ? formatShortcut(s) : undefined;
 }
 
 export function getActionShortcutScope(actionId: string): ActionShortcutScope | undefined {

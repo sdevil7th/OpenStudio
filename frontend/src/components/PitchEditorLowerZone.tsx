@@ -1,7 +1,8 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
-import { usePitchEditorStore, PitchEditorTool, PitchSnapMode } from "../store/pitchEditorStore";
+import { isPrimaryModifier, formatShortcut } from "../utils/platform";
+import { usePitchEditorStore, PitchEditorTool, PitchSnapMode, PITCH_EDITOR_FORMANT_EDITING_ENABLED } from "../store/pitchEditorStore";
 import { GripHorizontal, X, Scissors, MousePointer, Activity, Waves, ChevronRight, Pencil } from "lucide-react";
 import { NoteInspector } from "./NoteInspector";
 import { CorrectPitchModal } from "./CorrectPitchModal";
@@ -43,6 +44,71 @@ function formatNoteName(midi: number): string {
   const cents = Math.round((midi - Math.round(midi)) * 100);
   const name = NOTE_NAMES[noteClass < 0 ? noteClass + 12 : noteClass];
   return `${name}${octave}${cents !== 0 ? ` ${cents > 0 ? "+" : ""}${cents}¢` : ""}`;
+}
+
+function getNoteEffectiveStart(note: { startTime: number; effectiveStartTime?: number }) {
+  return note.effectiveStartTime ?? note.startTime;
+}
+
+function getNoteEffectiveEnd(note: { endTime: number; effectiveEndTime?: number }) {
+  return note.effectiveEndTime ?? note.endTime;
+}
+
+function getOpeningViewportWindow(
+  clipInfo: { startTime: number; duration: number },
+  currentTime: number,
+) {
+  const playheadInsideClip =
+    currentTime >= clipInfo.startTime &&
+    currentTime <= clipInfo.startTime + clipInfo.duration;
+  const leftEdgeProjectTime = playheadInsideClip ? currentTime : clipInfo.startTime;
+  const clipStart = Math.max(0, leftEdgeProjectTime - clipInfo.startTime);
+  const clipEnd = Math.min(clipInfo.duration, clipStart + 5);
+  return {
+    leftEdgeProjectTime,
+    clipStart,
+    clipEnd,
+  };
+}
+
+function isVoicedAtClipTime(contour: ReturnType<typeof usePitchEditorStore.getState>["contour"], clipTime: number) {
+  const frames = contour?.frames;
+  if (!frames || frames.times.length === 0) return true;
+
+  let closestIndex = -1;
+  let closestDt = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < frames.times.length; i++) {
+    const dt = Math.abs(frames.times[i] - clipTime);
+    if (dt < closestDt) {
+      closestDt = dt;
+      closestIndex = i;
+    }
+  }
+
+  if (closestIndex < 0 || closestDt > 0.04) return false;
+  return Boolean(frames.voiced[closestIndex]) && (frames.midi[closestIndex] ?? 0) > 0 && (frames.confidence[closestIndex] ?? 0) >= 0.15;
+}
+
+function findDrawTargetNote(
+  notes: ReturnType<typeof usePitchEditorStore.getState>["notes"],
+  selectedNoteIds: string[],
+  clipTime: number,
+  midi: number,
+) {
+  const selectedSet = new Set(selectedNoteIds);
+  const candidates = notes.filter((note) => clipTime >= getNoteEffectiveStart(note) && clipTime <= getNoteEffectiveEnd(note));
+  if (candidates.length === 0) return null;
+  const scored = candidates
+    .map((note) => ({
+      note,
+      selected: selectedSet.has(note.id),
+      pitchDistance: Math.abs(note.correctedPitch - midi),
+    }))
+    .sort((a, b) => {
+      if (a.selected !== b.selected) return a.selected ? -1 : 1;
+      return a.pitchDistance - b.pitchDistance;
+    });
+  return scored[0]?.note ?? null;
 }
 
 // Click-to-audition: play a short sine tone at a MIDI pitch via Web Audio API
@@ -121,31 +187,26 @@ export function PitchEditorLowerZone() {
   const timeSignature = useDAWStore((s) => s.timeSignature);
 
   const {
-    contour, notes, isAnalyzing, selectedNoteIds, tool, snapMode, progressPercent, progressLabel,
+    contour, notes, isAnalyzing, analysisPhase, selectedNoteIds, tool, snapMode, progressPercent, progressLabel,
     applyState, applyMessage,
     scrollY, zoomY,
     clipStartTime: pitchClipStartTime, clipDuration: pitchClipDuration,
     analyze, setTool, setSnapMode,
     selectNote, selectAll, deselectAll,
     updateNote, commitNoteEdit, moveSelectedPitch, splitNote,
+    beginInteractivePreview, endInteractivePreview,
     correctSelectedToScale, correctAllToScale,
     undo, redo, pushUndo,
     setScrollY,
     undoStack, redoStack,
-    polyMode, polyNotes, polyAnalysisResult, showPitchSalience,
-    togglePolyMode, analyzePolyphonic, moveSelectedPolyPitch,
-    applyPolyCorrection, togglePitchSalience,
-    polyNoteThreshold, polyOnsetThreshold, polyMinDuration,
-    setPolyNoteThreshold, setPolyOnsetThreshold, setPolyMinDuration,
     scaleKey, scaleType, scaleNotes, setScale, autoDetectScale,
     mergeNotes, toggleCorrectPitchModal,
     abCompareMode, toggleABCompare,
     drawPitchOnNote, beginDrawPitch, commitDrawPitch,
-    globalFormantCents, setGlobalFormantCents,
     renderCoverage,
   } = usePitchEditorStore(
     useShallow((s) => ({
-      contour: s.contour, notes: s.notes, isAnalyzing: s.isAnalyzing, progressPercent: s.progressPercent, progressLabel: s.progressLabel,
+      contour: s.contour, notes: s.notes, isAnalyzing: s.isAnalyzing, analysisPhase: s.analysisPhase, progressPercent: s.progressPercent, progressLabel: s.progressLabel,
       applyState: s.applyState, applyMessage: s.applyMessage,
       selectedNoteIds: s.selectedNoteIds, tool: s.tool, snapMode: s.snapMode,
       scrollY: s.scrollY, zoomY: s.zoomY,
@@ -153,26 +214,17 @@ export function PitchEditorLowerZone() {
       analyze: s.analyze, setTool: s.setTool, setSnapMode: s.setSnapMode,
       selectNote: s.selectNote, selectAll: s.selectAll, deselectAll: s.deselectAll,
       updateNote: s.updateNote, commitNoteEdit: s.commitNoteEdit, moveSelectedPitch: s.moveSelectedPitch,
+      beginInteractivePreview: s.beginInteractivePreview, endInteractivePreview: s.endInteractivePreview,
       splitNote: s.splitNote,
       correctSelectedToScale: s.correctSelectedToScale, correctAllToScale: s.correctAllToScale,
       undo: s.undo, redo: s.redo, pushUndo: s.pushUndo,
       setScrollY: s.setScrollY,
       undoStack: s.undoStack, redoStack: s.redoStack,
-      polyMode: s.polyMode, polyNotes: s.polyNotes,
-      polyAnalysisResult: s.polyAnalysisResult, showPitchSalience: s.showPitchSalience,
-      togglePolyMode: s.togglePolyMode, analyzePolyphonic: s.analyzePolyphonic,
-      moveSelectedPolyPitch: s.moveSelectedPolyPitch,
-      applyPolyCorrection: s.applyPolyCorrection, togglePitchSalience: s.togglePitchSalience,
-      polyNoteThreshold: s.polyNoteThreshold, polyOnsetThreshold: s.polyOnsetThreshold,
-      polyMinDuration: s.polyMinDuration,
-      setPolyNoteThreshold: s.setPolyNoteThreshold, setPolyOnsetThreshold: s.setPolyOnsetThreshold,
-      setPolyMinDuration: s.setPolyMinDuration,
       scaleKey: s.scaleKey, scaleType: s.scaleType, scaleNotes: s.scaleNotes,
       setScale: s.setScale, autoDetectScale: s.autoDetectScale,
       mergeNotes: s.mergeNotes, toggleCorrectPitchModal: s.toggleCorrectPitchModal,
       abCompareMode: s.abCompareMode, toggleABCompare: s.toggleABCompare,
       drawPitchOnNote: s.drawPitchOnNote, beginDrawPitch: s.beginDrawPitch, commitDrawPitch: s.commitDrawPitch,
-      globalFormantCents: s.globalFormantCents, setGlobalFormantCents: s.setGlobalFormantCents,
       renderCoverage: s.renderCoverage,
     }))
   );
@@ -184,16 +236,6 @@ export function PitchEditorLowerZone() {
       : applyState === "queued" || applyState === "processing" || applyState === "preview_processing" || applyState === "final_processing"
         ? "text-daw-accent bg-daw-accent/10 border-daw-accent/30"
       : "text-neutral-500 bg-neutral-800/80 border-neutral-700";
-  const formantStatusHint = globalFormantCents !== 0
-    ? (
-        applyState === "preview_processing"
-          ? "Rendering preview near playhead..."
-          : applyState === "preview_ready" || applyState === "final_processing" || applyState === "done"
-            ? "Previewing rendered formant"
-            : "Rendered formant preview"
-      )
-    : "Clip-wide timbre shift";
-
   const [hoveredNoteId, setHoveredNoteId] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{
     type: "move" | "pitch" | "resize-left" | "resize-right" | "straighten" | "formant" | "gain" | "drift" | "transition-in" | "transition-out" | "transition-both" | "draw";
@@ -206,18 +248,52 @@ export function PitchEditorLowerZone() {
   } | null>(null);
   // Clear analyzed range tracking when clip changes
   const analyzedRangesRef = useRef<Array<[number, number]>>([]);
+  const openViewportKeyRef = useRef<string | null>(null);
   useEffect(() => {
     analyzedRangesRef.current = [];
+    openViewportKeyRef.current = null;
   }, [pitchEditorClipId]);
+
+  // On open, snap the timeline to a 5-second viewport.
+  // If the playhead is inside the clip, anchor to the playhead.
+  // If not, anchor to the clip start so the editor opens on visible content.
+  useEffect(() => {
+    if (!pitchEditorTrackId || !pitchEditorClipId || !clipInfo || canvasSize.width <= 0) return;
+
+    const openKey = `${pitchEditorTrackId}:${pitchEditorClipId}`;
+    if (openViewportKeyRef.current === openKey) return;
+
+    const targetPixelsPerSecond = Math.max(MIN_PPS, Math.min(MAX_PPS, canvasSize.width / 5));
+    const { leftEdgeProjectTime } = getOpeningViewportWindow(clipInfo, currentTime);
+    const daw = useDAWStore.getState();
+
+    setZoom(targetPixelsPerSecond);
+    setScroll(Math.max(0, leftEdgeProjectTime * targetPixelsPerSecond), daw.scrollY);
+    openViewportKeyRef.current = openKey;
+  }, [pitchEditorTrackId, pitchEditorClipId, clipInfo, canvasSize.width, currentTime, setScroll, setZoom]);
 
   // Auto-analyze on mount
   useEffect(() => {
     if (pitchEditorTrackId && pitchEditorClipId && !contour && !isAnalyzing) {
-      // Record initial range so scroll-based re-analyze won't duplicate it
-      analyzedRangesRef.current = [[0, 30]];
-      analyze();
+      if (clipInfo) {
+        const openingWindow = getOpeningViewportWindow(clipInfo, currentTime);
+        const clipStart = openingWindow.clipStart;
+        const clipEnd = openingWindow.clipEnd;
+        if (clipEnd > clipStart) {
+          analyzedRangesRef.current = [[clipStart, clipEnd]];
+          analyze(clipStart, clipEnd);
+        } else {
+          const fallbackStart = Math.max(0, Math.min(openingWindow.clipStart, Math.max(0, clipInfo.duration - 5)));
+          const fallbackEnd = Math.min(clipInfo.duration, fallbackStart + 5);
+          analyzedRangesRef.current = [[fallbackStart, fallbackEnd]];
+          analyze(fallbackStart, fallbackEnd);
+        }
+      } else {
+        analyzedRangesRef.current = [[0, 5]];
+        analyze();
+      }
     }
-  }, [pitchEditorTrackId, pitchEditorClipId, contour, isAnalyzing, analyze]);
+  }, [pitchEditorTrackId, pitchEditorClipId, contour, isAnalyzing, analyze, clipInfo, dawScrollX, pixelsPerSecond, canvasSize.width, currentTime]);
 
   // Re-analyze when scrolling into unanalyzed territory (debounced)
   const analyzeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -250,6 +326,66 @@ export function PitchEditorLowerZone() {
       if (analyzeTimeoutRef.current) clearTimeout(analyzeTimeoutRef.current);
     };
   }, [dawScrollX, pixelsPerSecond, canvasSize.width, pitchEditorTrackId, pitchEditorClipId, isAnalyzing, contour, clipInfo, analyze, undoStack]);
+
+  // Continue filling only the viewport/playhead neighborhood in the background.
+  useEffect(() => {
+    if (!pitchEditorTrackId || !pitchEditorClipId || isAnalyzing || !contour || !clipInfo) return;
+    if (undoStack.length > 0) return;
+
+    const visibleStartProject = dawScrollX / pixelsPerSecond;
+    const visibleStart = visibleStartProject - clipInfo.startTime;
+    const visibleEnd = visibleStart + canvasSize.width / pixelsPerSecond;
+    const clipViewportStart = Math.max(0, visibleStart);
+    const clipViewportEnd = Math.min(clipInfo.duration, visibleEnd);
+    const clipPlayhead = Math.max(0, Math.min(clipInfo.duration, currentTime - clipInfo.startTime));
+    const targetStart = Math.max(0, Math.min(clipViewportStart, clipPlayhead));
+    const targetEnd = Math.min(clipInfo.duration, Math.max(clipViewportEnd, clipPlayhead + 30));
+    if (targetEnd <= targetStart) return;
+
+    const merged = [...analyzedRangesRef.current]
+      .sort((a, b) => a[0] - b[0])
+      .reduce<Array<[number, number]>>((acc, range) => {
+        if (acc.length === 0) {
+          acc.push([...range] as [number, number]);
+          return acc;
+        }
+        const last = acc[acc.length - 1];
+        if (range[0] <= last[1] + 0.25) {
+          last[1] = Math.max(last[1], range[1]);
+        } else {
+          acc.push([...range] as [number, number]);
+        }
+        return acc;
+      }, []);
+
+    let nextGap: [number, number] | null = null;
+    let cursor = targetStart;
+    for (const [start, end] of merged) {
+      if (end <= targetStart || start >= targetEnd) continue;
+      const clippedStart = Math.max(start, targetStart);
+      const clippedEnd = Math.min(end, targetEnd);
+      if (clippedStart > cursor + 0.5) {
+        nextGap = [cursor, clippedStart];
+        break;
+      }
+      cursor = Math.max(cursor, clippedEnd);
+    }
+
+    if (!nextGap && cursor < targetEnd - 0.25)
+      nextGap = [cursor, targetEnd];
+
+    if (!nextGap) return;
+
+    const nextStart = nextGap[0];
+    const nextEnd = Math.min(nextGap[1], nextStart + 5);
+    if (nextEnd <= nextStart + 0.1) return;
+    const timer = setTimeout(() => {
+      analyzedRangesRef.current.push([nextStart, nextEnd]);
+      analyze(nextStart, nextEnd);
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [pitchEditorTrackId, pitchEditorClipId, isAnalyzing, contour, clipInfo, analyze, undoStack, dawScrollX, pixelsPerSecond, canvasSize.width, currentTime]);
 
   // Resize observer
   useEffect(() => {
@@ -289,13 +425,6 @@ export function PitchEditorLowerZone() {
     timeSignature: [daw.timeSignature.numerator, daw.timeSignature.denominator],
     scaleNotes: st.scaleNotes,
     scaleKey: st.scaleKey,
-    polyMode: st.polyMode,
-    polyNotes: st.polyNotes,
-    showPitchSalience: st.showPitchSalience,
-    pitchSalience: st.polyAnalysisResult?.pitchSalience ?? null,
-    salienceDownsampleFactor: st.polyAnalysisResult?.salienceDownsampleFactor ?? 1,
-    salienceHopSize: st.polyAnalysisResult?.hopSize ?? 256,
-    salienceSampleRate: st.polyAnalysisResult?.sampleRate ?? 22050,
     renderCoverage: st.renderCoverage,
   }), []);
 
@@ -320,11 +449,6 @@ export function PitchEditorLowerZone() {
       currentTime, isPlaying, bpm,
       timeSignature: [timeSignature.numerator, timeSignature.denominator],
       scaleNotes, scaleKey,
-      polyMode, polyNotes, showPitchSalience,
-      pitchSalience: polyAnalysisResult?.pitchSalience ?? null,
-      salienceDownsampleFactor: polyAnalysisResult?.salienceDownsampleFactor ?? 1,
-      salienceHopSize: polyAnalysisResult?.hopSize ?? 256,
-      salienceSampleRate: polyAnalysisResult?.sampleRate ?? 22050,
       renderCoverage,
     };
     renderPitchEditor(ctx, canvasSize.width, canvasSize.height, viewport, renderState);
@@ -336,7 +460,7 @@ export function PitchEditorLowerZone() {
       offCtx.drawImage(canvas, 0, 0);
     }
     staticCanvasRef.current = offscreen;
-  }, [canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, polyMode, polyNotes, showPitchSalience, polyAnalysisResult, renderCoverage]);
+  }, [canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, renderCoverage]);
 
   // Playhead RAF — during playback, blit cached static canvas + draw playhead only.
   // This avoids a full renderPitchEditor() (grid, notes, contour) at 60fps.
@@ -461,6 +585,11 @@ export function PitchEditorLowerZone() {
   }, [setZoom, setScroll, setScrollY]);
 
   // Mouse handlers
+  const startInteractivePreviewForHit = useCallback((noteId: string, edge: "body" | "left" | "right" | "top-center" | "bottom-left" | "bottom-right") => {
+    if (edge === "left" || edge === "right") return;
+    beginInteractivePreview(noteId);
+  }, [beginInteractivePreview]);
+
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -497,6 +626,23 @@ export function PitchEditorLowerZone() {
       return;
     }
 
+    const clipTime = xToTime(x, freshViewport);
+    const midi = yToMidi(y, freshViewport, canvasSize.height);
+    if (!hit && pitchState.tool === "draw" && isVoicedAtClipTime(pitchState.contour, clipTime)) {
+      const drawTarget = findDrawTargetNote(currentNotes, pitchState.selectedNoteIds, clipTime, midi);
+      if (drawTarget) {
+        selectNote(drawTarget.id, e.ctrlKey || e.metaKey);
+        beginDrawPitch();
+        drawPitchOnNote(drawTarget.id, clipTime, midi);
+        setDragState({
+          type: "draw", noteId: drawTarget.id, startMouseY: y,
+          origPitch: drawTarget.correctedPitch, origStart: drawTarget.startTime, origEnd: drawTarget.endTime,
+          origValue: 0,
+        });
+        return;
+      }
+    }
+
     if (hit) {
       selectNote(hit.noteId, e.ctrlKey || e.metaKey);
       const note = currentNotes.find((n) => n.id === hit.noteId);
@@ -504,13 +650,15 @@ export function PitchEditorLowerZone() {
 
       if (hit.edge === "top-center") {
         pushUndo("Straighten vibrato");
+        startInteractivePreviewForHit(hit.noteId, hit.edge);
         setDragState({
           type: "straighten", noteId: hit.noteId, startMouseY: y,
           origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
           origValue: note.vibratoDepth,
         });
-      } else if (hit.edge === "bottom-left") {
+      } else if (hit.edge === "bottom-left" && PITCH_EDITOR_FORMANT_EDITING_ENABLED) {
         pushUndo("Change formant");
+        startInteractivePreviewForHit(hit.noteId, hit.edge);
         setDragState({
           type: "formant", noteId: hit.noteId, startMouseY: y,
           origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -518,6 +666,7 @@ export function PitchEditorLowerZone() {
         });
       } else if (hit.edge === "bottom-right") {
         pushUndo("Change gain");
+        startInteractivePreviewForHit(hit.noteId, hit.edge);
         setDragState({
           type: "gain", noteId: hit.noteId, startMouseY: y,
           origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -528,6 +677,7 @@ export function PitchEditorLowerZone() {
         const currentTool = usePitchEditorStore.getState().tool;
         if (currentTool === "vibrato") {
           pushUndo("Adjust vibrato");
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           setDragState({
             type: "straighten", noteId: hit.noteId, startMouseY: y,
             origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -535,6 +685,7 @@ export function PitchEditorLowerZone() {
           });
         } else if (currentTool === "drift") {
           pushUndo("Adjust drift");
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           setDragState({
             type: "drift", noteId: hit.noteId, startMouseY: y,
             origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -543,6 +694,7 @@ export function PitchEditorLowerZone() {
         } else if (currentTool === "pitch") {
           // Pitch tool: same as move but with finer control (no snap) and visual feedback
           pushUndo("Adjust pitch");
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           setDragState({
             type: "pitch", noteId: hit.noteId, startMouseY: y,
             origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -551,6 +703,7 @@ export function PitchEditorLowerZone() {
         } else if (currentTool === "transition") {
           // Transition tool on body: adjust both transitionIn and transitionOut simultaneously
           pushUndo("Adjust transitions");
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           setDragState({
             type: "transition-both", noteId: hit.noteId, startMouseY: y,
             origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -562,6 +715,7 @@ export function PitchEditorLowerZone() {
           return;
         } else if (currentTool === "draw") {
           beginDrawPitch();
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           const clipTime = xToTime(x, freshViewport);
           const midi = yToMidi(y, freshViewport, canvasSize.height);
           drawPitchOnNote(hit.noteId, clipTime, midi);
@@ -572,6 +726,7 @@ export function PitchEditorLowerZone() {
           });
         } else {
           pushUndo("Move note");
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           setDragState({
             type: "move", noteId: hit.noteId, startMouseY: y,
             origPitch: note.correctedPitch, origStart: note.startTime, origEnd: note.endTime,
@@ -582,6 +737,7 @@ export function PitchEditorLowerZone() {
         const currentTool = usePitchEditorStore.getState().tool;
         if (currentTool === "transition") {
           pushUndo("Adjust transition");
+          startInteractivePreviewForHit(hit.noteId, hit.edge);
           setDragState({
             type: hit.edge === "left" ? "transition-in" : "transition-out",
             noteId: hit.noteId, startMouseY: y,
@@ -601,7 +757,7 @@ export function PitchEditorLowerZone() {
     } else {
       deselectAll();
     }
-  }, [canvasSize.height, tool, selectNote, deselectAll, splitNote, pushUndo, beginDrawPitch, drawPitchOnNote]);
+  }, [canvasSize.height, tool, selectNote, deselectAll, splitNote, pushUndo, beginDrawPitch, drawPitchOnNote, startInteractivePreviewForHit]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -624,9 +780,17 @@ export function PitchEditorLowerZone() {
     if (dragState) {
       const deltaY = -(y - dragState.startMouseY);
       if (dragState.type === "move") {
-        const deltaSemitones = deltaY / freshViewport.pixelsPerSemitone;
+        // Alt = fine control (10x slower), regular = normal speed
+        const sensitivity = e.altKey ? 10 : 1;
+        const deltaSemitones = deltaY / (freshViewport.pixelsPerSemitone * sensitivity);
         let newPitch = dragState.origPitch + deltaSemitones;
-        if (snapMode === "chromatic") newPitch = Math.round(newPitch);
+        // Ctrl/Cmd bypasses chromatic snap for between-semitone placement
+        if (snapMode === "chromatic" && !e.ctrlKey && !e.metaKey) {
+          newPitch = Math.round(newPitch);
+        } else {
+          // Round to 1-cent precision
+          newPitch = Math.round(newPitch * 100) / 100;
+        }
         updateNote(dragState.noteId, { correctedPitch: newPitch });
       } else if (dragState.type === "resize-left") {
         const t = xToTime(x, freshViewport);
@@ -652,10 +816,11 @@ export function PitchEditorLowerZone() {
         const newDrift = Math.max(0, Math.min(1, dragState.origValue - deltaY / 100));
         updateNote(dragState.noteId, { driftCorrectionAmount: newDrift });
       } else if (dragState.type === "pitch") {
-        // Pitch tool: finer control (0.1 semitone per 10px), no chromatic snap
-        const deltaSemitones = deltaY / (freshViewport.pixelsPerSemitone * 1.5);
+        // Pitch tool: fine control, no chromatic snap, 1-cent precision
+        const sensitivity = e.altKey ? 20 : 2;
+        const deltaSemitones = deltaY / (freshViewport.pixelsPerSemitone * sensitivity);
         const newPitch = dragState.origPitch + deltaSemitones;
-        updateNote(dragState.noteId, { correctedPitch: Math.round(newPitch * 10) / 10 });
+        updateNote(dragState.noteId, { correctedPitch: Math.round(newPitch * 100) / 100 });
       } else if (dragState.type === "transition-in") {
         const newMs = Math.max(0, Math.min(200, dragState.origValue + deltaY / 2));
         updateNote(dragState.noteId, { transitionIn: Math.round(newMs) });
@@ -693,7 +858,16 @@ export function PitchEditorLowerZone() {
           : "grab";
       } else {
         const currentTool = usePitchEditorStore.getState().tool;
-        canvas.style.cursor = currentTool === "draw" ? "not-allowed" : "default";
+        if (currentTool === "draw") {
+          const clipTime = xToTime(x, freshViewport);
+          const midi = yToMidi(y, freshViewport, canvasSize.height);
+          const drawTarget = isVoicedAtClipTime(pitchState.contour, clipTime)
+            ? findDrawTargetNote(currentNotes, pitchState.selectedNoteIds, clipTime, midi)
+            : null;
+          canvas.style.cursor = drawTarget ? "crosshair" : "not-allowed";
+        } else {
+          canvas.style.cursor = "default";
+        }
       }
     }
   }, [dragState, canvasSize.height, snapMode, updateNote, drawPitchOnNote]);
@@ -705,32 +879,47 @@ export function PitchEditorLowerZone() {
       } else {
         commitNoteEdit();
       }
+    } else {
+      endInteractivePreview();
     }
     setDragState(null);
-  }, [dragState, commitNoteEdit, commitDrawPitch]);
+  }, [dragState, commitNoteEdit, commitDrawPitch, endInteractivePreview]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!pitchEditorTrackId) return;
-      if (e.ctrlKey && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
-      if (e.ctrlKey && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
-      if (e.ctrlKey && e.key === "a") { e.preventDefault(); selectAll(); return; }
+      const key = e.key.toLowerCase();
+      if (isPrimaryModifier(e) && key === "z" && !e.shiftKey) {
+        if (usePitchEditorStore.getState().undoStack.length > 0) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          undo();
+        }
+        return;
+      }
+      if (isPrimaryModifier(e) && (key === "y" || (key === "z" && e.shiftKey))) {
+        if (usePitchEditorStore.getState().redoStack.length > 0) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          redo();
+        }
+        return;
+      }
+      if (isPrimaryModifier(e) && key === "a") { e.preventDefault(); selectAll(); return; }
       if (e.key === "Escape") { closePitchEditor(); return; }
-      if (e.key === "ArrowUp" && !e.ctrlKey) {
+      if (e.key === "ArrowUp" && !isPrimaryModifier(e)) {
         e.preventDefault();
-        if (polyMode) moveSelectedPolyPitch(e.shiftKey ? 0.1 : 1);
-        else moveSelectedPitch(e.shiftKey ? 0.1 : 1);
+        moveSelectedPitch(e.shiftKey ? 0.1 : 1);
         return;
       }
-      if (e.key === "ArrowDown" && !e.ctrlKey) {
+      if (e.key === "ArrowDown" && !isPrimaryModifier(e)) {
         e.preventDefault();
-        if (polyMode) moveSelectedPolyPitch(e.shiftKey ? -0.1 : -1);
-        else moveSelectedPitch(e.shiftKey ? -0.1 : -1);
+        moveSelectedPitch(e.shiftKey ? -0.1 : -1);
         return;
       }
-      if (e.key === "q" || e.key === "Q") { correctSelectedToScale(); return; }
-      if (e.ctrlKey && e.key === "j") {
+      if (key === "q") { correctSelectedToScale(); return; }
+      if (isPrimaryModifier(e) && key === "j") {
         e.preventDefault();
         const sIds = usePitchEditorStore.getState().selectedNoteIds;
         if (sIds.length >= 2) mergeNotes(sIds);
@@ -739,9 +928,9 @@ export function PitchEditorLowerZone() {
       const toolKey = Number.parseInt(e.key);
       if (toolKey >= 1 && toolKey <= TOOL_DEFS.length) setTool(TOOL_DEFS[toolKey - 1].id);
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [pitchEditorTrackId, undo, redo, selectAll, closePitchEditor, moveSelectedPitch, moveSelectedPolyPitch, polyMode, correctSelectedToScale, setTool, mergeNotes]);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [pitchEditorTrackId, undo, redo, selectAll, closePitchEditor, moveSelectedPitch, correctSelectedToScale, setTool, mergeNotes]);
 
   // Panel resize
   const isDragging = useRef(false);
@@ -835,7 +1024,7 @@ export function PitchEditorLowerZone() {
                 ))}
               </div>
               <p className="mt-1 text-[9px] text-neutral-600 leading-tight">
-                Double-click or use Split tool to split notes. Draw modifies pitch on existing notes.
+                Double-click or use Split tool to split notes. Draw follows voiced contour and can start from note shoulders.
               </p>
             </div>
 
@@ -931,7 +1120,7 @@ export function PitchEditorLowerZone() {
                   <button
                     onClick={() => mergeNotes(selectedNoteIds)}
                     className="w-full px-2 py-1 text-[10px] rounded bg-neutral-800 text-neutral-300 hover:bg-neutral-700 transition-colors text-left"
-                    title="Merge selected notes (Ctrl+J)"
+                    title={`Merge selected notes (${formatShortcut("Ctrl+J")})`}
                   >
                     Merge notes
                   </button>
@@ -939,33 +1128,21 @@ export function PitchEditorLowerZone() {
               </div>
             </div>
 
-            {/* Global Formant */}
             <div className="px-2 py-1.5 border-b border-neutral-800/60 shrink-0">
-              <div className="text-[9px] text-neutral-600 uppercase tracking-wider mb-1">Formant</div>
-              <div className="flex items-center gap-2">
-                <span className="text-[9px] text-neutral-500 shrink-0">Global</span>
-                <input
-                  type="range"
-                  min={-386}
-                  max={386}
-                  step={1}
-                  value={globalFormantCents}
-                  onChange={(e) => setGlobalFormantCents(Number(e.target.value))}
-                  className="flex-1 h-1 accent-daw-accent cursor-pointer"
-                />
-                <span className="w-12 text-right text-[10px] font-mono text-neutral-300 shrink-0">
-                  {globalFormantCents > 0 ? "+" : ""}
-                  {globalFormantCents}c
-                </span>
+              <div className="text-[9px] text-neutral-600 uppercase tracking-wider mb-1">Pitch Engine</div>
+              <div className="text-[10px] text-neutral-400 leading-snug">
+                Formant editing is temporarily disabled while the pitch-only engine is being rebuilt around the research renderer.
               </div>
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <span className="text-[8px] text-neutral-600">{formantStatusHint}</span>
-                {applyState !== "idle" && applyMessage && (
-                  <span className={`px-1.5 py-0.5 rounded border text-[8px] uppercase tracking-wider ${applyStateClassName}`}>
+              <div className="mt-1 text-[10px] text-neutral-500 leading-snug">
+                Pitch editing is monophonic only. Stereo vocal clips are still supported and analyzed from a mono sum while correction keeps the clip's multichannel audio.
+              </div>
+              {applyState !== "idle" && applyMessage && (
+                <div className="mt-1">
+                  <span className={`inline-flex px-1.5 py-0.5 rounded border text-[8px] uppercase tracking-wider ${applyStateClassName}`}>
                     {applyMessage}
                   </span>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
             {/* Note Inspector */}
@@ -978,7 +1155,7 @@ export function PitchEditorLowerZone() {
                   onClick={undo}
                   disabled={undoStack.length === 0}
                   className="flex-1 px-2 py-1 text-[10px] rounded bg-neutral-800 text-neutral-300 hover:bg-neutral-700 disabled:opacity-30 transition-colors"
-                  title="Undo (Ctrl+Z)"
+                  title={`Undo (${formatShortcut("Ctrl+Z")})`}
                 >
                   ← Undo
                 </button>
@@ -986,87 +1163,11 @@ export function PitchEditorLowerZone() {
                   onClick={redo}
                   disabled={redoStack.length === 0}
                   className="flex-1 px-2 py-1 text-[10px] rounded bg-neutral-800 text-neutral-300 hover:bg-neutral-700 disabled:opacity-30 transition-colors"
-                  title="Redo (Ctrl+Y)"
+                  title={`Redo (${formatShortcut("Ctrl+Y")})`}
                 >
                   Redo →
                 </button>
               </div>
-            </div>
-
-            {/* Poly mode */}
-            <div className="px-2 py-1.5 border-b border-neutral-800/60 shrink-0">
-              <div className="text-[9px] text-neutral-600 uppercase tracking-wider mb-1">Mode</div>
-              <button
-                onClick={togglePolyMode}
-                className={`w-full px-2 py-1 text-[10px] rounded mb-0.5 transition-colors ${
-                  polyMode
-                    ? "bg-purple-700/80 text-purple-100 ring-1 ring-purple-500/40"
-                    : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200"
-                }`}
-                title="Toggle polyphonic mode"
-              >
-                {polyMode ? "Polyphonic ✓" : "Polyphonic"}
-              </button>
-              {polyMode && (
-                <div className="flex flex-col gap-0.5 mt-0.5">
-                  <button
-                    onClick={analyzePolyphonic}
-                    disabled={isAnalyzing}
-                    className="w-full px-2 py-1 text-[10px] rounded bg-neutral-800 text-amber-400 hover:bg-neutral-700 disabled:opacity-30 transition-colors"
-                    title="Run polyphonic analysis"
-                  >
-                    {isAnalyzing ? "Analyzing…" : "Run Poly Analysis"}
-                  </button>
-                  <button
-                    onClick={togglePitchSalience}
-                    className={`w-full px-2 py-0.5 text-[9px] rounded transition-colors ${
-                      showPitchSalience ? "bg-amber-800/60 text-amber-300" : "bg-neutral-800 text-neutral-500 hover:bg-neutral-700"
-                    }`}
-                  >
-                    Salience heatmap
-                  </button>
-
-                  {/* Poly detection tuning */}
-                  <div className="mt-1 pt-1 border-t border-neutral-800/40">
-                    <div className="text-[8px] text-neutral-600 uppercase tracking-wider mb-1">Detection Tuning</div>
-                    <div className="flex flex-col gap-1">
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[8px] text-neutral-500">Note thresh</span>
-                          <span className="text-[8px] font-mono text-neutral-400">{polyNoteThreshold.toFixed(2)}</span>
-                        </div>
-                        <input
-                          type="range" min={0.01} max={0.5} step={0.01} value={polyNoteThreshold}
-                          onChange={(e) => setPolyNoteThreshold(Number(e.target.value))}
-                          className="w-full h-0.5 bg-neutral-700 rounded-full appearance-none cursor-pointer accent-purple-500"
-                        />
-                      </div>
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[8px] text-neutral-500">Onset thresh</span>
-                          <span className="text-[8px] font-mono text-neutral-400">{polyOnsetThreshold.toFixed(2)}</span>
-                        </div>
-                        <input
-                          type="range" min={0.05} max={0.8} step={0.01} value={polyOnsetThreshold}
-                          onChange={(e) => setPolyOnsetThreshold(Number(e.target.value))}
-                          className="w-full h-0.5 bg-neutral-700 rounded-full appearance-none cursor-pointer accent-purple-500"
-                        />
-                      </div>
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[8px] text-neutral-500">Min duration</span>
-                          <span className="text-[8px] font-mono text-neutral-400">{polyMinDuration}ms</span>
-                        </div>
-                        <input
-                          type="range" min={10} max={500} step={10} value={polyMinDuration}
-                          onChange={(e) => setPolyMinDuration(Number(e.target.value))}
-                          className="w-full h-0.5 bg-neutral-700 rounded-full appearance-none cursor-pointer accent-purple-500"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* A/B Compare */}
@@ -1078,23 +1179,11 @@ export function PitchEditorLowerZone() {
                     ? "bg-amber-700/80 text-amber-100 ring-1 ring-amber-500/40"
                     : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200"
                 }`}
-                title="Toggle A/B comparison (hear original vs corrected)"
+                title="A = corrected state, B = original/raw clip"
               >
-                {abCompareMode ? "B (Original)" : "A/B Compare"}
+                {abCompareMode ? "B (Original)" : "A (Corrected)"}
               </button>
             </div>
-
-            {polyMode && (
-              <div className="px-2 py-1.5 shrink-0">
-                <button
-                  onClick={applyPolyCorrection}
-                  className="w-full px-2 py-1.5 text-[11px] rounded bg-daw-accent text-white hover:bg-daw-accent/80 font-semibold transition-colors shadow-sm"
-                  title="Apply polyphonic correction"
-                >
-                  Apply Poly
-                </button>
-              </div>
-            )}
           </div>
 
           {/* Status footer */}
@@ -1119,8 +1208,10 @@ export function PitchEditorLowerZone() {
             ) : (
               <div className="text-[9px] text-neutral-700">Hover or click a note</div>
             )}
-            {(isAnalyzing || progressLabel) && (
-              <div className="text-[9px] text-daw-accent animate-pulse">{progressLabel || "Analyzing…"}</div>
+            {(analysisPhase !== "idle" || progressLabel) && (
+              <div className="text-[9px] text-daw-accent animate-pulse">
+                {progressLabel || (analysisPhase === "loading" ? "Loading clip…" : "Analyzing pitch…")}
+              </div>
             )}
             {!isAnalyzing && applyMessage && (
               <div className={`text-[9px] ${applyState === "error" ? "text-red-400" : applyState === "done" ? "text-emerald-300" : applyState === "preview_ready" ? "text-sky-300" : "text-daw-accent"} ${applyState === "queued" || applyState === "processing" || applyState === "preview_processing" || applyState === "final_processing" ? "animate-pulse" : ""}`}>
@@ -1132,11 +1223,13 @@ export function PitchEditorLowerZone() {
 
         {/* ── Canvas (aligned with timeline) ── */}
         <div ref={containerRef} className="flex-1 min-w-0 relative bg-daw-panel">
-          {isAnalyzing && !contour && (
+          {(analysisPhase !== "idle" || isAnalyzing) && !contour && (
             <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/50">
               <div className="flex flex-col items-center gap-2 w-48">
                 <div className="w-5 h-5 border-2 border-daw-accent border-t-transparent rounded-full animate-spin" />
-                <div className="text-sm text-neutral-400">{progressLabel || "Analyzing pitch…"}</div>
+                <div className="text-sm text-neutral-400">
+                  {progressLabel || (analysisPhase === "loading" ? "Loading clip…" : "Analyzing pitch…")}
+                </div>
                 {progressPercent > 0 && progressPercent < 100 && (
                   <div className="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
                     <div

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "platform": "windows",
+  "pythonFamily": "3.11",
+  "target": {
+    "cuda": "cu128",
+    "pytorch": {
+      "indexUrl": "https://download.pytorch.org/whl/cu128",
+      "packages": [
+        "torch==2.8.0",
+        "torchvision==0.23.0",
+        "torchaudio==2.8.0"
+      ]
+    },
+    "tritonWindows": {
+      "package": "triton-windows==3.6.0.post26",
+      "version": "3.6.0.post26",
+      "url": "https://files.pythonhosted.org/packages/5e/20/acab7b4f50abe68d93f632b2e29cfb9e76284eaf9b4041a6eabbbd4afdc7/triton_windows-3.6.0.post26-cp311-cp311-win_amd64.whl",
+      "sha256": "369a47ed3ca25f6d405387a058b8fbc62e6ff4592bbf87b0c5f6de372ab68931"
+    },
+    "flashAttn": {
+      "distribution": "flash-attn",
+      "version": "2.8.3",
+      "fileName": "flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSEfullbackward-cp311-cp311-win_amd64.whl",
+      "url": "https://github.com/sdbds/flash-attention-for-windows/releases/download/2.8.3/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSEfullbackward-cp311-cp311-win_amd64.whl",
+      "sha256": "9850d5010e62dde2bf1ec415bd267da23c996f05939501e316fd2e0a7c729076",
+      "pythonTag": "cp311",
+      "torchVersion": "2.8.0",
+      "cuda": "cu128"
+    }
+  }
+}

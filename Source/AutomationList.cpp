@@ -12,34 +12,34 @@ void AutomationList::setPoints(std::vector<AutomationPoint> newPoints)
     // Sort by time before storing
     std::sort(newPoints.begin(), newPoints.end(),
               [](const AutomationPoint& a, const AutomationPoint& b) {
-                  return a.timeSamples < b.timeSamples;
+                  return a.timeSeconds < b.timeSeconds;
               });
 
     const juce::ScopedLock sl(lock);
     points = std::move(newPoints);
 }
 
-void AutomationList::addPoint(double timeSamples, float value)
+void AutomationList::addPoint(double timeSeconds, float value)
 {
     const juce::ScopedLock sl(lock);
 
-    AutomationPoint pt { timeSamples, value };
+    AutomationPoint pt { timeSeconds, value };
 
     // Insert in sorted order
     auto it = std::lower_bound(points.begin(), points.end(), pt,
                                 [](const AutomationPoint& a, const AutomationPoint& b) {
-                                    return a.timeSamples < b.timeSamples;
+                                    return a.timeSeconds < b.timeSeconds;
                                 });
     points.insert(it, pt);
 }
 
-void AutomationList::removePointsInRange(double startSample, double endSample)
+void AutomationList::removePointsInRange(double startTimeSeconds, double endTimeSeconds)
 {
     const juce::ScopedLock sl(lock);
     points.erase(
         std::remove_if(points.begin(), points.end(),
-                       [startSample, endSample](const AutomationPoint& p) {
-                           return p.timeSamples >= startSample && p.timeSamples <= endSample;
+                       [startTimeSeconds, endTimeSeconds](const AutomationPoint& p) {
+                           return p.timeSeconds >= startTimeSeconds && p.timeSeconds <= endTimeSeconds;
                        }),
         points.end());
 }
@@ -95,10 +95,10 @@ bool AutomationList::shouldRecord() const
     }
 }
 
-int AutomationList::findPointBefore(double timeSamples) const
+int AutomationList::findPointBefore(double timeSeconds) const
 {
-    // Binary search: find last point at or before timeSamples
-    // points must be sorted by timeSamples (guaranteed by setPoints/addPoint)
+    // Binary search: find last point at or before timeSeconds
+    // points must be sorted by timeSeconds (guaranteed by setPoints/addPoint)
     if (points.empty())
         return -1;
 
@@ -109,7 +109,7 @@ int AutomationList::findPointBefore(double timeSamples) const
     while (lo <= hi)
     {
         int mid = lo + (hi - lo) / 2;
-        if (points[static_cast<size_t>(mid)].timeSamples <= timeSamples)
+        if (points[static_cast<size_t>(mid)].timeSeconds <= timeSeconds)
         {
             result = mid;
             lo = mid + 1;
@@ -123,13 +123,13 @@ int AutomationList::findPointBefore(double timeSamples) const
     return result;
 }
 
-float AutomationList::eval(double timeSamples) const
+float AutomationList::eval(double timeSeconds) const
 {
     const juce::ScopedTryLock sl(lock);
     if (!sl.isLocked() || points.empty())
         return defaultValue.load(std::memory_order_relaxed);
 
-    int idx = findPointBefore(timeSamples);
+    int idx = findPointBefore(timeSeconds);
 
     // Before first point — hold first point's value
     if (idx < 0)
@@ -148,11 +148,11 @@ float AutomationList::eval(double timeSamples) const
     if (interpolation == AutomationInterpolation::Discrete)
         return p0.value;
 
-    double dt = p1.timeSamples - p0.timeSamples;
+    double dt = p1.timeSeconds - p0.timeSeconds;
     if (dt <= 0.0)
         return p0.value;
 
-    double t = (timeSamples - p0.timeSamples) / dt;  // 0.0 to 1.0
+    double t = (timeSeconds - p0.timeSeconds) / dt;  // 0.0 to 1.0
 
     if (interpolation == AutomationInterpolation::Exponential)
     {
@@ -163,7 +163,7 @@ float AutomationList::eval(double timeSamples) const
     return static_cast<float>(p0.value + (p1.value - p0.value) * t);
 }
 
-void AutomationList::evalBlock(double startSample, double sampleRate, int numSamples, float* outputBuffer) const
+void AutomationList::evalBlock(double startTimeSeconds, double sampleRate, int numSamples, float* outputBuffer) const
 {
     juce::ignoreUnused(sampleRate);
 
@@ -179,14 +179,14 @@ void AutomationList::evalBlock(double startSample, double sampleRate, int numSam
     auto sz = static_cast<int>(points.size());
 
     // Start search from the point before the block start
-    int idx = findPointBefore(startSample);
+    int idx = findPointBefore(startTimeSeconds);
 
     for (int i = 0; i < numSamples; ++i)
     {
-        double t = startSample + static_cast<double>(i);
+        double t = startTimeSeconds + static_cast<double>(i) / sampleRate;
 
         // Advance idx to the correct segment for this sample
-        while (idx < sz - 1 && points[static_cast<size_t>(idx + 1)].timeSamples <= t)
+        while (idx < sz - 1 && points[static_cast<size_t>(idx + 1)].timeSeconds <= t)
             ++idx;
 
         if (idx < 0)
@@ -213,14 +213,14 @@ void AutomationList::evalBlock(double startSample, double sampleRate, int numSam
             }
             else
             {
-                double dt = p1.timeSamples - p0.timeSamples;
+                double dt = p1.timeSeconds - p0.timeSeconds;
                 if (dt <= 0.0)
                 {
                     outputBuffer[i] = p0.value;
                 }
                 else
                 {
-                    double frac = (t - p0.timeSamples) / dt;
+                    double frac = (t - p0.timeSeconds) / dt;
                     if (interpolation == AutomationInterpolation::Exponential)
                         frac = frac * frac;
                     outputBuffer[i] = static_cast<float>(p0.value + (p1.value - p0.value) * frac);

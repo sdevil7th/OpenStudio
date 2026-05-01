@@ -37,7 +37,19 @@ param(
     [string]$MacArm64AiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$MacX64AiRuntimeAssetPath = ""
+    [string]$MacX64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxX64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxArm64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxAssetPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -262,6 +274,7 @@ $rootAiRuntimeManifestPath = Join-Path $resolvedMetadataDir "releases/ai-runtime
 $channelAiRuntimeManifestPath = Join-Path $resolvedMetadataDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)
 $windowsAppcastPath = Join-Path $resolvedMetadataDir ("appcast/windows-{0}.xml" -f $Channel)
 $macosAppcastPath = Join-Path $resolvedMetadataDir ("appcast/macos-{0}.xml" -f $Channel)
+$linuxAppcastPath = Join-Path $resolvedMetadataDir ("appcast/linux-{0}.xml" -f $Channel)
 
 $checksums = Parse-Checksums $checksumsPath
 $rootManifest = Load-Json $rootManifestPath
@@ -276,6 +289,7 @@ Assert-True ($rootJson -eq $channelJson) "Root latest.json and channel latest.js
 
 $windowsAsset = Get-AssetInfo $WindowsAssetPath
 $macosAsset = Get-AssetInfo $MacAssetPath
+$linuxAsset = Get-AssetInfo $LinuxAssetPath
 $windowsAiRuntimeAsset = Get-AssetInfo $WindowsAiRuntimeAssetPath
 $windowsBaseAiRuntimeAsset = Get-AssetInfo $WindowsBaseAiRuntimeAssetPath
 $windowsDirectmlAiRuntimeAsset = Get-AssetInfo $WindowsDirectmlAiRuntimeAssetPath
@@ -283,14 +297,21 @@ $windowsCudaAiRuntimeAsset = Get-AssetInfo $WindowsCudaAiRuntimeAssetPath
 $macosAiRuntimeAsset = Get-AssetInfo $MacAiRuntimeAssetPath
 $macosArm64AiRuntimeAsset = Get-AssetInfo $MacArm64AiRuntimeAssetPath
 $macosX64AiRuntimeAsset = Get-AssetInfo $MacX64AiRuntimeAssetPath
+$linuxAiRuntimeAsset = Get-AssetInfo $LinuxAiRuntimeAssetPath
+$linuxX64AiRuntimeAsset = Get-AssetInfo $LinuxX64AiRuntimeAssetPath
+$linuxArm64AiRuntimeAsset = Get-AssetInfo $LinuxArm64AiRuntimeAssetPath
 $windowsCudaInstallPlan = Load-OptionalJson $WindowsCudaInstallPlanPath
 $windowsDirectmlInstallPlan = Load-OptionalJson $WindowsDirectmlInstallPlanPath
 
 Validate-PlatformEntry -PlatformName "windows" -PlatformNode $rootManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAsset
 Validate-PlatformEntry -PlatformName "macos" -PlatformNode $rootManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAsset
+Validate-PlatformEntry -PlatformName "linux" -PlatformNode $rootManifest.platforms.linux -Checksums $checksums -AssetInfo $linuxAsset
 
 Validate-Appcast -PlatformName "windows" -AppcastPath $windowsAppcastPath -Manifest $rootManifest -PlatformNode $rootManifest.platforms.windows
 Validate-Appcast -PlatformName "macos" -AppcastPath $macosAppcastPath -Manifest $rootManifest -PlatformNode $rootManifest.platforms.macos
+if ($null -ne $rootManifest.platforms.linux) {
+    Validate-Appcast -PlatformName "linux" -AppcastPath $linuxAppcastPath -Manifest $rootManifest -PlatformNode $rootManifest.platforms.linux
+}
 
 if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManifestPath)) {
     $rootAiRuntimeManifest = Load-Json $rootAiRuntimeManifestPath
@@ -349,6 +370,15 @@ if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManif
     }
     else {
         Validate-PlatformEntry -PlatformName "macos AI runtime" -PlatformNode $macAiNode -Checksums $checksums -AssetInfo $macosAiRuntimeAsset
+    }
+
+    $linuxAiNode = $rootAiRuntimeManifest.platforms.linux
+    if ($null -ne $linuxAiNode -and (($null -ne $linuxAiNode.x64) -or ($null -ne $linuxAiNode.arm64))) {
+        Validate-PlatformEntry -PlatformName "linux x64 AI runtime" -PlatformNode $linuxAiNode.x64 -Checksums $checksums -AssetInfo $linuxX64AiRuntimeAsset
+        Validate-PlatformEntry -PlatformName "linux arm64 AI runtime" -PlatformNode $linuxAiNode.arm64 -Checksums $checksums -AssetInfo $linuxArm64AiRuntimeAsset
+    }
+    elseif ($null -ne $linuxAiNode) {
+        Validate-PlatformEntry -PlatformName "linux AI runtime" -PlatformNode $linuxAiNode -Checksums $checksums -AssetInfo $linuxAiRuntimeAsset
     }
 }
 

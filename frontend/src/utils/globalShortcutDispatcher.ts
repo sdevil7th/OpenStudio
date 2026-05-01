@@ -1,6 +1,7 @@
 import { type NativeGlobalShortcutEvent } from "../services/NativeBridge";
 import { getRegisteredActions, type ActionDef } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
+import { isMac } from "./platform";
 
 let _lastSpacebarMs = 0;
 
@@ -9,11 +10,26 @@ export interface GlobalShortcutPayload extends NativeGlobalShortcutEvent {
   preventDefault?: () => void;
 }
 
+/**
+ * Convert a key event payload into the canonical shortcut string used in actionRegistry.
+ *
+ * Canonical format uses Windows-style names: "Ctrl+Z", "Alt+Enter", "Ctrl+Shift+Z"
+ *
+ * Platform mapping:
+ *   macOS — metaKey (Cmd) → "Ctrl", ctrlKey (^) → "Alt", altKey (Option) ignored
+ *   Win   — ctrlKey/metaKey → "Ctrl", altKey → "Alt"
+ */
 function toPressedShortcut(payload: GlobalShortcutPayload): string | null {
   const parts: string[] = [];
-  if (payload.ctrlKey || payload.metaKey) parts.push("Ctrl");
+
+  if (isMac) {
+    if (payload.metaKey) parts.push("Ctrl"); // Cmd → Ctrl
+    if (payload.ctrlKey) parts.push("Alt");  // Ctrl → Alt
+  } else {
+    if (payload.ctrlKey || payload.metaKey) parts.push("Ctrl");
+    if (payload.altKey) parts.push("Alt");
+  }
   if (payload.shiftKey) parts.push("Shift");
-  if (payload.altKey) parts.push("Alt");
 
   let key = payload.key ?? "";
   if (["Control", "Shift", "Alt", "Meta"].includes(key)) {

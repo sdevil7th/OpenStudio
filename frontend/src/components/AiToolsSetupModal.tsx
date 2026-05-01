@@ -44,12 +44,80 @@ function formatElapsed(ms?: number): string {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
+function formatBytes(bytes?: number): string {
+  const value = Math.max(0, bytes ?? 0);
+  if (value === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 ? 0 : size >= 100 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function formatRuntimeProfileLabel(profile?: string): string {
+  switch (profile) {
+    case "native-xl-turbo":
+    case "openstudio-ace-split":
+      return "OpenStudio ACE Split";
+    default:
+      return profile ?? "";
+  }
+}
+
+function getUnavailableProfileDetails(
+  runtimeProfiles: Record<string, unknown> | undefined,
+  unavailableProfiles: Array<Record<string, unknown>>,
+): string[] {
+  const details: string[] = [];
+
+  if (runtimeProfiles && typeof runtimeProfiles === "object") {
+    for (const [profileId, rawProfile] of Object.entries(runtimeProfiles)) {
+      if (!rawProfile || typeof rawProfile !== "object") continue;
+      const profile = rawProfile as Record<string, unknown>;
+      if (profile.available === true) continue;
+      const missingAssets = Array.isArray(profile.missingAssets)
+        ? profile.missingAssets
+          .map((entry) => String(entry ?? "").trim())
+          .filter(Boolean)
+        : [];
+      const label = formatRuntimeProfileLabel(String(profile.id ?? profileId));
+      details.push(
+        missingAssets.length > 0
+          ? `${label}: ${missingAssets.join(", ")}`
+          : label,
+      );
+    }
+  }
+
+  if (details.length > 0) {
+    return details;
+  }
+
+  return unavailableProfiles
+    .map((entry) => {
+      const label = formatRuntimeProfileLabel(String(entry.id ?? ""));
+      const missingAssets = Array.isArray(entry.missingAssets)
+        ? entry.missingAssets
+          .map((asset) => String(asset ?? "").trim())
+          .filter(Boolean)
+        : [];
+      if (!label) return "";
+      return missingAssets.length > 0 ? `${label}: ${missingAssets.join(", ")}` : label;
+    })
+    .filter(Boolean);
+}
+
 export default function AiToolsSetupModal() {
-  const { showAiToolsSetup, closeAiToolsSetup, installAiTools, aiToolsStatus } = useDAWStore(
+  const { showAiToolsSetup, closeAiToolsSetup, installAiTools, resetAiTools, aiToolsStatus } = useDAWStore(
     useShallow((s) => ({
       showAiToolsSetup: s.showAiToolsSetup,
       closeAiToolsSetup: s.closeAiToolsSetup,
       installAiTools: s.installAiTools,
+      resetAiTools: s.resetAiTools,
       aiToolsStatus: s.aiToolsStatus,
     })),
   );
@@ -58,13 +126,31 @@ export default function AiToolsSetupModal() {
 
   const isPythonMissing = aiToolsStatus.state === "pythonMissing";
   const hasInstallError = aiToolsStatus.state === "error" || aiToolsStatus.state === "cancelled";
-  const isInstallComplete = aiToolsStatus.available || aiToolsStatus.state === "ready";
+  const isStemSeparationReady = aiToolsStatus.available || aiToolsStatus.state === "ready";
+  const isMusicGenerationInstalled = Boolean(aiToolsStatus.musicGenerationReady && aiToolsStatus.musicGenerationLayoutValid);
+  const isMusicGenerationPerformanceReady = aiToolsStatus.musicGenerationPerformanceReady ?? true;
+  const isMusicGenerationFullyReady =
+    isMusicGenerationInstalled
+    && isMusicGenerationPerformanceReady;
+  const isPartiallyReady = isStemSeparationReady && !isMusicGenerationFullyReady;
+  const isInstallComplete = isStemSeparationReady && isMusicGenerationFullyReady;
+  const showSetupModeCard = !isInstallComplete;
+  const showSetupSteps = !isInstallComplete;
+  const musicGenerationBlockedMessage =
+    aiToolsStatus.musicGenerationPerformanceStatusMessage
+    || (isMusicGenerationInstalled
+      ? "Music generation is installed, but acceleration is incomplete in this managed runtime."
+      : aiToolsStatus.musicGenerationStatusMessage
+        || (!aiToolsStatus.musicGenerationLayoutValid
+          ? "Pinned ACE-Step native split-model files are still missing."
+          : "Music generation still needs the OpenStudio ACE split backend."));
+  const isReconcilingInstallResult = aiToolsStatus.statusWarningCode === "reconciling_install_state";
   const requiresExternalPython = aiToolsStatus.requiresExternalPython;
   const buildRuntimeMode = aiToolsStatus.buildRuntimeMode ?? "downloaded-runtime";
   const isDownloadedRuntimeFlow =
     buildRuntimeMode === "downloaded-runtime" ||
     (aiToolsStatus.installSource === "downloadedRuntime" && !requiresExternalPython);
-  const isModelFailure = aiToolsStatus.errorCode === "model_download_failed";
+  const isModelFailure = (aiToolsStatus.errorCode ?? "").startsWith("model_");
   const isUnsupportedPlatform = aiToolsStatus.errorCode === "runtime_platform_unsupported";
   const isRuntimeManifestFailure =
     aiToolsStatus.errorCode === "runtime_manifest_missing" ||
@@ -81,17 +167,41 @@ export default function AiToolsSetupModal() {
     aiToolsStatus.errorCode === "installer_exited_incomplete" ||
     aiToolsStatus.errorCode === "installer_output_timeout" ||
     aiToolsStatus.errorCode === "model_preparation_incomplete";
+  const terminalReason = aiToolsStatus.terminalReason ?? "";
+  const isWindowsRuntimeLockFailure =
+    IS_WINDOWS &&
+    (terminalReason === "runtime_locked_rebuild_failed" ||
+      terminalReason === "runtime_rebuild_remove_failed");
   const installLogPath = aiToolsStatus.detailLogPath;
   const activityLines = aiToolsStatus.activityLines ?? [];
   const hasActivityConsole = aiToolsStatus.installInProgress || activityLines.length > 0;
+  const showLatestInstallerActivity = !isInstallComplete && hasActivityConsole && !aiToolsStatus.installInProgress;
+  const hasByteProgress = (aiToolsStatus.bytesTotal ?? 0) > 0 && (aiToolsStatus.bytesDownloaded ?? 0) >= 0;
+  const byteProgressRatio = hasByteProgress
+    ? Math.max(0, Math.min((aiToolsStatus.bytesDownloaded ?? 0) / Math.max(aiToolsStatus.bytesTotal ?? 1, 1), 1))
+    : 0;
+  const visualProgressRatio = hasByteProgress ? byteProgressRatio : Math.max(0, Math.min(aiToolsStatus.progress ?? 0, 1));
+  const progressPercent = Math.round(visualProgressRatio * 100);
+  const transferText = hasByteProgress
+    ? `${formatBytes(aiToolsStatus.bytesDownloaded)} / ${formatBytes(aiToolsStatus.bytesTotal)}`
+    : "";
+  const availableProfiles = aiToolsStatus.musicGenerationAvailableProfiles ?? [];
+  const unavailableProfiles = aiToolsStatus.musicGenerationUnavailableProfiles ?? [];
+  const defaultProfile = aiToolsStatus.musicGenerationDefaultProfile ?? "";
+  const unavailableProfileDetails = getUnavailableProfileDetails(
+    aiToolsStatus.musicGenerationRuntimeProfiles as Record<string, unknown> | undefined,
+    unavailableProfiles,
+  );
 
   const errorTitle = isModelFailure
     ? "Model download needs attention"
     : isUnsupportedPlatform
       ? "AI Tools are not available on this Mac"
-    : isRuntimeManifestFailure
-      ? "AI runtime download info is unavailable"
-      : isRuntimeArchiveFailure
+      : isWindowsRuntimeLockFailure
+        ? "Windows blocked the AI runtime update"
+      : isRuntimeManifestFailure
+        ? "AI runtime download info is unavailable"
+        : isRuntimeArchiveFailure
         ? "AI runtime setup failed"
       : aiToolsStatus.state === "cancelled"
         ? "AI tools setup was cancelled"
@@ -101,12 +211,16 @@ export default function AiToolsSetupModal() {
 
   const recommendationText = isDownloadedRuntimeFlow
     ? "This release downloads the OpenStudio AI runtime the first time you use AI Tools, verifies it, and then downloads the stem model. You can keep using the app while that setup runs."
-    : "This dev build needs Python 3.10 through 3.13 on your machine first. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically.";
+    : IS_WINDOWS
+      ? "This dev build needs Python 3.11 on your machine first for the Windows ACE-Step runtime. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically."
+      : "This dev build needs Python 3.10 through 3.12 on your machine first. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically.";
 
   const retryGuidance = isModelFailure
     ? "The runtime is already in place. Retry after checking your internet connection, VPN, firewall, or antivirus if the download keeps failing."
     : isUnsupportedPlatform
       ? "This release currently supports AI Tools on Apple Silicon Macs only. The base app can still be used normally on Intel Macs."
+    : isWindowsRuntimeLockFailure
+      ? "OpenStudio already attempted a runtime-only rebuild of stem-runtime after Windows denied access to a managed runtime file. Close any remaining helper processes, Python workers, or antivirus scanners that may still be touching the runtime, then retry. Normal retry preserves downloaded models and music-generation checkpoints. Use Reset AI Tools only for a full cleanup, which also removes the downloaded models and checkpoints."
     : isRuntimeManifestFailure
       ? "Retry once in case the release metadata service was temporarily unavailable. If the same message appears again, OpenStudio may not be able to reach the published AI runtime metadata from this machine."
     : isDownloadedRuntimeFlow
@@ -128,8 +242,18 @@ export default function AiToolsSetupModal() {
     await installAiTools();
   };
 
+  const handleReset = async () => {
+    await resetAiTools();
+  };
+
   return (
-    <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="md" fullHeight className="max-h-[80vh]">
+    <Modal
+      isOpen={showAiToolsSetup}
+      onClose={closeAiToolsSetup}
+      size="xl"
+      fullHeight
+      className="max-h-[80vh] w-[min(96vw,1100px)]"
+    >
       <ModalHeader title="AI Tools Setup" />
       <ModalContent className="space-y-5">
         <div className="space-y-5">
@@ -137,27 +261,106 @@ export default function AiToolsSetupModal() {
             <p className="text-sm font-medium text-daw-text">What is this?</p>
             <p className="text-xs text-daw-text-secondary leading-relaxed">
               AI Tools enables <span className="text-daw-text">Stem Separation</span> - splitting a
-              clip into individual tracks like Vocals, Drums, Bass, Guitar, and more.
+              clip into individual tracks like Vocals, Drums, Bass, Guitar, and more. It also powers
+              <span className="text-daw-text"> AI Track music generation</span> when ACE-Step is installed.
             </p>
           </div>
 
-          <div className="rounded border border-neutral-800 bg-neutral-950/60 p-3 space-y-1">
-            <p className="text-sm font-medium text-daw-text">
-              {isDownloadedRuntimeFlow ? "OpenStudio-managed runtime setup" : "Python-based setup"}
-            </p>
-            <p className="text-xs text-daw-text-secondary leading-relaxed">{recommendationText}</p>
-          </div>
+          {showSetupModeCard ? (
+            <div className="rounded border border-neutral-800 bg-neutral-950/60 p-3 space-y-1">
+              <p className="text-sm font-medium text-daw-text">
+                {isDownloadedRuntimeFlow ? "OpenStudio-managed runtime setup" : "Python-based setup"}
+              </p>
+              <p className="text-xs text-daw-text-secondary leading-relaxed">{recommendationText}</p>
+            </div>
+          ) : null}
 
           {isInstallComplete ? (
             <div className="rounded border border-green-600/40 bg-green-950/30 p-3 space-y-2">
               <p className="text-sm font-semibold text-green-400">AI Tools are ready</p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
-                The runtime and stem-separation model are installed for this OpenStudio session.
-                You can continue straight into stem separation now.
+                The runtime, stem-separation model, and pinned ACE-Step files are installed for this OpenStudio session.
+                You can continue straight into stem separation or music generation now.
               </p>
               {aiToolsStatus.selectedBackend ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">
                   Active backend: <span className="text-daw-text">{aiToolsStatus.selectedBackend}</span>
+                </p>
+              ) : null}
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Music generation:{" "}
+                <span className={isMusicGenerationFullyReady ? "text-green-400" : "text-yellow-300"}>
+                  {isMusicGenerationFullyReady ? "Ready" : "Installed, but degraded"}
+                </span>
+                {aiToolsStatus.aceStepVersion ? ` (ACE-Step ${aiToolsStatus.aceStepVersion})` : ""}
+              </p>
+              {aiToolsStatus.musicGenerationModelId ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Pinned model: <span className="text-daw-text">{aiToolsStatus.musicGenerationModelId}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.musicGenerationCheckpointRoot ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed break-all">
+                  Checkpoint root: <span className="text-daw-text">{aiToolsStatus.musicGenerationCheckpointRoot}</span>
+                </p>
+              ) : null}
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Checkpoint layout:{" "}
+                <span className={aiToolsStatus.musicGenerationLayoutValid ? "text-green-400" : "text-yellow-300"}>
+                  {aiToolsStatus.musicGenerationLayoutValid ? "Valid" : "Missing files"}
+                </span>
+              </p>
+              {availableProfiles.length > 0 ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Available profiles: <span className="text-daw-text">{availableProfiles.map(formatRuntimeProfileLabel).join(", ")}</span>
+                  {defaultProfile ? <span className="text-daw-text-secondary"> (default: {formatRuntimeProfileLabel(defaultProfile)})</span> : null}
+                </p>
+              ) : null}
+            </div>
+          ) : isPartiallyReady ? (
+            <div className="rounded border border-yellow-600/40 bg-yellow-950/30 p-3 space-y-2">
+              <p className="text-sm font-semibold text-yellow-300">Stem separation is ready</p>
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                {musicGenerationBlockedMessage}
+              </p>
+              {aiToolsStatus.selectedBackend ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Active backend: <span className="text-daw-text">{aiToolsStatus.selectedBackend}</span>
+                </p>
+              ) : null}
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Music generation: <span className="text-yellow-300">{isMusicGenerationInstalled ? "Installed, but degraded" : "Not ready yet"}</span>
+                {aiToolsStatus.aceStepVersion ? ` (ACE-Step ${aiToolsStatus.aceStepVersion})` : ""}
+              </p>
+              {aiToolsStatus.musicGenerationModelId ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Pinned model: <span className="text-daw-text">{aiToolsStatus.musicGenerationModelId}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.musicGenerationCheckpointRoot ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed break-all">
+                  Checkpoint root: <span className="text-daw-text">{aiToolsStatus.musicGenerationCheckpointRoot}</span>
+                </p>
+              ) : null}
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Checkpoint layout:{" "}
+                <span className={aiToolsStatus.musicGenerationLayoutValid ? "text-green-400" : "text-yellow-300"}>
+                  {aiToolsStatus.musicGenerationLayoutValid ? "Valid" : "Missing files"}
+                </span>
+                {aiToolsStatus.musicGenerationLayoutValid ? <span className="text-daw-text-secondary"> (the pinned files are present, but the OpenStudio ACE split backend is still unavailable)</span> : null}
+              </p>
+              {availableProfiles.length > 0 ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Available profiles: <span className="text-daw-text">{availableProfiles.map(formatRuntimeProfileLabel).join(", ")}</span>
+                  {defaultProfile ? <span className="text-daw-text-secondary"> (default: {formatRuntimeProfileLabel(defaultProfile)})</span> : null}
+                </p>
+              ) : null}
+              {unavailableProfileDetails.length > 0 ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Missing profile assets:{" "}
+                  <span className="text-daw-text">
+                    {unavailableProfileDetails.join("; ")}
+                  </span>
                 </p>
               ) : null}
             </div>
@@ -167,7 +370,7 @@ export default function AiToolsSetupModal() {
               <div className="w-full bg-neutral-900 rounded-full h-2">
                 <div
                   className="bg-daw-accent h-2 rounded-full transition-all duration-200"
-                  style={{ width: `${Math.max(4, Math.round(aiToolsStatus.progress * 100))}%` }}
+                  style={{ width: `${Math.max(4, progressPercent)}%` }}
                 />
               </div>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
@@ -186,9 +389,14 @@ export default function AiToolsSetupModal() {
                 <p>
                   {aiToolsStatus.stepCount && aiToolsStatus.stepIndex
                     ? <>Stage: <span className="text-daw-text">{aiToolsStatus.stepIndex} / {aiToolsStatus.stepCount}</span></>
-                    : <>Progress: <span className="text-daw-text">{Math.max(0, Math.round((aiToolsStatus.progress ?? 0) * 100))}%</span></>}
+                    : <>Progress: <span className="text-daw-text">{progressPercent}%</span></>}
                 </p>
               </div>
+              {hasByteProgress ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Transfer: <span className="text-daw-text">{transferText}</span>
+                </p>
+              ) : null}
               {aiToolsStatus.lastPhase ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">
                   Current phase: <span className="text-daw-text">{aiToolsStatus.lastPhase}</span>
@@ -228,12 +436,34 @@ export default function AiToolsSetupModal() {
                 </div>
               </div>
             </div>
+          ) : isReconcilingInstallResult ? (
+            <div className="rounded border border-yellow-600/40 bg-yellow-950/30 p-3 space-y-3">
+              <p className="text-sm font-semibold text-yellow-300">Confirming the install result</p>
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                OpenStudio temporarily lost contact with the installer, so it is now probing the installed runtime on disk before deciding whether setup succeeded.
+              </p>
+              {aiToolsStatus.statusWarning ? (
+                <p className="rounded border border-yellow-600/30 bg-yellow-950/20 px-3 py-2 text-xs leading-relaxed text-yellow-200">
+                  {aiToolsStatus.statusWarning}
+                </p>
+              ) : null}
+              {aiToolsStatus.lastPhase ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Last observed phase: <span className="text-daw-text">{aiToolsStatus.lastPhase}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.installSessionId ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed break-all">
+                  Install session: <span className="text-daw-text">{aiToolsStatus.installSessionId}</span>
+                </p>
+              ) : null}
+            </div>
           ) : isPythonMissing ? (
             <div className="rounded border border-yellow-600/40 bg-yellow-950/30 p-3 space-y-2">
               <p className="text-sm font-semibold text-yellow-400">Python is required</p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
                 OpenStudio could not find a supported Python version on this machine. This dev
-                build needs Python 3.10 through 3.13 before AI Tools can be installed.
+                build needs {IS_WINDOWS ? "Python 3.11" : "Python 3.10 through 3.12"} before AI Tools can be installed.
               </p>
             </div>
           ) : hasInstallError ? (
@@ -244,6 +474,8 @@ export default function AiToolsSetupModal() {
                   ? "OpenStudio prepared the AI runtime, but the stem model download did not complete."
                   : isUnsupportedPlatform
                     ? "This OpenStudio release does not currently publish an AI runtime for this Mac architecture."
+                  : isWindowsRuntimeLockFailure
+                    ? "OpenStudio detected a locked file inside the managed Windows runtime and already attempted a runtime-only rebuild of stem-runtime."
                   : isRuntimeManifestFailure
                     ? "OpenStudio could not fetch the published AI runtime metadata needed for this setup."
                   : isRuntimeArchiveFailure
@@ -292,6 +524,12 @@ export default function AiToolsSetupModal() {
                   Terminal reason: <span className="text-daw-text">{aiToolsStatus.terminalReason}</span>
                 </p>
               ) : null}
+              {isWindowsRuntimeLockFailure ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Retry keeps the downloaded stem models and ACE-Step checkpoints in place.{" "}
+                  <span className="text-daw-text">Reset AI Tools</span> is the full cleanup option and removes those downloads too.
+                </p>
+              ) : null}
               {requiresExternalPython ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">
                   Python detected:{" "}
@@ -309,7 +547,7 @@ export default function AiToolsSetupModal() {
             </div>
           ) : null}
 
-          {requiresExternalPython ? (
+          {showSetupSteps && requiresExternalPython ? (
             <div className="space-y-1">
               <p className="text-xs font-medium text-daw-text-secondary uppercase tracking-wide">
                 Python setup steps
@@ -320,7 +558,7 @@ export default function AiToolsSetupModal() {
                     <Step number={1}>
                       Click <span className="text-daw-text font-medium">Download Python</span> below.
                       Your browser will open the official Python website. Download the latest{" "}
-                      <span className="text-daw-text font-medium">Python 3.10, 3.11, 3.12, or 3.13</span> installer for{" "}
+                      <span className="text-daw-text font-medium">Python 3.11</span> installer for{" "}
                       <span className="text-daw-text font-medium">Windows 64-bit</span>.
                     </Step>
                     <Step number={2}>
@@ -350,7 +588,7 @@ export default function AiToolsSetupModal() {
                     <Step number={1}>
                       Click <span className="text-daw-text font-medium">Download Python</span> below.
                       This opens the official Python website. Download the latest{" "}
-                      <span className="text-daw-text font-medium">Python 3.10, 3.11, 3.12, or 3.13</span> installer for
+                      <span className="text-daw-text font-medium">Python 3.10, 3.11, or 3.12</span> installer for
                       macOS.
                     </Step>
                     <Step number={2}>
@@ -363,7 +601,7 @@ export default function AiToolsSetupModal() {
                     </Step>
                     <Step number={4}>
                       Advanced option: if you already use Homebrew, you can install Python from
-                      Terminal with <CodeSnip>brew install python@3.13</CodeSnip>, then restart
+                      Terminal with <CodeSnip>brew install python@3.12</CodeSnip>, then restart
                       OpenStudio and retry from this window.
                     </Step>
                     <Step number={5}>
@@ -374,7 +612,7 @@ export default function AiToolsSetupModal() {
                 )}
               </div>
             </div>
-          ) : (
+          ) : showSetupSteps ? (
             <div className="space-y-1">
               <p className="text-xs font-medium text-daw-text-secondary uppercase tracking-wide">
                 Runtime download steps
@@ -403,9 +641,9 @@ export default function AiToolsSetupModal() {
                 </Step>
               </div>
             </div>
-          )}
+          ) : null}
 
-          {hasActivityConsole && !aiToolsStatus.installInProgress ? (
+          {showLatestInstallerActivity ? (
             <div className="rounded-xl border border-neutral-800 bg-black px-3 py-3 font-mono text-[11px] text-green-300">
               <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-neutral-500">
                 <span>Latest Installer Activity</span>
@@ -425,34 +663,54 @@ export default function AiToolsSetupModal() {
             <p className="text-xs text-daw-text-secondary leading-relaxed">
               {isInstallComplete
                 ? "AI Tools finished installing in this session. You can close this window and continue working."
-                : "OpenStudio keeps the app responsive while setup runs. This window now shows the live install activity, current phase, and long-download hints."}
+                : isPartiallyReady
+                  ? `Stem separation is ready in this session. ${musicGenerationBlockedMessage} Retry install to finish music generation, or close this window if you only need stem separation right now.`
+                  : "OpenStudio keeps the app responsive while setup runs. This window now shows the live install activity, current phase, and long-download hints."}
             </p>
           </div>
         </div>
       </ModalContent>
-      <ModalFooter>
-        <Button variant="ghost" onClick={closeAiToolsSetup}>
+      <ModalFooter className="flex-wrap justify-end gap-3 sm:flex-nowrap">
+        <Button variant="ghost" onClick={closeAiToolsSetup} className="whitespace-nowrap">
           Close
         </Button>
         {installLogPath ? (
-          <Button variant="ghost" onClick={() => void handleOpenInstallLog()}>
+          <Button
+            variant="ghost"
+            onClick={() => void handleOpenInstallLog()}
+            className="whitespace-nowrap"
+          >
             Open Install Log
           </Button>
         ) : null}
-        {requiresExternalPython ? (
-          <Button variant="secondary" onClick={() => void handleDownloadPython()}>
+        {!aiToolsStatus.installInProgress ? (
+          <Button variant="ghost" onClick={() => void handleReset()} className="whitespace-nowrap">
+            Reset AI Tools
+          </Button>
+        ) : null}
+        {requiresExternalPython && !isInstallComplete ? (
+          <Button
+            variant="secondary"
+            onClick={() => void handleDownloadPython()}
+            className="whitespace-nowrap"
+          >
             Download Python
           </Button>
         ) : null}
         <Button
           variant="primary"
           onClick={() => void (isInstallComplete ? closeAiToolsSetup() : handleRetry())}
-          disabled={aiToolsStatus.installInProgress}
+          disabled={aiToolsStatus.installInProgress || isReconcilingInstallResult}
+          className="whitespace-nowrap"
         >
           {isInstallComplete
             ? "Continue"
+            : isPartiallyReady
+              ? "Retry Install"
             : aiToolsStatus.installInProgress
               ? "Installing..."
+              : isReconcilingInstallResult
+                ? "Checking Result..."
               : requiresExternalPython && isPythonMissing
                 ? "Retry After Python Install"
                 : "Retry Install"}

@@ -21,7 +21,7 @@ export function ModalHeader({
   showCloseButton = true,
 }: ModalHeaderProps) {
   return (
-    <div className="flex items-center justify-between p-4 border-b border-daw-border">
+    <div className="flex shrink-0 items-center justify-between p-4 border-b border-daw-border">
       <h2 className="text-lg font-semibold text-daw-text">{title}</h2>
       {showCloseButton && onClose && (
         <Button

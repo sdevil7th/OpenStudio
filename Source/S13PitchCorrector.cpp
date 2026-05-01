@@ -28,6 +28,13 @@ void S13PitchCorrector::prepareToPlay(double sampleRate, int samplesPerBlock)
     detector.setSensitivity(sensitivity.load());
 
     setLatencySamples (stretcher.outputLatency());
+
+    // Pre-allocate per-block scratch buffers so processBlock never heap-allocates.
+    // samplesPerBlock is the maximum; actual numSamples will always be <= this.
+    dryBuffer.setSize (2, samplesPerBlock, false, true, false);
+    stretchOutputBuf.setSize (2, samplesPerBlock, false, true, false);
+    inPtrs.resize (2);
+    outPtrs.resize (2);
 }
 
 void S13PitchCorrector::releaseResources()
@@ -51,12 +58,12 @@ void S13PitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     detector.setMaxFrequency(maxFreqParam.load(std::memory_order_relaxed));
     detector.setSensitivity(sensitivity.load(std::memory_order_relaxed));
 
-    // Save dry signal for mix
-    juce::AudioBuffer<float> dryBuffer;
+    // Save dry signal for mix (copyFrom into pre-allocated member — no heap alloc)
     float mixVal = mix.load(std::memory_order_relaxed);
     if (mixVal < 0.999f)
     {
-        dryBuffer.makeCopyOf(buffer);
+        for (int ch = 0; ch < numChannels; ++ch)
+            dryBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
     }
 
     // Pitch detection on mono sum (L channel or mono mix)
@@ -81,29 +88,23 @@ void S13PitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         ratio = juce::jlimit(0.25f, 4.0f, ratio);
     }
 
-    // Apply pitch shift via Signalsmith Stretch (real-time, native stereo)
+    // Apply pitch shift via Signalsmith Stretch (real-time, native stereo).
+    // Use pre-allocated inPtrs/outPtrs/stretchOutputBuf to avoid heap allocation.
     stretcher.setTransposeFactor (ratio);
     stretcher.setFormantBase (detectedHz > 0.0f ? detectedHz : 0.0f); // help formant estimation
     stretcher.setFormantFactor (1.0f, true); // preserve formants via library's exact freq map
 
+    for (int ch = 0; ch < numChannels; ++ch)
     {
-        std::vector<const float*> inPtrs  (static_cast<size_t> (numChannels));
-        std::vector<float*>       outPtrs (static_cast<size_t> (numChannels));
-        std::vector<std::vector<float>> tempOut (static_cast<size_t> (numChannels),
-                                                  std::vector<float> (static_cast<size_t> (numSamples)));
-
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            inPtrs[static_cast<size_t> (ch)]  = buffer.getReadPointer (ch);
-            outPtrs[static_cast<size_t> (ch)] = tempOut[static_cast<size_t> (ch)].data();
-        }
-
-        stretcher.process (inPtrs, numSamples, outPtrs, numSamples);
-
-        for (int ch = 0; ch < numChannels; ++ch)
-            std::memcpy (buffer.getWritePointer (ch), tempOut[static_cast<size_t> (ch)].data(),
-                         static_cast<size_t> (numSamples) * sizeof (float));
+        inPtrs[static_cast<size_t> (ch)]  = buffer.getReadPointer (ch);
+        outPtrs[static_cast<size_t> (ch)] = stretchOutputBuf.getWritePointer (ch);
     }
+
+    stretcher.process (inPtrs, numSamples, outPtrs, numSamples);
+
+    for (int ch = 0; ch < numChannels; ++ch)
+        std::memcpy (buffer.getWritePointer (ch), stretchOutputBuf.getReadPointer (ch),
+                     static_cast<size_t> (numSamples) * sizeof (float));
 
     // Apply dry/wet mix
     if (mixVal < 0.999f)
@@ -119,14 +120,16 @@ void S13PitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         }
     }
 
-    // Store pitch history for UI
+    // Store pitch history for UI — lock-free, audio thread is sole writer.
+    // Write the frame first, then publish the new index with release semantics so
+    // the UI thread (which reads with acquire) is guaranteed to see the frame data.
     {
         float detMidi = detectedHz > 0.0f ? hzToMidi(detectedHz) : 0.0f;
         float corMidi = correctedHz > 0.0f ? hzToMidi(correctedHz) : 0.0f;
 
-        const std::lock_guard<std::mutex> lock(pitchHistoryMutex);
-        pitchHistory[static_cast<size_t>(pitchHistoryWritePos)] = { detMidi, corMidi, conf };
-        pitchHistoryWritePos = (pitchHistoryWritePos + 1) % maxPitchHistory;
+        const int writePos = pitchHistoryWritePos.load (std::memory_order_relaxed);
+        pitchHistory[static_cast<size_t> (writePos)] = { detMidi, corMidi, conf };
+        pitchHistoryWritePos.store ((writePos + 1) % maxPitchHistory, std::memory_order_release);
     }
 
     // MIDI output generation
@@ -200,7 +203,9 @@ S13PitchCorrector::PitchData S13PitchCorrector::getCurrentPitchData() const
 
 std::vector<S13PitchCorrector::PitchHistoryFrame> S13PitchCorrector::getPitchHistory(int numFrames) const
 {
-    const std::lock_guard<std::mutex> lock(pitchHistoryMutex);
+    // Acquire the current write position with acquire semantics so all frame
+    // data written before this store (release) is visible to this thread.
+    const int wp = pitchHistoryWritePos.load (std::memory_order_acquire);
 
     int count = std::min(numFrames, maxPitchHistory);
     std::vector<PitchHistoryFrame> result;
@@ -208,7 +213,7 @@ std::vector<S13PitchCorrector::PitchHistoryFrame> S13PitchCorrector::getPitchHis
 
     for (int i = 0; i < count; ++i)
     {
-        int idx = (pitchHistoryWritePos - count + i + maxPitchHistory) % maxPitchHistory;
+        int idx = (wp - count + i + maxPitchHistory) % maxPitchHistory;
         result.push_back(pitchHistory[static_cast<size_t>(idx)]);
     }
     return result;

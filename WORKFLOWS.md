@@ -28,7 +28,7 @@ cmake --build build --config Debug
 
 ### First Time Setup
 ```bash
-python build.py dev
+python build.py dev --run
 ```
 
 ### Daily Workflow

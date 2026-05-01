@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
+import { prepareForManualRender } from "../utils/renderPreparation";
 import {
   Button,
   Input,
@@ -97,7 +98,7 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
     setProgress(0);
 
     try {
-      await syncClipsWithBackend();
+      await prepareForManualRender(syncClipsWithBackend, "region-render-matrix");
 
       for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
@@ -117,6 +118,7 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
           normalize: false,
           addTail: false,
           tailLength: 0,
+          includeMetronome: false,
         });
 
         setProgress(Math.round(((i + 1) / jobs.length) * 100));

@@ -17,12 +17,14 @@ const TRACK_TYPE_OPTIONS = [
   { value: "audio", label: "Audio" },
   { value: "midi", label: "MIDI" },
   { value: "instrument", label: "Instrument" },
+  { value: "ai", label: "AI Track" },
 ] as const;
 
 const DEFAULT_PREFIX: Record<InsertableTrackType, string> = {
   audio: "Audio",
   midi: "MIDI",
   instrument: "Instrument",
+  ai: "AI",
 };
 
 export function AddMultipleTracksModal({

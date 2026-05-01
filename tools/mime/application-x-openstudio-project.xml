@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-openstudio-project">
+    <comment>OpenStudio Project</comment>
+    <comment xml:lang="en">OpenStudio Project</comment>
+    <glob pattern="*.osproj"/>
+    <glob pattern="*.s13"/>
+    <icon name="OpenStudio"/>
+  </mime-type>
+</mime-info>

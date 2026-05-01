@@ -1,6 +1,6 @@
 import React, { useCallback } from "react";
 import { useShallow } from "zustand/shallow";
-import { usePitchEditorStore } from "../store/pitchEditorStore";
+import { PITCH_EDITOR_FORMANT_EDITING_ENABLED, usePitchEditorStore } from "../store/pitchEditorStore";
 import type { PitchNoteData } from "../services/NativeBridge";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -128,15 +128,16 @@ export function NoteInspector() {
             }}
           />
 
-          {/* Formant (cents) */}
-          <InspectorRow
-            label="Formant"
-            value={formantDisplay}
-            suffix="ct"
-            disabled={!note}
-            min={-386} max={386} step={1}
-            onChange={(v) => { if (note) setNoteFormant(note.id, v / 100); }}
-          />
+          {PITCH_EDITOR_FORMANT_EDITING_ENABLED && (
+            <InspectorRow
+              label="Formant"
+              value={formantDisplay}
+              suffix="ct"
+              disabled={!note}
+              min={-386} max={386} step={1}
+              onChange={(v) => { if (note) setNoteFormant(note.id, v / 100); }}
+            />
+          )}
 
           {/* Volume */}
           <InspectorRow
