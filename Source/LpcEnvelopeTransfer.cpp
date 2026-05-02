@@ -105,6 +105,14 @@ static void lpcToEnvelope (const std::vector<float>& lpc,
 bool LpcEnvelopeTransfer::applyToBuffer (std::vector<std::vector<float>>& processed,
                                          const float* const* original,
                                          int numChannels,
+                                         int numSamples)
+{
+    return applyToBuffer (processed, original, numChannels, numSamples, Settings {});
+}
+
+bool LpcEnvelopeTransfer::applyToBuffer (std::vector<std::vector<float>>& processed,
+                                         const float* const* original,
+                                         int numChannels,
                                          int numSamples,
                                          const Settings& settings)
 {

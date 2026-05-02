@@ -9011,7 +9011,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     const double renderChainDebugMaxSec = juce::jlimit (0.25, 600.0,
         static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_AUDIO_CHAIN_DEBUG_MAX_SEC", 12.0f)));
     const int renderChainCaptureSamples = renderChainDebugEnabled
-        ? static_cast<int> (juce::jmin<juce::int64> (
+        ? static_cast<int> (std::min<juce::int64> (
             totalSamples,
             static_cast<juce::int64> (std::ceil (renderChainDebugMaxSec * actualSampleRate))))
         : 0;
@@ -9706,7 +9706,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 if (renderHybrid64)
                     copyDoubleBufferToFloatBuffer (reusableMasterBufferDouble, masterBuffer, 2, samplesThisBlock);
 
-                const int chainCaptureOffset = static_cast<int> (juce::jmin<juce::int64> (
+                const int chainCaptureOffset = static_cast<int> (std::min<juce::int64> (
                     renderBlockStartSample,
                     static_cast<juce::int64> (std::numeric_limits<int>::max())));
                 addToSignalChainCapture (chainPlaybackTap, chainCaptureOffset, chainPlaybackBlock, samplesThisBlock);
@@ -9728,7 +9728,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 if (renderHybrid64)
                     copyDoubleBufferToFloatBuffer (reusableMasterBufferDouble, masterBuffer, 2, samplesThisBlock);
 
-                const int chainCaptureOffset = static_cast<int> (juce::jmin<juce::int64> (
+                const int chainCaptureOffset = static_cast<int> (std::min<juce::int64> (
                     renderBlockStartSample,
                     static_cast<juce::int64> (std::numeric_limits<int>::max())));
                 chainMasterPostBlock.copyFrom (0, 0, masterBuffer, 0, 0, samplesThisBlock);
@@ -9820,7 +9820,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
                 if (captureRenderChainBlock)
                 {
-                    const int chainCaptureOffset = static_cast<int> (juce::jmin<juce::int64> (
+                    const int chainCaptureOffset = static_cast<int> (std::min<juce::int64> (
                         renderBlockStartSample,
                         static_cast<juce::int64> (std::numeric_limits<int>::max())));
                     chainWriterInputBlock.copyFrom (0, 0, masterBuffer, 0, 0, samplesThisBlock);
