@@ -559,11 +559,23 @@ if(HAS_ONNXRUNTIME AND WIN32)
         "Copying ONNX Runtime DLL to output directory"
     )
 elseif(HAS_ONNXRUNTIME AND UNIX AND NOT APPLE)
-    openstudio_copy_runtime_file(
-        "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so"
-        "libonnxruntime.so"
-        "Copying ONNX Runtime .so to output directory"
-    )
+    file(GLOB OPENSTUDIO_ONNXRUNTIME_LINUX_LIBS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so*")
+    foreach(OPENSTUDIO_ONNXRUNTIME_LINUX_LIB IN LISTS OPENSTUDIO_ONNXRUNTIME_LINUX_LIBS)
+        get_filename_component(OPENSTUDIO_ONNXRUNTIME_LINUX_LIB_NAME "${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB}" NAME)
+        openstudio_copy_runtime_file(
+            "${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB}"
+            "${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB_NAME}"
+            "Copying ONNX Runtime Linux shared library ${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB_NAME} to output directory"
+        )
+    endforeach()
+    if(EXISTS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so" AND NOT EXISTS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so.1")
+        add_custom_command(TARGET OpenStudio POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so"
+                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/libonnxruntime.so.1"
+            COMMENT "Copying ONNX Runtime Linux SONAME fallback libonnxruntime.so.1 to output directory"
+        )
+    endif()
 endif()
 
 # Copy required core ML model(s) to output directory
