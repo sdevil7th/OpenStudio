@@ -720,7 +720,7 @@ def get_music_generation_runtime_requirements(
         return []
 
     return [
-        "transformers>=4.51.0,<4.58.0",
+        "transformers==4.50.0",
         "diffusers==0.35.2",
         "accelerate>=1.12.0",
         "vector-quantize-pytorch>=1.27.15",
