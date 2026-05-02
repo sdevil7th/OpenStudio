@@ -253,6 +253,33 @@ export default function StemSeparationModal() {
 
               <div className="rounded bg-neutral-900/80 p-3 text-xs text-daw-text-secondary">
                 {aiToolsStatus.message || "Install AI Tools to enable stem separation."}
+                <p className="mt-2">
+                  Music generation:{" "}
+                  <span className="text-daw-text">
+                    {(
+                      aiToolsStatus.musicGenerationReady
+                      && aiToolsStatus.musicGenerationLayoutValid
+                      && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
+                    ) ? "ready" : "not ready yet"}
+                  </span>
+                  {aiToolsStatus.aceStepVersion ? ` (ACE-Step ${aiToolsStatus.aceStepVersion})` : ""}
+                </p>
+                {aiToolsStatus.musicGenerationModelId ? (
+                  <p className="mt-1">
+                    Pinned model: <span className="text-daw-text">{aiToolsStatus.musicGenerationModelId}</span>
+                  </p>
+                ) : null}
+                {aiToolsStatus.musicGenerationCheckpointRoot ? (
+                  <p className="mt-1 break-all">
+                    Checkpoint root: <span className="text-daw-text">{aiToolsStatus.musicGenerationCheckpointRoot}</span>
+                  </p>
+                ) : null}
+                <p className="mt-1">
+                  Checkpoint layout:{" "}
+                  <span className="text-daw-text">
+                    {aiToolsStatus.musicGenerationLayoutValid ? "valid" : "missing files"}
+                  </span>
+                </p>
                 {aiToolsStatus.error ? (
                   <p className="mt-2 text-daw-record">{aiToolsStatus.error}</p>
                 ) : null}

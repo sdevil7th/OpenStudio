@@ -2,11 +2,12 @@ import { useState, useEffect, useCallback } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
 import { EditMenu } from "./menus/EditMenu";
 import { MenuDropdown, MenuItemProps } from "./menus/MenuDropdown";
-import { getEffectiveActionShortcut } from "../store/actionRegistry";
+import { getDisplayEffectiveShortcut } from "../store/actionRegistry";
 import { useDAWStore, THEME_PRESETS } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { usesNativeWindowChrome } from "../utils/windowEnvironment";
+import { createTrackOfType } from "../utils/trackCreation";
 
 /**
  * Main Menu Bar Component
@@ -14,7 +15,7 @@ import { usesNativeWindowChrome } from "../utils/windowEnvironment";
  */
 export function MenuBar() {
   const shortcut = (actionId: string, fallback: string) =>
-    getEffectiveActionShortcut(actionId) ?? fallback;
+    getDisplayEffectiveShortcut(actionId) ?? fallback;
   const {
     toggleMixer,
     showMixer,
@@ -710,6 +711,13 @@ export function MenuBar() {
         openPluginBrowser(trackId);
       },
       dividerAfter: true,
+    },
+    {
+      label: "New AI Track",
+      shortcut: shortcut("insert.aiTrack", "Ctrl+Alt+T"),
+      onClick: () => {
+        void createTrackOfType("ai");
+      },
     },
     {
       label: "New Bus/Group Track",

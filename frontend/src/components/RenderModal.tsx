@@ -1,7 +1,16 @@
 import { useState, useEffect } from "react";
-import { useDAWStore } from "../store/useDAWStore";
+import {
+  useDAWStore,
+  type RenderDialogOptions,
+  type RenderSource,
+  type RenderBounds,
+  type AudioFormat,
+  type SampleRate,
+  type BitDepth,
+} from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
+import { prepareForManualRender } from "../utils/renderPreparation";
 import {
   Button,
   Input,
@@ -16,31 +25,6 @@ import {
 interface RenderModalProps {
   isOpen: boolean;
   onClose: () => void;
-}
-
-type RenderSource = "master" | "selected_tracks" | "stems" | "selected_items" | "selected_items_master" | "razor";
-type RenderBounds = "entire" | "custom" | "time_selection" | "project_regions" | "selected_regions";
-type AudioFormat = "wav" | "aiff" | "flac" | "mp3" | "ogg" | "raw";
-type SampleRate = 44100 | 48000 | 88200 | 96000 | 192000;
-type BitDepth = 16 | 24 | 32;
-
-interface RenderOptions {
-  source: RenderSource;
-  bounds: RenderBounds;
-  startTime: number;
-  endTime: number;
-  tailLength: number;
-  addTail: boolean;
-  directory: string;
-  fileName: string;
-  format: AudioFormat;
-  sampleRate: SampleRate;
-  bitDepth: BitDepth;
-  channels: "stereo" | "mono";
-  normalize: boolean;
-  dither: boolean;
-  mp3Bitrate: number;
-  oggQuality: number;
 }
 
 const isLossyFormat = (format: AudioFormat) => format === "mp3" || format === "ogg";
@@ -81,15 +65,18 @@ function resolveWildcards(
  */
 export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   const {
-    tracks, timeSelection, projectPath, projectRange, syncClipsWithBackend,
+    tracks, timeSelection, projectRange, projectPath, syncClipsWithBackend,
     selectedTrackIds, regions, selectedRegionIds, selectedClipIds, razorEdits,
     projectName, renderMetadata, secondaryOutputEnabled, secondaryOutputFormat,
     secondaryOutputBitDepth, onlineRender, addToProjectAfterRender,
+    loopEnabled, loopStart, loopEnd,
+    renderDialogOptions, setRenderDialogOptions, lastRenderDirectory, setLastRenderDirectory,
+    showToast,
   } = useDAWStore(useShallow((s) => ({
     tracks: s.tracks,
     timeSelection: s.timeSelection,
-    projectPath: s.projectPath,
     projectRange: s.projectRange,
+    projectPath: s.projectPath,
     syncClipsWithBackend: s.syncClipsWithBackend,
     selectedTrackIds: s.selectedTrackIds,
     regions: s.regions,
@@ -98,67 +85,63 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     razorEdits: s.razorEdits,
     projectName: s.projectName,
     renderMetadata: s.renderMetadata,
+    loopEnabled: s.transport.loopEnabled,
+    loopStart: s.transport.loopStart,
+    loopEnd: s.transport.loopEnd,
+    renderDialogOptions: s.renderDialogOptions,
+    setRenderDialogOptions: s.setRenderDialogOptions,
+    lastRenderDirectory: s.lastRenderDirectory,
+    setLastRenderDirectory: s.setLastRenderDirectory,
     secondaryOutputEnabled: s.secondaryOutputEnabled,
     secondaryOutputFormat: s.secondaryOutputFormat,
     secondaryOutputBitDepth: s.secondaryOutputBitDepth,
     onlineRender: s.onlineRender,
     addToProjectAfterRender: s.addToProjectAfterRender,
+    showToast: s.showToast,
   })));
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState("");
-  const [options, setOptions] = useState<RenderOptions>(() => {
-    // Compute initial extent from clips if projectRange is empty
-    let extent = projectRange;
-    if (extent.end <= extent.start) {
-      let minStart = Infinity;
-      let maxEnd = 0;
-      for (const track of tracks) {
-        for (const clip of track.clips) {
-          minStart = Math.min(minStart, clip.startTime);
-          maxEnd = Math.max(maxEnd, clip.startTime + clip.duration);
-        }
-      }
-      if (maxEnd > 0) extent = { start: Math.min(minStart, 0), end: maxEnd };
-    }
-    return {
-      source: "master",
-      bounds: "entire",
-      startTime: extent.start,
-      endTime: extent.end,
-      tailLength: 1000,
-      addTail: true,
-      directory: "",
-      fileName: "$project",
-      format: "wav",
-      sampleRate: 44100,
-      bitDepth: 24,
-      channels: "stereo",
-      normalize: false,
-      dither: false,
-      mp3Bitrate: 320,
-      oggQuality: 6,
-    };
-  });
+  const options = renderDialogOptions;
+  const setOptions = (
+    next:
+      | RenderDialogOptions
+      | ((prev: RenderDialogOptions) => RenderDialogOptions)
+  ) => {
+    const resolved = typeof next === "function" ? next(renderDialogOptions) : next;
+    setRenderDialogOptions(resolved);
+  };
 
-  // Compute actual project extent from clips if projectRange is empty
-  const getProjectExtent = () => {
-    if (projectRange.end > projectRange.start) {
-      return projectRange;
+  const getActiveTimeSelection = () => {
+    const liveState = useDAWStore.getState();
+    const liveTimeSelection = liveState.timeSelection;
+    if (liveTimeSelection && liveTimeSelection.end > liveTimeSelection.start) {
+      return liveTimeSelection;
     }
-    // Fall back: compute from clip positions
-    let minStart = Infinity;
+    if (liveState.projectRange.end > liveState.projectRange.start) {
+      return {
+        start: liveState.projectRange.start,
+        end: liveState.projectRange.end,
+      };
+    }
+    if (liveState.transport.loopEnabled && liveState.transport.loopEnd > liveState.transport.loopStart) {
+      return {
+        start: liveState.transport.loopStart,
+        end: liveState.transport.loopEnd,
+      };
+    }
+    return null;
+  };
+
+  // Compute project extent from clips: start=0, end=last clip end
+  const getProjectExtent = () => {
     let maxEnd = 0;
     for (const track of tracks) {
       for (const clip of track.clips) {
-        minStart = Math.min(minStart, clip.startTime);
         maxEnd = Math.max(maxEnd, clip.startTime + clip.duration);
       }
     }
-    if (maxEnd > 0) {
-      return { start: Math.min(minStart, 0), end: maxEnd };
-    }
-    return { start: 0, end: 0 };
+    return { start: 0, end: maxEnd };
   };
 
   const resolveBoundsRange = (bounds: RenderBounds, fallbackStart: number, fallbackEnd: number) => {
@@ -167,8 +150,9 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       return { startTime: extent.start, endTime: extent.end };
     }
     if (bounds === "time_selection") {
-      if (timeSelection) {
-        return { startTime: timeSelection.start, endTime: timeSelection.end };
+      const selection = getActiveTimeSelection();
+      if (selection) {
+        return { startTime: selection.start, endTime: selection.end };
       }
       return { startTime: fallbackStart, endTime: fallbackEnd };
     }
@@ -202,22 +186,49 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       }
       return { ...prev, ...resolved };
     });
-  }, [options.bounds, projectRange, tracks, timeSelection, regions, selectedRegionIds]);
+  }, [options.bounds, tracks, timeSelection, projectRange, loopEnabled, loopStart, loopEnd, regions, selectedRegionIds]);
 
-  // Set default directory from project path
+  // On open: always refresh time bounds from current state, handle missing time selection,
+  // and set default directory.
   useEffect(() => {
-    if (isOpen && projectPath && !options.directory) {
-      const dir = projectPath.substring(0, projectPath.lastIndexOf("\\"));
-      setOptions((prev) => ({ ...prev, directory: dir }));
+    if (!isOpen) return;
+    const activeSelection = getActiveTimeSelection();
+    const effectiveBounds =
+      renderDialogOptions.bounds === "time_selection" && !activeSelection
+        ? ("entire" as const)
+        : renderDialogOptions.bounds;
+    let next: RenderDialogOptions = { ...renderDialogOptions, bounds: effectiveBounds };
+    if (effectiveBounds !== "custom") {
+      const resolved = resolveBoundsRange(
+        effectiveBounds,
+        renderDialogOptions.startTime,
+        renderDialogOptions.endTime
+      );
+      next = { ...next, startTime: resolved.startTime, endTime: resolved.endTime };
     }
-  }, [isOpen, projectPath]);
+    if (!renderDialogOptions.directory) {
+      const dir =
+        lastRenderDirectory ||
+        (projectPath
+          ? projectPath.substring(0, Math.max(projectPath.lastIndexOf("\\"), projectPath.lastIndexOf("/")))
+          : "");
+      if (dir) {
+        next = { ...next, directory: dir };
+      }
+    }
+    setOptions(next);
+  }, [isOpen]);
 
   const handleBrowseDirectory = async () => {
     try {
       const ext = options.format;
+      const initialDir = options.directory ||
+        lastRenderDirectory ||
+        (projectPath ? projectPath.substring(0, Math.max(projectPath.lastIndexOf("\\"), projectPath.lastIndexOf("/"))) : "");
       const path = await nativeBridge.showRenderSaveDialog(
         resolveWildcards(options.fileName, { projectName }) || "untitled",
-        ext
+        ext,
+        initialDir
       );
       if (path) {
         const lastSlash = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
@@ -226,6 +237,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         // Strip extension from filename if present
         const dotIdx = name.lastIndexOf(".");
         if (dotIdx > 0) name = name.substring(0, dotIdx);
+        if (dir) setLastRenderDirectory(dir);
         setOptions((prev) => ({ ...prev, directory: dir, fileName: name }));
       }
     } catch (error) {
@@ -287,6 +299,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       normalize: options.normalize,
       addTail: options.addTail,
       tailLength: options.tailLength,
+      includeMetronome: false,
     };
   };
 
@@ -374,11 +387,12 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
 
     setIsRendering(true);
     setRenderProgress(0);
-    setRenderStatus("Syncing clips...");
+    setRenderStatus("Checking pitch renders...");
     const renderedFiles: string[] = [];
 
     try {
-      await syncClipsWithBackend();
+      setRenderStatus("Syncing clips...");
+      await prepareForManualRender(syncClipsWithBackend, "render-modal");
       const ranges = getRenderRanges();
       const totalFiles = getFileCount();
       let rendered = 0;
@@ -511,6 +525,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       isOpen={isOpen}
       onClose={handleCancel}
       size="lg"
+      fullHeight
       closeOnOverlayClick={!isRendering}
       closeOnEscape={!isRendering}
     >
@@ -555,6 +570,11 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
               value={options.bounds}
               onChange={(val) => {
                 const newBounds = val as RenderBounds;
+                const activeSelection = getActiveTimeSelection();
+                if (newBounds === "time_selection" && !activeSelection) {
+                  showToast("No time selection active. Make a selection on the timeline first.", "info");
+                  return;
+                }
                 const resolved = resolveBoundsRange(newBounds, options.startTime, options.endTime);
                 setOptions({
                   ...options,

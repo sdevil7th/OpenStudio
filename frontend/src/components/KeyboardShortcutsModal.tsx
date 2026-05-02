@@ -5,45 +5,11 @@ import { getActionShortcutScopeLabel, getRegisteredActions } from "../store/acti
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
+import { formatShortcut, keyEventToCanonicalShortcut } from "../utils/platform";
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
   onClose: () => void;
-}
-
-/**
- * Convert a KeyboardEvent into a human-readable shortcut string
- * matching the format used in actionRegistry (e.g. "Ctrl+Shift+Z", "Alt+B", "F1").
- */
-function keyEventToShortcutString(e: KeyboardEvent): string {
-  const parts: string[] = [];
-
-  if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
-  if (e.shiftKey) parts.push("Shift");
-  if (e.altKey) parts.push("Alt");
-
-  // Map the key to a display name
-  let key = e.key;
-
-  // Skip standalone modifier keys
-  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return "";
-
-  // Normalize keys
-  if (key === " ") key = "Space";
-  else if (key === "ArrowLeft") key = "Left";
-  else if (key === "ArrowRight") key = "Right";
-  else if (key === "ArrowUp") key = "Up";
-  else if (key === "ArrowDown") key = "Down";
-  else if (key === "Escape") key = "Esc";
-  else if (key.startsWith("F") && key.length <= 3 && /^F\d+$/.test(key)) {
-    // Function keys: keep as-is (F1, F2, etc.)
-  } else if (key.length === 1) {
-    // Single character: uppercase it
-    key = key.toUpperCase();
-  }
-
-  parts.push(key);
-  return parts.join("+");
 }
 
 /**
@@ -126,7 +92,7 @@ export function KeyboardShortcutsModal({
         return;
       }
 
-      const shortcut = keyEventToShortcutString(e);
+      const shortcut = keyEventToCanonicalShortcut(e);
       if (!shortcut) return; // Ignore standalone modifier keys
 
       setCapturedShortcut(shortcut);
@@ -179,7 +145,7 @@ export function KeyboardShortcutsModal({
       if (!printGroups[action.category]) printGroups[action.category] = [];
       printGroups[action.category].push({
         name: action.name,
-        shortcut: effectiveShortcut,
+        shortcut: formatShortcut(effectiveShortcut),
       });
     }
 
@@ -386,11 +352,11 @@ export function KeyboardShortcutsModal({
                               }`}
                               title={
                                 isCustom
-                                  ? `Custom (default: ${action.shortcut || "none"})`
+                                  ? `Custom (default: ${formatShortcut(action.shortcut) || "none"})`
                                   : undefined
                               }
                             >
-                              {effectiveShortcut}
+                              {formatShortcut(effectiveShortcut)}
                             </span>
                             <span className="text-[10px] uppercase tracking-wide text-daw-text-muted/70">
                               {shortcutScopeLabel}

@@ -297,11 +297,83 @@ jobs:
           path: dist/macos/OpenStudio-macOS.dmg
           if-no-files-found: error
 
+  build-linux:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      BUILD_DIR: build-release-linux
+      ONNXRUNTIME_VERSION: 1.24.4
+      RELEASE_SITE_URL: https://openstudio.org.in
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Normalize version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            libasound2-dev libjack-jackd2-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libgl1-mesa-dev libfreetype6-dev libfontconfig1-dev \
+            libcurl4-openssl-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev \
+            libxinerama-dev libxcursor-dev libxcomposite-dev
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: cd frontend && npm ci && npm run build
+
+      - name: Download ONNX Runtime (Linux CPU)
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          wget -q "$URL" -O onnxruntime.tgz
+          mkdir -p thirdparty/onnxruntime
+          tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSTUDIO_APP_VERSION="$VERSION" \
+            -DOPENSTUDIO_UPDATE_MANIFEST_URL_VALUE="$RELEASE_SITE_URL/releases/stable/latest.json" \
+            -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="$RELEASE_SITE_URL/appcast/linux-stable.xml" \
+            -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="$RELEASE_SITE_URL/download" \
+            -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
+            -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
+            -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
+
+      - name: Build OpenStudio
+        run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Package AppImage
+        run: |
+          chmod +x ./tools/package-linux-release.sh
+          bash ./tools/package-linux-release.sh "$VERSION" "$BUILD_DIR"
+
+      - name: Verify Linux release outputs
+        run: test -f "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: dist/linux/OpenStudio-*-linux-x86_64.AppImage
+          if-no-files-found: error
+
   publish:
     runs-on: ubuntu-latest
     needs:
       - build-windows
       - build-macos
+      - build-linux
     permissions:
       contents: write
     env:
@@ -368,6 +440,11 @@ jobs:
           name: macos-release
           path: dist/macos
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+          path: dist/linux
+
       - name: Download AI runtime release assets
         shell: bash
         env:
@@ -378,6 +455,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --pattern "OpenStudio-AI-Runtime-windows-base-x64.zip" \
             --pattern "OpenStudio-AI-Runtime-macos-arm64.zip" \
+            --pattern "OpenStudio-AI-Runtime-linux-cpu-x64.zip" \
             --dir dist/ai-runtime
 
       - name: Verify downloaded release assets
@@ -387,7 +465,8 @@ jobs:
             "dist/windows/OpenStudio-Setup-x64.exe",
             "dist/macos/OpenStudio-macOS.dmg",
             "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip",
-            "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
+            "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip",
+            "dist/ai-runtime/OpenStudio-AI-Runtime-linux-cpu-x64.zip"
           )
 
           foreach ($file in $requiredFiles) {
@@ -406,6 +485,7 @@ jobs:
           $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
           $windowsBaseAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-base-x64.zip"
           $macosArm64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-macos-arm64.zip"
+          $linuxUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-$env:VERSION-linux-x86_64.AppImage"
           ./tools/generate-release-metadata.ps1 `
             -Version $env:VERSION `
             -Channel stable `
@@ -417,6 +497,8 @@ jobs:
             -WindowsInstallerArguments "/SP- /NOICONS" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
             -MacAssetUrl $macosUrl `
+            -LinuxAssetPath "dist/linux/OpenStudio-$env:VERSION-linux-x86_64.AppImage" `
+            -LinuxAssetUrl $linuxUrl `
             -WindowsBaseAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `
             -WindowsBaseAiRuntimeAssetUrl $windowsBaseAiRuntimeUrl `
             -WindowsCudaInstallPlanPath "tools/ai-runtime-install-plan-windows-cuda.json" `
@@ -433,6 +515,7 @@ jobs:
             -Channel stable `
             -WindowsAssetPath "dist/windows/OpenStudio-Setup-x64.exe" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
+            -LinuxAssetPath "dist/linux/OpenStudio-$env:VERSION-linux-x86_64.AppImage" `
             -WindowsBaseAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `
             -WindowsCudaInstallPlanPath "tools/ai-runtime-install-plan-windows-cuda.json" `
             -WindowsDirectmlInstallPlanPath "tools/ai-runtime-install-plan-windows-directml.json" `
@@ -456,6 +539,7 @@ jobs:
           files: |
             dist/windows/OpenStudio-Setup-x64.exe
             dist/macos/OpenStudio-macOS.dmg
+            dist/linux/OpenStudio-*-linux-x86_64.AppImage
             dist/release-publish-assets/OpenStudio-checksums.txt
             dist/release-publish-assets/OpenStudio-release-latest.json
             dist/release-publish-assets/OpenStudio-release-stable-latest.json
@@ -463,6 +547,7 @@ jobs:
             dist/release-publish-assets/OpenStudio-ai-runtime-stable-latest.json
             dist/release-publish-assets/OpenStudio-appcast-windows-stable.xml
             dist/release-publish-assets/OpenStudio-appcast-macos-stable.xml
+            dist/release-publish-assets/OpenStudio-appcast-linux-stable.xml
 
       - name: Verify website dispatch configuration
         shell: bash

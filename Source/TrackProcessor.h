@@ -6,6 +6,8 @@
 #include "ARAHostController.h"
 #include <map>
 #include <array>
+#include <limits>
+#include <optional>
 
 // Track type enumeration
 enum class TrackType
@@ -62,6 +64,28 @@ public:
         bool enabled = false;
         bool preFader = false;
         bool phaseInvert = false;
+    };
+
+    struct AutomationTarget
+    {
+        enum class Kind
+        {
+            Volume,
+            Pan,
+            Width,
+            PreFXVolume,
+            PreFXPan,
+            PreFXWidth,
+            TrimVolume,
+            Mute,
+            PluginParameter
+        };
+
+        Kind kind = Kind::Volume;
+        AutomationList* list = nullptr;
+        bool isInputFX = false;
+        int fxIndex = -1;
+        int paramIndex = -1;
     };
 
     TrackProcessor();
@@ -127,7 +151,9 @@ public:
     int getNumInputFX() const;
     int getNumTrackFX() const;
     juce::AudioProcessor* getInputFXProcessor(int index);
+    const juce::AudioProcessor* getInputFXProcessor(int index) const;
     juce::AudioProcessor* getTrackFXProcessor(int index);
+    const juce::AudioProcessor* getTrackFXProcessor(int index) const;
     std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>> getInputFXSnapshot() const;
     std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>> getTrackFXSnapshot() const;
     std::shared_ptr<const std::map<int, bool>> getInputFXBypassSnapshot() const;
@@ -203,9 +229,9 @@ public:
     // MIDI intake / scheduling
     bool enqueueMidiMessage(const juce::MidiMessage& message, int sampleOffset = 0);
     void setScheduledMIDIClips(std::vector<ScheduledMIDIClip> clips);
-    void buildMidiBuffer(juce::MidiBuffer& destination, double blockStartTimeSeconds,
+    void buildMidiBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
                          int numSamples, double sampleRate, bool playing);
-    bool needsProcessing(double blockStartTimeSeconds, int numSamples, double sampleRate, bool playing) const;
+    bool needsProcessing(double blockTimeSeconds, int numSamples, double sampleRate, bool playing) const;
     void queueAllNotesOff();
     std::vector<juce::String> getSidechainSourceSnapshot() const;
     std::vector<RealtimeSendInfo> getRealtimeSendSnapshot() const;
@@ -271,22 +297,33 @@ public:
     juce::String getMIDIOutputDeviceName() const { return midiOutputDeviceName; }
     void sendMIDIToOutput(const juce::MidiBuffer& buffer);
 
-    // Automation (Phase 1.1)
-    // Each track has automation for volume and pan. Plugin param automation
-    // uses the paramId "plugin-{index}-param-{paramIndex}" key in AudioEngine's
-    // per-track automation map — TrackProcessor only handles volume + pan.
+    // Automation
     AutomationList& getVolumeAutomation() { return volumeAutomation; }
     AutomationList& getPanAutomation() { return panAutomation; }
+    AutomationList& getWidthAutomation() { return widthAutomation; }
+    AutomationList& getPreFXVolumeAutomation() { return preFXVolumeAutomation; }
+    AutomationList& getPreFXPanAutomation() { return preFXPanAutomation; }
+    AutomationList& getPreFXWidthAutomation() { return preFXWidthAutomation; }
+    AutomationList& getTrimVolumeAutomation() { return trimVolumeAutomation; }
+    AutomationList& getMuteAutomation() { return muteAutomation; }
     const AutomationList& getVolumeAutomation() const { return volumeAutomation; }
     const AutomationList& getPanAutomation() const { return panAutomation; }
+    const AutomationList& getWidthAutomation() const { return widthAutomation; }
+    const AutomationList& getPreFXVolumeAutomation() const { return preFXVolumeAutomation; }
+    const AutomationList& getPreFXPanAutomation() const { return preFXPanAutomation; }
+    const AutomationList& getPreFXWidthAutomation() const { return preFXWidthAutomation; }
+    const AutomationList& getTrimVolumeAutomation() const { return trimVolumeAutomation; }
+    const AutomationList& getMuteAutomation() const { return muteAutomation; }
+    std::optional<AutomationTarget> resolveAutomationTarget(const juce::String& parameterId, bool createIfNeeded);
+    float getAutomationDefaultValue(const AutomationTarget& target) const;
 
     // Set the current timeline position for this block (called by AudioEngine
     // before processBlock so automation knows where it is on the timeline).
-    void setCurrentBlockPosition(double samplePosition, double sRate)
+    void setCurrentBlockPosition(double timeSeconds)
     {
-        blockStartSample = samplePosition;
-        blockSampleRate = sRate;
+        blockStartTimeSeconds = timeSeconds;
     }
+    void setIgnoreStaticMuteForProcessing(bool ignore) { ignoreStaticMuteDuringProcessing.store(ignore, std::memory_order_relaxed); }
 
     bool tryProcessBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&);
 
@@ -315,8 +352,24 @@ public:
     void shutdownARA();
 
 private:
+    struct PluginAutomationRoute
+    {
+        juce::String parameterId;
+        bool isInputFX = false;
+        int fxIndex = -1;
+        int paramIndex = -1;
+        std::shared_ptr<AutomationList> automation = std::make_shared<AutomationList>();
+        std::atomic<float> lastAppliedValue { std::numeric_limits<float>::quiet_NaN() };
+    };
+
+    using PluginAutomationRouteSnapshot = std::vector<std::shared_ptr<PluginAutomationRoute>>;
+
     void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&);
     void publishRealtimeStateSnapshots();
+    std::shared_ptr<PluginAutomationRoute> getOrCreatePluginAutomationRoute(const juce::String& parameterId);
+    std::shared_ptr<PluginAutomationRoute> findPluginAutomationRoute(const juce::String& parameterId) const;
+    static std::optional<std::pair<int, int>> parsePluginAutomationParameterId(const juce::String& parameterId);
+    void applyPluginAutomationForProcessor(juce::AudioProcessor* proc, bool isInputFX, int fxIndex, double blockTimeSeconds);
 
     // Current peak level (was named currentRMS but now holds peak — kept as-is
     // to avoid changing the public getRMSLevel() / resetRMS() API used by AudioEngine).
@@ -405,14 +458,22 @@ private:
     std::shared_ptr<juce::AudioPluginInstance> instrumentPlugin;
     juce::MidiBuffer midiBuffer;  // For MIDI event storage
 
-    // Automation (Phase 1.1)
+    // Automation
     AutomationList volumeAutomation;
     AutomationList panAutomation;
-    double blockStartSample { 0.0 };  // Set by AudioEngine before processBlock
-    double blockSampleRate { 44100.0 };
+    AutomationList widthAutomation;
+    AutomationList preFXVolumeAutomation;
+    AutomationList preFXPanAutomation;
+    AutomationList preFXWidthAutomation;
+    AutomationList trimVolumeAutomation;
+    AutomationList muteAutomation;
+    double blockStartTimeSeconds { 0.0 };
+    std::atomic<bool> ignoreStaticMuteDuringProcessing { false };
 
     // Pre-allocated buffer for per-sample automation gain (avoids alloc on audio thread)
     juce::AudioBuffer<float> automationGainBuffer;
+    juce::CriticalSection pluginAutomationRouteLock;
+    std::shared_ptr<const PluginAutomationRouteSnapshot> pluginAutomationSnapshot;
 
     // Plugin Delay Compensation (PDC)
     juce::dsp::DelayLine<float> pdcDelayLine { 96000 };  // max 2 seconds at 48kHz
@@ -504,11 +565,11 @@ private:
     ProcessingPrecisionMode processingPrecisionMode { ProcessingPrecisionMode::Float32 };
 
     void markActiveMIDINoteState(const juce::MidiMessage& message);
-    void appendScheduledMIDIToBuffer(juce::MidiBuffer& destination, double blockStartTimeSeconds,
+    void appendScheduledMIDIToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
                                      int numSamples, double sampleRate) const;
     void appendQueuedMIDIToBuffer(juce::MidiBuffer& destination, int numSamples);
     bool hasQueuedMIDI() const;
-    bool hasScheduledMIDIInBlock(double blockStartTimeSeconds, int numSamples, double sampleRate) const;
+    bool hasScheduledMIDIInBlock(double blockTimeSeconds, int numSamples, double sampleRate) const;
 
     // ARA Plugin Hosting (Phase 9)
     mutable juce::CriticalSection araStatusLock;

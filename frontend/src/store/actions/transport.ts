@@ -21,6 +21,17 @@ const stringifyForDebug = (value: unknown) => {
   }
 };
 
+async function clearPitchRoutesForCorrectedSourcesBeforePlayback(reason: string) {
+  try {
+    const cleared = await nativeBridge.clearPitchPreviewRoutesForCorrectedSources();
+    if (cleared > 0) {
+      console.warn(`${AUDIO_TRANSPORT_LOG_PREFIX} ${reason}:clearedPitchPreviewRoutes`, { correctedSourceClipCount: cleared });
+    }
+  } catch (error) {
+    console.warn(`${AUDIO_TRANSPORT_LOG_PREFIX} ${reason}:clearPitchPreviewRoutesForCorrectedSources failed`, error);
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -80,6 +91,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:ara`, { araActive, startTime });
 
       if (araActive) {
+        await clearPitchRoutesForCorrectedSourcesBeforePlayback("play:ara");
         const positionResult = await nativeBridge.setTransportPosition(startTime);
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPosition`, { startTime, positionResult });
         set((state) => ({
@@ -96,6 +108,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPlaying`, { playingResult, mode: "ara" });
       } else {
         await syncClipsWithBackend();
+        await clearPitchRoutesForCorrectedSourcesBeforePlayback("play:standard");
         const positionResult = await nativeBridge.setTransportPosition(startTime);
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPosition`, { startTime, positionResult });
         set((state) => ({

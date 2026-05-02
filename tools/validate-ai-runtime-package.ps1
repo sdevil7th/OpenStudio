@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("windows", "macos")]
+    [ValidateSet("windows", "macos", "linux")]
     [string]$Platform,
 
     [Parameter(Mandatory = $true)]
@@ -84,6 +84,33 @@ function Assert-True {
     }
 }
 
+function Restore-UnixExecuteBits {
+    param([string]$RuntimeRoot)
+
+    if ($Platform -notin @("macos", "linux")) {
+        return
+    }
+
+    $candidateRoots = @(
+        (Join-Path $RuntimeRoot "bin"),
+        (Join-Path $RuntimeRoot "lib"),
+        (Join-Path $RuntimeRoot "python/bin"),
+        (Join-Path $RuntimeRoot "python/lib")
+    )
+
+    foreach ($root in $candidateRoots) {
+        if (Test-Path $root) {
+            Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue |
+                ForEach-Object { & chmod +x $_.FullName }
+        }
+    }
+
+    $pythonExe = Resolve-PythonExecutable -Root $RuntimeRoot
+    if (-not [string]::IsNullOrWhiteSpace($pythonExe)) {
+        & chmod +x $pythonExe
+    }
+}
+
 $resolvedArchive = if ([System.IO.Path]::IsPathRooted($ArchivePath)) {
     $ArchivePath
 } else {
@@ -119,6 +146,8 @@ try {
     if (-not $runtimeRoot) {
         throw "AI runtime archive did not contain a Python executable."
     }
+
+    Restore-UnixExecuteBits -RuntimeRoot $runtimeRoot
 
     $venvMarker = Join-Path $runtimeRoot "pyvenv.cfg"
     Assert-True (-not (Test-Path $venvMarker)) "AI runtime archive contains pyvenv.cfg and is not relocatable."
@@ -182,7 +211,7 @@ try {
 
     $probe = ($probeJson | Select-Object -Last 1) | ConvertFrom-Json
     Assert-True ($probe.baseRuntimeReady -eq $true) "AI runtime capability probe did not report a valid base runtime."
-    Assert-True ($probe.selectedBackend -in @("cuda", "directml", "coreml", "mps", "cpu")) "AI runtime capability probe returned an unexpected selectedBackend '$($probe.selectedBackend)'."
+    Assert-True ($probe.selectedBackend -in @("cuda", "directml", "coreml", "mps", "rocm", "cpu")) "AI runtime capability probe returned an unexpected selectedBackend '$($probe.selectedBackend)'."
     Assert-True ($probe.supportedBackends.Count -ge 1) "AI runtime capability probe did not report supportedBackends."
 
     if ($runtimeMode -eq "base") {
@@ -197,6 +226,10 @@ try {
 
         if ($Platform -eq "macos") {
             Assert-True (($probe.packagedBackends -contains "coreml") -or ($probe.packagedBackends -contains "mps") -or ($probe.packagedBackends -contains "cpu")) "macOS AI runtime probe did not report packaged backends."
+        }
+
+        if ($Platform -eq "linux") {
+            Assert-True (($probe.packagedBackends -contains "cuda") -or ($probe.packagedBackends -contains "rocm") -or ($probe.packagedBackends -contains "cpu")) "Linux AI runtime probe did not report packaged backends."
         }
 
         foreach ($expectedBackend in $ExpectedPackagedBackends) {

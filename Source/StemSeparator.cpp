@@ -1,13 +1,25 @@
 #include "StemSeparator.h"
 
+#if JUCE_MAC || JUCE_LINUX
+ #include <sys/stat.h>
+#endif
+
 namespace
 {
 constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
+constexpr auto kPinnedMusicGenerationModelId = "acestep-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/Ace-Step1.5";
 constexpr auto kPythonHelpUrl = "https://www.python.org/downloads/";
 constexpr auto kInstallSourceDownloadedRuntime = "downloadedRuntime";
 constexpr auto kInstallSourceExternalPython = "externalPython";
 constexpr auto kBuildRuntimeModeDownloadedRuntime = "downloaded-runtime";
 constexpr auto kBuildRuntimeModeUnbundledDev = "unbundled-dev";
+#if JUCE_WINDOWS
+constexpr auto kSupportedExternalPythonRange = "Python 3.11";
+#else
+constexpr auto kSupportedExternalPythonRange = "Python 3.10 through 3.12";
+#endif
 constexpr double kInstallerOutputTimeoutMs = 20000.0;
 constexpr double kInstallerMonitorPollMs = 150.0;
 constexpr double kInstallerHeartbeatMs = 1000.0;
@@ -78,6 +90,12 @@ bool isInstallerTerminalFailureCode (const juce::String& errorCode)
         || errorCode == "installer_output_timeout";
 }
 
+bool hasNativeMusicProfile (const StemSeparator::AiToolsStatus& status)
+{
+    return status.musicGenerationAvailableProfiles.isEmpty()
+        || status.musicGenerationAvailableProfiles.contains("native-xl-turbo");
+}
+
 juce::String sanitiseArchiveEntryName (juce::String name)
 {
     name = name.replaceCharacter('\\', '/').trim();
@@ -141,15 +159,26 @@ juce::File StemSeparator::getUserDataRoot() const
     const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     if (localAppData.isNotEmpty())
         return juce::File(localAppData).getChildFile("OpenStudio");
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("OpenStudio");
    #elif JUCE_MAC
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile("Library")
         .getChildFile("Application Support")
         .getChildFile("OpenStudio");
-   #endif
-
+   #elif JUCE_LINUX
+    // XDG Base Directory spec: use $XDG_DATA_HOME or the default ~/.local/share
+    const auto xdgDataHome = juce::SystemStats::getEnvironmentVariable("XDG_DATA_HOME", {});
+    if (xdgDataHome.isNotEmpty())
+        return juce::File(xdgDataHome).getChildFile("OpenStudio");
+    return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+        .getChildFile(".local")
+        .getChildFile("share")
+        .getChildFile("OpenStudio");
+   #else
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("OpenStudio");
+   #endif
 }
 
 juce::File StemSeparator::getUserRuntimeRoot() const
@@ -160,6 +189,14 @@ juce::File StemSeparator::getUserRuntimeRoot() const
 juce::File StemSeparator::getUserModelsDir() const
 {
     return getUserDataRoot().getChildFile("models");
+}
+
+juce::File StemSeparator::getMusicGenerationCheckpointRoot() const
+{
+    return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+        .getChildFile(".cache")
+        .getChildFile("ace-step")
+        .getChildFile("checkpoints");
 }
 
 juce::File StemSeparator::getAiToolsInstallLogFile() const
@@ -202,6 +239,12 @@ juce::String StemSeparator::getAiRuntimeArchitectureKey() const
    #else
     return "x64";
    #endif
+#elif JUCE_LINUX
+   #if defined(__aarch64__) || defined(__arm64__)
+    return "arm64";
+   #else
+    return "x64";
+   #endif
 #else
     return {};
 #endif
@@ -210,29 +253,70 @@ juce::String StemSeparator::getAiRuntimeArchitectureKey() const
 juce::File StemSeparator::findSystemPython() const
 {
 #if JUCE_WINDOWS
+    const auto isSupportedPythonVersion = [] (juce::String versionText)
+    {
+        versionText = versionText.trim();
+        if (versionText.startsWithIgnoreCase("Python "))
+            versionText = versionText.fromFirstOccurrenceOf("Python ", false, false).trim();
+
+        auto parts = juce::StringArray::fromTokens(versionText, ".", "");
+        if (parts.size() < 2)
+            return false;
+
+        const auto major = parts[0].getIntValue();
+        const auto minor = parts[1].retainCharacters("0123456789").getIntValue();
+        return major == 3 && minor >= 10 && minor <= 12;
+    };
+
+    const auto isSupportedPythonExecutable = [&] (const juce::File& candidate)
+    {
+        if (! candidate.existsAsFile())
+            return false;
+
+        juce::ChildProcess versionProbe;
+        if (! versionProbe.start(quoteCommandPart(candidate.getFullPathName()) + " --version")
+            || ! versionProbe.waitForProcessToFinish(5000))
+            return false;
+
+        return isSupportedPythonVersion(versionProbe.readAllProcessOutput());
+    };
+
+    const auto resolvePyLauncherPython = [&] (const juce::String& selector) -> juce::File
+    {
+        juce::ChildProcess pyLauncher;
+        const auto command = "py -" + selector + " -c \"import sys; print(sys.executable)\"";
+        if (! pyLauncher.start(command) || ! pyLauncher.waitForProcessToFinish(5000))
+            return {};
+
+        const auto output = pyLauncher.readAllProcessOutput().trim();
+        if (output.isEmpty())
+            return {};
+
+        juce::File systemPython(output);
+        if (isSupportedPythonExecutable(systemPython))
+            return systemPython;
+
+        return {};
+    };
+
+    for (const auto& selector : { juce::String("3.12"), juce::String("3.11"), juce::String("3.10") })
+        if (auto launcherPython = resolvePyLauncherPython(selector); launcherPython.existsAsFile())
+            return launcherPython;
+
     juce::ChildProcess where;
     if (where.start("where python") && where.waitForProcessToFinish(3000))
     {
         auto output = where.readAllProcessOutput().trim();
         if (output.isNotEmpty())
         {
-            auto firstLine = output.upToFirstOccurrenceOf("\n", false, false).trim();
-            juce::File systemPython(firstLine);
-            if (systemPython.existsAsFile())
-                return systemPython;
-        }
-    }
-
-    juce::ChildProcess pyLauncher;
-    if (pyLauncher.start("py -3 -c \"import sys; print(sys.executable)\"")
-        && pyLauncher.waitForProcessToFinish(5000))
-    {
-        auto output = pyLauncher.readAllProcessOutput().trim();
-        if (output.isNotEmpty())
-        {
-            juce::File systemPython(output);
-            if (systemPython.existsAsFile())
-                return systemPython;
+            juce::StringArray candidates;
+            candidates.addLines(output);
+            for (auto candidatePath : candidates)
+            {
+                juce::File systemPython(candidatePath.trim());
+                if (isSupportedPythonExecutable(systemPython))
+                    return systemPython;
+            }
         }
     }
 #elif JUCE_MAC
@@ -255,9 +339,24 @@ juce::File StemSeparator::findSystemPython() const
             return systemPy;
     }
 #elif JUCE_LINUX
-    juce::File systemPy("/usr/bin/python3");
-    if (systemPy.existsAsFile())
-        return systemPy;
+    juce::ChildProcess which;
+    if (which.start("which python3") && which.waitForProcessToFinish(3000))
+    {
+        auto output = which.readAllProcessOutput().trim();
+        if (output.isNotEmpty())
+        {
+            juce::File systemPython(output);
+            if (systemPython.existsAsFile())
+                return systemPython;
+        }
+    }
+
+    for (const auto& path : { "/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3" })
+    {
+        juce::File systemPy(path);
+        if (systemPy.existsAsFile())
+            return systemPy;
+    }
 #endif
 
     return {};
@@ -417,25 +516,59 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
     RuntimeCapabilities capabilities;
 
     if (! python.existsAsFile())
+    {
+        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_skipped", "",
+            [] (juce::DynamicObject& o) { o.setProperty ("reason", "python executable not found"); }));
         return capabilities;
+    }
 
     const auto probeScript = findRuntimeProbeScript();
     if (! probeScript.existsAsFile())
+    {
+        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_skipped", "",
+            [&] (juce::DynamicObject& o) { o.setProperty ("reason", "probe script not found"); }));
         return capabilities;
+    }
 
     juce::ChildProcess probe;
-    const auto command = quoteCommandPart(python.getFullPathName())
-        + " " + quoteCommandPart(probeScript.getFullPathName())
-        + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
-        + " --model " + quoteCommandPart(modelName)
-        + " --acceleration-mode " + quoteCommandPart(accelerationMode);
+    const auto command = quoteCommandPart (python.getFullPathName())
+        + " " + quoteCommandPart (probeScript.getFullPathName())
+        + " --models-dir " + quoteCommandPart (modelsDir.getFullPathName())
+        + " --model " + quoteCommandPart (modelName)
+        + " --music-gen-checkpoint-root " + quoteCommandPart (getMusicGenerationCheckpointRoot().getFullPathName())
+        + " --music-gen-model " + quoteCommandPart (kPinnedMusicGenerationModelId)
+        + " --acceleration-mode " + quoteCommandPart (accelerationMode);
 
-    if (! probe.start(command) || ! probe.waitForProcessToFinish(15000))
+    if (! probe.start (command))
+    {
+        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_failed", "",
+            [&] (juce::DynamicObject& o)
+            {
+                o.setProperty ("reason", "child process failed to start");
+                o.setProperty ("python", python.getFullPathName());
+            }));
         return capabilities;
+    }
+
+    if (! probe.waitForProcessToFinish (30000))
+    {
+        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_failed", "",
+            [] (juce::DynamicObject& o) { o.setProperty ("reason", "probe timed out after 30 s"); }));
+        return capabilities;
+    }
 
     auto output = probe.readAllProcessOutput().trim();
     if (probe.getExitCode() != 0 || output.isEmpty())
+    {
+        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_failed", "",
+            [&] (juce::DynamicObject& o)
+            {
+                o.setProperty ("reason", "non-zero exit code or empty output");
+                o.setProperty ("exitCode", static_cast<int> (probe.getExitCode()));
+                o.setProperty ("outputSnippet", output.substring (0, 300));
+            }));
         return capabilities;
+    }
 
     const auto lastLine = output.fromLastOccurrenceOf("\n", false, false).trim();
     const auto json = juce::JSON::parse(lastLine.isNotEmpty() ? lastLine : output);
@@ -452,6 +585,22 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
         capabilities.runtimeVersion = obj->getProperty("runtimeVersion").toString();
         capabilities.modelVersion = obj->getProperty("modelVersion").toString();
         capabilities.restartRequired = static_cast<bool>(obj->getProperty("restartRequired"));
+        capabilities.aceStepVersion = obj->getProperty("aceStepVersion").toString();
+        capabilities.musicGenerationReady = static_cast<bool>(obj->getProperty("musicGenerationReady"));
+        capabilities.musicGenerationLayoutValid = static_cast<bool>(obj->getProperty("musicGenerationLayoutValid"));
+        capabilities.musicGenerationModelId = obj->getProperty("musicGenerationModelId").toString();
+        capabilities.musicGenerationModelRepoId = obj->getProperty("musicGenerationModelRepoId").toString();
+        capabilities.musicGenerationSharedRepoId = obj->getProperty("musicGenerationSharedRepoId").toString();
+        capabilities.musicGenerationCheckpointRoot = obj->getProperty("musicGenerationCheckpointRoot").toString();
+        capabilities.musicGenerationStatusMessage = obj->getProperty("musicGenerationStatusMessage").toString();
+        capabilities.musicGenerationFailureCode = obj->getProperty("musicGenerationFailureCode").toString();
+        capabilities.musicGenerationPerformanceReady = static_cast<bool>(obj->getProperty("musicGenerationPerformanceReady"));
+        capabilities.musicGenerationPerformanceStatusMessage = obj->getProperty("musicGenerationPerformanceStatusMessage").toString();
+        capabilities.musicGenerationRuntimeProfiles = obj->getProperty("musicGenerationRuntimeProfiles");
+        capabilities.musicGenerationAvailableProfiles = varToStringArray(obj->getProperty("musicGenerationAvailableProfiles"));
+        capabilities.musicGenerationUnavailableProfiles = obj->getProperty("musicGenerationUnavailableProfiles");
+        capabilities.musicGenerationDefaultProfile = obj->getProperty("musicGenerationDefaultProfile").toString();
+        capabilities.musicGenerationWarmSessionCapable = static_cast<bool>(obj->getProperty("musicGenerationWarmSessionCapable"));
     }
 
     if (capabilities.supportedBackends.isEmpty())
@@ -509,7 +658,11 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
     {
         status.state = "ready";
         status.progress = 1.0f;
-        status.stepLabel = "AI tools are ready.";
+        const auto musicGenerationFullyReady = status.musicGenerationReady
+            && status.musicGenerationLayoutValid
+            && status.musicGenerationPerformanceReady
+            && hasNativeMusicProfile(status);
+        status.stepLabel = musicGenerationFullyReady ? "AI tools are ready." : "Stem separation is ready.";
         status.stepIndex = 0;
         status.stepCount = 0;
         status.bytesDownloaded = 0;
@@ -522,9 +675,19 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.statusWarningCode.clear();
         status.terminalReason.clear();
         status.lastPhase = "ready";
-        status.message = "AI tools are ready.";
+        status.message = musicGenerationFullyReady
+            ? "AI tools are ready."
+            : (! hasNativeMusicProfile(status)
+                ? "Stem separation is ready, but the Native XL Turbo ACE-Step profile is still missing required music-generation assets."
+                : (status.musicGenerationPerformanceStatusMessage.isNotEmpty()
+                    ? status.musicGenerationPerformanceStatusMessage
+                    : (status.musicGenerationStatusMessage.isNotEmpty()
+                        ? status.musicGenerationStatusMessage
+                        : "Stem separation is ready, but music generation still needs a compatible ACE-Step runtime bridge.")));
         status.activityLines.clear();
-        status.activityLines.add(status.message);
+        status.activityLines.add(status.stepLabel);
+        if (status.message != status.stepLabel)
+            status.activityLines.add(status.message);
         return status;
     }
 
@@ -570,7 +733,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         {
             status.state = "pythonMissing";
             status.progress = 0.0f;
-            status.message = "Python 3.10 through 3.13 is required for this dev build before AI tools can be installed.";
+            status.message = kSupportedExternalPythonRange + juce::String(" is required for this dev build before AI tools can be installed.");
             status.error.clear();
             status.errorCode = "python_missing";
             status.lastPhase = "pythonMissing";
@@ -628,6 +791,11 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
     status.supportedBackends.add("cpu");
     status.selectedBackend = "cpu";
     status.modelVersion = kStemModelName;
+    status.musicGenerationModelId = kPinnedMusicGenerationModelId;
+    status.musicGenerationModelRepoId = kPinnedMusicGenerationModelRepoId;
+    status.musicGenerationSharedRepoId = kPinnedMusicGenerationSharedRepoId;
+    status.musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot().getFullPathName();
+    status.musicGenerationLayoutValid = false;
     status.fallbackAttempted = false;
     return status;
 }
@@ -669,6 +837,14 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
         status.selectedBackend = "cpu";
     if (status.modelVersion.isEmpty())
         status.modelVersion = kStemModelName;
+    if (status.musicGenerationModelId.isEmpty())
+        status.musicGenerationModelId = kPinnedMusicGenerationModelId;
+    if (status.musicGenerationModelRepoId.isEmpty())
+        status.musicGenerationModelRepoId = kPinnedMusicGenerationModelRepoId;
+    if (status.musicGenerationSharedRepoId.isEmpty())
+        status.musicGenerationSharedRepoId = kPinnedMusicGenerationSharedRepoId;
+    if (status.musicGenerationCheckpointRoot.isEmpty())
+        status.musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot().getFullPathName();
     return status;
 }
 
@@ -758,6 +934,26 @@ void StemSeparator::scheduleStatusRefresh()
         refreshedStatus.runtimeVersion = runtimeCapabilities.runtimeVersion;
         refreshedStatus.modelVersion = runtimeCapabilities.modelVersion;
         refreshedStatus.restartRequired = runtimeCapabilities.restartRequired;
+        refreshedStatus.aceStepVersion = runtimeCapabilities.aceStepVersion;
+        refreshedStatus.musicGenerationReady = runtimeCapabilities.musicGenerationReady;
+        refreshedStatus.musicGenerationLayoutValid = runtimeCapabilities.musicGenerationLayoutValid;
+        refreshedStatus.musicGenerationModelId = runtimeCapabilities.musicGenerationModelId;
+        refreshedStatus.musicGenerationModelRepoId = runtimeCapabilities.musicGenerationModelRepoId;
+        refreshedStatus.musicGenerationSharedRepoId = runtimeCapabilities.musicGenerationSharedRepoId;
+        refreshedStatus.musicGenerationCheckpointRoot = runtimeCapabilities.musicGenerationCheckpointRoot;
+        refreshedStatus.musicGenerationPerformanceReady = runtimeCapabilities.musicGenerationPerformanceReady;
+        refreshedStatus.musicGenerationPerformanceStatusMessage = runtimeCapabilities.musicGenerationPerformanceStatusMessage;
+        refreshedStatus.musicGenerationRuntimeProfiles = runtimeCapabilities.musicGenerationRuntimeProfiles;
+        refreshedStatus.musicGenerationAvailableProfiles = runtimeCapabilities.musicGenerationAvailableProfiles;
+        refreshedStatus.musicGenerationUnavailableProfiles = runtimeCapabilities.musicGenerationUnavailableProfiles;
+        refreshedStatus.musicGenerationDefaultProfile = runtimeCapabilities.musicGenerationDefaultProfile;
+        refreshedStatus.musicGenerationWarmSessionCapable = runtimeCapabilities.musicGenerationWarmSessionCapable;
+        const auto musicGenerationFullyReady = refreshedStatus.musicGenerationReady
+                                            && refreshedStatus.musicGenerationLayoutValid
+                                            && refreshedStatus.musicGenerationPerformanceReady
+                                            && hasNativeMusicProfile(refreshedStatus);
+
+        const auto isReconciliationRefresh = previousStatus.statusWarningCode == "reconciling_install_state";
 
         if (isInstallerTerminalFailureCode(previousStatus.errorCode))
         {
@@ -777,7 +973,7 @@ void StemSeparator::scheduleStatusRefresh()
                                                 }));
         }
 
-        if (previousStatus.state == "error" && refreshedStatus.available)
+        if (previousStatus.state == "error" && refreshedStatus.available && musicGenerationFullyReady)
         {
             appendAiToolsLogLine(makeAiLogEvent("host",
                                                 "refresh",
@@ -791,7 +987,8 @@ void StemSeparator::scheduleStatusRefresh()
                                                 }));
         }
 
-        if (! previousStatus.available && refreshedStatus.available && previousStatus.installSessionId.isNotEmpty())
+        if (! previousStatus.available && refreshedStatus.available && musicGenerationFullyReady
+            && previousStatus.installSessionId.isNotEmpty())
         {
             appendAiToolsLogLine(makeAiLogEvent("host",
                                                 "refresh",
@@ -803,6 +1000,40 @@ void StemSeparator::scheduleStatusRefresh()
                                                     obj.setProperty("refreshedState", refreshedStatus.state);
                                                     obj.setProperty("selectedBackend", refreshedStatus.selectedBackend);
                                                 }));
+        }
+
+        if (isReconciliationRefresh && ! refreshedStatus.available)
+        {
+            appendAiToolsLogLine(makeAiLogEvent("host",
+                                                "refresh",
+                                                "installer_reconciliation_failed",
+                                                previousStatus.installSessionId,
+                                                [&] (juce::DynamicObject& obj)
+                                                {
+                                                    obj.setProperty("runtimeCandidate", previousStatus.runtimeCandidate);
+                                                    obj.setProperty("previousErrorCode", previousStatus.errorCode);
+                                                    obj.setProperty("refreshedState", refreshedStatus.state);
+                                                    obj.setProperty("runtimeInstalled", refreshedStatus.runtimeInstalled);
+                                                    obj.setProperty("modelInstalled", refreshedStatus.modelInstalled);
+                                                }));
+
+            refreshedStatus.state = "error";
+            refreshedStatus.progress = 0.0f;
+            refreshedStatus.available = false;
+            refreshedStatus.installInProgress = false;
+            refreshedStatus.errorCode = previousStatus.errorCode.isNotEmpty()
+                ? previousStatus.errorCode
+                : juce::String("installer_exited_incomplete");
+            refreshedStatus.message = "OpenStudio could not confirm that AI tools finished installing.";
+            refreshedStatus.error = previousStatus.error.isNotEmpty()
+                ? previousStatus.error
+                : juce::String("The AI tools installer exited before it reported a ready state.");
+            refreshedStatus.lastPhase = previousStatus.lastPhase.isNotEmpty()
+                ? previousStatus.lastPhase
+                : refreshedStatus.lastPhase;
+            refreshedStatus.terminalReason = refreshedStatus.errorCode;
+            refreshedStatus.statusWarning.clear();
+            refreshedStatus.statusWarningCode.clear();
         }
 
         {
@@ -1011,6 +1242,48 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
         return false;
     }
 
+   #if JUCE_MAC || JUCE_LINUX
+    {
+        // juce::ZipFile::uncompressTo does not restore Unix execute bits from the zip's file
+        // attributes. On Unix-like platforms this means the extracted Python binary has no +x permission and
+        // posix_spawn() refuses to run it (EACCES), causing probeRuntimeCapabilities() to
+        // return all-false defaults. Restore +x on every regular file under bin/ and lib/,
+        // and on the Python binary itself (which may live elsewhere in the archive layout).
+        auto restoreExecuteBit = [] (const juce::File& dir)
+        {
+            if (! dir.isDirectory())
+                return;
+            for (const auto& entry : juce::RangedDirectoryIterator (dir, false, "*", juce::File::findFiles))
+            {
+                const auto path = entry.getFile().getFullPathName();
+                struct ::stat st {};
+                if (::stat (path.toUTF8(), &st) == 0)
+                    ::chmod (path.toUTF8(), st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH);
+            }
+        };
+        restoreExecuteBit (destinationRoot.getChildFile ("bin"));
+        restoreExecuteBit (destinationRoot.getChildFile ("lib"));
+
+        const auto py = findPythonInRuntimeRoot (destinationRoot);
+        if (py.existsAsFile())
+        {
+            struct ::stat st {};
+            if (::stat (py.getFullPathName().toUTF8(), &st) == 0)
+                ::chmod (py.getFullPathName().toUTF8(), st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH);
+        }
+
+       #if JUCE_MAC
+        // macOS attaches com.apple.quarantine to all files extracted from a downloaded zip.
+        // Gatekeeper blocks execution of quarantined binaries. Strip the attribute recursively.
+        // xattr is a system tool always present on macOS; failure here is non-fatal because
+        // the chmod step above is the primary fix.
+        juce::ChildProcess xattr;
+        xattr.start ("xattr -rd com.apple.quarantine " + quoteCommandPart (destinationRoot.getFullPathName()));
+        xattr.waitForProcessToFinish (10000);
+       #endif
+    }
+   #endif
+
     extractionRoot.deleteRecursively();
     return true;
 }
@@ -1024,6 +1297,9 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     juce::Array<juce::var> activityLines;
     for (const auto& line : status.activityLines)
         activityLines.add(line);
+    juce::Array<juce::var> availableProfiles;
+    for (const auto& profile : status.musicGenerationAvailableProfiles)
+        availableProfiles.add(profile);
     obj->setProperty("state", status.state);
     obj->setProperty("progress", static_cast<double>(status.progress));
     obj->setProperty("stepIndex", status.stepIndex);
@@ -1056,6 +1332,19 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("selectedBackend", status.selectedBackend);
     obj->setProperty("runtimeVersion", status.runtimeVersion);
     obj->setProperty("modelVersion", status.modelVersion);
+    obj->setProperty("aceStepVersion", status.aceStepVersion);
+    obj->setProperty("musicGenerationModelId", status.musicGenerationModelId);
+    obj->setProperty("musicGenerationModelRepoId", status.musicGenerationModelRepoId);
+    obj->setProperty("musicGenerationSharedRepoId", status.musicGenerationSharedRepoId);
+    obj->setProperty("musicGenerationCheckpointRoot", status.musicGenerationCheckpointRoot);
+    obj->setProperty("musicGenerationStatusMessage", status.musicGenerationStatusMessage);
+    obj->setProperty("musicGenerationFailureCode", status.musicGenerationFailureCode);
+    obj->setProperty("musicGenerationPerformanceStatusMessage", status.musicGenerationPerformanceStatusMessage);
+    obj->setProperty("musicGenerationRuntimeProfiles", status.musicGenerationRuntimeProfiles);
+    obj->setProperty("musicGenerationAvailableProfiles", availableProfiles);
+    obj->setProperty("musicGenerationUnavailableProfiles", status.musicGenerationUnavailableProfiles);
+    obj->setProperty("musicGenerationDefaultProfile", status.musicGenerationDefaultProfile);
+    obj->setProperty("musicGenerationWarmSessionCapable", status.musicGenerationWarmSessionCapable);
     obj->setProperty("verificationMode", status.verificationMode);
     obj->setProperty("runtimeCandidate", status.runtimeCandidate);
     obj->setProperty("backendRequested", status.backendRequested);
@@ -1064,6 +1353,9 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("terminalReason", status.terminalReason);
     obj->setProperty("fallbackAttempted", status.fallbackAttempted);
     obj->setProperty("restartRequired", status.restartRequired);
+    obj->setProperty("musicGenerationReady", status.musicGenerationReady);
+    obj->setProperty("musicGenerationLayoutValid", status.musicGenerationLayoutValid);
+    obj->setProperty("musicGenerationPerformanceReady", status.musicGenerationPerformanceReady);
     return juce::var(obj.release());
 }
 
@@ -1088,15 +1380,19 @@ juce::var StemSeparator::refreshAiToolsStatus()
     return aiToolsStatusToVar(getCachedAiToolsStatusSnapshot());
 }
 
-juce::var StemSeparator::installAiTools()
+juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
 {
     if (! aiToolsInstallWorkInProgress.load())
         scheduleStatusRefresh();
 
     auto cachedStatus = getCachedAiToolsStatusSnapshot();
+    const bool musicGenerationFullyReady = cachedStatus.musicGenerationReady
+        && cachedStatus.musicGenerationLayoutValid
+        && cachedStatus.musicGenerationPerformanceReady
+        && hasNativeMusicProfile(cachedStatus);
 
     auto result = std::make_unique<juce::DynamicObject>();
-    if (cachedStatus.available)
+    if (cachedStatus.available && musicGenerationFullyReady)
     {
         result->setProperty("started", false);
         result->setProperty("message", "AI tools are already installed.");
@@ -1108,6 +1404,15 @@ juce::var StemSeparator::installAiTools()
     {
         result->setProperty("started", false);
         result->setProperty("error", "AI tools installation is already running.");
+        result->setProperty("status", aiToolsStatusToVar(cachedStatus));
+        return juce::var(result.release());
+    }
+
+    if (! userConfirmedDownload)
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "AI tools setup requires explicit confirmation before downloading runtime or model files.");
+        result->setProperty("message", "Open the AI Tools setup window and confirm the download to continue.");
         result->setProperty("status", aiToolsStatusToVar(cachedStatus));
         return juce::var(result.release());
     }
@@ -1142,6 +1447,7 @@ juce::var StemSeparator::installAiTools()
         const auto logFile = getAiToolsInstallLogFile();
         const auto runtimeRoot = getUserRuntimeRoot();
         const auto modelsDir = getUserModelsDir();
+        const auto musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot();
         const auto downloadsDir = getAiRuntimeDownloadsDir();
         const auto manifestUrl = getAiRuntimeManifestUrl().trim();
         const auto sessionId = juce::Uuid().toString();
@@ -1269,6 +1575,7 @@ juce::var StemSeparator::installAiTools()
         appendAiToolsLogLine("systemPython=" + systemPython.getFullPathName());
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
         appendAiToolsLogLine("modelsDir=" + modelsDir.getFullPathName());
+        appendAiToolsLogLine("musicGenerationCheckpointRoot=" + musicGenerationCheckpointRoot.getFullPathName());
 
         if (! installerScript.existsAsFile())
         {
@@ -1293,7 +1600,7 @@ juce::var StemSeparator::installAiTools()
             if (! systemPython.existsAsFile())
             {
                 finishWithStatus("pythonMissing", 0.0f,
-                                 "Python 3.10 through 3.13 is required for this dev build before AI Tools can be installed.",
+                                 juce::String(kSupportedExternalPythonRange) + " is required for this dev build before AI Tools can be installed.",
                                  {},
                                  "python_missing",
                                  false,
@@ -1487,8 +1794,48 @@ juce::var StemSeparator::installAiTools()
                             runtimeCandidates.add(buildCandidateFromNode("windows-legacy", "Windows runtime", "Using legacy flat Windows runtime manifest entry.", platformNode));
                     }
 #else
-                    if (! platformNode.isVoid() && ! platformNode.isUndefined())
-                        runtimeCandidates.add(buildCandidateFromNode(getAiRuntimePlatformKey(), getAiRuntimePlatformKey() + " runtime", "Using platform runtime manifest entry.", platformNode));
+                    if (auto* linuxPlatformObject = platformNode.getDynamicObject())
+                    {
+                        const auto architectureKey = getAiRuntimeArchitectureKey();
+                        const auto architectureNode = linuxPlatformObject->getProperty(architectureKey);
+                        if (! architectureNode.isVoid() && ! architectureNode.isUndefined())
+                        {
+                            appendAiToolsLogLine("runtimeArchitecture=" + architectureKey);
+                            runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey,
+                                                                         "Linux " + architectureKey,
+                                                                         "Selected by current Linux architecture.",
+                                                                         architectureNode));
+                        }
+                        else if (getPropertyString(platformNode, "url").isNotEmpty())
+                        {
+                            runtimeCandidates.add(buildCandidateFromNode("linux-legacy",
+                                                                         "Linux runtime",
+                                                                         "Using legacy flat Linux runtime manifest entry.",
+                                                                         platformNode));
+                        }
+                        else if (! linuxPlatformObject->getProperty("x64").isVoid()
+                                 || ! linuxPlatformObject->getProperty("arm64").isVoid())
+                        {
+                            finishWithStatus("error", 0.05f,
+                                             "AI Tools are not available for this Linux machine yet.",
+                                             "The published AI runtime metadata does not include a Linux " + architectureKey + " runtime for this release.",
+                                             "runtime_platform_unsupported",
+                                             false,
+                                             false,
+                                             false,
+                                             false,
+                                             kInstallSourceDownloadedRuntime,
+                                             kBuildRuntimeModeDownloadedRuntime);
+                            return;
+                        }
+                    }
+                    else if (! platformNode.isVoid() && ! platformNode.isUndefined())
+                    {
+                        runtimeCandidates.add(buildCandidateFromNode("linux-legacy",
+                                                                     "Linux runtime",
+                                                                     "Using legacy flat Linux runtime manifest entry.",
+                                                                     platformNode));
+                    }
 #endif
                 }
             }
@@ -1772,6 +2119,8 @@ juce::var StemSeparator::installAiTools()
             + " --runtime-root " + quoteCommandPart(runtimeRoot.getFullPathName())
             + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
             + " --model " + quoteCommandPart(kStemModelName)
+            + " --music-gen-model " + quoteCommandPart(kPinnedMusicGenerationModelId)
+            + " --music-gen-checkpoint-root " + quoteCommandPart(musicGenerationCheckpointRoot.getFullPathName())
             + " --log-path " + quoteCommandPart(logFile.getFullPathName())
             + launchMode;
         if (selectedBackendRequested.isNotEmpty())
@@ -1794,7 +2143,7 @@ juce::var StemSeparator::installAiTools()
                                                 obj.setProperty("command", cmd);
                                             }));
 
-        auto nextInstallProcess = std::make_unique<juce::ChildProcess>();
+        auto nextInstallProcess = std::make_shared<juce::ChildProcess>();
         if (! nextInstallProcess->start(cmd))
         {
             finishWithStatus("error", 0.0f,
@@ -1813,6 +2162,7 @@ juce::var StemSeparator::installAiTools()
         {
             const juce::ScopedLock lock (aiToolsStatusLock);
             installOutputBuffer.clear();
+            installLogReadOffset = logFile.existsAsFile() ? logFile.getSize() : 0;
             installDiagnosticLines.clear();
             installCommandLine = cmd;
             installRuntimePythonPath = launcherPython.getFullPathName();
@@ -1825,6 +2175,9 @@ juce::var StemSeparator::installAiTools()
             installFirstOutputTimeMs = 0.0;
             installLastOutputTimeMs = 0.0;
             installLastHeartbeatTimeMs = installLaunchTimeMs;
+            installLastStructuredStatusTimeMs = 0.0;
+            installLastDownloadProgressTimeMs = 0.0;
+            installLastBytesDownloaded = 0;
             installSawTerminalStatus = false;
             installFallbackAttempted = fallbackAttempted;
             installOutputTimeoutLogged = false;
@@ -1873,11 +2226,41 @@ juce::var StemSeparator::installAiTools()
 void StemSeparator::pollInstallProgress()
 {
     bool shouldRefreshAfterExit = false;
+    std::shared_ptr<juce::ChildProcess> process;
+    juce::int64 logReadOffset = 0;
 
     {
         const juce::ScopedLock lock (aiToolsStatusLock);
-        if (! installProcess)
+        process = installProcess;
+        logReadOffset = installLogReadOffset;
+    }
+
+    if (! process)
+        return;
+
+    juce::String newlyReadOutput;
+    bool sawNewOutput = false;
+    const auto logFile = getAiToolsInstallLogFile();
+    if (logFile.existsAsFile())
+    {
+        const auto logFileSize = logFile.getSize();
+        if (logFileSize < logReadOffset)
+            logReadOffset = 0;
+
+        juce::FileInputStream input(logFile);
+        if (input.openedOk() && input.setPosition(logReadOffset))
+        {
+            newlyReadOutput = input.readEntireStreamAsString();
+            logReadOffset = input.getPosition();
+        }
+    }
+
+    {
+        const juce::ScopedLock lock (aiToolsStatusLock);
+        if (installProcess != process)
             return;
+
+        installLogReadOffset = logReadOffset;
 
         auto noteInstallerOutput = [&]
         {
@@ -1899,19 +2282,49 @@ void StemSeparator::pollInstallProgress()
             lastAiToolsStatus.statusWarningCode.clear();
         };
 
-        char buffer[4096];
-        while (installProcess->isRunning())
+        if (newlyReadOutput.isNotEmpty())
         {
-            auto bytesRead = installProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
-            if (bytesRead <= 0)
-                break;
+            installOutputBuffer += newlyReadOutput;
 
-            buffer[bytesRead] = '\0';
-            installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
-            noteInstallerOutput();
+            juce::StringArray addedLines;
+            addedLines.addLines(newlyReadOutput);
+            for (const auto& addedLine : addedLines)
+            {
+                const auto trimmed = addedLine.trim();
+                if (trimmed.isEmpty())
+                    continue;
+
+                if (! trimmed.startsWith("{"))
+                {
+                    sawNewOutput = true;
+                    break;
+                }
+
+                const auto json = juce::JSON::parse(trimmed);
+                if (! json.isObject())
+                    continue;
+
+                if (const auto* obj = json.getDynamicObject(); obj != nullptr)
+                {
+                    if (obj->hasProperty("state"))
+                    {
+                        sawNewOutput = true;
+                        break;
+                    }
+
+                    if (obj->getProperty("component").toString() == "installer")
+                    {
+                        sawNewOutput = true;
+                        break;
+                    }
+                }
+            }
         }
 
-        if (installProcess->isRunning()
+        if (sawNewOutput)
+            noteInstallerOutput();
+
+        if (process->isRunning()
             && installFirstOutputTimeMs <= 0.0
             && juce::Time::getMillisecondCounterHiRes() - installLaunchTimeMs >= kInstallerOutputTimeoutMs
             && ! installOutputTimeoutLogged)
@@ -1933,23 +2346,38 @@ void StemSeparator::pollInstallProgress()
         }
 
         const auto nowMs = juce::Time::getMillisecondCounterHiRes();
-        if (installProcess->isRunning() && nowMs - installLastHeartbeatTimeMs >= kInstallerHeartbeatMs)
+        if (process->isRunning() && nowMs - installLastHeartbeatTimeMs >= kInstallerHeartbeatMs)
         {
             lastAiToolsStatus.elapsedMs = static_cast<juce::int64>(nowMs - installLaunchTimeMs);
             installLastHeartbeatTimeMs = nowMs;
-        }
 
-        if (! installProcess->isRunning())
-        {
-            for (;;)
+            if (installFirstOutputTimeMs > 0.0
+                && nowMs - installLastOutputTimeMs >= kInstallerOutputTimeoutMs)
             {
-                auto bytesRead = installProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
-                if (bytesRead <= 0)
-                    break;
+                const auto hasRecentStructuredStatus = installLastStructuredStatusTimeMs > 0.0
+                    && nowMs - installLastStructuredStatusTimeMs < kInstallerOutputTimeoutMs;
+                const auto hasRecentDownloadProgress = installLastObservedPhase == "downloading_model"
+                    && installLastDownloadProgressTimeMs > 0.0
+                    && nowMs - installLastDownloadProgressTimeMs < kInstallerOutputTimeoutMs;
 
-                buffer[bytesRead] = '\0';
-                installOutputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
-                noteInstallerOutput();
+                if (installLastObservedPhase == "downloading_model")
+                {
+                    if (! hasRecentStructuredStatus && ! hasRecentDownloadProgress)
+                    {
+                        lastAiToolsStatus.statusWarning = "The model download appears stalled. OpenStudio has not seen a fresh heartbeat or byte progress update recently.";
+                        lastAiToolsStatus.statusWarningCode = "model_download_stalled";
+                    }
+                    else
+                    {
+                        lastAiToolsStatus.statusWarning.clear();
+                        lastAiToolsStatus.statusWarningCode.clear();
+                    }
+                }
+                else if (! hasRecentStructuredStatus)
+                {
+                    lastAiToolsStatus.statusWarning = "The AI installer is still working, but the current step has not produced a fresh progress line yet.";
+                    lastAiToolsStatus.statusWarningCode = "installer_silent";
+                }
             }
         }
 
@@ -1961,42 +2389,74 @@ void StemSeparator::pollInstallProgress()
 
             if (line.startsWith("{"))
             {
-                lastAiToolsStatus = parseInstallJsonLine(line);
-                installLastObservedPhase = lastAiToolsStatus.lastPhase.isNotEmpty() ? lastAiToolsStatus.lastPhase
-                                                                                    : lastAiToolsStatus.state;
-                if (isAiToolsTerminalState(lastAiToolsStatus.state))
-                    installSawTerminalStatus = true;
+                const auto json = juce::JSON::parse(line);
+                if (json.isObject())
+                {
+                    if (const auto* obj = json.getDynamicObject(); obj != nullptr && obj->hasProperty("state"))
+                    {
+                        const auto statusNowMs = juce::Time::getMillisecondCounterHiRes();
+                        lastAiToolsStatus = parseInstallJsonLine(line);
+                        installLastObservedPhase = lastAiToolsStatus.lastPhase.isNotEmpty() ? lastAiToolsStatus.lastPhase
+                                                                                            : lastAiToolsStatus.state;
+                        installLastStructuredStatusTimeMs = statusNowMs;
+                        if (lastAiToolsStatus.state == "downloading_model"
+                            && lastAiToolsStatus.bytesDownloaded > installLastBytesDownloaded)
+                        {
+                            installLastDownloadProgressTimeMs = statusNowMs;
+                            installLastBytesDownloaded = lastAiToolsStatus.bytesDownloaded;
+                        }
+                        else if (lastAiToolsStatus.state != "downloading_model")
+                        {
+                            installLastBytesDownloaded = 0;
+                            installLastDownloadProgressTimeMs = statusNowMs;
+                        }
+                        if (isAiToolsTerminalState(lastAiToolsStatus.state))
+                            installSawTerminalStatus = true;
+                    }
+                }
             }
             else if (line.isNotEmpty())
             {
                 installDiagnosticLines.add(line);
                 while (installDiagnosticLines.size() > 8)
                     installDiagnosticLines.remove(0);
-                appendAiToolsLogLine("[installer] " + line);
                 lastAiToolsStatus.activityLines.add(line);
                 while (lastAiToolsStatus.activityLines.size() > 12)
                     lastAiToolsStatus.activityLines.remove(0);
             }
         }
 
-        if (! installProcess->isRunning())
+        if (! process->isRunning())
         {
-            const auto exitCode = installProcess->getExitCode();
+            const auto exitCode = process->getExitCode();
             const auto finalLine = installOutputBuffer.trim();
             if (finalLine.startsWith("{"))
             {
-                lastAiToolsStatus = parseInstallJsonLine(finalLine);
-                installLastObservedPhase = lastAiToolsStatus.lastPhase.isNotEmpty() ? lastAiToolsStatus.lastPhase
-                                                                                    : lastAiToolsStatus.state;
-                if (isAiToolsTerminalState(lastAiToolsStatus.state))
-                    installSawTerminalStatus = true;
+                const auto json = juce::JSON::parse(finalLine);
+                if (json.isObject())
+                {
+                    if (const auto* obj = json.getDynamicObject(); obj != nullptr && obj->hasProperty("state"))
+                    {
+                        lastAiToolsStatus = parseInstallJsonLine(finalLine);
+                        installLastObservedPhase = lastAiToolsStatus.lastPhase.isNotEmpty() ? lastAiToolsStatus.lastPhase
+                                                                                            : lastAiToolsStatus.state;
+                        installLastStructuredStatusTimeMs = juce::Time::getMillisecondCounterHiRes();
+                        if (lastAiToolsStatus.state == "downloading_model"
+                            && lastAiToolsStatus.bytesDownloaded > installLastBytesDownloaded)
+                        {
+                            installLastDownloadProgressTimeMs = installLastStructuredStatusTimeMs;
+                            installLastBytesDownloaded = lastAiToolsStatus.bytesDownloaded;
+                        }
+                        if (isAiToolsTerminalState(lastAiToolsStatus.state))
+                            installSawTerminalStatus = true;
+                    }
+                }
             }
             else if (finalLine.isNotEmpty())
             {
                 installDiagnosticLines.add(finalLine);
                 while (installDiagnosticLines.size() > 8)
                     installDiagnosticLines.remove(0);
-                appendAiToolsLogLine("[installer] " + finalLine);
             }
 
             if (exitCode != 0 && lastAiToolsStatus.state != "error" && lastAiToolsStatus.state != "cancelled")
@@ -2039,14 +2499,19 @@ void StemSeparator::pollInstallProgress()
                                                         obj.setProperty("sawTerminalStatus", installSawTerminalStatus);
                                                     }));
 
-                lastAiToolsStatus.state = "error";
-                lastAiToolsStatus.progress = 0.0f;
+                lastAiToolsStatus.state = "checking";
+                lastAiToolsStatus.progress = 0.98f;
                 lastAiToolsStatus.available = false;
                 lastAiToolsStatus.errorCode = "installer_exited_incomplete";
-                lastAiToolsStatus.message = "OpenStudio could not confirm that AI tools finished installing.";
+                lastAiToolsStatus.message = "Verifying whether AI tools finished after a delayed installer response...";
                 lastAiToolsStatus.error = "The AI tools installer exited before it reported a ready state.";
                 lastAiToolsStatus.lastPhase = installLastObservedPhase.isNotEmpty() ? installLastObservedPhase : juce::String("installer_process");
-                lastAiToolsStatus.terminalReason = "installer_exited_incomplete";
+                lastAiToolsStatus.terminalReason.clear();
+                lastAiToolsStatus.statusWarning = "OpenStudio temporarily lost contact with the AI installer. It is now checking the installed runtime before showing a result.";
+                lastAiToolsStatus.statusWarningCode = "reconciling_install_state";
+                lastAiToolsStatus.activityLines.add(lastAiToolsStatus.message);
+                while (lastAiToolsStatus.activityLines.size() > 12)
+                    lastAiToolsStatus.activityLines.remove(0);
 
                 if (lastDiagnostics.isNotEmpty())
                     lastAiToolsStatus.error += " Last output: " + lastDiagnostics;
@@ -2061,6 +2526,7 @@ void StemSeparator::pollInstallProgress()
             aiToolsInstallWorkInProgress = false;
             installProcess.reset();
             installOutputBuffer.clear();
+            installLogReadOffset = 0;
             installDiagnosticLines.clear();
             installCommandLine.clear();
             installRuntimePythonPath.clear();
@@ -2073,6 +2539,9 @@ void StemSeparator::pollInstallProgress()
             installFirstOutputTimeMs = 0.0;
             installLastOutputTimeMs = 0.0;
             installLastHeartbeatTimeMs = 0.0;
+            installLastStructuredStatusTimeMs = 0.0;
+            installLastDownloadProgressTimeMs = 0.0;
+            installLastBytesDownloaded = 0;
             installSawTerminalStatus = false;
             installFallbackAttempted = false;
             installOutputTimeoutLogged = false;
@@ -2150,6 +2619,32 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.runtimeVersion = json["runtimeVersion"].toString();
     if (json.hasProperty("modelVersion"))
         status.modelVersion = json["modelVersion"].toString();
+    if (json.hasProperty("aceStepVersion"))
+        status.aceStepVersion = json["aceStepVersion"].toString();
+    if (json.hasProperty("musicGenerationModelId"))
+        status.musicGenerationModelId = json["musicGenerationModelId"].toString();
+    if (json.hasProperty("musicGenerationModelRepoId"))
+        status.musicGenerationModelRepoId = json["musicGenerationModelRepoId"].toString();
+    if (json.hasProperty("musicGenerationSharedRepoId"))
+        status.musicGenerationSharedRepoId = json["musicGenerationSharedRepoId"].toString();
+    if (json.hasProperty("musicGenerationCheckpointRoot"))
+        status.musicGenerationCheckpointRoot = json["musicGenerationCheckpointRoot"].toString();
+    if (json.hasProperty("musicGenerationStatusMessage"))
+        status.musicGenerationStatusMessage = json["musicGenerationStatusMessage"].toString();
+    if (json.hasProperty("musicGenerationFailureCode"))
+        status.musicGenerationFailureCode = json["musicGenerationFailureCode"].toString();
+    if (json.hasProperty("musicGenerationPerformanceStatusMessage"))
+        status.musicGenerationPerformanceStatusMessage = json["musicGenerationPerformanceStatusMessage"].toString();
+    if (json.hasProperty("musicGenerationRuntimeProfiles"))
+        status.musicGenerationRuntimeProfiles = json["musicGenerationRuntimeProfiles"];
+    if (json.hasProperty("musicGenerationAvailableProfiles"))
+        status.musicGenerationAvailableProfiles = varToStringArray(json["musicGenerationAvailableProfiles"]);
+    if (json.hasProperty("musicGenerationUnavailableProfiles"))
+        status.musicGenerationUnavailableProfiles = json["musicGenerationUnavailableProfiles"];
+    if (json.hasProperty("musicGenerationDefaultProfile"))
+        status.musicGenerationDefaultProfile = json["musicGenerationDefaultProfile"].toString();
+    if (json.hasProperty("musicGenerationWarmSessionCapable"))
+        status.musicGenerationWarmSessionCapable = static_cast<bool>(json["musicGenerationWarmSessionCapable"]);
     if (json.hasProperty("verificationMode"))
         status.verificationMode = json["verificationMode"].toString();
     if (json.hasProperty("runtimeCandidate"))
@@ -2166,6 +2661,12 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.fallbackAttempted = static_cast<bool>(json["fallbackAttempted"]);
     if (json.hasProperty("restartRequired"))
         status.restartRequired = static_cast<bool>(json["restartRequired"]);
+    if (json.hasProperty("musicGenerationReady"))
+        status.musicGenerationReady = static_cast<bool>(json["musicGenerationReady"]);
+    if (json.hasProperty("musicGenerationLayoutValid"))
+        status.musicGenerationLayoutValid = static_cast<bool>(json["musicGenerationLayoutValid"]);
+    if (json.hasProperty("musicGenerationPerformanceReady"))
+        status.musicGenerationPerformanceReady = static_cast<bool>(json["musicGenerationPerformanceReady"]);
 
     if (status.lastPhase.isEmpty() && status.state.isNotEmpty())
         status.lastPhase = status.state;
@@ -2180,6 +2681,14 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
 
     if (status.buildRuntimeMode.isEmpty())
         status.buildRuntimeMode = isExternalPythonFallbackEnabled() ? kBuildRuntimeModeUnbundledDev : kBuildRuntimeModeDownloadedRuntime;
+    if (status.musicGenerationModelId.isEmpty())
+        status.musicGenerationModelId = kPinnedMusicGenerationModelId;
+    if (status.musicGenerationModelRepoId.isEmpty())
+        status.musicGenerationModelRepoId = kPinnedMusicGenerationModelRepoId;
+    if (status.musicGenerationSharedRepoId.isEmpty())
+        status.musicGenerationSharedRepoId = kPinnedMusicGenerationSharedRepoId;
+    if (status.musicGenerationCheckpointRoot.isEmpty())
+        status.musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot().getFullPathName();
     return status;
 }
 
@@ -2205,7 +2714,7 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
     {
         juce::String errorMessage = status.message;
         if (status.state == "pythonMissing")
-            errorMessage = "Python 3.10 through 3.13 is required before installing AI Tools in this dev build.";
+            errorMessage = juce::String(kSupportedExternalPythonRange) + " is required before installing AI Tools in this dev build.";
         else if (status.state == "runtimeMissing" || status.state == "modelMissing")
             errorMessage = "Install AI Tools before using stem separation.";
         else if (status.state == "error" && status.error.isNotEmpty())
@@ -2380,6 +2889,7 @@ void StemSeparator::cancelAiToolsInstall()
         }
         installProcess.reset();
         installOutputBuffer.clear();
+        installLogReadOffset = 0;
         installDiagnosticLines.clear();
         installCommandLine.clear();
         installRuntimePythonPath.clear();
@@ -2392,6 +2902,9 @@ void StemSeparator::cancelAiToolsInstall()
         installFirstOutputTimeMs = 0.0;
         installLastOutputTimeMs = 0.0;
         installLastHeartbeatTimeMs = 0.0;
+        installLastStructuredStatusTimeMs = 0.0;
+        installLastDownloadProgressTimeMs = 0.0;
+        installLastBytesDownloaded = 0;
         installSawTerminalStatus = false;
         installFallbackAttempted = false;
         installOutputTimeoutLogged = false;
@@ -2419,6 +2932,76 @@ void StemSeparator::cancelAiToolsInstall()
         else
             status.helpUrl.clear();
     });
+}
+
+juce::var StemSeparator::resetAiTools()
+{
+    cancelAiToolsInstall();
+    cancel();
+
+    const auto runtimeRoot = getUserRuntimeRoot();
+    const auto modelsDir = getUserModelsDir();
+    const auto checkpointRoot = getMusicGenerationCheckpointRoot();
+    const auto hubCacheDir = checkpointRoot.getParentDirectory().getChildFile(".hub-cache");
+    const auto logFile = getAiToolsInstallLogFile();
+    const auto downloadsDir = getAiRuntimeDownloadsDir();
+
+    juce::StringArray deletedPaths;
+    juce::StringArray failedPaths;
+
+    const auto deletePath = [&] (const juce::File& path)
+    {
+        if (! path.exists())
+            return;
+
+        const auto deleted = path.isDirectory() ? path.deleteRecursively() : path.deleteFile();
+        if (deleted)
+            deletedPaths.add(path.getFullPathName());
+        else
+            failedPaths.add(path.getFullPathName());
+    };
+
+    deletePath(runtimeRoot);
+    deletePath(modelsDir);
+    deletePath(checkpointRoot);
+    deletePath(hubCacheDir);
+    deletePath(downloadsDir);
+    deletePath(logFile);
+
+    const auto logsDir = logFile.getParentDirectory();
+    if (logsDir.isDirectory() && logsDir.findChildFiles(juce::File::findFilesAndDirectories, false).isEmpty())
+        logsDir.deleteRecursively();
+
+    const auto checkpointParent = checkpointRoot.getParentDirectory();
+    if (checkpointParent.isDirectory() && checkpointParent.findChildFiles(juce::File::findFilesAndDirectories, false).isEmpty())
+        checkpointParent.deleteRecursively();
+
+    {
+        const juce::ScopedLock lock (aiToolsStatusLock);
+        lastAiToolsStatus = buildInitialAiToolsStatus();
+        initialStatusPrepared = true;
+    }
+
+    scheduleStatusRefresh();
+
+    auto result = std::make_unique<juce::DynamicObject>();
+    const auto success = failedPaths.isEmpty();
+    result->setProperty("success", success);
+    result->setProperty(
+        "message",
+        success
+            ? "AI tools files were removed. You can install from a clean state now."
+            : "Some AI tools files could not be removed. Close any processes using them and retry.");
+    if (! success)
+        result->setProperty("error", "Failed to delete: " + failedPaths.joinIntoString(", "));
+    result->setProperty("status", aiToolsStatusToVar(getCachedAiToolsStatusSnapshot()));
+
+    juce::Array<juce::var> deletedVars;
+    for (const auto& path : deletedPaths)
+        deletedVars.add(path);
+    result->setProperty("deletedPaths", juce::var(deletedVars));
+
+    return juce::var(result.release());
 }
 
 bool StemSeparator::isRunning() const

@@ -61,7 +61,7 @@ C++ (JUCE) Backend                React/TypeScript Frontend
 │ Metronome                │       │ MixerPanel / ChannelStrip     │
 │ PitchAnalyzer            │       │ PitchEditorLowerZone          │
 │ PitchResynthesizer       │       │ PianoRoll / FXChainPanel      │
-│ SignalsmithShifter       │       │ TransportBar / MenuBar        │
+│ Pitch preview/scrub      │       │ TransportBar / MenuBar        │
 │ PitchCorrector           │       │ PluginBrowser / RenderModal   │
 │ StemSeparator            │       └──────────────────────────────┘
 │ ARAHostController        │
@@ -124,9 +124,8 @@ flowchart TD
         direction TB
         YIN[PitchAnalyzer\nYIN Detection · Note Segmentation]
         NOTES[PitchNotes\npitch · formant · vibrato · drift per note]
-        RSYNTH[PitchResynthesizer\nbuildCorrectionCurve · buildFormantCurve]
-        SS[SignalsmithShifter\nper-block setTransposeFactor · setFormantFactor]
-        XF[Crossfade Splice\n512-sample overlap-add]
+        VSF[Native VSF HQ\npitch-only note render]
+        PREVIEW[Signalsmith Stretch\nlive scrub/fast preview]
     end
 
     subgraph Polyphonic Path
@@ -140,7 +139,9 @@ flowchart TD
         RTFX[PitchCorrector\nper-block · key/scale-aware\nSignalsmithStretch presetCheaper]
     end
 
-    AUDIO --> YIN --> NOTES --> RSYNTH --> SS --> XF --> OUT[Corrected Audio File\nreplaceClipAudioFile]
+    AUDIO --> YIN --> NOTES --> BACKEND --> RB --> OUT[Corrected Audio File\nreplaceClipAudioFile]
+    BACKEND --> NATIVE
+    BACKEND --> SS --> SPEAKERS
     AUDIO --> POLY --> MASKS --> SPECSHIFT --> OUT
     AUDIO --> RTFX --> SPEAKERS[Live Output]
 ```
@@ -207,7 +208,7 @@ sequenceDiagram
     UI->>NB: applyPitchCorrection(trackId, clipId, notes)
     NB->>MC: backend.applyPitchCorrection(json)
     MC->>AE: applyPitchCorrection(...)
-    AE->>AE: PitchResynthesizer → SignalsmithShifter
+    AE->>AE: native VSF note-HQ pitch-only render
     AE->>AE: replaceClipAudioFile(newPath)
     AE-->>MC: newFilePath
     MC-->>UI: newFilePath (React re-renders waveform)
@@ -241,7 +242,7 @@ sequenceDiagram
 ### Pitch Editor
 - **Graphical pitch editor** (Melodyne/VariAudio-style) — analyze, display, and redraw pitch curves per note
 - **Real-time auto-tune** corrector (built-in pitch corrector FX) — key/scale-aware, inserted as an FX plugin
-- **Signalsmith Stretch** (MIT) as the default pitch engine — native stereo, formant-preserving, offline quality
+- **Native VSF pitch apply** for graphical note-HQ pitch-only edits; Signalsmith Stretch remains limited to live scrub/fast preview and the realtime pitch-corrector FX.
 - **Polyphonic pitch detection** via Spotify's Basic-Pitch ONNX model
 - Formant shift, vibrato, drift, and transition controls per note
 
@@ -326,8 +327,7 @@ python build.py prod
 | Library | Purpose |
 |---------|---------|
 | [JUCE 8](https://juce.com/) | Audio engine, plugin hosting, WebBrowserComponent |
-| [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) | MIT — pitch shifting with formant preservation |
-| [RubberBand](https://breakfastquay.com/rubberband/) | R3 engine, alternative pitch shifter |
+| [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) | MIT — pitch preview/scrub and realtime pitch-corrector FX |
 | [YSFX](https://github.com/jpcima/ysfx) | JSFX / Lua script processor |
 | [ONNX Runtime](https://onnxruntime.ai/) | Basic-Pitch polyphonic pitch detection |
 | [sol2](https://github.com/ThePhD/sol2) | Lua scripting engine bindings |
@@ -366,7 +366,7 @@ repo-root/
 
 ### In Progress
 - [ ] Graphical pitch editor — Melodyne/VariAudio parity (vibrato tool, multi-note operations)
-- [ ] Polyphonic pitch correction rewrite with Signalsmith Stretch
+- [ ] Polyphonic pitch correction rewrite
 - [ ] ARA2 deep integration
 
 ### Planned
@@ -378,7 +378,7 @@ repo-root/
 ### Completed
 - [x] VST3 / CLAP / LV2 plugin hosting
 - [x] ARA plugin hosting controller
-- [x] Signalsmith Stretch pitch engine (formant-preserving, native stereo)
+- [x] Signalsmith Stretch preview/scrub and realtime pitch-corrector support
 - [x] Real-time auto-tune pitch corrector
 - [x] Polyphonic pitch detection (Basic-Pitch ONNX)
 - [x] PRO DAW-style multi-resolution peak cache

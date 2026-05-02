@@ -5,10 +5,12 @@
 #include <atomic>
 
 /**
- * PitchDetector — pYIN-based fundamental frequency estimation.
+ * PitchDetector — YIN-style real-time fundamental frequency estimation.
  *
- * Operates on mono audio frames. Uses the probabilistic YIN (pYIN) algorithm
- * for better accuracy with octave errors and noisy signals.
+ * Operates on mono audio frames. This is a lightweight YIN-style detector
+ * used for live tracking and UI feedback. It does not yet implement the
+ * offline pYIN-style candidate generation and temporal decoding used by the
+ * pitch-editor analysis path.
  *
  * Thread-safe: analyzeFrame() is called from audio thread,
  * results read from UI thread via atomics.
@@ -59,7 +61,7 @@ private:
     float maxFreq = 1000.0f;
     float sensitivityThreshold = 0.15f; // YIN threshold
 
-    // pYIN internals
+    // YIN internals
     std::vector<float> yinBuffer;
     float runYIN(const float* frame, int size);
     float parabolicInterpolation(int tauEstimate) const;

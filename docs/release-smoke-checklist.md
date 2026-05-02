@@ -73,6 +73,7 @@ Use this checklist for every release candidate before publishing installers, man
   - `OpenStudio-ai-runtime-stable-latest.json`
   - `OpenStudio-appcast-windows-stable.xml`
   - `OpenStudio-appcast-macos-stable.xml`
+  - `OpenStudio-appcast-linux-stable.xml`
 - Confirm `OpenStudio-checksums.txt` matches the published binaries.
 - Confirm `appcast/windows-stable.xml` points to the published Windows installer.
 - Confirm `appcast/macos-stable.xml` points to the published macOS DMG.
@@ -80,7 +81,7 @@ Use this checklist for every release candidate before publishing installers, man
 - Confirm the website repo deploy has completed before validating `openstudio.org.in`.
 - Confirm the public metadata and appcast URLs on `openstudio.org.in` no longer return the SPA HTML shell.
 - Confirm `https://openstudio.org.in/releases/ai-runtime/latest.json` and `https://openstudio.org.in/releases/ai-runtime/stable/latest.json` are live and uncached.
-- Confirm `https://openstudio.org.in/download/ai-runtime/windows/latest` and `https://openstudio.org.in/download/ai-runtime/macos/latest` redirect cleanly if those convenience endpoints are enabled.
+- Confirm `https://openstudio.org.in/download/ai-runtime/windows/latest`, `https://openstudio.org.in/download/ai-runtime/macos/latest`, and `https://openstudio.org.in/download/ai-runtime/linux/latest` redirect cleanly if those convenience endpoints are enabled.
 - Run `./tools/validate-published-release.ps1 -MetadataDir dist/release-metadata -Channel stable -ReleaseSiteUrl https://openstudio.org.in -ValidateRedirects` after deploy and confirm it passes.
 
 ## Launch Sign-Off

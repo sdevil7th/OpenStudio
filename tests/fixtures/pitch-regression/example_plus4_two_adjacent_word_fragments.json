@@ -1,0 +1,40 @@
+[
+  {
+    "id": "pitch-note-1a",
+    "wordGroupId": "word_fixture_1",
+    "startTime": 0.9,
+    "endTime": 1.12,
+    "effectiveStartTime": 0.86,
+    "effectiveEndTime": 1.12,
+    "detectedPitch": 60,
+    "correctedPitch": 64,
+    "driftCorrectionAmount": 0,
+    "vibratoDepth": 1,
+    "vibratoRate": 0,
+    "transitionIn": 40,
+    "transitionOut": 0,
+    "formantShift": 0,
+    "gain": 0,
+    "voiced": true,
+    "pitchDrift": []
+  },
+  {
+    "id": "pitch-note-1b",
+    "wordGroupId": "word_fixture_1",
+    "startTime": 1.143,
+    "endTime": 1.55,
+    "effectiveStartTime": 1.143,
+    "effectiveEndTime": 1.61,
+    "detectedPitch": 60,
+    "correctedPitch": 64,
+    "driftCorrectionAmount": 0,
+    "vibratoDepth": 1,
+    "vibratoRate": 0,
+    "transitionIn": 0,
+    "transitionOut": 60,
+    "formantShift": 0,
+    "gain": 0,
+    "voiced": true,
+    "pitchDrift": []
+  }
+]

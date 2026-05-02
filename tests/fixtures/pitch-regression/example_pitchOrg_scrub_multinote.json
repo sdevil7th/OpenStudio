@@ -1,0 +1,38 @@
+[
+  {
+    "id": "note_0",
+    "startTime": 0.214784577488899,
+    "endTime": 0.534058928489685,
+    "effectiveStartTime": 0.214784577488899,
+    "effectiveEndTime": 0.534058928489685,
+    "detectedPitch": 67.04881286621094,
+    "correctedPitch": 67.04881286621094,
+    "driftCorrectionAmount": 0,
+    "vibratoDepth": 1,
+    "vibratoRate": 0,
+    "transitionIn": 0,
+    "transitionOut": 0,
+    "formantShift": 0,
+    "gain": 0,
+    "voiced": true,
+    "pitchDrift": []
+  },
+  {
+    "id": "note_1",
+    "startTime": 0.615328788757324,
+    "endTime": 1.52671205997467,
+    "effectiveStartTime": 0.615328788757324,
+    "effectiveEndTime": 1.120362758636475,
+    "detectedPitch": 67.56072998046875,
+    "correctedPitch": 67.56072998046875,
+    "driftCorrectionAmount": 0,
+    "vibratoDepth": 1,
+    "vibratoRate": 0,
+    "transitionIn": 0,
+    "transitionOut": 0,
+    "formantShift": 0,
+    "gain": 0,
+    "voiced": true,
+    "pitchDrift": []
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "pitchtest-plus4-note-1",
+    "startTime": 1.193,
+    "endTime": 2.283,
+    "effectiveStartTime": 1.153,
+    "effectiveEndTime": 2.333,
+    "detectedPitch": 67.64092835801603,
+    "correctedPitch": 71.21309485364912,
+    "driftCorrectionAmount": 0.0,
+    "vibratoDepth": 1.0,
+    "vibratoRate": 0.0,
+    "transitionIn": 40.0,
+    "transitionOut": 60.0,
+    "formantShift": 0.0,
+    "gain": 0.0,
+    "voiced": true,
+    "pitchDrift": []
+  }
+]

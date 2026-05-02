@@ -36,7 +36,40 @@ jobs:
 
       - name: Install Windows prerequisite installers
         shell: pwsh
-        run: ./tools/setup-windows-prereqs.ps1
+        run: |
+          ./tools/setup-windows-prereqs.ps1
+
+          function Invoke-PrerequisiteInstaller {
+            param(
+              [Parameter(Mandatory = $true)]
+              [string]$Path,
+
+              [Parameter(Mandatory = $true)]
+              [string[]]$Arguments,
+
+              [Parameter(Mandatory = $true)]
+              [string]$Name
+            )
+
+            if (-not (Test-Path -LiteralPath $Path)) {
+              throw "$Name installer was not found at '$Path'."
+            }
+
+            $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010, 1638)) {
+              Write-Warning "$Name installer exited with code $($process.ExitCode). Continuing so the startup self-test can report the actual runtime state."
+            }
+          }
+
+          $prereqDir = Join-Path $env:GITHUB_WORKSPACE "thirdparty/windows-prereqs"
+          Invoke-PrerequisiteInstaller `
+            -Path (Join-Path $prereqDir "vc_redist.x64.exe") `
+            -Arguments @("/install", "/quiet", "/norestart") `
+            -Name "Visual C++ Redistributable"
+          Invoke-PrerequisiteInstaller `
+            -Path (Join-Path $prereqDir "MicrosoftEdgeWebView2RuntimeInstallerX64.exe") `
+            -Arguments @("/silent", "/install") `
+            -Name "Microsoft Edge WebView2 Runtime"
 
       - name: Configure CMake
         shell: pwsh
@@ -60,10 +93,21 @@ jobs:
         shell: pwsh
         run: |
           $report = Join-Path $env:RUNNER_TEMP "OpenStudio_StartupSelfTest.txt"
-          & "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe" --startup-self-test --report $report
-          if ($LASTEXITCODE -ne 0) {
+          if (Test-Path $report) {
+            Remove-Item -LiteralPath $report -Force -ErrorAction SilentlyContinue
+          }
+
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $process = Start-Process -FilePath $exePath -ArgumentList @("--startup-self-test", "--report", "`"$report`"") -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
             if (Test-Path $report) {
-              Get-Content $report
+              Get-Content -LiteralPath $report
+            } else {
+              Write-Host "No self-test report was written."
+              $startupLog = Join-Path $env:APPDATA "OpenStudio/logs/OpenStudio_Startup.log"
+              if (Test-Path $startupLog) {
+                Get-Content -LiteralPath $startupLog
+              }
             }
             throw "Windows startup self-test failed."
           }
@@ -112,8 +156,8 @@ jobs:
           echo "APP_BUNDLE=$APP_BUNDLE" >> "$GITHUB_ENV"
 
       - name: Validate macOS runtime bundle
-        shell: bash
-        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$APP_BUNDLE" -ExpectedVersion "$VERSION" -EnforceLeanBundle
+        shell: pwsh
+        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$env:APP_BUNDLE" -ExpectedVersion "$env:VERSION" -EnforceLeanBundle
 
       - name: Run macOS startup self-test
         shell: bash
@@ -126,3 +170,82 @@ jobs:
             fi
             exit 1
           fi
+
+  verify-linux:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: 0.0.0
+      BUILD_DIR: build-verify-linux
+      ONNXRUNTIME_VERSION: 1.24.4
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          bash ./tools/setup-linux-prereqs.sh
+          sudo apt-get install -y xvfb
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Download ONNX Runtime
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          wget -q "$URL" -O onnxruntime.tgz
+          mkdir -p thirdparty/onnxruntime
+          tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -S . -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSTUDIO_APP_VERSION="$VERSION" \
+            -DOPENSTUDIO_UPDATE_MANIFEST_URL_VALUE="https://openstudio.org.in/releases/stable/latest.json" \
+            -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="https://openstudio.org.in/appcast/linux-stable.xml" \
+            -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="https://openstudio.org.in/download" \
+            -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
+            -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
+            -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
+
+      - name: Build OpenStudio
+        shell: bash
+        run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Validate Linux runtime bundle
+        shell: pwsh
+        run: ./tools/validate-runtime-bundle.ps1 -Platform linux -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
+
+      - name: Run Linux startup self-test
+        shell: bash
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_StartupSelfTest.txt"
+          xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --startup-self-test --report "$REPORT"
+          if [ $? -ne 0 ]; then
+            if [ -f "$REPORT" ]; then
+              cat "$REPORT"
+            fi
+            exit 1
+          fi
+
+      - name: Package AppImage
+        shell: bash
+        run: |
+          chmod +x ./tools/package-linux-release.sh
+          bash ./tools/package-linux-release.sh "$VERSION" "$BUILD_DIR"
+
+      - name: Verify Linux AppImage output
+        shell: bash
+        run: test -f "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"

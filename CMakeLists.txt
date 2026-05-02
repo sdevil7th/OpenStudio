@@ -166,6 +166,8 @@ juce_add_gui_app(OpenStudio
     VERSION ${PROJECT_VERSION}
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-256x256.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-16x16.png"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )
 
 # Source files
@@ -207,11 +209,13 @@ target_sources(OpenStudio PRIVATE
     Source/S13PitchCorrector.cpp
     Source/PitchAnalyzer.cpp
     Source/PitchResynthesizer.cpp
-    Source/SignalsmithShifter.cpp
+    Source/LpcEnvelopeTransfer.cpp
+    Source/OwnPitchEngine.cpp
     Source/TriggerEngine.cpp
     Source/SessionInterchange.cpp
     Source/PolyPitchDetector.cpp
     Source/StemSeparator.cpp
+    Source/AITrackEngine.cpp
     Source/ARAHostController.cpp
 )
 
@@ -292,7 +296,7 @@ if(WIN32)
 elseif(APPLE)
     set(_OPENSTUDIO_DEFAULT_APPCAST_URL "https://openstudio.org.in/appcast/macos-stable.xml")
 else()
-    set(_OPENSTUDIO_DEFAULT_APPCAST_URL "")
+    set(_OPENSTUDIO_DEFAULT_APPCAST_URL "https://openstudio.org.in/appcast/linux-stable.xml")
 endif()
 
 set(OPENSTUDIO_UPDATE_APPCAST_URL_VALUE "${_OPENSTUDIO_DEFAULT_APPCAST_URL}" CACHE STRING "Updater appcast URL compiled into OpenStudio")
@@ -392,9 +396,15 @@ endif()
 # ==============================================================================
 if(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
+    find_package(CURL REQUIRED)
     pkg_check_modules(ALSA alsa)
     pkg_check_modules(JACK jack)
-    pkg_check_modules(WEBKIT webkit2gtk-4.0)
+    # webkit2gtk-4.1 is standard on Ubuntu 24.04+; fall back to 4.0 for older distros
+    pkg_check_modules(WEBKIT webkit2gtk-4.1)
+    if(NOT WEBKIT_FOUND)
+        pkg_check_modules(WEBKIT webkit2gtk-4.0)
+    endif()
+    pkg_check_modules(GTK gtk+-3.0)
     if(ALSA_FOUND)
         target_link_libraries(OpenStudio PRIVATE ${ALSA_LIBRARIES})
         target_include_directories(OpenStudio PRIVATE ${ALSA_INCLUDE_DIRS})
@@ -407,6 +417,11 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(OpenStudio PRIVATE ${WEBKIT_LIBRARIES})
         target_include_directories(OpenStudio PRIVATE ${WEBKIT_INCLUDE_DIRS})
     endif()
+    if(GTK_FOUND)
+        target_link_libraries(OpenStudio PRIVATE ${GTK_LIBRARIES})
+        target_include_directories(OpenStudio PRIVATE ${GTK_INCLUDE_DIRS})
+    endif()
+    target_link_libraries(OpenStudio PRIVATE CURL::libcurl)
 endif()
 
 # Generate the JuceHeader.h
@@ -417,6 +432,14 @@ if(MSVC)
     target_compile_options(OpenStudio PRIVATE /W4 /FS)
 else()
     target_compile_options(OpenStudio PRIVATE -Wall -Wextra)
+endif()
+
+# On Linux, set RPATH to $ORIGIN so the binary finds libonnxruntime.so etc. next to it
+if(UNIX AND NOT APPLE)
+    set_target_properties(OpenStudio PROPERTIES
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
 endif()
 
 # ==============================================================================
@@ -528,13 +551,31 @@ if(EXISTS "${SCRIPTS_DIR}")
     )
 endif()
 
-# Copy ONNX Runtime DLL + models to output directory
+# Copy ONNX Runtime shared library + models to output directory
 if(HAS_ONNXRUNTIME AND WIN32)
     openstudio_copy_runtime_file(
         "${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll"
         "onnxruntime.dll"
         "Copying ONNX Runtime DLL to output directory"
     )
+elseif(HAS_ONNXRUNTIME AND UNIX AND NOT APPLE)
+    file(GLOB OPENSTUDIO_ONNXRUNTIME_LINUX_LIBS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so*")
+    foreach(OPENSTUDIO_ONNXRUNTIME_LINUX_LIB IN LISTS OPENSTUDIO_ONNXRUNTIME_LINUX_LIBS)
+        get_filename_component(OPENSTUDIO_ONNXRUNTIME_LINUX_LIB_NAME "${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB}" NAME)
+        openstudio_copy_runtime_file(
+            "${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB}"
+            "${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB_NAME}"
+            "Copying ONNX Runtime Linux shared library ${OPENSTUDIO_ONNXRUNTIME_LINUX_LIB_NAME} to output directory"
+        )
+    endforeach()
+    if(EXISTS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so" AND NOT EXISTS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so.1")
+        add_custom_command(TARGET OpenStudio POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so"
+                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/libonnxruntime.so.1"
+            COMMENT "Copying ONNX Runtime Linux SONAME fallback libonnxruntime.so.1 to output directory"
+        )
+    endif()
 endif()
 
 # Copy required core ML model(s) to output directory
@@ -582,6 +623,56 @@ if(EXISTS "${AI_RUNTIME_PROBE_SCRIPT}")
     )
 endif()
 
+set(AI_MUSIC_GENERATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_music.py")
+if(EXISTS "${AI_MUSIC_GENERATION_SCRIPT}")
+    openstudio_copy_runtime_file(
+        "${AI_MUSIC_GENERATION_SCRIPT}"
+        "scripts/generate_music.py"
+        "Copying music generation helper script to output directory"
+    )
+endif()
+
+set(AI_OPENSTUDIO_ACE_RUNNER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_runner.py")
+if(EXISTS "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}")
+    openstudio_copy_runtime_file(
+        "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}"
+        "scripts/openstudio_ace_runner.py"
+        "Copying OpenStudio ACE runner script to output directory"
+    )
+endif()
+
+set(AI_OPENSTUDIO_ACE_BACKEND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_backend")
+if(EXISTS "${AI_OPENSTUDIO_ACE_BACKEND_DIR}")
+    openstudio_copy_runtime_directory(
+        "${AI_OPENSTUDIO_ACE_BACKEND_DIR}"
+        "scripts/openstudio_ace_backend"
+        "Copying OpenStudio ACE backend package to output directory"
+    )
+endif()
+
+set(WINDOWS_AI_ACCELERATION_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/tools/windows-ai-acceleration-manifest.json")
+if(EXISTS "${WINDOWS_AI_ACCELERATION_MANIFEST}")
+    openstudio_copy_runtime_file(
+        "${WINDOWS_AI_ACCELERATION_MANIFEST}"
+        "scripts/windows-ai-acceleration-manifest.json"
+        "Copying Windows AI acceleration manifest to output directory"
+    )
+endif()
+
+# Copy Linux AI backend install plans to output directory
+if(UNIX AND NOT APPLE)
+    foreach(LINUX_PLAN_FILE "ai-runtime-install-plan-linux-cuda.json" "ai-runtime-install-plan-linux-rocm.json")
+        set(LINUX_PLAN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tools/${LINUX_PLAN_FILE}")
+        if(EXISTS "${LINUX_PLAN_SRC}")
+            openstudio_copy_runtime_file(
+                "${LINUX_PLAN_SRC}"
+                "scripts/${LINUX_PLAN_FILE}"
+                "Copying Linux AI backend plan ${LINUX_PLAN_FILE} to output directory"
+            )
+        endif()
+    endforeach()
+endif()
+
 # Remove legacy bundled AI runtime artifacts from reused build directories.
 openstudio_remove_runtime_path(
     "python"
@@ -598,6 +689,28 @@ openstudio_remove_runtime_file(
 openstudio_remove_runtime_file(
     "models/download_checks.json"
     "Removing legacy bundled stem model download manifest from output directory"
+)
+openstudio_remove_runtime_file(
+    "scripts/ace_step_parity_replay.py"
+    "Removing ACE-Step parity replay script from output directory"
+)
+openstudio_remove_runtime_file(
+    "scripts/compare_ace_parity_artifacts.py"
+    "Removing ACE-Step parity comparison script from output directory"
+)
+openstudio_remove_runtime_file(
+    "scripts/run_ace_step_parity_capture.ps1"
+    "Removing ACE-Step parity capture helper from output directory"
+)
+openstudio_remove_runtime_file(
+    "scripts/openstudio_ace_backend/parity_debug.py"
+    "Removing ACE-Step parity backend helper from output directory"
+)
+set(LEGACY_EXTERNAL_ACE_RUNNER_PATH "scripts/co")
+string(APPEND LEGACY_EXTERNAL_ACE_RUNNER_PATH "mfy_ace_runner.py")
+openstudio_remove_runtime_file(
+    "${LEGACY_EXTERNAL_ACE_RUNNER_PATH}"
+    "Removing legacy external ACE runner from output directory"
 )
 
 # Copy packaged frontend assets for release/offline builds

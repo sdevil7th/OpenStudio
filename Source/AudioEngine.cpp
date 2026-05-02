@@ -8,6 +8,15 @@
 
 namespace
 {
+struct PitchPhraseRenderRegion
+{
+    double startSec = 0.0;
+    double endSec = 0.0;
+    bool startIsSafeBoundary = false;
+    bool endIsSafeBoundary = false;
+    bool expandedToFullClip = true;
+};
+
 juce::File getOpenStudioDocumentsDirectory()
 {
     auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
@@ -58,6 +67,2302 @@ juce::File getPreferredApplicationDataDirectory()
 
     return openStudioDir;
 }
+
+float getPitchEnvFloat (const char* name, float fallback)
+{
+    auto value = juce::SystemStats::getEnvironmentVariable (name, {}).trim();
+    if (value.isEmpty())
+        return fallback;
+
+    const float parsed = value.getFloatValue();
+    return std::isfinite (parsed) ? parsed : fallback;
+}
+
+bool getPitchEnvFlag (const char* name, bool fallback)
+{
+    const auto value = juce::SystemStats::getEnvironmentVariable (name, {}).trim().toLowerCase();
+    if (value.isEmpty())
+        return fallback;
+
+    if (value == "1" || value == "true" || value == "yes" || value == "on")
+        return true;
+
+    if (value == "0" || value == "false" || value == "no" || value == "off")
+        return false;
+
+    return fallback;
+}
+
+bool writeBufferToWavFile (const juce::AudioBuffer<float>& buffer,
+                           int numSamples,
+                           double sampleRate,
+                           const juce::File& outputFile)
+{
+    outputFile.deleteFile();
+
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::FileOutputStream> stream (outputFile.createOutputStream());
+    if (! stream)
+        return false;
+
+    std::unique_ptr<juce::AudioFormatWriter> writer (
+        wavFormat.createWriterFor (stream.get(), sampleRate,
+                                   static_cast<unsigned int> (buffer.getNumChannels()),
+                                   32, {}, 0));
+    if (! writer)
+        return false;
+
+    stream.release();
+    const bool ok = writer->writeFromAudioSampleBuffer (buffer, 0, numSamples);
+    writer.reset();
+    return ok && outputFile.existsAsFile();
+}
+
+juce::var writePitchBakedContextWav (const juce::File& sourceFile,
+                                     double startSec,
+                                     double durationSec,
+                                     const juce::File& outputFile)
+{
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty ("success", false);
+    resultObj->setProperty ("sourceFile", sourceFile.getFullPathName());
+    resultObj->setProperty ("filePath", outputFile.getFullPathName());
+    resultObj->setProperty ("source", "baked_corrected_file");
+
+    if (! sourceFile.existsAsFile())
+    {
+        resultObj->setProperty ("error", "source file missing");
+        return juce::var (resultObj);
+    }
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (sourceFile));
+    if (! reader)
+    {
+        resultObj->setProperty ("error", "failed to create source reader");
+        return juce::var (resultObj);
+    }
+
+    const double sampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 44100.0;
+    const auto startSample = juce::jlimit<juce::int64> (
+        0,
+        reader->lengthInSamples,
+        static_cast<juce::int64> (std::llround (std::max (0.0, startSec) * sampleRate)));
+    const auto maxSamples = reader->lengthInSamples - startSample;
+    const int requestedSamples = std::max (1, static_cast<int> (std::ceil (std::max (0.0, durationSec) * sampleRate)));
+    const int numSamples = static_cast<int> (std::min<juce::int64> (maxSamples, requestedSamples));
+    if (numSamples <= 0)
+    {
+        resultObj->setProperty ("error", "empty baked context range");
+        return juce::var (resultObj);
+    }
+
+    juce::AudioBuffer<float> buffer (static_cast<int> (reader->numChannels), numSamples);
+    buffer.clear();
+    reader->read (&buffer, 0, numSamples, startSample, true, true);
+
+    outputFile.getParentDirectory().createDirectory();
+    const bool wrote = writeBufferToWavFile (buffer, numSamples, sampleRate, outputFile);
+    if (! wrote)
+    {
+        resultObj->setProperty ("error", "failed to write baked context wav");
+        return juce::var (resultObj);
+    }
+
+    resultObj->setProperty ("success", true);
+    resultObj->setProperty ("filePath", outputFile.getFullPathName());
+    resultObj->setProperty ("startSec", static_cast<double> (startSample) / sampleRate);
+    resultObj->setProperty ("durationSec", static_cast<double> (numSamples) / sampleRate);
+    resultObj->setProperty ("sampleRate", sampleRate);
+    resultObj->setProperty ("channels", static_cast<int> (reader->numChannels));
+    return juce::var (resultObj);
+}
+
+bool readAudioFileForParity (const juce::File& file,
+                             juce::AudioBuffer<float>& buffer,
+                             double& sampleRate)
+{
+    if (! file.existsAsFile())
+        return false;
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
+    if (! reader || reader->lengthInSamples <= 0)
+        return false;
+
+    const int numSamples = static_cast<int> (std::min<juce::int64> (
+        reader->lengthInSamples,
+        static_cast<juce::int64> (std::numeric_limits<int>::max())));
+    buffer.setSize (static_cast<int> (reader->numChannels), numSamples);
+    buffer.clear();
+    reader->read (&buffer, 0, numSamples, 0, true, true);
+    sampleRate = reader->sampleRate;
+    return true;
+}
+
+float sampleBufferCubicForParity (const juce::AudioBuffer<float>& buffer,
+                                  int channel,
+                                  double position)
+{
+    const int availableSamples = buffer.getNumSamples();
+    if (availableSamples <= 0 || buffer.getNumChannels() <= 0)
+        return 0.0f;
+
+    const int safeChannel = juce::jlimit (0, buffer.getNumChannels() - 1, channel);
+    if (availableSamples == 1)
+        return buffer.getSample (safeChannel, 0);
+
+    const double clampedPosition = juce::jlimit (0.0,
+                                                 static_cast<double> (availableSamples - 1),
+                                                 position);
+    const int i1 = juce::jlimit (0, availableSamples - 1,
+                                 static_cast<int> (std::floor (clampedPosition)));
+    const int i0 = juce::jlimit (0, availableSamples - 1, i1 - 1);
+    const int i2 = juce::jlimit (0, availableSamples - 1, i1 + 1);
+    const int i3 = juce::jlimit (0, availableSamples - 1, i1 + 2);
+    const float t = static_cast<float> (clampedPosition - static_cast<double> (i1));
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float y0 = buffer.getSample (safeChannel, i0);
+    const float y1 = buffer.getSample (safeChannel, i1);
+    const float y2 = buffer.getSample (safeChannel, i2);
+    const float y3 = buffer.getSample (safeChannel, i3);
+
+    return 0.5f * ((2.0f * y1)
+        + (-y0 + y2) * t
+        + (2.0f * y0 - 5.0f * y1 + 4.0f * y2 - y3) * t2
+        + (-y0 + 3.0f * y1 - 3.0f * y2 + y3) * t3);
+}
+
+juce::AudioBuffer<float> resampleBufferCubicForParity (const juce::AudioBuffer<float>& source,
+                                                       double sourceSampleRate,
+                                                       double targetSampleRate,
+                                                       int targetSamples)
+{
+    const int channels = source.getNumChannels();
+    juce::AudioBuffer<float> result (channels, std::max (0, targetSamples));
+    result.clear();
+    if (channels <= 0 || targetSamples <= 0 || sourceSampleRate <= 0.0 || targetSampleRate <= 0.0)
+        return result;
+
+    const double ratio = sourceSampleRate / targetSampleRate;
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        for (int i = 0; i < targetSamples; ++i)
+            result.setSample (ch, i, sampleBufferCubicForParity (source, ch, static_cast<double> (i) * ratio));
+    }
+    return result;
+}
+
+juce::var writePitchBakedResampledContextWav (const juce::File& sourceFile,
+                                              double startSec,
+                                              double durationSec,
+                                              double targetSampleRate,
+                                              const juce::File& outputFile)
+{
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty ("success", false);
+    resultObj->setProperty ("sourceFile", sourceFile.getFullPathName());
+    resultObj->setProperty ("filePath", outputFile.getFullPathName());
+    resultObj->setProperty ("source", "baked_corrected_file_resampled");
+    resultObj->setProperty ("resampler", "shared_cubic_fractional");
+
+    if (! sourceFile.existsAsFile())
+    {
+        resultObj->setProperty ("error", "source file missing");
+        return juce::var (resultObj);
+    }
+
+    if (targetSampleRate <= 0.0 || durationSec <= 0.0)
+    {
+        resultObj->setProperty ("error", "invalid target sample rate or duration");
+        return juce::var (resultObj);
+    }
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (sourceFile));
+    if (! reader)
+    {
+        resultObj->setProperty ("error", "failed to create source reader");
+        return juce::var (resultObj);
+    }
+
+    const double sourceSampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : targetSampleRate;
+    const double ratio = sourceSampleRate / targetSampleRate;
+    double exactFileStart = std::max (0.0, startSec) * sourceSampleRate;
+    const double roundedFileStart = std::round (exactFileStart);
+    if (std::abs (exactFileStart - roundedFileStart) < 1.0e-6)
+        exactFileStart = roundedFileStart;
+
+    const auto fileStartSample = static_cast<juce::int64> (std::floor (exactFileStart));
+    const auto readStartSample = fileStartSample > 0 ? fileStartSample - 1 : fileStartSample;
+    const int readStartOffset = static_cast<int> (fileStartSample - readStartSample);
+    const double fileStartFraction = exactFileStart - static_cast<double> (fileStartSample);
+    const double bufferStartPosition = static_cast<double> (readStartOffset) + fileStartFraction;
+    const int requestedSamples = std::max (1, static_cast<int> (std::ceil (durationSec * targetSampleRate)));
+    int outputSamples = requestedSamples;
+    int sourceSamplesToRead = static_cast<int> (std::ceil (bufferStartPosition + outputSamples * ratio)) + 3;
+    const auto sourceSamplesAvailable = reader->lengthInSamples - readStartSample;
+    if (sourceSamplesAvailable <= 0)
+    {
+        resultObj->setProperty ("error", "empty resampled context range");
+        return juce::var (resultObj);
+    }
+
+    if (sourceSamplesAvailable < sourceSamplesToRead)
+    {
+        sourceSamplesToRead = static_cast<int> (sourceSamplesAvailable);
+        outputSamples = static_cast<int> (std::floor (
+            (static_cast<double> (sourceSamplesToRead - 1) - bufferStartPosition) / ratio));
+    }
+
+    if (outputSamples <= 0 || sourceSamplesToRead <= 0)
+    {
+        resultObj->setProperty ("error", "empty resampled context output");
+        return juce::var (resultObj);
+    }
+
+    const int channels = static_cast<int> (reader->numChannels);
+    juce::AudioBuffer<float> sourceBuffer (channels, sourceSamplesToRead);
+    sourceBuffer.clear();
+    reader->read (&sourceBuffer, 0, sourceSamplesToRead, readStartSample, true, true);
+
+    juce::AudioBuffer<float> outputBuffer (channels, outputSamples);
+    outputBuffer.clear();
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        for (int i = 0; i < outputSamples; ++i)
+        {
+            const double filePos = bufferStartPosition + static_cast<double> (i) * ratio;
+            outputBuffer.setSample (ch, i, sampleBufferCubicForParity (sourceBuffer, ch, filePos));
+        }
+    }
+
+    outputFile.getParentDirectory().createDirectory();
+    const bool wrote = writeBufferToWavFile (outputBuffer, outputSamples, targetSampleRate, outputFile);
+    if (! wrote)
+    {
+        resultObj->setProperty ("error", "failed to write resampled baked context wav");
+        return juce::var (resultObj);
+    }
+
+    resultObj->setProperty ("success", true);
+    resultObj->setProperty ("filePath", outputFile.getFullPathName());
+    resultObj->setProperty ("startSec", std::max (0.0, startSec));
+    resultObj->setProperty ("durationSec", static_cast<double> (outputSamples) / targetSampleRate);
+    resultObj->setProperty ("nativeSampleRate", sourceSampleRate);
+    resultObj->setProperty ("sampleRate", targetSampleRate);
+    resultObj->setProperty ("channels", channels);
+    resultObj->setProperty ("sourceReadStartSample", static_cast<double> (readStartSample));
+    resultObj->setProperty ("sourceReadStartFraction", fileStartFraction);
+    return juce::var (resultObj);
+}
+
+double safeDbRatio (double numerator, double denominator)
+{
+    constexpr double eps = 1.0e-12;
+    return 20.0 * std::log10 (std::max (numerator, eps) / std::max (denominator, eps));
+}
+
+double computeBufferRms (const juce::AudioBuffer<float>& buffer,
+                         int channels,
+                         int startSample,
+                         int numSamples)
+{
+    if (channels <= 0 || numSamples <= 0)
+        return 0.0;
+
+    double energy = 0.0;
+    juce::int64 count = 0;
+    const int start = juce::jlimit (0, buffer.getNumSamples(), startSample);
+    const int end = juce::jlimit (start, buffer.getNumSamples(), start + numSamples);
+    for (int ch = 0; ch < std::min (channels, buffer.getNumChannels()); ++ch)
+    {
+        const float* data = buffer.getReadPointer (ch);
+        for (int i = start; i < end; ++i)
+        {
+            const double s = data[i];
+            energy += s * s;
+            ++count;
+        }
+    }
+
+    return count > 0 ? std::sqrt (energy / static_cast<double> (count)) : 0.0;
+}
+
+double computeShortRmsEnvelopeCorrelation (const juce::AudioBuffer<float>& a,
+                                           const juce::AudioBuffer<float>& b,
+                                           int channels,
+                                           double sampleRate)
+{
+    const int samples = std::min (a.getNumSamples(), b.getNumSamples());
+    const int frameSamples = std::max (16, static_cast<int> (std::round (0.020 * sampleRate)));
+    const int hopSamples = std::max (8, static_cast<int> (std::round (0.010 * sampleRate)));
+    if (samples < frameSamples || channels <= 0)
+        return 0.0;
+
+    std::vector<double> envA;
+    std::vector<double> envB;
+    for (int start = 0; start + frameSamples <= samples; start += hopSamples)
+    {
+        envA.push_back (computeBufferRms (a, channels, start, frameSamples));
+        envB.push_back (computeBufferRms (b, channels, start, frameSamples));
+    }
+    if (envA.size() < 2 || envA.size() != envB.size())
+        return 0.0;
+
+    double meanA = 0.0;
+    double meanB = 0.0;
+    for (size_t i = 0; i < envA.size(); ++i)
+    {
+        meanA += envA[i];
+        meanB += envB[i];
+    }
+    meanA /= static_cast<double> (envA.size());
+    meanB /= static_cast<double> (envB.size());
+
+    double numerator = 0.0;
+    double denomA = 0.0;
+    double denomB = 0.0;
+    for (size_t i = 0; i < envA.size(); ++i)
+    {
+        const double da = envA[i] - meanA;
+        const double db = envB[i] - meanB;
+        numerator += da * db;
+        denomA += da * da;
+        denomB += db * db;
+    }
+
+    const double denom = std::sqrt (denomA * denomB);
+    return denom > 1.0e-12 ? numerator / denom : 0.0;
+}
+
+int findFirstActiveSample (const juce::AudioBuffer<float>& buffer,
+                           int channels,
+                           double threshold)
+{
+    for (int i = 0; i < buffer.getNumSamples(); ++i)
+    {
+        double peak = 0.0;
+        for (int ch = 0; ch < std::min (channels, buffer.getNumChannels()); ++ch)
+            peak = std::max (peak, std::abs (static_cast<double> (buffer.getSample (ch, i))));
+        if (peak >= threshold)
+            return i;
+    }
+
+    return -1;
+}
+
+juce::var comparePitchParityFiles (const juce::File& bakedFile,
+                                   const juce::File& appPlaybackFile,
+                                   double captureStartClipSec,
+                                   double noteStartClipSec,
+                                   double noteEndClipSec)
+{
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty ("success", false);
+    resultObj->setProperty ("bakedContextPath", bakedFile.getFullPathName());
+    resultObj->setProperty ("appPlaybackContextPath", appPlaybackFile.getFullPathName());
+
+    juce::AudioBuffer<float> baked;
+    juce::AudioBuffer<float> app;
+    double bakedSampleRate = 0.0;
+    double appSampleRate = 0.0;
+    if (! readAudioFileForParity (bakedFile, baked, bakedSampleRate)
+        || ! readAudioFileForParity (appPlaybackFile, app, appSampleRate))
+    {
+        resultObj->setProperty ("error", "failed to read parity wav files");
+        return juce::var (resultObj);
+    }
+
+    const bool resampledReferenceForParity = std::abs (bakedSampleRate - appSampleRate) > 1.0e-6;
+    juce::AudioBuffer<float> bakedComparison;
+    if (resampledReferenceForParity)
+    {
+        bakedComparison = resampleBufferCubicForParity (baked,
+                                                        bakedSampleRate,
+                                                        appSampleRate,
+                                                        app.getNumSamples());
+    }
+    else
+    {
+        bakedComparison.makeCopyOf (baked, true);
+    }
+
+    const double comparisonSampleRate = resampledReferenceForParity ? appSampleRate : bakedSampleRate;
+    const int channels = std::min (bakedComparison.getNumChannels(), app.getNumChannels());
+    const int samples = std::min (bakedComparison.getNumSamples(), app.getNumSamples());
+    if (channels <= 0 || samples <= 0)
+    {
+        resultObj->setProperty ("error", "parity wav shape mismatch");
+        resultObj->setProperty ("bakedSampleRate", bakedSampleRate);
+        resultObj->setProperty ("appSampleRate", appSampleRate);
+        resultObj->setProperty ("comparisonSampleRate", comparisonSampleRate);
+        resultObj->setProperty ("resampledReferenceForParity", resampledReferenceForParity);
+        return juce::var (resultObj);
+    }
+
+    double bakedEnergy = 0.0;
+    double appEnergy = 0.0;
+    double diffEnergy = 0.0;
+    double maxAbsDiff = 0.0;
+    juce::int64 count = 0;
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        const float* bakedData = bakedComparison.getReadPointer (ch);
+        const float* appData = app.getReadPointer (ch);
+        for (int i = 0; i < samples; ++i)
+        {
+            const double a = bakedData[i];
+            const double b = appData[i];
+            const double d = b - a;
+            bakedEnergy += a * a;
+            appEnergy += b * b;
+            diffEnergy += d * d;
+            maxAbsDiff = std::max (maxAbsDiff, std::abs (d));
+            ++count;
+        }
+    }
+
+    const double bakedRms = count > 0 ? std::sqrt (bakedEnergy / static_cast<double> (count)) : 0.0;
+    const double appRms = count > 0 ? std::sqrt (appEnergy / static_cast<double> (count)) : 0.0;
+    const double diffRms = count > 0 ? std::sqrt (diffEnergy / static_cast<double> (count)) : 0.0;
+    const double residualRelativeDb = safeDbRatio (diffRms, bakedRms);
+
+    const int entryStartSample = juce::jlimit (0, samples,
+        static_cast<int> (std::round ((noteStartClipSec - captureStartClipSec) * comparisonSampleRate)));
+    const int entryEndSample = juce::jlimit (entryStartSample, samples,
+        static_cast<int> (std::round ((std::min (noteEndClipSec, noteStartClipSec + 0.240) - captureStartClipSec) * comparisonSampleRate)));
+    double entryBakedEnergy = 0.0;
+    double entryDiffEnergy = 0.0;
+    juce::int64 entryCount = 0;
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        const float* bakedData = bakedComparison.getReadPointer (ch);
+        const float* appData = app.getReadPointer (ch);
+        for (int i = entryStartSample; i < entryEndSample; ++i)
+        {
+            const double a = bakedData[i];
+            const double d = static_cast<double> (appData[i]) - a;
+            entryBakedEnergy += a * a;
+            entryDiffEnergy += d * d;
+            ++entryCount;
+        }
+    }
+    const double entryBakedRms = entryCount > 0 ? std::sqrt (entryBakedEnergy / static_cast<double> (entryCount)) : 0.0;
+    const double entryDiffRms = entryCount > 0 ? std::sqrt (entryDiffEnergy / static_cast<double> (entryCount)) : 0.0;
+    const double entryResidualRelativeDb = safeDbRatio (entryDiffRms, entryBakedRms);
+
+    const double activeThreshold = std::max (1.0e-5, bakedRms * 0.02);
+    const int bakedActiveSample = findFirstActiveSample (bakedComparison, channels, activeThreshold);
+    const int appActiveSample = findFirstActiveSample (app, channels, activeThreshold);
+    const double activeStartDeltaMs = (bakedActiveSample >= 0 && appActiveSample >= 0)
+        ? (static_cast<double> (appActiveSample - bakedActiveSample) * 1000.0 / comparisonSampleRate)
+        : 0.0;
+    const double envelopeCorrelation = computeShortRmsEnvelopeCorrelation (bakedComparison, app, channels, comparisonSampleRate);
+
+    const bool passed = residualRelativeDb <= -70.0
+        && entryResidualRelativeDb <= -60.0
+        && std::abs (activeStartDeltaMs) <= 1.0
+        && envelopeCorrelation >= 0.995;
+
+    resultObj->setProperty ("success", true);
+    resultObj->setProperty ("parityPassed", passed);
+    resultObj->setProperty ("residualRelativeDb", residualRelativeDb);
+    resultObj->setProperty ("entryResidualRelativeDb", entryResidualRelativeDb);
+    resultObj->setProperty ("shortRmsEnvelopeCorrelation", envelopeCorrelation);
+    resultObj->setProperty ("activeStartDeltaMs", activeStartDeltaMs);
+    resultObj->setProperty ("maxAbsDiff", maxAbsDiff);
+    resultObj->setProperty ("bakedRms", bakedRms);
+    resultObj->setProperty ("appPlaybackRms", appRms);
+    resultObj->setProperty ("diffRms", diffRms);
+    resultObj->setProperty ("sampleRate", comparisonSampleRate);
+    resultObj->setProperty ("bakedNativeSampleRate", bakedSampleRate);
+    resultObj->setProperty ("appSampleRate", appSampleRate);
+    resultObj->setProperty ("resampledReferenceForParity", resampledReferenceForParity);
+    resultObj->setProperty ("referenceResampler", resampledReferenceForParity ? "shared_cubic_fractional" : "none");
+    resultObj->setProperty ("channels", channels);
+    resultObj->setProperty ("samplesCompared", samples);
+    resultObj->setProperty ("entryStartSample", entryStartSample);
+    resultObj->setProperty ("entryEndSample", entryEndSample);
+    return juce::var (resultObj);
+}
+
+PitchPhraseRenderRegion resolvePitchPhraseRenderRegion (const std::vector<PitchAnalyzer::PitchFrame>& frames,
+                                                        double editStartSec,
+                                                        double editEndSec,
+                                                        double clipDurationSec)
+{
+    PitchPhraseRenderRegion region;
+
+    constexpr double searchSec = 0.75;
+    constexpr float safeConfidence = 0.20f;
+    constexpr float safeRmsDb = -55.0f;
+
+    bool foundLeft = false;
+    bool foundRight = false;
+    double left = std::max (0.0, editStartSec - searchSec);
+    double right = std::min (clipDurationSec, editEndSec + searchSec);
+
+    for (auto it = frames.rbegin(); it != frames.rend(); ++it)
+    {
+        const double t = static_cast<double> (it->time);
+        if (t >= editStartSec)
+            continue;
+        if (editStartSec - t > searchSec)
+            break;
+        if (! it->voiced || it->confidence < safeConfidence || it->rmsDB < safeRmsDb)
+        {
+            left = t;
+            foundLeft = true;
+            break;
+        }
+    }
+
+    for (const auto& frame : frames)
+    {
+        const double t = static_cast<double> (frame.time);
+        if (t <= editEndSec)
+            continue;
+        if (t - editEndSec > searchSec)
+            break;
+        if (! frame.voiced || frame.confidence < safeConfidence || frame.rmsDB < safeRmsDb)
+        {
+            right = t;
+            foundRight = true;
+            break;
+        }
+    }
+
+    region.startSec = juce::jlimit (0.0, clipDurationSec, left);
+    region.endSec = juce::jlimit (region.startSec, clipDurationSec, right);
+    region.startIsSafeBoundary = foundLeft || region.startSec <= 0.0;
+    region.endIsSafeBoundary = foundRight || region.endSec >= clipDurationSec;
+    region.expandedToFullClip = region.startSec <= 0.0 && region.endSec >= clipDurationSec;
+
+    return region;
+}
+
+struct PitchCommitRange
+{
+    double startSec = 0.0;
+    double endSec = 0.0;
+    double bodyStartSec = 0.0;
+    double bodyEndSec = 0.0;
+    double pitchRatio = 1.0;
+    int pitchDirection = 0;
+    juce::String wordGroupId;
+    int editedNoteCount = 1;
+    bool variablePitchRatio = false;
+    juce::String entryBoundaryKind = "unknown";
+    juce::String exitBoundaryKind = "unknown";
+    double entryBoundaryScore = 0.0;
+    double exitBoundaryScore = 0.0;
+};
+
+struct PitchCompositeStats
+{
+    int dryProtectedSamples = 0;
+    int preBodyDryProtectedSamples = 0;
+    double audibleCommitStartSec = 0.0;
+    double audibleCommitEndSec = 0.0;
+    double entryInsideBodyFadeMs = 12.0;
+    double exitLeadInMs = 12.0;
+    double entryBridgeStartSec = 0.0;
+    double entryBridgeEndSec = 0.0;
+    double entryBridgeWetLagMs = 0.0;
+    double entryBridgeEnvelopeGainDb = 0.0;
+    bool entryBridgeUsed = false;
+    bool entrySimpleHandoffUsed = false;
+    bool entrySafeHandoffUsed = false;
+    double entryDryHoldMs = 0.0;
+    double entrySafeBridgeMs = 0.0;
+    double entryWetAlignmentMs = 0.0;
+    double entryWetGainDb = 0.0;
+    double entryWetVsDryRmsDb = 0.0;
+    bool entryEqualPowerBlendUsed = false;
+    bool entryRmsContinuityUsed = false;
+    double entryRmsContinuityGainDb = 0.0;
+    double entryRmsContinuityMs = 0.0;
+    bool entryTransientResidualUsed = false;
+    double entryTransientResidualMix = 0.0;
+    double entryTransientResidualMs = 0.0;
+    bool entryPhaseSafeUsed = false;
+    bool entryWetAlignmentAccepted = false;
+    double entryFirstCycleCorrelation = 0.0;
+    double entryZeroCrossOffsetMs = 0.0;
+    double entryBridgeGainRampDb = 0.0;
+    double entryTransientDryPreservedMs = 0.0;
+    bool exitDryRestoreUsed = false;
+    double exitDryRestoreStartSec = 0.0;
+    double exitDryRestoreEndSec = 0.0;
+    bool entryTimbreCorrectionUsed = false;
+    double entryRmsTrimDb = 0.0;
+    double entryTiltDb = 0.0;
+    bool downshiftCoreEnvelopePassUsed = false;
+    double downshiftCoreRmsTrimDb = 0.0;
+    double downshiftCoreEnvelopeMaxDb = 0.0;
+    int downshiftCoreEnvelopeFrames = 0;
+    juce::String entryBoundaryKind = "unknown";
+    juce::String exitBoundaryKind = "unknown";
+    double entryBoundaryScore = 0.0;
+    double exitBoundaryScore = 0.0;
+};
+
+bool hasPitchEditForDryCommit (const PitchAnalyzer::PitchNote& note)
+{
+    return std::abs (note.correctedPitch - note.detectedPitch) > 0.01f;
+}
+
+std::vector<PitchCommitRange> buildDryPitchCommitRanges (const std::vector<PitchAnalyzer::PitchNote>& notes,
+                                                         double clipDurationSec)
+{
+    std::vector<PitchCommitRange> ranges;
+    for (const auto& note : notes)
+    {
+        if (! hasPitchEditForDryCommit (note))
+            continue;
+
+        PitchCommitRange range;
+        const double effectiveStart = std::min (static_cast<double> (note.startTime),
+                                                static_cast<double> (note.effectiveStartTime));
+        const double effectiveEnd = std::max (static_cast<double> (note.endTime),
+                                              static_cast<double> (note.effectiveEndTime));
+        range.startSec = juce::jlimit (0.0, clipDurationSec, effectiveStart);
+        range.endSec = juce::jlimit (range.startSec, clipDurationSec, effectiveEnd);
+        range.bodyStartSec = juce::jlimit (range.startSec, range.endSec, static_cast<double> (note.startTime));
+        range.bodyEndSec = juce::jlimit (range.bodyStartSec, range.endSec, static_cast<double> (note.endTime));
+        const double semitoneDelta = static_cast<double> (note.correctedPitch - note.detectedPitch);
+        range.pitchRatio = std::pow (2.0, semitoneDelta / 12.0);
+        range.pitchDirection = semitoneDelta > 0.01 ? 1 : (semitoneDelta < -0.01 ? -1 : 0);
+        range.wordGroupId = note.wordGroupId.isEmpty() ? note.id : note.wordGroupId;
+        range.editedNoteCount = 1;
+        range.variablePitchRatio = false;
+        range.entryBoundaryKind = note.entryBoundaryKind.isEmpty() ? "unknown" : note.entryBoundaryKind;
+        range.exitBoundaryKind = note.exitBoundaryKind.isEmpty() ? "unknown" : note.exitBoundaryKind;
+        range.entryBoundaryScore = static_cast<double> (note.entryBoundaryScore);
+        range.exitBoundaryScore = static_cast<double> (note.exitBoundaryScore);
+        if (range.endSec - range.startSec >= 0.0005)
+            ranges.push_back (range);
+    }
+
+    std::sort (ranges.begin(), ranges.end(), [] (const auto& a, const auto& b)
+    {
+        return a.startSec < b.startSec || (a.startSec == b.startSec && a.endSec < b.endSec);
+    });
+
+    std::vector<PitchCommitRange> merged;
+    for (const auto& range : ranges)
+    {
+        const bool sameWordGroup = ! merged.empty()
+            && ! merged.back().wordGroupId.isEmpty()
+            && merged.back().wordGroupId == range.wordGroupId;
+        const bool nearBodyGap = ! merged.empty()
+            && range.bodyStartSec - merged.back().bodyEndSec <= 0.080;
+        const bool overlapsContext = ! merged.empty()
+            && range.startSec <= merged.back().endSec + 0.001;
+        if (merged.empty() || (! overlapsContext && ! sameWordGroup && ! nearBodyGap))
+        {
+            merged.push_back (range);
+            continue;
+        }
+        merged.back().endSec = std::max (merged.back().endSec, range.endSec);
+        merged.back().bodyStartSec = std::min (merged.back().bodyStartSec, range.bodyStartSec);
+        merged.back().bodyEndSec = std::max (merged.back().bodyEndSec, range.bodyEndSec);
+        merged.back().exitBoundaryKind = range.exitBoundaryKind;
+        merged.back().exitBoundaryScore = range.exitBoundaryScore;
+        merged.back().editedNoteCount += range.editedNoteCount;
+        if (merged.back().wordGroupId != range.wordGroupId)
+            merged.back().wordGroupId = {};
+        if (merged.back().pitchDirection != range.pitchDirection)
+        {
+            merged.back().pitchDirection = 0;
+            merged.back().pitchRatio = 1.0;
+            merged.back().variablePitchRatio = true;
+        }
+        else if (std::abs (merged.back().pitchRatio - range.pitchRatio) > 1.0e-4)
+        {
+            merged.back().pitchRatio = 1.0;
+            merged.back().variablePitchRatio = true;
+        }
+        else
+        {
+            merged.back().pitchRatio = range.pitchRatio;
+        }
+    }
+
+    return merged;
+}
+
+double getCommitStartSec (const std::vector<PitchCommitRange>& ranges)
+{
+    return ranges.empty() ? 0.0 : ranges.front().startSec;
+}
+
+double getCommitEndSec (const std::vector<PitchCommitRange>& ranges)
+{
+    return ranges.empty() ? 0.0 : ranges.back().endSec;
+}
+
+double getCommitDurationSec (const std::vector<PitchCommitRange>& ranges)
+{
+    double duration = 0.0;
+    for (const auto& range : ranges)
+        duration += std::max (0.0, range.endSec - range.startSec);
+    return duration;
+}
+
+double getAudibleCommitStartSec (const std::vector<PitchCommitRange>& ranges)
+{
+    if (ranges.empty())
+        return 0.0;
+
+    double start = std::numeric_limits<double>::max();
+    for (const auto& range : ranges)
+    {
+        const double maxBridgePreSec = range.entryBoundaryKind == "hard_word_like" ? 0.012 : 0.024;
+        start = std::min (start, std::max (range.startSec, range.bodyStartSec - maxBridgePreSec));
+    }
+    return start == std::numeric_limits<double>::max() ? 0.0 : start;
+}
+
+double getAudibleCommitEndSec (const std::vector<PitchCommitRange>& ranges)
+{
+    double end = 0.0;
+    for (const auto& range : ranges)
+        end = std::max (end, range.endSec);
+    return end;
+}
+
+double getAudibleCommitDurationSec (const std::vector<PitchCommitRange>& ranges)
+{
+    double duration = 0.0;
+    for (const auto& range : ranges)
+    {
+        const double maxBridgePreSec = range.entryBoundaryKind == "hard_word_like" ? 0.012 : 0.024;
+        duration += std::max (0.0, range.endSec - std::max (range.startSec, range.bodyStartSec - maxBridgePreSec));
+    }
+    return duration;
+}
+
+struct PitchEntryBridgePlan
+{
+    int startSample = 0;
+    int endSample = 0;
+    int wetLagSamples = 0;
+    double envelopeGainDb = 0.0;
+    double correlation = 0.0;
+    double transientDryPreserveMs = 0.0;
+    bool used = false;
+    bool safeHandoffUsed = false;
+    int dryHoldSamples = 0;
+    double safeBridgeMs = 0.0;
+    double wetAlignmentMs = 0.0;
+    double wetVsDryRmsDb = 0.0;
+    bool equalPowerBlend = false;
+    bool phaseSafeUsed = false;
+    bool wetAlignmentAccepted = false;
+    double firstCycleCorrelation = 0.0;
+    double zeroCrossOffsetMs = 0.0;
+    double bridgeGainRampDb = 0.0;
+};
+
+float smoothHalfCosine (float t)
+{
+    t = juce::jlimit (0.0f, 1.0f, t);
+    return 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * t);
+}
+
+float monoOriginalAt (const juce::AudioBuffer<float>& buffer, int sample)
+{
+    const int numChannels = buffer.getNumChannels();
+    if (numChannels <= 0 || sample < 0 || sample >= buffer.getNumSamples())
+        return 0.0f;
+
+    double sum = 0.0;
+    for (int ch = 0; ch < numChannels; ++ch)
+        sum += buffer.getSample (ch, sample);
+    return static_cast<float> (sum / static_cast<double> (numChannels));
+}
+
+double computeOriginalHighbandRmsDb (const juce::AudioBuffer<float>& buffer,
+                                     int startSample,
+                                     int endSample)
+{
+    if (buffer.getNumChannels() <= 0 || buffer.getNumSamples() <= 0)
+        return -240.0;
+
+    const int start = juce::jlimit (0, buffer.getNumSamples(), startSample);
+    const int end = juce::jlimit (start, buffer.getNumSamples(), endSample);
+    if (end <= start)
+        return -240.0;
+
+    double sumSq = 0.0;
+    int count = 0;
+    float previous = monoOriginalAt (buffer, start - 1);
+    for (int sample = start; sample < end; ++sample)
+    {
+        const float current = monoOriginalAt (buffer, sample);
+        const double high = static_cast<double> (current) - 0.97 * static_cast<double> (previous);
+        sumSq += high * high;
+        previous = current;
+        ++count;
+    }
+
+    if (count <= 0)
+        return -240.0;
+
+    const double rms = std::sqrt (sumSq / static_cast<double> (count) + 1.0e-24);
+    return 20.0 * std::log10 (std::max (1.0e-12, rms));
+}
+
+double computeOriginalEntryHighbandBurstDb (const juce::AudioBuffer<float>& buffer,
+                                            int bodyStartSample,
+                                            double sampleRate)
+{
+    if (sampleRate <= 0.0)
+        return 0.0;
+
+    const int windowSamples = std::max (1, static_cast<int> (std::round (0.024 * sampleRate)));
+    const double pre = computeOriginalHighbandRmsDb (buffer, bodyStartSample - windowSamples, bodyStartSample);
+    const double post = computeOriginalHighbandRmsDb (buffer, bodyStartSample, bodyStartSample + windowSamples);
+    return post - pre;
+}
+
+float monoCorrectedAt (const std::vector<std::vector<float>>& correctedContext,
+                       int contextIndex)
+{
+    if (correctedContext.empty())
+        return 0.0f;
+
+    double sum = 0.0;
+    int count = 0;
+    for (const auto& channel : correctedContext)
+    {
+        if (contextIndex >= 0 && contextIndex < static_cast<int> (channel.size()))
+        {
+            sum += channel[static_cast<size_t> (contextIndex)];
+            ++count;
+        }
+    }
+    return count > 0 ? static_cast<float> (sum / static_cast<double> (count)) : 0.0f;
+}
+
+double computeMonoRms (const juce::AudioBuffer<float>& original,
+                       const std::vector<std::vector<float>>& correctedContext,
+                       int contextStartSample,
+                       int startSample,
+                       int numSamples,
+                       int wetLagSamples,
+                       bool useCorrected)
+{
+    double sumSq = 0.0;
+    int count = 0;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const int sample = startSample + i;
+        const float value = useCorrected
+            ? monoCorrectedAt (correctedContext, sample - contextStartSample + wetLagSamples)
+            : monoOriginalAt (original, sample);
+        sumSq += static_cast<double> (value) * static_cast<double> (value);
+        ++count;
+    }
+    return count > 0 ? std::sqrt (sumSq / static_cast<double> (count)) : 0.0;
+}
+
+double computeDryWetCorrelation (const juce::AudioBuffer<float>& original,
+                                 const std::vector<std::vector<float>>& correctedContext,
+                                 int contextStartSample,
+                                 int startSample,
+                                 int numSamples,
+                                 int wetLagSamples)
+{
+    if (numSamples <= 4)
+        return 0.0;
+
+    double dryMean = 0.0;
+    double wetMean = 0.0;
+    int count = 0;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const int sample = startSample + i;
+        dryMean += monoOriginalAt (original, sample);
+        wetMean += monoCorrectedAt (correctedContext, sample - contextStartSample + wetLagSamples);
+        ++count;
+    }
+
+    if (count <= 0)
+        return 0.0;
+
+    dryMean /= static_cast<double> (count);
+    wetMean /= static_cast<double> (count);
+
+    double numerator = 0.0;
+    double dryEnergy = 0.0;
+    double wetEnergy = 0.0;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const int sample = startSample + i;
+        const double dry = static_cast<double> (monoOriginalAt (original, sample)) - dryMean;
+        const double wet = static_cast<double> (monoCorrectedAt (correctedContext, sample - contextStartSample + wetLagSamples)) - wetMean;
+        numerator += dry * wet;
+        dryEnergy += dry * dry;
+        wetEnergy += wet * wet;
+    }
+
+    return numerator / (std::sqrt (dryEnergy * wetEnergy) + 1.0e-20);
+}
+
+PitchEntryBridgePlan choosePitchEntryBridgePlan (const juce::AudioBuffer<float>& original,
+                                                 const std::vector<std::vector<float>>& correctedContext,
+                                                 const PitchCommitRange& range,
+                                                 int contextStartSample,
+                                                 int contextRangeStartSample,
+                                                 int bodyStartSample,
+                                                 int bodyEndSample,
+                                                 int endSample,
+                                                 double sampleRate,
+                                                 bool allowUpwardEntryAlignment)
+{
+    PitchEntryBridgePlan plan;
+    plan.startSample = bodyStartSample;
+    const bool isDownward = range.pitchDirection < 0 || range.pitchRatio < 0.999;
+    const bool hardEntryBoundary = range.entryBoundaryKind == "hard_word_like";
+    const bool softEntryBoundary = range.entryBoundaryKind == "soft_legato";
+    const bool constrainedUpwardEntry = ! isDownward && ! softEntryBoundary;
+    const double upwardBridgeEndSec = static_cast<double> (juce::jlimit (10.0f, 40.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN_END_MS", hardEntryBoundary ? 12.0f : 16.0f))) * 0.001;
+    const double bridgeEndSec = hardEntryBoundary
+        ? (isDownward ? 0.040 : upwardBridgeEndSec)
+        : (softEntryBoundary ? (isDownward ? 0.080 : 0.048) : (isDownward ? 0.080 : upwardBridgeEndSec));
+    const int bridgeEndOffset = static_cast<int> (std::round (bridgeEndSec * sampleRate));
+    plan.endSample = juce::jlimit (bodyStartSample, endSample, bodyStartSample + bridgeEndOffset);
+    plan.transientDryPreserveMs = hardEntryBoundary ? 6.0 : (isDownward ? 10.0 : 8.0);
+
+    const bool useUpwardEntryAlignment = ! isDownward
+        && ! softEntryBoundary
+        && allowUpwardEntryAlignment
+        && juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN", "1").trim() != "0";
+
+    if (! isDownward && ! softEntryBoundary && ! useUpwardEntryAlignment)
+    {
+        plan.startSample = bodyStartSample;
+        plan.endSample = juce::jlimit (bodyStartSample, endSample,
+            bodyStartSample + static_cast<int> (std::round ((hardEntryBoundary ? 0.012 : 0.016) * sampleRate)));
+        plan.wetLagSamples = 0;
+        plan.envelopeGainDb = 0.0;
+        plan.correlation = 1.0;
+        plan.transientDryPreserveMs = 0.0;
+        plan.used = plan.endSample > plan.startSample;
+        return plan;
+    }
+
+    if (constrainedUpwardEntry)
+    {
+        plan.transientDryPreserveMs = static_cast<double> (juce::jlimit (0.0f, 12.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN_DRY_PRESERVE_MS", 0.0f)));
+    }
+
+    const double defaultPreSec = hardEntryBoundary ? 0.012 : (softEntryBoundary ? 0.024 : 0.024);
+    const double upwardPreSec = static_cast<double> (juce::jlimit (0.0f, 12.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN_PRE_MS", 0.0f))) * 0.001;
+    const double upwardPostSec = static_cast<double> (juce::jlimit (2.0f, 14.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN_POST_MS", 8.0f))) * 0.001;
+    const double upwardLagSec = static_cast<double> (juce::jlimit (1.0f, 12.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN_MAX_LAG_MS", 6.0f))) * 0.001;
+    const int maxPreSamples = static_cast<int> (std::round ((constrainedUpwardEntry ? upwardPreSec : defaultPreSec) * sampleRate));
+    const int postSearchSamples = static_cast<int> (std::round ((constrainedUpwardEntry ? upwardPostSec : 0.008) * sampleRate));
+    const int searchStart = juce::jlimit (contextRangeStartSample, endSample, bodyStartSample - maxPreSamples);
+    const int searchEnd = juce::jlimit (searchStart, std::min (bodyEndSample, endSample), bodyStartSample + postSearchSamples);
+    const int analysisSamples = std::max (32, static_cast<int> (std::round (0.012 * sampleRate)));
+    const int energySamples = std::max (16, static_cast<int> (std::round (0.006 * sampleRate)));
+    const int maxLagSamples = static_cast<int> (std::round ((constrainedUpwardEntry ? upwardLagSec : (hardEntryBoundary ? 0.012 : 0.024)) * sampleRate));
+    const int lagStep = std::max (1, static_cast<int> (std::round (0.00025 * sampleRate)));
+    const int candidateStep = std::max (1, static_cast<int> (std::round (0.001 * sampleRate)));
+    const double bodyRms = computeMonoRms (original,
+                                           correctedContext,
+                                           contextStartSample,
+                                           bodyStartSample,
+                                           std::max (analysisSamples, std::min (bodyEndSample - bodyStartSample, static_cast<int> (std::round (0.040 * sampleRate)))),
+                                           0,
+                                           false);
+
+    double bestScore = std::numeric_limits<double>::max();
+    double bestCorrelation = -1.0;
+    int bestStart = bodyStartSample;
+    int bestLag = 0;
+
+    for (int candidate = searchStart; candidate <= searchEnd; candidate += candidateStep)
+    {
+        const int available = std::min (analysisSamples, endSample - candidate);
+        if (available <= 16)
+            continue;
+
+        int localBestLag = 0;
+        double localBestCorrelation = -1.0;
+        for (int lag = -maxLagSamples; lag <= maxLagSamples; lag += lagStep)
+        {
+            const int wetStart = candidate - contextStartSample + lag;
+            const int wetEnd = wetStart + available;
+            if (wetStart < 0)
+                continue;
+            bool hasEnoughCorrected = true;
+            for (const auto& channel : correctedContext)
+            {
+                if (wetEnd > static_cast<int> (channel.size()))
+                {
+                    hasEnoughCorrected = false;
+                    break;
+                }
+            }
+            if (! hasEnoughCorrected)
+                continue;
+
+            const double correlation = computeDryWetCorrelation (
+                original, correctedContext, contextStartSample, candidate, available, lag);
+            if (correlation > localBestCorrelation)
+            {
+                localBestCorrelation = correlation;
+                localBestLag = lag;
+            }
+        }
+
+        if (localBestCorrelation < -0.5)
+            continue;
+
+        const double dryRms = computeMonoRms (original,
+                                              correctedContext,
+                                              contextStartSample,
+                                              candidate,
+                                              std::min (energySamples, endSample - candidate),
+                                              0,
+                                              false);
+        const double wetRms = computeMonoRms (original,
+                                              correctedContext,
+                                              contextStartSample,
+                                              candidate,
+                                              std::min (energySamples, endSample - candidate),
+                                              localBestLag,
+                                              true);
+        const float dryPrev = monoOriginalAt (original, candidate - 1);
+        const float dryHere = monoOriginalAt (original, candidate);
+        const float wetHere = monoCorrectedAt (correctedContext, candidate - contextStartSample + localBestLag);
+        const double derivativeMismatch = std::abs ((static_cast<double> (wetHere) - static_cast<double> (dryPrev))
+            - (static_cast<double> (dryHere) - static_cast<double> (dryPrev)));
+        const double rmsScale = std::max (1.0e-5, bodyRms);
+        const double energyPenalty = std::min (1.0, dryRms / rmsScale);
+        const double wetDryRmsPenalty = std::min (1.0, std::abs (wetRms - dryRms) / rmsScale);
+        const double preNoteBonus = (! constrainedUpwardEntry && candidate < bodyStartSample) ? -0.08 : 0.0;
+        const double score = (1.0 - juce::jlimit (-1.0, 1.0, localBestCorrelation)) * 2.0
+            + energyPenalty * 0.35
+            + wetDryRmsPenalty * 0.25
+            + std::min (1.0, derivativeMismatch / rmsScale) * 0.25
+            + preNoteBonus;
+
+        if (score < bestScore)
+        {
+            bestScore = score;
+            bestCorrelation = localBestCorrelation;
+            bestStart = candidate;
+            bestLag = localBestLag;
+        }
+    }
+
+    const int forcedUpwardPreSamples = constrainedUpwardEntry
+        ? static_cast<int> (std::round (static_cast<double> (juce::jlimit (0.0f, 24.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_FORCE_PRE_MS",
+                (! hardEntryBoundary
+                    && computeOriginalEntryHighbandBurstDb (original, bodyStartSample, sampleRate)
+                        <= static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_MAX_SOURCE_BURST_DB", 1.0f)))
+                    ? 24.0f
+                    : 0.0f))) * 0.001 * sampleRate))
+        : 0;
+    if (forcedUpwardPreSamples > 0)
+        bestStart = juce::jlimit (contextRangeStartSample, bodyStartSample,
+            bodyStartSample - forcedUpwardPreSamples);
+
+    const int startLowerBound = forcedUpwardPreSamples > 0 ? contextRangeStartSample : searchStart;
+    plan.startSample = juce::jlimit (startLowerBound, std::max (bodyStartSample, searchEnd), bestStart);
+    if (plan.endSample <= plan.startSample)
+        plan.endSample = juce::jlimit (plan.startSample, endSample, plan.startSample + std::max (1, bridgeEndOffset));
+
+    const int gainSamples = std::min (std::max (16, static_cast<int> (std::round (0.008 * sampleRate))),
+                                      std::max (1, plan.endSample - plan.startSample));
+    const double dryRms = computeMonoRms (original, correctedContext, contextStartSample, plan.startSample, gainSamples, 0, false);
+    const double wetRms = computeMonoRms (original, correctedContext, contextStartSample, plan.startSample, gainSamples, bestLag, true);
+    const int bodyGainSamples = std::min (std::max (16, static_cast<int> (std::round (0.024 * sampleRate))),
+                                          std::max (1, plan.endSample - bodyStartSample));
+    const double dryBodyRms = computeMonoRms (original, correctedContext, contextStartSample, bodyStartSample, bodyGainSamples, 0, false);
+    const double wetBodyRms = computeMonoRms (original, correctedContext, contextStartSample, bodyStartSample, bodyGainSamples, 0, true);
+    const double bridgeGainDb = 20.0 * std::log10 ((dryRms + 1.0e-8) / (wetRms + 1.0e-8));
+    const double bodyGainDb = 20.0 * std::log10 ((dryBodyRms + 1.0e-8) / (wetBodyRms + 1.0e-8));
+
+    const int downshiftTargetLag = -static_cast<int> (std::round ((hardEntryBoundary ? 0.010 : 0.022) * sampleRate));
+    plan.wetLagSamples = isDownward ? std::min (bestLag, downshiftTargetLag) : bestLag;
+    const double gainLimitDb = constrainedUpwardEntry
+        ? static_cast<double> (juce::jlimit (0.0f, 1.2f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_ALIGN_GAIN_LIMIT_DB", 0.0f)))
+        : (hardEntryBoundary ? 1.2 : 1.7);
+    plan.envelopeGainDb = juce::jlimit (-gainLimitDb, gainLimitDb,
+        std::abs (bodyGainDb) > std::abs (bridgeGainDb) ? bodyGainDb : bridgeGainDb);
+    plan.correlation = bestCorrelation;
+    plan.used = plan.endSample > plan.startSample;
+    return plan;
+}
+
+PitchEntryBridgePlan makeSimplePitchEntryHandoffPlan (int bodyStartSample,
+                                                      int bodyEndSample,
+                                                      int endSample,
+                                                      double sampleRate)
+{
+    PitchEntryBridgePlan plan;
+    plan.startSample = bodyStartSample;
+    const float handoffMs = juce::jlimit (6.0f, 10.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_SIMPLE_ENTRY_HANDOFF_MS", 8.0f));
+    const int handoffSamples = std::max (1, static_cast<int> (std::round (handoffMs * 0.001f * static_cast<float> (sampleRate))));
+    const int maxEnd = std::max (bodyStartSample, std::min (bodyEndSample, endSample));
+    plan.endSample = juce::jlimit (bodyStartSample, maxEnd, bodyStartSample + handoffSamples);
+    plan.wetLagSamples = 0;
+    plan.envelopeGainDb = 0.0;
+    plan.correlation = 1.0;
+    plan.transientDryPreserveMs = 0.0;
+    plan.used = plan.endSample > plan.startSample;
+    return plan;
+}
+
+bool correctedContextHasRange (const std::vector<std::vector<float>>& correctedContext,
+                               int startIndex,
+                               int endIndex)
+{
+    if (correctedContext.empty() || startIndex < 0 || endIndex <= startIndex)
+        return false;
+
+    for (const auto& channel : correctedContext)
+    {
+        if (endIndex > static_cast<int> (channel.size()))
+            return false;
+    }
+
+    return true;
+}
+
+int chooseEntrySafeWetLag (const juce::AudioBuffer<float>& original,
+                           const std::vector<std::vector<float>>& correctedContext,
+                           int contextStartSample,
+                           int analysisStartSample,
+                           int analysisSamples,
+                           int maxLagSamples,
+                           double sampleRate,
+                           double& bestCorrelation)
+{
+    bestCorrelation = 0.0;
+    if (analysisSamples <= 16 || maxLagSamples <= 0 || sampleRate <= 0.0)
+        return 0;
+
+    const int lagStep = std::max (1, static_cast<int> (std::round (0.00025 * sampleRate)));
+    int bestLag = 0;
+    double bestScore = -2.0;
+
+    for (int lag = -maxLagSamples; lag <= maxLagSamples; lag += lagStep)
+    {
+        const int wetStart = analysisStartSample - contextStartSample + lag;
+        if (! correctedContextHasRange (correctedContext, wetStart, wetStart + analysisSamples))
+            continue;
+
+        const double dryRms = computeMonoRms (original,
+                                              correctedContext,
+                                              contextStartSample,
+                                              analysisStartSample,
+                                              analysisSamples,
+                                              0,
+                                              false);
+        const double wetRms = computeMonoRms (original,
+                                              correctedContext,
+                                              contextStartSample,
+                                              analysisStartSample,
+                                              analysisSamples,
+                                              lag,
+                                              true);
+        if (dryRms <= 1.0e-7 || wetRms <= 1.0e-7)
+            continue;
+
+        const double correlation = computeDryWetCorrelation (
+            original, correctedContext, contextStartSample, analysisStartSample, analysisSamples, lag);
+        if (correlation > bestScore)
+        {
+            bestScore = correlation;
+            bestLag = lag;
+        }
+    }
+
+    bestCorrelation = bestScore > -1.5 ? bestScore : 0.0;
+    return bestCorrelation >= 0.10 ? bestLag : 0;
+}
+
+int chooseEntryPhaseSafeDryHoldSamples (const juce::AudioBuffer<float>& original,
+                                        const std::vector<std::vector<float>>& correctedContext,
+                                        int contextStartSample,
+                                        int bodyStartSample,
+                                        int bodyEndSample,
+                                        int wetLagSamples,
+                                        double sampleRate,
+                                        float defaultMinDryHoldMs = 0.0f,
+                                        float defaultMaxDryHoldMs = -1.0f)
+{
+    if (sampleRate <= 0.0 || bodyEndSample <= bodyStartSample)
+        return 0;
+
+    const bool longBlendEnabled = getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_LONG_BLEND_ENABLE", false);
+    if (defaultMaxDryHoldMs < 0.0f)
+        defaultMaxDryHoldMs = longBlendEnabled ? 2.0f : 3.0f;
+    const int minOffset = std::max (0, static_cast<int> (std::round (juce::jlimit (0.0f, 14.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_PHASE_SAFE_MIN_DRY_HOLD_MS", defaultMinDryHoldMs))
+            * 0.001f * static_cast<float> (sampleRate))));
+    const int maxOffset = std::max (minOffset, static_cast<int> (std::round (juce::jlimit (2.0f, 14.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_PHASE_SAFE_MAX_DRY_HOLD_MS", defaultMaxDryHoldMs))
+            * 0.001f * static_cast<float> (sampleRate))));
+    const int searchEnd = std::min (bodyEndSample - 2, bodyStartSample + maxOffset);
+    if (searchEnd <= bodyStartSample)
+        return 0;
+
+    const int searchStart = std::min (searchEnd, bodyStartSample + minOffset);
+    const int bodyAnalysisSamples = std::min (std::max (32, static_cast<int> (std::round (0.030 * sampleRate))),
+                                              std::max (1, bodyEndSample - bodyStartSample));
+    const double bodyRms = std::max (1.0e-5, computeMonoRms (original,
+                                                             correctedContext,
+                                                             contextStartSample,
+                                                             bodyStartSample,
+                                                             bodyAnalysisSamples,
+                                                             0,
+                                                             false));
+
+    int bestOffset = searchStart - bodyStartSample;
+    double bestScore = std::numeric_limits<double>::max();
+    float prevOriginal = monoOriginalAt (original, bodyStartSample - 1);
+    float prevWet = monoCorrectedAt (correctedContext, bodyStartSample - contextStartSample - 1 + wetLagSamples);
+
+    for (int sample = searchStart; sample <= searchEnd; ++sample)
+    {
+        const int wetIndex = sample - contextStartSample + wetLagSamples;
+        if (! correctedContextHasRange (correctedContext, wetIndex, wetIndex + 1))
+            continue;
+
+        const float dry = monoOriginalAt (original, sample);
+        const float wet = monoCorrectedAt (correctedContext, wetIndex);
+        const float dryPrev = sample == bodyStartSample ? prevOriginal : monoOriginalAt (original, sample - 1);
+        const float wetPrev = sample == bodyStartSample ? prevWet : monoCorrectedAt (correctedContext, wetIndex - 1);
+
+        const double dryDerivative = static_cast<double> (dry) - static_cast<double> (dryPrev);
+        const double wetDerivative = static_cast<double> (wet) - static_cast<double> (wetPrev);
+        const double signBonus = ((dryPrev <= 0.0f && dry >= 0.0f) || (dryPrev >= 0.0f && dry <= 0.0f)) ? -0.20 : 0.0;
+        const double wetSignBonus = ((wetPrev <= 0.0f && wet >= 0.0f) || (wetPrev >= 0.0f && wet <= 0.0f)) ? -0.10 : 0.0;
+        const double offsetPenalty = static_cast<double> (sample - bodyStartSample) / static_cast<double> (std::max (1, maxOffset)) * 0.12;
+        const double score = std::abs (static_cast<double> (dry)) / bodyRms
+            + std::abs (static_cast<double> (wet)) / bodyRms * 0.55
+            + std::abs (dryDerivative) / bodyRms * 0.45
+            + std::abs (wetDerivative) / bodyRms * 0.25
+            + std::abs (dryDerivative - wetDerivative) / bodyRms * 0.35
+            + offsetPenalty
+            + signBonus
+            + wetSignBonus;
+
+        if (score < bestScore)
+        {
+            bestScore = score;
+            bestOffset = sample - bodyStartSample;
+        }
+
+        prevOriginal = dry;
+        prevWet = wet;
+    }
+
+    return juce::jlimit (0, maxOffset, bestOffset);
+}
+
+PitchEntryBridgePlan makeEntrySafePitchHandoffPlan (const juce::AudioBuffer<float>& original,
+                                                    const std::vector<std::vector<float>>& correctedContext,
+                                                    int contextStartSample,
+                                                    int bodyStartSample,
+                                                    int bodyEndSample,
+                                                    int endSample,
+                                                    double sampleRate)
+{
+    PitchEntryBridgePlan plan;
+    plan.startSample = bodyStartSample;
+
+    if (sampleRate <= 0.0)
+        return plan;
+
+    const bool phaseSafeEnabled = ! getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_PHASE_SAFE_DISABLE", false);
+    const bool wetAlignmentEnabled = getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_ALIGN_ENABLE", false)
+        && ! getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_ALIGN_DISABLE", false);
+    const bool longBlendEnabled = getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_LONG_BLEND_ENABLE", false);
+    const float defaultDryHoldMs = phaseSafeEnabled
+        ? 0.0f
+        : 3.0f;
+    const float dryHoldMs = juce::jlimit (0.0f, 14.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SAFE_DRY_HOLD_MS", defaultDryHoldMs));
+    const float bridgeMs = phaseSafeEnabled
+        ? (longBlendEnabled
+            ? juce::jlimit (10.0f, 36.0f,
+                getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SAFE_BRIDGE_MS", 24.0f))
+            : juce::jlimit (3.0f, 6.0f,
+                getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SAFE_BRIDGE_MS", 3.0f)))
+        : juce::jlimit (12.0f, 30.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SAFE_BRIDGE_MS", 18.0f));
+    const int requestedDryHoldSamples = std::max (0, static_cast<int> (std::round (
+        dryHoldMs * 0.001f * static_cast<float> (sampleRate))));
+    const int requestedBridgeSamples = std::max (1, static_cast<int> (std::round (
+        bridgeMs * 0.001f * static_cast<float> (sampleRate))));
+    const int maxEnd = std::max (bodyStartSample, std::min (bodyEndSample, endSample));
+    plan.endSample = juce::jlimit (bodyStartSample, maxEnd,
+        bodyStartSample + requestedDryHoldSamples + requestedBridgeSamples);
+    const int totalSamples = plan.endSample - plan.startSample;
+    if (totalSamples <= 1)
+        return plan;
+
+    const int requestedBridgeStartSample = std::min (plan.endSample - 1,
+                                                     plan.startSample + std::min (requestedDryHoldSamples, std::max (0, totalSamples / 3)));
+    const int requestedBridgeSamplesAvailable = std::max (1, plan.endSample - requestedBridgeStartSample);
+    const int maxLagSamples = std::max (1, static_cast<int> (std::round (
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SAFE_MAX_ALIGN_MS", 3.0f)
+            * 0.001f * static_cast<float> (sampleRate))));
+    const int analysisSamples = std::min (requestedBridgeSamplesAvailable,
+        std::max (32, static_cast<int> (std::round (0.014 * sampleRate))));
+
+    double bestCorrelation = 0.0;
+    const double zeroLagCorrelation = computeDryWetCorrelation (original,
+                                                                correctedContext,
+                                                                contextStartSample,
+                                                                requestedBridgeStartSample,
+                                                                analysisSamples,
+                                                                0);
+    const int candidateLagSamples = wetAlignmentEnabled
+        ? chooseEntrySafeWetLag (original,
+                                 correctedContext,
+                                 contextStartSample,
+                                 requestedBridgeStartSample,
+                                 analysisSamples,
+                                 maxLagSamples,
+                                 sampleRate,
+                                 bestCorrelation)
+        : 0;
+    const double acceptedCorrelation = candidateLagSamples == 0 ? zeroLagCorrelation : bestCorrelation;
+    const double improvement = bestCorrelation - zeroLagCorrelation;
+    const bool acceptAlignment = phaseSafeEnabled
+        ? (wetAlignmentEnabled
+            && candidateLagSamples != 0
+            && bestCorrelation >= static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_ALIGN_MIN_CORRELATION", 0.25f))
+            && improvement >= static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_ALIGN_MIN_IMPROVEMENT", 0.08f)))
+        : (candidateLagSamples != 0);
+    plan.wetLagSamples = acceptAlignment ? candidateLagSamples : 0;
+    plan.correlation = acceptAlignment ? bestCorrelation : zeroLagCorrelation;
+    plan.wetAlignmentMs = static_cast<double> (plan.wetLagSamples) * 1000.0 / sampleRate;
+    plan.wetAlignmentAccepted = acceptAlignment;
+    plan.firstCycleCorrelation = acceptedCorrelation;
+
+    const int gainSamples = std::min (std::max (16, static_cast<int> (std::round (0.045 * sampleRate))),
+                                      std::max (1, bodyEndSample - bodyStartSample));
+    const double preliminaryDryRms = computeMonoRms (original,
+                                                    correctedContext,
+                                                    contextStartSample,
+                                                    bodyStartSample,
+                                                    gainSamples,
+                                                    0,
+                                                    false);
+    const double preliminaryWetRms = computeMonoRms (original,
+                                                    correctedContext,
+                                                    contextStartSample,
+                                                    bodyStartSample,
+                                                    gainSamples,
+                                                    plan.wetLagSamples,
+                                                    true);
+    const double preliminaryWetVsDryRmsDb = 20.0 * std::log10 ((preliminaryWetRms + 1.0e-8) / (preliminaryDryRms + 1.0e-8));
+    const bool weakWetDryShellEnabled = getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_WEAK_WET_DRY_SHELL_ENABLE", false);
+    const bool weakWetOnset = weakWetDryShellEnabled
+        && phaseSafeEnabled
+        && ! longBlendEnabled
+        && preliminaryWetVsDryRmsDb <= static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_WEAK_WET_THRESHOLD_DB", -10.0f));
+
+    if (phaseSafeEnabled)
+    {
+        plan.phaseSafeUsed = true;
+        const float weakDryHoldMs = juce::jlimit (3.0f, 14.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_WEAK_WET_DRY_HOLD_MS", 8.0f));
+        plan.dryHoldSamples = chooseEntryPhaseSafeDryHoldSamples (original,
+                                                                  correctedContext,
+                                                                  contextStartSample,
+                                                                  bodyStartSample,
+                                                                  bodyEndSample,
+                                                                  plan.wetLagSamples,
+                                                                  sampleRate,
+                                                                  weakWetOnset ? weakDryHoldMs : 0.0f,
+                                                                  weakWetOnset ? weakDryHoldMs : -1.0f);
+        const int phaseSafeBridgeStartSample = std::min (maxEnd - 1, plan.startSample + plan.dryHoldSamples);
+        const int phaseSafeBridgeEndSample = juce::jlimit (phaseSafeBridgeStartSample + 1,
+                                                           maxEnd,
+                                                           phaseSafeBridgeStartSample + requestedBridgeSamples);
+        plan.endSample = phaseSafeBridgeEndSample;
+        plan.zeroCrossOffsetMs = static_cast<double> (plan.dryHoldSamples) * 1000.0 / sampleRate;
+        plan.firstCycleCorrelation = computeDryWetCorrelation (original,
+                                                               correctedContext,
+                                                               contextStartSample,
+                                                               phaseSafeBridgeStartSample,
+                                                               std::min (std::max (32, static_cast<int> (std::round (0.012 * sampleRate))),
+                                                                         std::max (1, plan.endSample - phaseSafeBridgeStartSample)),
+                                                               plan.wetLagSamples);
+    }
+    else
+    {
+        plan.dryHoldSamples = std::min (requestedDryHoldSamples, std::max (0, totalSamples / 3));
+        plan.zeroCrossOffsetMs = static_cast<double> (plan.dryHoldSamples) * 1000.0 / sampleRate;
+    }
+
+    const int bridgeStartSample = std::min (plan.endSample - 1, plan.startSample + plan.dryHoldSamples);
+    const int bridgeSamples = std::max (1, plan.endSample - bridgeStartSample);
+
+    const double dryRms = computeMonoRms (original,
+                                          correctedContext,
+                                          contextStartSample,
+                                          bodyStartSample,
+                                          gainSamples,
+                                          0,
+                                          false);
+    const double wetRms = computeMonoRms (original,
+                                          correctedContext,
+                                          contextStartSample,
+                                          bodyStartSample,
+                                          gainSamples,
+                                          plan.wetLagSamples,
+                                          true);
+    plan.wetVsDryRmsDb = 20.0 * std::log10 ((wetRms + 1.0e-8) / (dryRms + 1.0e-8));
+    plan.envelopeGainDb = (! phaseSafeEnabled && plan.wetVsDryRmsDb < -0.5)
+        ? juce::jlimit (0.0, 4.0, -plan.wetVsDryRmsDb)
+        : 0.0;
+    plan.bridgeGainRampDb = phaseSafeEnabled ? 0.0 : plan.envelopeGainDb;
+    plan.transientDryPreserveMs = static_cast<double> (plan.dryHoldSamples) * 1000.0 / sampleRate;
+    plan.safeBridgeMs = static_cast<double> (bridgeSamples) * 1000.0 / sampleRate;
+    plan.used = plan.endSample > plan.startSample;
+    plan.safeHandoffUsed = plan.used;
+    plan.equalPowerBlend = plan.used && getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_EQUAL_POWER_ENABLE", false);
+    return plan;
+}
+
+struct PitchEntryTimbrePlan
+{
+    bool used = false;
+    float rmsTrimDb = 0.0f;
+    float tiltDb = 0.0f;
+};
+
+struct PitchEntryRmsContinuityPlan
+{
+    bool used = false;
+    double gainDb = 0.0;
+    double durationMs = 0.0;
+};
+
+struct PitchEntryTransientResidualPlan
+{
+    bool used = false;
+    double mix = 0.0;
+    double durationMs = 0.0;
+};
+
+struct PitchDownshiftCoreEnvelopePlan
+{
+    bool used = false;
+    double rmsTrimDb = 0.0;
+    double maxFrameGainDb = 0.0;
+    int envelopeFrames = 0;
+};
+
+PitchDownshiftCoreEnvelopePlan applyDownshiftCoreEnvelopePass (juce::AudioBuffer<float>& destination,
+                                                               const juce::AudioBuffer<float>& original,
+                                                               const PitchCommitRange& range,
+                                                               double sampleRate)
+{
+    PitchDownshiftCoreEnvelopePlan plan;
+    if (range.pitchDirection >= 0
+        || ! getPitchEnvFlag ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_ENVELOPE_ENABLE", true)
+        || getPitchEnvFlag ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_ENVELOPE_DISABLE", false)
+        || sampleRate <= 0.0
+        || destination.getNumChannels() <= 0
+        || destination.getNumSamples() <= 0)
+        return plan;
+
+    const int numSamples = destination.getNumSamples();
+    const int bodyStart = juce::jlimit (0, numSamples, static_cast<int> (std::round (range.bodyStartSec * sampleRate)));
+    const int bodyEnd = juce::jlimit (bodyStart, numSamples, static_cast<int> (std::round (range.bodyEndSec * sampleRate)));
+    const int edgeGuardSamples = std::max (1, static_cast<int> (std::round (
+        juce::jlimit (45.0f, 110.0f, getPitchEnvFloat ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_EDGE_GUARD_MS", 80.0f))
+            * 0.001f * static_cast<float> (sampleRate))));
+    int coreStart = std::min (bodyEnd, bodyStart + edgeGuardSamples);
+    int coreEnd = std::max (coreStart, bodyEnd - edgeGuardSamples);
+    if (coreEnd - coreStart < static_cast<int> (std::round (0.090 * sampleRate)))
+    {
+        const int fallbackGuard = std::max (1, static_cast<int> (std::round (0.045 * sampleRate)));
+        coreStart = std::min (bodyEnd, bodyStart + fallbackGuard);
+        coreEnd = std::max (coreStart, bodyEnd - fallbackGuard);
+    }
+    if (coreEnd - coreStart < static_cast<int> (std::round (0.070 * sampleRate)))
+        return plan;
+
+    const float maxTrimDb = juce::jlimit (0.0f, 1.5f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_MAX_TRIM_DB", 1.5f));
+    const float sourceHeadroomDb = juce::jlimit (0.0f, 2.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_SOURCE_HEADROOM_DB", 2.0f));
+    const float frameMs = juce::jlimit (12.0f, 35.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_ENV_FRAME_MS", 24.0f));
+    const float hopMs = juce::jlimit (4.0f, 16.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_DOWNSHIFT_CORE_ENV_HOP_MS", 8.0f));
+    const int frameSamples = std::max (8, static_cast<int> (std::round (frameMs * 0.001f * static_cast<float> (sampleRate))));
+    const int hopSamples = std::max (1, static_cast<int> (std::round (hopMs * 0.001f * static_cast<float> (sampleRate))));
+    const int fadeSamples = std::max (1, static_cast<int> (std::round (0.025 * sampleRate)));
+    const double sourceHeadroomGain = std::pow (10.0, -static_cast<double> (sourceHeadroomDb) / 20.0);
+
+    std::vector<float> gainSum (static_cast<size_t> (numSamples), 0.0f);
+    std::vector<float> weightSum (static_cast<size_t> (numSamples), 0.0f);
+    double globalSourceEnergy = 0.0;
+    double globalDestEnergy = 0.0;
+    int globalCount = 0;
+
+    for (int frameStart = coreStart; frameStart < coreEnd; frameStart += hopSamples)
+    {
+        const int frameEnd = std::min (coreEnd, frameStart + frameSamples);
+        if (frameEnd - frameStart < 8)
+            continue;
+
+        double sourceEnergy = 0.0;
+        double destEnergy = 0.0;
+        int count = 0;
+        for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+        {
+            if (ch >= original.getNumChannels())
+                continue;
+
+            for (int sample = frameStart; sample < frameEnd; ++sample)
+            {
+                const double source = static_cast<double> (original.getSample (ch, sample)) * sourceHeadroomGain;
+                const double dest = static_cast<double> (destination.getSample (ch, sample));
+                sourceEnergy += source * source;
+                destEnergy += dest * dest;
+                globalSourceEnergy += source * source;
+                globalDestEnergy += dest * dest;
+                ++count;
+                ++globalCount;
+            }
+        }
+
+        if (count <= 0 || sourceEnergy <= 1.0e-12 || destEnergy <= 1.0e-12)
+            continue;
+
+        const double frameGainDb = juce::jlimit (-static_cast<double> (maxTrimDb),
+                                                 static_cast<double> (maxTrimDb),
+                                                 10.0 * std::log10 (sourceEnergy / destEnergy));
+        const float frameGain = static_cast<float> (std::pow (10.0, frameGainDb / 20.0));
+        plan.maxFrameGainDb = std::abs (frameGainDb) > std::abs (plan.maxFrameGainDb)
+            ? frameGainDb
+            : plan.maxFrameGainDb;
+        ++plan.envelopeFrames;
+
+        for (int sample = frameStart; sample < frameEnd; ++sample)
+        {
+            const float local = static_cast<float> (sample - frameStart) / static_cast<float> (std::max (1, frameEnd - frameStart - 1));
+            const float window = std::sin (juce::MathConstants<float>::pi * juce::jlimit (0.0f, 1.0f, local));
+            const size_t index = static_cast<size_t> (sample);
+            gainSum[index] += frameGain * window;
+            weightSum[index] += window;
+        }
+    }
+
+    if (plan.envelopeFrames <= 0 || globalCount <= 0 || globalSourceEnergy <= 1.0e-12 || globalDestEnergy <= 1.0e-12)
+        return PitchDownshiftCoreEnvelopePlan();
+
+    plan.rmsTrimDb = juce::jlimit (-static_cast<double> (maxTrimDb),
+                                   static_cast<double> (maxTrimDb),
+                                   10.0 * std::log10 (globalSourceEnergy / globalDestEnergy));
+    const float globalGain = static_cast<float> (std::pow (10.0, plan.rmsTrimDb / 20.0));
+
+    for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+    {
+        for (int sample = coreStart; sample < coreEnd; ++sample)
+        {
+            const size_t index = static_cast<size_t> (sample);
+            if (weightSum[index] <= 1.0e-5f)
+                continue;
+
+            const float fromStart = static_cast<float> (sample - coreStart) / static_cast<float> (fadeSamples);
+            const float fromEnd = static_cast<float> (coreEnd - 1 - sample) / static_cast<float> (fadeSamples);
+            const float fade = smoothHalfCosine (std::min (fromStart, fromEnd));
+            const float frameGain = gainSum[index] / weightSum[index];
+            const float targetGain = std::sqrt (std::max (0.05f, frameGain * globalGain));
+            const float gain = 1.0f + (targetGain - 1.0f) * fade;
+            destination.setSample (ch, sample, destination.getSample (ch, sample) * gain);
+        }
+    }
+
+    plan.used = true;
+    return plan;
+}
+
+PitchEntryRmsContinuityPlan applyPitchEntryRmsContinuity (juce::AudioBuffer<float>& destination,
+                                                          const juce::AudioBuffer<float>& original,
+                                                          const PitchCommitRange& range,
+                                                          double sampleRate,
+                                                          bool enabled,
+                                                          int startSampleOverride = -1,
+                                                          double maxGainDbOverride = -1.0,
+                                                          double attackMsOverride = -1.0)
+{
+    PitchEntryRmsContinuityPlan plan;
+    if (! enabled
+        || getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_RMS_CONTINUITY_DISABLE", false)
+        || sampleRate <= 0.0
+        || destination.getNumChannels() <= 0
+        || destination.getNumSamples() <= 0)
+        return plan;
+
+    const int numSamples = destination.getNumSamples();
+    const int bodyStart = juce::jlimit (0, numSamples, static_cast<int> (std::round (range.bodyStartSec * sampleRate)));
+    const int entryStart = juce::jlimit (bodyStart, numSamples, startSampleOverride >= 0 ? startSampleOverride : bodyStart);
+    const int entryLimit = juce::jlimit (entryStart, numSamples, static_cast<int> (std::round (range.bodyEndSec * sampleRate)));
+    const float continuityDurationMs = juce::jlimit (30.0f, 120.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_RMS_CONTINUITY_DURATION_MS", 45.0f));
+    const int entrySamples = std::min (entryLimit - entryStart,
+        std::max (1, static_cast<int> (std::round (continuityDurationMs * 0.001f * static_cast<float> (sampleRate)))));
+    if (entrySamples <= 16)
+        return plan;
+    const int measurementSamples = std::min (entrySamples,
+        std::max (1, static_cast<int> (std::round (0.045 * sampleRate))));
+
+    double sourceEnergy = 0.0;
+    double destEnergy = 0.0;
+    int count = 0;
+    for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+    {
+        if (ch >= original.getNumChannels())
+            continue;
+
+        for (int i = 0; i < measurementSamples; ++i)
+        {
+            const int sample = entryStart + i;
+            const double source = static_cast<double> (original.getSample (ch, sample));
+            const double dest = static_cast<double> (destination.getSample (ch, sample));
+            sourceEnergy += source * source;
+            destEnergy += dest * dest;
+            ++count;
+        }
+    }
+
+    if (count <= 0 || sourceEnergy <= 1.0e-10 || destEnergy <= 1.0e-10)
+        return plan;
+
+    const double requestedGainDb = 10.0 * std::log10 (sourceEnergy / destEnergy);
+    const double maxGainDb = maxGainDbOverride >= 0.0
+        ? juce::jlimit (0.0, 9.0, maxGainDbOverride)
+        : static_cast<double> (juce::jlimit (0.0f, 9.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_RMS_CONTINUITY_MAX_GAIN_DB", 4.0f)));
+    plan.gainDb = juce::jlimit (0.0, maxGainDb, requestedGainDb);
+    if (plan.gainDb < 0.10)
+        return plan;
+
+    const float targetGain = static_cast<float> (std::pow (10.0, plan.gainDb / 20.0));
+    const float attackMs = attackMsOverride >= 0.0
+        ? static_cast<float> (juce::jlimit (3.0, 45.0, attackMsOverride))
+        : juce::jlimit (18.0f, 45.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_RMS_CONTINUITY_ATTACK_MS", 36.0f));
+    const int fadeInSamples = std::max (1, static_cast<int> (std::round (attackMs * 0.001f * static_cast<float> (sampleRate))));
+    const int fadeOutSamples = std::max (1, static_cast<int> (std::round (0.018 * sampleRate)));
+    for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+    {
+        for (int i = 0; i < entrySamples; ++i)
+        {
+            const float fromStart = static_cast<float> (i) / static_cast<float> (fadeInSamples);
+            const float fromEnd = static_cast<float> (entrySamples - 1 - i) / static_cast<float> (fadeOutSamples);
+            const float weight = smoothHalfCosine (std::min (fromStart, fromEnd));
+            if (weight <= 0.0001f)
+                continue;
+
+            const int sample = entryStart + i;
+            const float current = destination.getSample (ch, sample);
+            const float gain = 1.0f + (targetGain - 1.0f) * weight;
+            destination.setSample (ch, sample, current * gain);
+        }
+    }
+
+    plan.used = true;
+    plan.durationMs = static_cast<double> (entrySamples) * 1000.0 / sampleRate;
+    return plan;
+}
+
+PitchEntryTransientResidualPlan applyPitchEntryTransientResidual (juce::AudioBuffer<float>& destination,
+                                                                  const juce::AudioBuffer<float>& original,
+                                                                  const PitchCommitRange& range,
+                                                                  const PitchEntryBridgePlan& entryBridge,
+                                                                  double sampleRate)
+{
+    PitchEntryTransientResidualPlan plan;
+    if (getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_TRANSIENT_RESIDUAL_DISABLE", false)
+        || sampleRate <= 0.0
+        || destination.getNumChannels() <= 0
+        || destination.getNumSamples() <= 0)
+        return plan;
+
+    const int numSamples = destination.getNumSamples();
+    const int bodyStart = juce::jlimit (0, numSamples, static_cast<int> (std::round (range.bodyStartSec * sampleRate)));
+    const int bodyEnd = juce::jlimit (bodyStart, numSamples, static_cast<int> (std::round (range.bodyEndSec * sampleRate)));
+    if (bodyEnd <= bodyStart + 16)
+        return plan;
+
+    const int dryHoldSamples = entryBridge.safeHandoffUsed ? entryBridge.dryHoldSamples : 0;
+    const int residualStart = juce::jlimit (bodyStart, bodyEnd, bodyStart + dryHoldSamples);
+    const float durationMs = juce::jlimit (6.0f, 45.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TRANSIENT_RESIDUAL_MS",
+            entryBridge.wetVsDryRmsDb <= -6.0 ? 24.0f : 14.0f));
+    const int residualEnd = juce::jlimit (residualStart, bodyEnd,
+        residualStart + std::max (1, static_cast<int> (std::round (durationMs * 0.001f * static_cast<float> (sampleRate)))));
+    if (residualEnd <= residualStart + 8)
+        return plan;
+
+    const float envMix = getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TRANSIENT_RESIDUAL_MIX", -1.0f);
+    const float defaultMix = entryBridge.wetVsDryRmsDb <= -6.0 ? 0.36f : 0.24f;
+    const float mix = juce::jlimit (0.0f, 0.70f, envMix >= 0.0f ? envMix : defaultMix);
+    if (mix <= 0.0001f)
+        return plan;
+
+    const float cutoffHz = juce::jlimit (900.0f, 4200.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TRANSIENT_RESIDUAL_HIGHPASS_HZ", 1800.0f));
+    const float alpha = static_cast<float> (std::exp (-2.0 * juce::MathConstants<double>::pi
+        * static_cast<double> (cutoffHz) / sampleRate));
+    const int fadeInSamples = std::max (1, static_cast<int> (std::round (0.0025 * sampleRate)));
+    const int fadeOutSamples = std::max (1, static_cast<int> (std::round (0.010 * sampleRate)));
+
+    for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+    {
+        if (ch >= original.getNumChannels())
+            continue;
+
+        float sourceLow = original.getSample (ch, std::max (0, residualStart - 1));
+        float destLow = destination.getSample (ch, std::max (0, residualStart - 1));
+        for (int sample = residualStart; sample < residualEnd; ++sample)
+        {
+            const float source = original.getSample (ch, sample);
+            const float current = destination.getSample (ch, sample);
+            sourceLow = alpha * sourceLow + (1.0f - alpha) * source;
+            destLow = alpha * destLow + (1.0f - alpha) * current;
+            const float sourceHigh = source - sourceLow;
+            const float destHigh = current - destLow;
+            const float fromStart = static_cast<float> (sample - residualStart) / static_cast<float> (fadeInSamples);
+            const float fromEnd = static_cast<float> (residualEnd - 1 - sample) / static_cast<float> (fadeOutSamples);
+            const float weight = smoothHalfCosine (std::min (fromStart, fromEnd));
+            if (weight <= 0.0001f)
+                continue;
+
+            const float highDelta = sourceHigh - destHigh;
+            destination.setSample (ch, sample, current + highDelta * mix * weight);
+        }
+    }
+
+    plan.used = true;
+    plan.mix = mix;
+    plan.durationMs = static_cast<double> (residualEnd - residualStart) * 1000.0 / sampleRate;
+    return plan;
+}
+
+PitchEntryTimbrePlan applyPitchEntryTimbreCorrection (juce::AudioBuffer<float>& destination,
+                                                      const juce::AudioBuffer<float>& original,
+                                                      const PitchCommitRange& range,
+                                                      double sampleRate)
+{
+    PitchEntryTimbrePlan plan;
+    if (destination.getNumChannels() <= 0 || destination.getNumSamples() <= 0 || sampleRate <= 0.0)
+        return plan;
+
+    const bool downward = range.pitchDirection < 0 || range.pitchRatio < 0.999;
+    const float amount = juce::jlimit (0.0f, 1.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_AMOUNT", 0.0f));
+    if (amount <= 0.0001f)
+        return plan;
+
+    const int numSamples = destination.getNumSamples();
+    const int entryStart = juce::jlimit (0, numSamples, static_cast<int> (std::round (range.bodyStartSec * sampleRate)));
+    const int entryLimit = juce::jlimit (entryStart, numSamples, static_cast<int> (std::round (range.bodyEndSec * sampleRate)));
+    const float entryMs = juce::jlimit (35.0f, 95.0f,
+        getPitchEnvFloat (downward ? "OPENSTUDIO_PITCH_ENTRY_TIMBRE_DOWN_MS" : "OPENSTUDIO_PITCH_ENTRY_TIMBRE_UP_MS", 80.0f));
+    const int entryEnd = juce::jlimit (entryStart, entryLimit,
+        entryStart + std::max (1, static_cast<int> (std::round (entryMs * 0.001f * static_cast<float> (sampleRate)))));
+    const int entryLen = entryEnd - entryStart;
+    if (entryLen <= 8)
+        return plan;
+
+    const int fadeInSamples = std::max (1, std::min (entryLen / 3,
+        static_cast<int> (std::round (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_FADE_IN_MS", 5.0f) * 0.001f * static_cast<float> (sampleRate)))));
+    const int fadeOutSamples = std::max (1, std::min (entryLen / 2,
+        static_cast<int> (std::round (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_FADE_OUT_MS", 24.0f) * 0.001f * static_cast<float> (sampleRate)))));
+
+    double sourceEnergy = 0.0;
+    double destEnergy = 0.0;
+    double weightSum = 0.0;
+    for (int s = entryStart; s < entryEnd; ++s)
+    {
+        const float fromStart = static_cast<float> (s - entryStart) / static_cast<float> (fadeInSamples);
+        const float fromEnd = static_cast<float> (entryEnd - 1 - s) / static_cast<float> (fadeOutSamples);
+        const float weight = smoothHalfCosine (std::min (fromStart, fromEnd));
+        if (weight <= 0.0001f)
+            continue;
+
+        for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+        {
+            const float sourceSample = original.getSample (ch, s);
+            const float destSample = destination.getSample (ch, s);
+            sourceEnergy += static_cast<double> (sourceSample) * static_cast<double> (sourceSample) * weight;
+            destEnergy += static_cast<double> (destSample) * static_cast<double> (destSample) * weight;
+            weightSum += weight;
+        }
+    }
+
+    if (weightSum <= 1.0 || sourceEnergy <= 1.0e-10 || destEnergy <= 1.0e-10)
+        return plan;
+
+    const float sourceMatchScale = downward
+        ? juce::jlimit (0.0f, 1.0f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_DOWN_SOURCE_SCALE", 0.30f))
+        : juce::jlimit (0.0f, 1.0f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_UP_SOURCE_SCALE", 0.55f));
+    const float maxTrimDb = downward
+        ? juce::jlimit (0.0f, 2.0f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_DOWN_MAX_TRIM_DB", 1.1f))
+        : juce::jlimit (0.0f, 2.4f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_UP_MAX_TRIM_DB", 1.7f));
+    const float requestedTrimDb = static_cast<float> (20.0 * std::log10 (std::sqrt (sourceEnergy / weightSum)
+        / std::sqrt (destEnergy / weightSum))) * sourceMatchScale;
+    const float trimDb = juce::jlimit (-maxTrimDb, maxTrimDb, requestedTrimDb) * amount;
+    const float tiltDb = (downward
+        ? juce::jlimit (-3.0f, 1.0f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_DOWN_TILT_DB", -1.4f))
+        : juce::jlimit (-1.0f, 3.5f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_UP_TILT_DB", 1.7f))) * amount;
+
+    if (std::abs (trimDb) < 0.02f && std::abs (tiltDb) < 0.02f)
+        return plan;
+
+    const float lowpassCutoffHz = juce::jlimit (1200.0f, 4200.0f,
+        getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_TIMBRE_CUTOFF_HZ", downward ? 2300.0f : 2600.0f));
+    const float lowpassCoeff = static_cast<float> (std::exp (
+        -juce::MathConstants<double>::twoPi * static_cast<double> (lowpassCutoffHz) / sampleRate));
+    const float lowGain = std::pow (10.0f, trimDb / 20.0f);
+    const float highGain = std::pow (10.0f, (trimDb + tiltDb) / 20.0f);
+
+    for (int ch = 0; ch < destination.getNumChannels(); ++ch)
+    {
+        std::vector<float> lowMid (static_cast<size_t> (numSamples), 0.0f);
+        float state = 0.0f;
+        for (int s = 0; s < numSamples; ++s)
+        {
+            state = (1.0f - lowpassCoeff) * destination.getSample (ch, s) + lowpassCoeff * state;
+            lowMid[static_cast<size_t> (s)] = state;
+        }
+        state = 0.0f;
+        for (int s = numSamples - 1; s >= 0; --s)
+        {
+            state = (1.0f - lowpassCoeff) * lowMid[static_cast<size_t> (s)] + lowpassCoeff * state;
+            lowMid[static_cast<size_t> (s)] = state;
+        }
+
+        for (int s = entryStart; s < entryEnd; ++s)
+        {
+            const float fromStart = static_cast<float> (s - entryStart) / static_cast<float> (fadeInSamples);
+            const float fromEnd = static_cast<float> (entryEnd - 1 - s) / static_cast<float> (fadeOutSamples);
+            const float weight = smoothHalfCosine (std::min (fromStart, fromEnd));
+            if (weight <= 0.0001f)
+                continue;
+
+            const float current = destination.getSample (ch, s);
+            const float low = lowMid[static_cast<size_t> (s)];
+            const float high = current - low;
+            const float target = low * lowGain + high * highGain;
+            destination.setSample (ch, s, current + (target - current) * weight);
+        }
+    }
+
+    plan.used = true;
+    plan.rmsTrimDb = trimDb;
+    plan.tiltDb = tiltDb;
+    return plan;
+}
+
+PitchCompositeStats compositeDryProtectedPitchPatch (juce::AudioBuffer<float>& destination,
+                                                     const juce::AudioBuffer<float>& original,
+                                                     const std::vector<std::vector<float>>& correctedContext,
+                                                     const std::vector<PitchCommitRange>& commitRanges,
+                                                     int contextStartSample,
+                                                     double sampleRate,
+                                                     bool allowPitchOnlyEntryExperiments,
+                                                     bool allowEntryBridge)
+{
+    destination.makeCopyOf (original, true);
+
+    const int numChannels = destination.getNumChannels();
+    const int clipNumSamples = destination.getNumSamples();
+    PitchCompositeStats stats;
+    stats.audibleCommitStartSec = getAudibleCommitStartSec (commitRanges);
+    stats.audibleCommitEndSec = getAudibleCommitEndSec (commitRanges);
+    constexpr double exitLeadInSec = 0.012;
+    stats.entryInsideBodyFadeMs = 0.0;
+    stats.exitLeadInMs = exitLeadInSec * 1000.0;
+    int committedSamples = 0;
+    bool hasAudibleStart = false;
+    bool hasAudibleEnd = false;
+    const bool useLegacyEntryBridge = allowEntryBridge
+        && (allowPitchOnlyEntryExperiments
+            || juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_PITCH_LEGACY_ENTRY_BRIDGE_ENABLE", {}).trim() == "1");
+    const bool useSimpleBoundaryHandoff = allowEntryBridge && ! useLegacyEntryBridge;
+    const bool disableEntrySafeHandoff = juce::SystemStats::getEnvironmentVariable (
+        "OPENSTUDIO_PITCH_ENTRY_SAFE_HANDOFF_DISABLE", {}).trim() == "1";
+
+    for (const auto& range : commitRanges)
+    {
+        const int contextRangeStartSample = juce::jlimit (0, clipNumSamples, static_cast<int> (std::floor (range.startSec * sampleRate)));
+        const int effectiveEndSample = juce::jlimit (contextRangeStartSample, clipNumSamples, static_cast<int> (std::ceil (range.endSec * sampleRate)));
+        const int bodyStartSample = juce::jlimit (contextRangeStartSample, effectiveEndSample, static_cast<int> (std::round (range.bodyStartSec * sampleRate)));
+        const int bodyEndSample = juce::jlimit (bodyStartSample, effectiveEndSample, static_cast<int> (std::round (range.bodyEndSec * sampleRate)));
+        const int endSample = useSimpleBoundaryHandoff ? bodyEndSample : effectiveEndSample;
+        const auto entryBridge = useLegacyEntryBridge
+            ? choosePitchEntryBridgePlan (
+                original, correctedContext, range, contextStartSample,
+                contextRangeStartSample, bodyStartSample, bodyEndSample, effectiveEndSample, sampleRate,
+                allowPitchOnlyEntryExperiments)
+            : (allowEntryBridge
+                ? (disableEntrySafeHandoff
+                    ? makeSimplePitchEntryHandoffPlan (bodyStartSample, bodyEndSample, effectiveEndSample, sampleRate)
+                    : makeEntrySafePitchHandoffPlan (
+                        original, correctedContext, contextStartSample, bodyStartSample, bodyEndSample, effectiveEndSample, sampleRate))
+                : PitchEntryBridgePlan { bodyStartSample, bodyStartSample, 0, 0.0, 0.0, 0.0, false });
+        const int startSample = entryBridge.used ? entryBridge.startSample : bodyStartSample;
+        const int rangeSamples = endSample - startSample;
+        if (rangeSamples <= 0)
+            continue;
+
+        stats.preBodyDryProtectedSamples += std::max (0, startSample - contextRangeStartSample);
+        committedSamples += rangeSamples;
+        stats.entryBridgeUsed = stats.entryBridgeUsed || entryBridge.used;
+        stats.entrySimpleHandoffUsed = stats.entrySimpleHandoffUsed
+            || (entryBridge.used && useSimpleBoundaryHandoff && ! entryBridge.safeHandoffUsed);
+        stats.entrySafeHandoffUsed = stats.entrySafeHandoffUsed || entryBridge.safeHandoffUsed;
+        if (entryBridge.safeHandoffUsed)
+        {
+            stats.entryDryHoldMs = std::max (stats.entryDryHoldMs, entryBridge.transientDryPreserveMs);
+            stats.entrySafeBridgeMs = std::max (stats.entrySafeBridgeMs, entryBridge.safeBridgeMs);
+            stats.entryWetAlignmentMs = std::abs (entryBridge.wetAlignmentMs) > std::abs (stats.entryWetAlignmentMs)
+                ? entryBridge.wetAlignmentMs
+                : stats.entryWetAlignmentMs;
+            stats.entryWetGainDb = std::abs (entryBridge.envelopeGainDb) > std::abs (stats.entryWetGainDb)
+                ? entryBridge.envelopeGainDb
+                : stats.entryWetGainDb;
+            stats.entryWetVsDryRmsDb = std::abs (entryBridge.wetVsDryRmsDb) > std::abs (stats.entryWetVsDryRmsDb)
+                ? entryBridge.wetVsDryRmsDb
+                : stats.entryWetVsDryRmsDb;
+            stats.entryEqualPowerBlendUsed = stats.entryEqualPowerBlendUsed || entryBridge.equalPowerBlend;
+            stats.entryPhaseSafeUsed = stats.entryPhaseSafeUsed || entryBridge.phaseSafeUsed;
+            stats.entryWetAlignmentAccepted = stats.entryWetAlignmentAccepted || entryBridge.wetAlignmentAccepted;
+            stats.entryFirstCycleCorrelation = std::abs (entryBridge.firstCycleCorrelation) > std::abs (stats.entryFirstCycleCorrelation)
+                ? entryBridge.firstCycleCorrelation
+                : stats.entryFirstCycleCorrelation;
+            stats.entryZeroCrossOffsetMs = std::max (stats.entryZeroCrossOffsetMs, entryBridge.zeroCrossOffsetMs);
+            stats.entryBridgeGainRampDb = std::abs (entryBridge.bridgeGainRampDb) > std::abs (stats.entryBridgeGainRampDb)
+                ? entryBridge.bridgeGainRampDb
+                : stats.entryBridgeGainRampDb;
+        }
+        if (useSimpleBoundaryHandoff && effectiveEndSample > bodyEndSample)
+        {
+            stats.exitDryRestoreUsed = true;
+            const double exitStartSec = static_cast<double> (bodyEndSample) / sampleRate;
+            const double exitEndSec = static_cast<double> (effectiveEndSample) / sampleRate;
+            stats.exitDryRestoreStartSec = stats.exitDryRestoreStartSec == 0.0
+                ? exitStartSec
+                : std::min (stats.exitDryRestoreStartSec, exitStartSec);
+            stats.exitDryRestoreEndSec = std::max (stats.exitDryRestoreEndSec, exitEndSec);
+        }
+        stats.audibleCommitEndSec = hasAudibleEnd
+            ? std::max (stats.audibleCommitEndSec, static_cast<double> (endSample) / sampleRate)
+            : static_cast<double> (endSample) / sampleRate;
+        hasAudibleEnd = true;
+        if (stats.entryBoundaryKind == "unknown" || range.entryBoundaryScore > stats.entryBoundaryScore)
+        {
+            stats.entryBoundaryKind = range.entryBoundaryKind.isEmpty() ? "unknown" : range.entryBoundaryKind;
+            stats.entryBoundaryScore = range.entryBoundaryScore;
+        }
+        if (stats.exitBoundaryKind == "unknown" || range.exitBoundaryScore > stats.exitBoundaryScore)
+        {
+            stats.exitBoundaryKind = range.exitBoundaryKind.isEmpty() ? "unknown" : range.exitBoundaryKind;
+            stats.exitBoundaryScore = range.exitBoundaryScore;
+        }
+        if (entryBridge.used)
+        {
+            if (! hasAudibleStart)
+            {
+                stats.entryBridgeStartSec = static_cast<double> (entryBridge.startSample) / sampleRate;
+                stats.audibleCommitStartSec = stats.entryBridgeStartSec;
+                hasAudibleStart = true;
+            }
+            else
+            {
+                stats.entryBridgeStartSec = std::min (stats.entryBridgeStartSec, static_cast<double> (entryBridge.startSample) / sampleRate);
+                stats.audibleCommitStartSec = std::min (stats.audibleCommitStartSec, static_cast<double> (entryBridge.startSample) / sampleRate);
+            }
+            stats.entryBridgeEndSec = std::max (stats.entryBridgeEndSec, static_cast<double> (entryBridge.endSample) / sampleRate);
+            stats.entryBridgeWetLagMs = static_cast<double> (entryBridge.wetLagSamples) * 1000.0 / sampleRate;
+            stats.entryBridgeEnvelopeGainDb = std::abs (entryBridge.envelopeGainDb) > std::abs (stats.entryBridgeEnvelopeGainDb)
+                ? entryBridge.envelopeGainDb
+                : stats.entryBridgeEnvelopeGainDb;
+            stats.entryTransientDryPreservedMs = std::max (stats.entryTransientDryPreservedMs, entryBridge.transientDryPreserveMs);
+        }
+
+        const bool upwardBridge = range.pitchDirection > 0 || range.pitchRatio > 1.001;
+        const bool autoUpPostBridgeLag = upwardBridge
+            && entryBridge.safeHandoffUsed
+            && entryBridge.firstCycleCorrelation < 0.0
+            && entryBridge.wetVsDryRmsDb > -6.0
+            && ! getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_UP_POST_BRIDGE_WET_LAG_AUTO_DISABLE", false);
+        const float defaultPostBridgeLagMs = autoUpPostBridgeLag ? 0.8f : 0.0f;
+        const float postBridgeLagMs = upwardBridge
+            ? juce::jlimit (-2.0f, 2.0f,
+                getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_UP_POST_BRIDGE_WET_LAG_MS", defaultPostBridgeLagMs))
+            : 0.0f;
+        const int postBridgeLagSamples = static_cast<int> (std::round (
+            postBridgeLagMs * 0.001f * static_cast<float> (sampleRate)));
+        const float postBridgeLagTaperMs = juce::jlimit (4.0f, 60.0f,
+            getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_UP_POST_BRIDGE_WET_LAG_TAPER_MS", 24.0f));
+        const int postBridgeLagEndSample = postBridgeLagSamples != 0
+            ? juce::jlimit (entryBridge.endSample, endSample,
+                entryBridge.endSample + std::max (1, static_cast<int> (std::round (
+                    postBridgeLagTaperMs * 0.001f * static_cast<float> (sampleRate)))))
+            : entryBridge.endSample;
+        if (postBridgeLagSamples != 0)
+        {
+            const double postLagMs = static_cast<double> (postBridgeLagSamples) * 1000.0 / sampleRate;
+            stats.entryWetAlignmentMs = std::abs (postLagMs) > std::abs (stats.entryWetAlignmentMs)
+                ? postLagMs
+                : stats.entryWetAlignmentMs;
+        }
+
+        int fadeOutStartSample = juce::jlimit (startSample, endSample,
+            static_cast<int> (std::round ((range.bodyEndSec - exitLeadInSec) * sampleRate)));
+        fadeOutStartSample = std::max (entryBridge.endSample, fadeOutStartSample);
+        const int dryPreserveSamples = static_cast<int> (std::round ((entryBridge.transientDryPreserveMs / 1000.0) * sampleRate));
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            if (static_cast<size_t> (ch) >= correctedContext.size())
+                continue;
+
+            const bool downwardBridge = range.pitchDirection < 0 || range.pitchRatio < 0.999;
+            const float entryBodyBlend = downwardBridge
+                ? juce::jlimit (0.40f, 0.85f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_DOWN_BODY_BLEND", 0.71f))
+                : juce::jlimit (0.40f, 0.85f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_BODY_BLEND", 0.72f));
+            const float entryStartBlend = downwardBridge
+                ? 0.0f
+                : juce::jlimit (0.0f, 0.85f, getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_UP_START_BLEND", 0.0f));
+            const auto& corrected = correctedContext[static_cast<size_t> (ch)];
+            for (int sample = startSample; sample < endSample; ++sample)
+            {
+                float entryProgress = 1.0f;
+                if (entryBridge.used && sample < entryBridge.endSample)
+                {
+                    if (entryBridge.safeHandoffUsed)
+                    {
+                        const int dryHoldEndSample = std::min (entryBridge.endSample,
+                                                               entryBridge.startSample + entryBridge.dryHoldSamples);
+                        if (sample < dryHoldEndSample)
+                        {
+                            entryProgress = entryBridge.phaseSafeUsed
+                                ? 0.0f
+                                : 0.12f * smoothHalfCosine (
+                                    static_cast<float> (sample - entryBridge.startSample)
+                                        / static_cast<float> (std::max (1, dryHoldEndSample - entryBridge.startSample)));
+                        }
+                        else
+                        {
+                            const float bridgeProgress = smoothHalfCosine (
+                                static_cast<float> (sample - dryHoldEndSample)
+                                    / static_cast<float> (std::max (1, entryBridge.endSample - dryHoldEndSample)));
+                            entryProgress = entryBridge.phaseSafeUsed
+                                ? bridgeProgress
+                                : 0.12f + 0.88f * bridgeProgress;
+                        }
+                    }
+                    else if (entryBridge.startSample >= bodyStartSample)
+                    {
+                        const float fadeProgress = smoothHalfCosine (
+                            static_cast<float> (sample - entryBridge.startSample)
+                                / static_cast<float> (std::max (1, entryBridge.endSample - entryBridge.startSample)));
+                        entryProgress = entryStartBlend + (1.0f - entryStartBlend) * fadeProgress;
+                    }
+                    else if (sample < bodyStartSample)
+                    {
+                        entryProgress = entryBodyBlend * smoothHalfCosine (
+                            static_cast<float> (sample - entryBridge.startSample)
+                                / static_cast<float> (std::max (1, bodyStartSample - entryBridge.startSample)));
+                    }
+                    else
+                    {
+                        entryProgress = entryBodyBlend + (1.0f - entryBodyBlend) * smoothHalfCosine (
+                            static_cast<float> (sample - bodyStartSample)
+                                / static_cast<float> (std::max (1, entryBridge.endSample - bodyStartSample)));
+                    }
+                    if (sample < entryBridge.startSample + dryPreserveSamples)
+                    {
+                        const float preserveProgress = static_cast<float> (sample - entryBridge.startSample)
+                            / static_cast<float> (std::max (1, dryPreserveSamples));
+                        entryProgress *= smoothHalfCosine (preserveProgress);
+                    }
+                }
+
+                int taperedLag = 0;
+                if (entryBridge.used && sample < entryBridge.endSample)
+                {
+                    if (postBridgeLagSamples != 0)
+                    {
+                        taperedLag = static_cast<int> (std::round (
+                            static_cast<double> (postBridgeLagSamples) * static_cast<double> (entryProgress)));
+                    }
+                    else
+                    {
+                        taperedLag = static_cast<int> (std::round (
+                            static_cast<double> (entryBridge.wetLagSamples) * (1.0 - static_cast<double> (entryProgress))));
+                    }
+                }
+                else if (postBridgeLagSamples != 0 && sample < postBridgeLagEndSample)
+                {
+                    const float postLagProgress = smoothHalfCosine (
+                        static_cast<float> (sample - entryBridge.endSample)
+                            / static_cast<float> (std::max (1, postBridgeLagEndSample - entryBridge.endSample)));
+                    taperedLag = static_cast<int> (std::round (
+                        static_cast<double> (postBridgeLagSamples) * (1.0 - static_cast<double> (postLagProgress))));
+                }
+                const int contextIndex = sample - contextStartSample + taperedLag;
+                if (contextIndex < 0 || contextIndex >= static_cast<int> (corrected.size()))
+                    continue;
+
+                float blend = entryBridge.used ? entryProgress : 1.0f;
+                if (sample > fadeOutStartSample)
+                {
+                    const float t = static_cast<float> (endSample - 1 - sample)
+                        / static_cast<float> (std::max (1, endSample - 1 - fadeOutStartSample));
+                    blend = std::min (blend, smoothHalfCosine (t));
+                }
+
+                const float dry = original.getSample (ch, sample);
+                float wet = corrected[static_cast<size_t> (contextIndex)];
+                if (entryBridge.used && sample < entryBridge.endSample && ! entryBridge.phaseSafeUsed)
+                {
+                    const int gainStartSample = entryBridge.safeHandoffUsed
+                        ? entryBridge.startSample
+                        : bodyStartSample;
+                    const float gainProgress = sample < gainStartSample
+                        ? 0.0f
+                        : smoothHalfCosine (static_cast<float> (sample - gainStartSample)
+                            / static_cast<float> (std::max (1, entryBridge.endSample - gainStartSample)));
+                    const double gainDb = entryBridge.envelopeGainDb * (1.0 - static_cast<double> (gainProgress));
+                    wet *= static_cast<float> (std::pow (10.0, gainDb / 20.0));
+                }
+                if (entryBridge.equalPowerBlend && sample < entryBridge.endSample)
+                {
+                    const float p = juce::jlimit (0.0f, 1.0f, blend);
+                    const float theta = p * 0.5f * juce::MathConstants<float>::pi;
+                    const float dryGain = std::cos (theta);
+                    const float wetGain = std::sin (theta);
+                    destination.setSample (ch, sample, dry * dryGain + wet * wetGain);
+                }
+                else
+                {
+                    destination.setSample (ch, sample, dry + (wet - dry) * blend);
+                }
+            }
+        }
+
+        const bool autoEntryRmsContinuity = false;
+        const bool entryRmsContinuityEnabled = getPitchEnvFlag (
+            "OPENSTUDIO_PITCH_ENTRY_RMS_CONTINUITY_ENABLE", autoEntryRmsContinuity);
+        PitchEntryRmsContinuityPlan entryContinuity;
+        if (entryRmsContinuityEnabled
+            && entryBridge.phaseSafeUsed
+            && entryBridge.safeHandoffUsed
+            && entryBridge.wetVsDryRmsDb <= -6.0
+            && ! getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_SOURCE_RMS_CONTINUITY_DISABLE", false))
+        {
+            const bool allowContinuityDuringBridge = getPitchEnvFlag (
+                "OPENSTUDIO_PITCH_ENTRY_SOURCE_RMS_CONTINUITY_DURING_BRIDGE_ENABLE", false);
+            entryContinuity = applyPitchEntryRmsContinuity (
+                destination,
+                original,
+                range,
+                sampleRate,
+                true,
+                allowContinuityDuringBridge ? entryBridge.startSample : entryBridge.endSample,
+                static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SOURCE_RMS_CONTINUITY_MAX_GAIN_DB", 3.0f)),
+                static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_PITCH_ENTRY_SOURCE_RMS_CONTINUITY_ATTACK_MS", 45.0f)));
+        }
+
+        if (! entryContinuity.used && entryRmsContinuityEnabled)
+        {
+            entryContinuity = applyPitchEntryRmsContinuity (
+                destination,
+                original,
+                range,
+                sampleRate,
+                entryBridge.safeHandoffUsed && entryBridge.wetVsDryRmsDb <= -6.0,
+                entryBridge.phaseSafeUsed ? entryBridge.endSample : -1);
+        }
+
+        if (entryContinuity.used)
+        {
+            stats.entryRmsContinuityUsed = true;
+            stats.entryRmsContinuityGainDb = std::abs (entryContinuity.gainDb) > std::abs (stats.entryRmsContinuityGainDb)
+                ? entryContinuity.gainDb
+                : stats.entryRmsContinuityGainDb;
+            stats.entryRmsContinuityMs = std::max (stats.entryRmsContinuityMs, entryContinuity.durationMs);
+        }
+
+        const auto entryTransientResidual = applyPitchEntryTransientResidual (
+            destination, original, range, entryBridge, sampleRate);
+        if (entryTransientResidual.used)
+        {
+            stats.entryTransientResidualUsed = true;
+            stats.entryTransientResidualMix = std::max (stats.entryTransientResidualMix, entryTransientResidual.mix);
+            stats.entryTransientResidualMs = std::max (stats.entryTransientResidualMs, entryTransientResidual.durationMs);
+        }
+
+        const auto entryTimbre = allowPitchOnlyEntryExperiments
+            ? applyPitchEntryTimbreCorrection (destination, original, range, sampleRate)
+            : PitchEntryTimbrePlan();
+        if (entryTimbre.used)
+        {
+            stats.entryTimbreCorrectionUsed = true;
+            if (std::abs (entryTimbre.rmsTrimDb) > std::abs (stats.entryRmsTrimDb))
+                stats.entryRmsTrimDb = entryTimbre.rmsTrimDb;
+            if (std::abs (entryTimbre.tiltDb) > std::abs (stats.entryTiltDb))
+                stats.entryTiltDb = entryTimbre.tiltDb;
+        }
+
+        const auto downshiftCore = applyDownshiftCoreEnvelopePass (destination, original, range, sampleRate);
+        if (downshiftCore.used)
+        {
+            stats.downshiftCoreEnvelopePassUsed = true;
+            if (std::abs (downshiftCore.rmsTrimDb) > std::abs (stats.downshiftCoreRmsTrimDb))
+                stats.downshiftCoreRmsTrimDb = downshiftCore.rmsTrimDb;
+            if (std::abs (downshiftCore.maxFrameGainDb) > std::abs (stats.downshiftCoreEnvelopeMaxDb))
+                stats.downshiftCoreEnvelopeMaxDb = downshiftCore.maxFrameGainDb;
+            stats.downshiftCoreEnvelopeFrames += downshiftCore.envelopeFrames;
+        }
+    }
+
+    stats.dryProtectedSamples = std::max (0, clipNumSamples - committedSamples);
+    if (! stats.entryBridgeUsed)
+    {
+        stats.entryBridgeStartSec = stats.audibleCommitStartSec;
+        stats.entryBridgeEndSec = stats.audibleCommitStartSec;
+    }
+    return stats;
+}
 }
 
 // Debug logging — always active for FX diagnostics
@@ -68,23 +2373,26 @@ static void logToDisk(const juce::String& msg)
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
 }
 
+static bool shouldEnablePitchEditorFormantDebugLogs()
+{
 #if JUCE_DEBUG
-static constexpr bool kPitchEditorFormantDebugLogs = true;
+    return true;
 #else
-static constexpr bool kPitchEditorFormantDebugLogs = false;
+    return juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_PITCH_DEBUG", {}).trim() == "1";
 #endif
+}
 
 static void logPitchEditorFormant(const juce::String& msg)
 {
-    if (kPitchEditorFormantDebugLogs)
+    if (shouldEnablePitchEditorFormantDebugLogs())
         juce::Logger::writeToLog("[pitchEditor.formant] " + msg);
 }
 
-#if JUCE_DEBUG
-static constexpr bool kAudioPathDebugLogs = true;
-#else
+// Per-callback audio path logging. Set to true ONLY when actively debugging audio
+// path issues — it calls juce::Logger::writeToLog (disk write via FileLogger) from
+// the audio thread every 50 callbacks (~33 ms at 32-sample blocks), which causes
+// periodic xruns at low buffer sizes. Must be false in normal use.
 static constexpr bool kAudioPathDebugLogs = false;
-#endif
 
 static void logAudioTransport(const juce::String& msg)
 {
@@ -133,6 +2441,83 @@ static float peakFromFloatBuffer(const juce::AudioBuffer<float>& buffer, int num
         peak = juce::jmax(peak, juce::jmax(std::abs(range.getStart()), std::abs(range.getEnd())));
     }
     return peak;
+}
+
+static juce::var makeSignalChainBufferStats (const juce::AudioBuffer<float>& buffer,
+                                             int numSamples)
+{
+    auto* obj = new juce::DynamicObject();
+    const int safeSamples = juce::jlimit (0, buffer.getNumSamples(), numSamples);
+    double sumSquares = 0.0;
+    juce::int64 sampleCount = 0;
+    float peak = 0.0f;
+    float maxDerivative = 0.0f;
+    int nonFiniteCount = 0;
+
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        const auto* data = buffer.getReadPointer (ch);
+        float previous = safeSamples > 0 ? data[0] : 0.0f;
+        for (int i = 0; i < safeSamples; ++i)
+        {
+            const float sample = data[i];
+            if (! std::isfinite (sample))
+            {
+                ++nonFiniteCount;
+                continue;
+            }
+
+            peak = juce::jmax (peak, std::abs (sample));
+            sumSquares += static_cast<double> (sample) * static_cast<double> (sample);
+            ++sampleCount;
+
+            if (i > 0)
+                maxDerivative = juce::jmax (maxDerivative, std::abs (sample - previous));
+            previous = sample;
+        }
+    }
+
+    obj->setProperty ("samples", safeSamples);
+    obj->setProperty ("channels", buffer.getNumChannels());
+    obj->setProperty ("peak", peak);
+    obj->setProperty ("rms", sampleCount > 0 ? std::sqrt (sumSquares / static_cast<double> (sampleCount)) : 0.0);
+    obj->setProperty ("maxDerivative", maxDerivative);
+    obj->setProperty ("nonFiniteCount", nonFiniteCount);
+    return juce::var (obj);
+}
+
+static void addToSignalChainCapture (juce::AudioBuffer<float>& destination,
+                                     int destinationStart,
+                                     const juce::AudioBuffer<float>& source,
+                                     int numSamples)
+{
+    if (destination.getNumSamples() <= 0 || destinationStart >= destination.getNumSamples())
+        return;
+
+    const int samplesToCopy = juce::jmin (numSamples, destination.getNumSamples() - destinationStart);
+    if (samplesToCopy <= 0)
+        return;
+
+    const int channels = juce::jmin (destination.getNumChannels(), source.getNumChannels());
+    for (int ch = 0; ch < channels; ++ch)
+        destination.addFrom (ch, destinationStart, source, ch, 0, samplesToCopy);
+}
+
+static void copyToSignalChainCapture (juce::AudioBuffer<float>& destination,
+                                      int destinationStart,
+                                      const juce::AudioBuffer<float>& source,
+                                      int numSamples)
+{
+    if (destination.getNumSamples() <= 0 || destinationStart >= destination.getNumSamples())
+        return;
+
+    const int samplesToCopy = juce::jmin (numSamples, destination.getNumSamples() - destinationStart);
+    if (samplesToCopy <= 0)
+        return;
+
+    const int channels = juce::jmin (destination.getNumChannels(), source.getNumChannels());
+    for (int ch = 0; ch < channels; ++ch)
+        destination.copyFrom (ch, destinationStart, source, ch, 0, samplesToCopy);
 }
 
 static float peakFromDoubleBuffer(const juce::AudioBuffer<double>& buffer, int numChannels, int numSamples)
@@ -733,25 +3118,67 @@ void AudioEngine::saveDeviceSettings()
 
 void AudioEngine::loadDeviceSettings()
 {
+   #if JUCE_MAC
+    if (! isMicrophonePermissionGrantedForInput())
+    {
+        juce::Logger::writeToLog("AudioEngine: macOS microphone permission is not granted; opening output-only audio first.");
+        loadDeviceSettingsWithChannelCounts(0, 2);
+        requestMicrophonePermissionIfNeeded([this] (bool granted)
+        {
+            juce::MessageManager::callAsync([this, granted]
+            {
+                if (granted)
+                {
+                    juce::Logger::writeToLog("AudioEngine: macOS microphone permission granted; reopening audio inputs.");
+                    loadDeviceSettingsWithChannelCounts(2, 2);
+                    saveDeviceSettings();
+                }
+                else
+                {
+                    juce::Logger::writeToLog("AudioEngine: macOS microphone permission denied; keeping output-only audio configuration.");
+                }
+            });
+        });
+        return;
+    }
+   #endif
+
+    loadDeviceSettingsWithChannelCounts(2, 2);
+}
+
+void AudioEngine::loadDeviceSettingsWithChannelCounts(int inputChannels, int outputChannels)
+{
     auto settingsFile = getDeviceSettingsFile();
+    const int requestedInputChannels = juce::jmax(0, inputChannels);
+    const int requestedOutputChannels = juce::jmax(0, outputChannels);
+
+    auto activateAvailableChannels = [requestedInputChannels, requestedOutputChannels] (juce::AudioDeviceManager& manager)
+    {
+        juce::AudioDeviceManager::AudioDeviceSetup patchSetup;
+        manager.getAudioDeviceSetup (patchSetup);
+        patchSetup.useDefaultInputChannels = false;
+        patchSetup.inputChannels.clear();
+        if (requestedInputChannels > 0)
+            patchSetup.inputChannels.setRange (0, 32, true);
+        patchSetup.useDefaultOutputChannels = false;
+        patchSetup.outputChannels.clear();
+        if (requestedOutputChannels > 0)
+            patchSetup.outputChannels.setRange (0, 32, true);
+        manager.setAudioDeviceSetup (patchSetup, true);
+    };
+
     if (settingsFile.existsAsFile())
     {
         auto xml = juce::XmlDocument::parse(settingsFile);
         if (xml)
         {
-            auto error = deviceManager.initialise(2, 2, xml.get(), true);
+            auto error = deviceManager.initialise(requestedInputChannels, requestedOutputChannels, xml.get(), true);
             if (error.isEmpty())
             {
                 // Patch: expand active channels to all available.
                 // Existing XML may have been saved with only 2 channels active.
                 // JUCE caps the bitmask at the device's actual channel count.
-                juce::AudioDeviceManager::AudioDeviceSetup patchSetup;
-                deviceManager.getAudioDeviceSetup (patchSetup);
-                patchSetup.useDefaultInputChannels = false;
-                patchSetup.inputChannels.setRange (0, 32, true);
-                patchSetup.useDefaultOutputChannels = false;
-                patchSetup.outputChannels.setRange (0, 32, true);
-                deviceManager.setAudioDeviceSetup (patchSetup, true);
+                activateAvailableChannels(deviceManager);
                 juce::Logger::writeToLog("AudioEngine: Restored device settings from " + settingsFile.getFullPathName());
                 return;
             }
@@ -760,17 +3187,34 @@ void AudioEngine::loadDeviceSettings()
     }
 
     // No saved settings or failed to load - use defaults
-    deviceManager.initialiseWithDefaultDevices(2, 2);
+    deviceManager.initialiseWithDefaultDevices(requestedInputChannels, requestedOutputChannels);
     // Patch: activate all channels on the default device too
+    activateAvailableChannels(deviceManager);
+}
+
+bool AudioEngine::isMicrophonePermissionGrantedForInput() const
+{
+   #if JUCE_MAC
+    if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio))
+        return juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio);
+   #endif
+
+    return true;
+}
+
+void AudioEngine::requestMicrophonePermissionIfNeeded(std::function<void(bool)> completion)
+{
+   #if JUCE_MAC
+    if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
+        && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio))
     {
-        juce::AudioDeviceManager::AudioDeviceSetup patchSetup;
-        deviceManager.getAudioDeviceSetup (patchSetup);
-        patchSetup.useDefaultInputChannels = false;
-        patchSetup.inputChannels.setRange (0, 32, true);
-        patchSetup.useDefaultOutputChannels = false;
-        patchSetup.outputChannels.setRange (0, 32, true);
-        deviceManager.setAudioDeviceSetup (patchSetup, true);
+        juce::Logger::writeToLog("AudioEngine: requesting macOS microphone permission.");
+        juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio, std::move(completion));
+        return;
     }
+   #endif
+
+    completion(true);
 }
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -984,9 +3428,15 @@ void AudioEngine::updateSpectrumAnalyzer (const float* const* outputChannelData,
             spectrumFFT.performFrequencyOnlyForwardTransform (fftData);
 
             {
-                const juce::ScopedLock specLock (spectrumLock);
+                const juce::ScopedTryLock specLock (spectrumLock);
+                if (! specLock.isLocked())
+                {
+                    spectrumFftLockMissCount.fetch_add (1, std::memory_order_relaxed);
+                    continue;
+                }
                 std::memcpy (spectrumOutputBuffer, fftData, sizeof (float) * static_cast<size_t> (FFT_SIZE));
                 spectrumReady = true;
+                spectrumFftPublishCount.fetch_add (1, std::memory_order_relaxed);
             }
         }
     }
@@ -1148,7 +3598,7 @@ void AudioEngine::processMonitoringFXChain (const std::shared_ptr<const ActiveFX
 
 void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
                                           int numOutputChannels, int numSamples,
-                                          double samplePosition, bool hybrid64PostChainActive)
+                                          double currentTimeSeconds, bool hybrid64PostChainActive)
 {
     // Master Pan (with automation)
     if (numOutputChannels >= 2)
@@ -1158,7 +3608,7 @@ void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
 
         if (masterPanAutomation.shouldPlayback())
         {
-            float autoPan = masterPanAutomation.eval (samplePosition);
+            float autoPan = masterPanAutomation.eval (currentTimeSeconds);
             computePanLawGains (currentPanLaw, autoPan, 1.0f, leftGain, rightGain);
         }
 
@@ -1176,7 +3626,7 @@ void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
         float effectiveMasterVol = masterVolume;
         if (masterVolumeAutomation.shouldPlayback())
         {
-            float autoDb = masterVolumeAutomation.eval (samplePosition);
+            float autoDb = masterVolumeAutomation.eval (currentTimeSeconds);
             effectiveMasterVol = (autoDb <= -60.0f) ? 0.0f : std::pow (10.0f, autoDb / 20.0f);
         }
         if (hybrid64PostChainActive)
@@ -1292,7 +3742,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext& context)
 {
+    juce::ScopedNoDenormals noDenormals;
     juce::ignoreUnused(context);
+    audioCallbackScopedNoDenormalsCount.fetch_add (1, std::memory_order_relaxed);
     const uint64 callbackCounter = audioCallbackCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
     lastAudioCallbackCounter.store(callbackCounter, std::memory_order_relaxed);
     const bool firstCallbackAfterTransportStart = firstCallbackAfterTransportStartPending.exchange(false, std::memory_order_acq_rel);
@@ -1312,7 +3764,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // During offline rendering, skip ALL processing to avoid sharing FX plugin
     // instances between the audio callback and the render thread
     if (isRendering.load())
+    {
+        const double callbackDurationMs = juce::Time::getMillisecondCounterHiRes() - callbackStartWallTimeMs;
+        lastAudioCallbackProcessMs.store (callbackDurationMs, std::memory_order_relaxed);
         return;
+    }
 
     auto rtTracks = std::atomic_load_explicit(&realtimeTrackSnapshot, std::memory_order_acquire);
     auto rtMasterFX = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
@@ -1321,9 +3777,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         && (((callbackCounter % 50) == 1) || ((isPlaying || isRecordMode) && firstCallbackAfterTransportStart));
     float postTrackPlaybackPeak = 0.0f;
     float postMonitoringInputPeak = 0.0f;
-    const float preTrackPeak = peakFromFloatChannels(outputChannelData, numOutputChannels, numSamples);
+    // preTrackPeak is only ever used in logging — compute it only when logging is active.
+    // (The output buffer is also all-zeros here, so the scan would return 0 anyway.)
+    float preTrackPeak = 0.0f;
     if (shouldLogCallbackSummary)
     {
+        preTrackPeak = peakFromFloatChannels(outputChannelData, numOutputChannels, numSamples);
         logAudioPlayback("callback start #" + juce::String(static_cast<juce::int64>(callbackCounter))
             + " isPlaying=" + juce::String(isPlaying.load() ? "true" : "false")
             + " isRecordMode=" + juce::String(isRecordMode.load() ? "true" : "false")
@@ -1468,7 +3927,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // happen on ASIO but guards against unusual driver behaviour), resize it here.
         // This heap-allocates only in that exceptional case.
         if (reusableTrackBuffer.getNumSamples() < numSamples || reusableTrackBuffer.getNumChannels() < 2)
+        {
             reusableTrackBuffer.setSize (2, numSamples, false, true);
+            audioCallbackTrackBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
+        }
 
         float* trackChans[2] = { reusableTrackBuffer.getWritePointer (0),
                                   reusableTrackBuffer.getWritePointer (1) };
@@ -1555,7 +4017,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
 
         // Tell the track where we are on the timeline so automation can evaluate
-        track->setCurrentBlockPosition(currentSamplePosition, currentSampleRate);
+        track->setCurrentBlockPosition(currentSamplePosition / juce::jmax(1.0, currentSampleRate));
 
         // ========== SIDECHAIN: provide source track's output to this track ==========
         // If this track has any sidechain-routed FX plugins, find the first sidechain
@@ -1623,7 +4085,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         {
             auto& scOut = *trackEntry.sidechainOutputBuffer;
             if (scOut.getNumSamples() < numSamples)
+            {
                 scOut.setSize(2, numSamples, false, false, true);
+                audioCallbackSidechainBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
+            }
 
             for (int ch = 0; ch < juce::jmin(2, trackBuffer.getNumChannels()); ++ch)
                 scOut.copyFrom(ch, 0, trackBuffer, ch, 0, numSamples);
@@ -1710,6 +4175,40 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     // ========== FX Chains (extracted helpers) ==========
+    if (reusablePitchScrubBuffer.getNumChannels() < numOutputChannels
+        || reusablePitchScrubBuffer.getNumSamples() < numSamples)
+    {
+        reusablePitchScrubBuffer.setSize (juce::jmax (1, numOutputChannels),
+                                          juce::jmax (1, numSamples),
+                                          false,
+                                          true);
+        audioCallbackPitchScrubBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
+    }
+    reusablePitchScrubBuffer.clear();
+    playbackEngine.renderPitchScrubPreview (reusablePitchScrubBuffer, currentSampleRate);
+    if (numOutputChannels > 0)
+    {
+        if (useHybrid64Summing)
+        {
+            for (int ch = 0; ch < juce::jmin (numOutputChannels, reusablePitchScrubBuffer.getNumChannels()); ++ch)
+            {
+                auto* dest = reusableMasterBufferDouble.getWritePointer (ch);
+                auto* src = reusablePitchScrubBuffer.getReadPointer (ch);
+                for (int sample = 0; sample < numSamples; ++sample)
+                    dest[sample] += static_cast<double> (src[sample]);
+            }
+        }
+        else
+        {
+            for (int ch = 0; ch < juce::jmin (numOutputChannels, reusablePitchScrubBuffer.getNumChannels()); ++ch)
+            {
+                juce::FloatVectorOperations::add (outputChannelData[ch],
+                                                  reusablePitchScrubBuffer.getReadPointer (ch),
+                                                  numSamples);
+            }
+        }
+    }
+
     lastPostTrackPlaybackPeak.store(postTrackPlaybackPeak, std::memory_order_relaxed);
     lastPostMonitoringInputPeak.store(postMonitoringInputPeak, std::memory_order_relaxed);
     processMasterFXChain (rtMasterFX, outputChannelData, numOutputChannels, numSamples, useHybrid64Summing);
@@ -1725,12 +4224,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // ========== Master Gain, Pan, Mono, and Precision Conversion ==========
     applyMasterGainPanMono (outputChannelData, numOutputChannels, numSamples,
-                            currentSamplePosition, hybrid64PostChainActive);
+                            currentSamplePosition / juce::jmax(1.0, currentSampleRate), hybrid64PostChainActive);
     const float finalOutputPeak = peakFromFloatChannels(outputChannelData, numOutputChannels, numSamples);
     lastFinalOutputPeak.store(finalOutputPeak, std::memory_order_relaxed);
-    if (shouldLogCallbackSummary || (((isPlaying || isRecordMode) && finalOutputPeak <= 0.0001f)
-        && ((callbackCounter % 15) == 1)))
+    // Silence-detection log: only fires when kAudioPathDebugLogs is on.
+    // Previously also fired unconditionally in release builds; removed because
+    // it calls FileLogger (disk write + mutex) from the audio thread.
+    if (kAudioPathDebugLogs
+        && (shouldLogCallbackSummary || (((isPlaying || isRecordMode) && finalOutputPeak <= 0.0001f)
+            && ((callbackCounter % 15) == 1))))
     {
+        if (preTrackPeak == 0.0f)
+            preTrackPeak = peakFromFloatChannels(outputChannelData, numOutputChannels, numSamples);
         logAudioPlayback("callback peaks #" + juce::String(static_cast<juce::int64>(callbackCounter))
             + " preTrackPeak=" + juce::String(preTrackPeak, 4)
             + " postTrackPlaybackPeak=" + juce::String(postTrackPlaybackPeak, 4)
@@ -1810,17 +4315,37 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         currentSamplePosition += numSamples;
     }
 
-    const double callbackDurationMs = juce::Time::getMillisecondCounterHiRes() - callbackStartWallTimeMs;
-    if (kEnableARADebugDiagnostics && anyActiveARAInCallback && callbackDurationMs > 10.0)
+    // Only measure callback duration when an ARA plugin is active — the QPC call is
+    // non-trivial at 32-sample block sizes (1500/sec) and the result is only used for
+    // ARA slow-block diagnostics.
+    if (kEnableARADebugDiagnostics && anyActiveARAInCallback)
     {
-        logToDisk("Audio callback slow: callback=" + juce::String(static_cast<juce::int64>(callbackCounter))
-            + " firstCallbackAfterTransportStart=" + juce::String(firstCallbackAfterTransportStart ? "true" : "false")
-            + " totalMs=" + juce::String(callbackDurationMs, 2)
-            + " tracksProcessed=" + juce::String(orderCount)
-            + " numSamples=" + juce::String(numSamples)
-            + " transportPlaying=" + juce::String(isPlaying.load() ? "true" : "false")
-            + " currentPositionSeconds=" + juce::String(currentSampleRate > 0.0 ? currentSamplePosition / currentSampleRate : 0.0, 3));
+        const double callbackDurationMs = juce::Time::getMillisecondCounterHiRes() - callbackStartWallTimeMs;
+        if (callbackDurationMs > 10.0)
+        {
+            logToDisk("Audio callback slow: callback=" + juce::String(static_cast<juce::int64>(callbackCounter))
+                + " firstCallbackAfterTransportStart=" + juce::String(firstCallbackAfterTransportStart ? "true" : "false")
+                + " totalMs=" + juce::String(callbackDurationMs, 2)
+                + " tracksProcessed=" + juce::String(orderCount)
+                + " numSamples=" + juce::String(numSamples)
+                + " transportPlaying=" + juce::String(isPlaying.load() ? "true" : "false")
+                + " currentPositionSeconds=" + juce::String(currentSampleRate > 0.0 ? currentSamplePosition / currentSampleRate : 0.0, 3));
+        }
     }
+
+    const double callbackProcessMs = juce::Time::getMillisecondCounterHiRes() - callbackStartWallTimeMs;
+    lastAudioCallbackProcessMs.store (callbackProcessMs, std::memory_order_relaxed);
+    double previousMaxMs = maxAudioCallbackProcessMs.load (std::memory_order_relaxed);
+    while (callbackProcessMs > previousMaxMs
+           && ! maxAudioCallbackProcessMs.compare_exchange_weak (previousMaxMs,
+                                                                  callbackProcessMs,
+                                                                  std::memory_order_relaxed))
+    {
+    }
+
+    const double expectedBlockMs = lastAudioBlockDurationMs.load (std::memory_order_relaxed);
+    if (expectedBlockMs > 0.0 && callbackProcessMs > expectedBlockMs)
+        audioCallbackDeadlineMissCount.fetch_add (1, std::memory_order_relaxed);
 }
 
 juce::String AudioEngine::addTrack(const juce::String& explicitId)
@@ -2499,6 +5024,7 @@ juce::var AudioEngine::getAudioDeviceSetup()
     // 1. Current Setup
     auto* currentSetup = new juce::DynamicObject();
     auto currentDeviceType = deviceManager.getCurrentAudioDeviceType();
+    const bool microphonePermissionGranted = isMicrophonePermissionGrantedForInput();
     
     juce::Logger::writeToLog("AudioEngine: Current device type: " + currentDeviceType);
     
@@ -2506,6 +5032,12 @@ juce::var AudioEngine::getAudioDeviceSetup()
     auto* device = deviceManager.getCurrentAudioDevice();
     
     currentSetup->setProperty("audioDeviceType", currentDeviceType);
+    currentSetup->setProperty("microphonePermissionGranted", microphonePermissionGranted);
+   #if JUCE_MAC
+    currentSetup->setProperty("microphonePermissionRequired", juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio));
+   #else
+    currentSetup->setProperty("microphonePermissionRequired", false);
+   #endif
     if (device)
     {
         juce::Logger::writeToLog("AudioEngine: Current device: " + device->getName());
@@ -2641,6 +5173,29 @@ juce::var AudioEngine::getAudioDeviceSetup()
 }
 
 void AudioEngine::setAudioDeviceSetup(const juce::String& type, const juce::String& input, const juce::String& output, double sampleRate, int bufferSize)
+{
+   #if JUCE_MAC
+    if (input.trim().isNotEmpty() && ! isMicrophonePermissionGrantedForInput())
+    {
+        juce::Logger::writeToLog("AudioEngine: audio input setup requested before macOS microphone permission was granted.");
+        requestMicrophonePermissionIfNeeded([this, type, input, output, sampleRate, bufferSize] (bool granted)
+        {
+            juce::MessageManager::callAsync([this, type, input, output, sampleRate, bufferSize, granted]
+            {
+                if (granted)
+                    applyAudioDeviceSetup(type, input, output, sampleRate, bufferSize);
+                else
+                    juce::Logger::writeToLog("AudioEngine: macOS microphone permission denied; input device setup was not applied.");
+            });
+        });
+        return;
+    }
+   #endif
+
+    applyAudioDeviceSetup(type, input, output, sampleRate, bufferSize);
+}
+
+void AudioEngine::applyAudioDeviceSetup(const juce::String& type, const juce::String& input, const juce::String& output, double sampleRate, int bufferSize)
 {
     juce::Logger::writeToLog("AudioEngine: Setting Audio Device...");
     
@@ -3263,7 +5818,7 @@ juce::var AudioEngine::runEngineBenchmarks()
                     auto* track = it->second;
                     trackBuffer.clear();
                     midi.clear();
-                    track->setCurrentBlockPosition(static_cast<double>(iteration * benchmarkBlockSize), sr);
+                    track->setCurrentBlockPosition(static_cast<double>(iteration * benchmarkBlockSize) / sr);
                     track->buildMidiBuffer(midi, 0.0, benchmarkBlockSize, sr, false);
                     track->processBlock(trackBuffer, midi);
                     if (benchmarkHybrid64)
@@ -5306,7 +7861,7 @@ void AudioEngine::clearTrackPlaybackClips(const juce::String& trackId)
 
 juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels)
 {
-    // REAPER-inspired: read from pre-computed peak cache (.s13peaks) instead of audio file.
+    // REAPER-inspired: read from pre-computed peak cache (.ospeaks) instead of audio file.
     // If cache doesn't exist, kick off async generation and return empty.
     // Frontend will re-request on next render after cache is ready.
     juce::File audioFile(filePath);
@@ -5833,6 +8388,15 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("callbackInputChannels", lastCallbackInputChannels.load(std::memory_order_relaxed));
     root->setProperty("callbackOutputChannels", lastCallbackOutputChannels.load(std::memory_order_relaxed));
     root->setProperty("lastCallbackCounter", static_cast<int64>(lastAudioCallbackCounter.load(std::memory_order_relaxed)));
+    root->setProperty("lastAudioCallbackProcessMs", lastAudioCallbackProcessMs.load(std::memory_order_relaxed));
+    root->setProperty("maxAudioCallbackProcessMs", maxAudioCallbackProcessMs.load(std::memory_order_relaxed));
+    root->setProperty("audioCallbackDeadlineMissCount", static_cast<int64>(audioCallbackDeadlineMissCount.load(std::memory_order_relaxed)));
+    root->setProperty("audioCallbackScopedNoDenormalsCount", static_cast<int64>(audioCallbackScopedNoDenormalsCount.load(std::memory_order_relaxed)));
+    root->setProperty("audioCallbackTrackBufferResizeCount", audioCallbackTrackBufferResizeCount.load(std::memory_order_relaxed));
+    root->setProperty("audioCallbackPitchScrubBufferResizeCount", audioCallbackPitchScrubBufferResizeCount.load(std::memory_order_relaxed));
+    root->setProperty("audioCallbackSidechainBufferResizeCount", audioCallbackSidechainBufferResizeCount.load(std::memory_order_relaxed));
+    root->setProperty("spectrumFftPublishCount", static_cast<int64>(spectrumFftPublishCount.load(std::memory_order_relaxed)));
+    root->setProperty("spectrumFftLockMissCount", static_cast<int64>(spectrumFftLockMissCount.load(std::memory_order_relaxed)));
     root->setProperty("postTrackPlaybackPeak", lastPostTrackPlaybackPeak.load(std::memory_order_relaxed));
     root->setProperty("postMonitoringInputPeak", lastPostMonitoringInputPeak.load(std::memory_order_relaxed));
     root->setProperty("postMasterFxPeak", lastPostMasterFXPeak.load(std::memory_order_relaxed));
@@ -5844,6 +8408,16 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("lastOverlappingClipCount", playbackEngine.getLastOverlappingClipCount());
     root->setProperty("lastMixedClipCount", playbackEngine.getLastMixedClipCount());
     root->setProperty("lastTrackPlaybackPeak", playbackEngine.getLastTrackPlaybackPeak());
+    root->setProperty("playbackFileBufferResizeCount", playbackEngine.getFileBufferResizeCount());
+    root->setProperty("playbackPitchShiftWorkBufferResizeCount", playbackEngine.getPitchShiftWorkBufferResizeCount());
+    root->setProperty("playbackRenderResampleScratchResizeCount", playbackEngine.getRenderResampleScratchResizeCount());
+    root->setProperty("playbackChunkBoundaryReserveCount", playbackEngine.getChunkBoundaryReserveCount());
+    const auto pitchRouting = playbackEngine.getPitchPreviewRoutingStatus({});
+    root->setProperty("pitchRouteMonitorMode", pitchRouting.monitorMode);
+    root->setProperty("pitchRouteRenderedSegmentActive", pitchRouting.renderedSegmentActive);
+    root->setProperty("pitchRouteClipLivePreviewActive", pitchRouting.clipLivePreviewActive);
+    root->setProperty("pitchRouteScrubPreviewActive", pitchRouting.scrubPreviewActive);
+    root->setProperty("pitchRouteCorrectedSourceActive", pitchRouting.correctedSourceActive);
     root->setProperty("playbackTracks", playbackTracks);
     return juce::var(root);
 }
@@ -6139,7 +8713,8 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
 bool AudioEngine::renderProject(const juce::String& source, double startTime, double endTime,
                                 const juce::String& filePath, const juce::String& format,
                                 double renderSampleRate, int bitDepth, int numChannels,
-                                bool normalize, bool addTail, double tailLengthMs)
+                                bool normalize, bool addTail, double tailLengthMs,
+                                bool includeMetronome)
 {
     logToDisk("renderProject: START - file=" + filePath + " format=" + format +
               " range=" + juce::String(startTime) + "-" + juce::String(endTime) +
@@ -6147,7 +8722,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
               " ch=" + juce::String(numChannels) +
               " normalize=" + juce::String(normalize ? "true" : "false") +
               " addTail=" + juce::String(addTail ? "true" : "false") +
-              " tailMs=" + juce::String(tailLengthMs));
+              " tailMs=" + juce::String(tailLengthMs) +
+              " includeMetronome=" + juce::String(includeMetronome ? "true" : "false"));
 
     // ========== 1. Validate inputs ==========
     if (endTime <= startTime)
@@ -6197,9 +8773,48 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     isRendering = true;  // Block audio callback from processing FX plugins
     juce::Thread::sleep(100); // Let audio callback finish current block
 
+    // Exports must be sourced from baked clip files only.  Live pitch previews,
+    // scrub loops, and rendered preview segments are UI audition routes; letting
+    // them survive into the render snapshot can add bursts even for no-op renders.
+    playbackEngine.clearAllPitchPreviewRoutes(juce::String());
+
     // ========== 3. Snapshot clip data ==========
     auto clipSnapshot = playbackEngine.getClipSnapshot();
+    auto renderedPreviewSegmentSnapshot = playbackEngine.getRenderedPreviewSegmentSnapshot();
+    int staleRenderedPitchSegmentsDropped = 0;
+    const bool includePitchPreviewSegmentsInRender = getPitchEnvFlag ("OPENSTUDIO_RENDER_INCLUDE_PITCH_PREVIEW_SEGMENTS", false);
+    if (! includePitchPreviewSegmentsInRender && ! renderedPreviewSegmentSnapshot.empty())
+    {
+        for (const auto& entry : renderedPreviewSegmentSnapshot)
+            staleRenderedPitchSegmentsDropped += static_cast<int>(entry.second.size());
+        renderedPreviewSegmentSnapshot.clear();
+    }
+    for (const auto& clip : clipSnapshot)
+    {
+        if (clip.clipId.isEmpty())
+            continue;
+
+        const bool usingCorrectedSource = clip.originalAudioFile.existsAsFile()
+            && clip.audioFile.existsAsFile()
+            && clip.audioFile != clip.originalAudioFile;
+        if (! usingCorrectedSource)
+            continue;
+
+        auto segmentIt = renderedPreviewSegmentSnapshot.find(clip.clipId);
+        if (segmentIt != renderedPreviewSegmentSnapshot.end())
+        {
+            staleRenderedPitchSegmentsDropped += static_cast<int>(segmentIt->second.size());
+            renderedPreviewSegmentSnapshot.erase(segmentIt);
+        }
+    }
     logToDisk("renderProject: Clip snapshot has " + juce::String((int)clipSnapshot.size()) + " clips");
+    logToDisk("renderProject: Rendered pitch segment snapshot has "
+              + juce::String((int)renderedPreviewSegmentSnapshot.size()) + " clips");
+    if (staleRenderedPitchSegmentsDropped > 0)
+        logToDisk("renderProject: Dropped " + juce::String(staleRenderedPitchSegmentsDropped)
+                  + " rendered pitch preview segment(s) before export"
+                  + juce::String(includePitchPreviewSegmentsInRender ? " because corrected source files are active"
+                                                                     : " because exports must use baked/original clip sources"));
 
     if (clipSnapshot.empty())
     {
@@ -6225,9 +8840,23 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         float pan;
         bool muted;
         bool soloed;
+        int inputFxCount = 0;
+        int trackFxCount = 0;
+        int sendCount = 0;
+        int sidechainSourceCount = 0;
+        bool hasInstrument = false;
+        bool hasARA = false;
+        bool masterSendEnabled = true;
+        bool hasTrackAutomation = false;
+        bool requiresFullRender = false;
     };
     std::vector<TrackSnapshot> trackSnapshots;
+    std::map<juce::String, TrackSnapshot> trackSnapshotById;
     bool anySoloed = false;
+    auto automationIsActive = [] (const AutomationList& automation)
+    {
+        return automation.shouldPlayback() && automation.getNumPoints() > 0;
+    };
     {
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
         for (const auto& trackId : trackOrder)
@@ -6241,16 +8870,66 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             snap.pan = track->getPan();
             snap.muted = track->getMute();
             snap.soloed = track->getSolo();
+            snap.inputFxCount = track->getNumInputFX();
+            snap.trackFxCount = track->getNumTrackFX();
+            snap.hasInstrument = track->getInstrument() != nullptr;
+            snap.hasARA = track->hasActiveARA();
+            snap.masterSendEnabled = track->getMasterSendEnabled();
+            snap.sendCount = static_cast<int>(track->getRealtimeSendSnapshot().size());
+            snap.sidechainSourceCount = static_cast<int>(track->getSidechainSourceSnapshot().size());
+            snap.hasTrackAutomation =
+                automationIsActive(track->getVolumeAutomation())
+                || automationIsActive(track->getPanAutomation())
+                || automationIsActive(track->getWidthAutomation())
+                || automationIsActive(track->getPreFXVolumeAutomation())
+                || automationIsActive(track->getPreFXPanAutomation())
+                || automationIsActive(track->getPreFXWidthAutomation())
+                || automationIsActive(track->getTrimVolumeAutomation())
+                || automationIsActive(track->getMuteAutomation());
+            snap.requiresFullRender =
+                snap.inputFxCount > 0
+                || snap.trackFxCount > 0
+                || snap.hasInstrument
+                || snap.hasARA
+                || snap.sendCount > 0
+                || snap.sidechainSourceCount > 0
+                || snap.hasTrackAutomation
+                || (!isStemRender && !snap.masterSendEnabled);
             if (snap.soloed) anySoloed = true;
             trackSnapshots.push_back(snap);
+            trackSnapshotById[snap.id] = snap;
             logToDisk("  Track " + trackId + ": vol=" + juce::String(snap.volumeDB) +
                       "dB pan=" + juce::String(snap.pan) +
                       " mute=" + juce::String(snap.muted ? "true" : "false") +
-                      " solo=" + juce::String(snap.soloed ? "true" : "false"));
+                      " solo=" + juce::String(snap.soloed ? "true" : "false") +
+                      " fx=" + juce::String(snap.inputFxCount + snap.trackFxCount) +
+                      " sends=" + juce::String(snap.sendCount) +
+                      " sidechains=" + juce::String(snap.sidechainSourceCount) +
+                      " automation=" + juce::String(snap.hasTrackAutomation ? "true" : "false"));
         }
     }
 
     logToDisk("renderProject: " + juce::String((int)trackSnapshots.size()) + " tracks, anySoloed=" + juce::String(anySoloed ? "true" : "false"));
+
+    struct ScopedTrackMuteBypass
+    {
+        TrackProcessor* track = nullptr;
+        ~ScopedTrackMuteBypass()
+        {
+            if (track != nullptr)
+                track->setIgnoreStaticMuteForProcessing(false);
+        }
+    } stemMuteBypass;
+
+    if (isStemRender)
+    {
+        auto trackIt = trackMap.find(stemTrackId);
+        if (trackIt != trackMap.end() && trackIt->second != nullptr)
+        {
+            trackIt->second->setIgnoreStaticMuteForProcessing(true);
+            stemMuteBypass.track = trackIt->second;
+        }
+    }
 
     // ========== 5. Create format writer ==========
     // For lossy formats (mp3/ogg) or sample rate conversion, render to temp WAV first
@@ -6327,6 +9006,58 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
               "s totalSamples=" + juce::String(totalSamples) +
               " blockSize=" + juce::String(blockSize));
 
+    const bool renderChainDebugEnabled = getPitchEnvFlag ("OPENSTUDIO_AUDIO_CHAIN_DEBUG", false)
+        || getPitchEnvFlag ("OPENSTUDIO_RENDER_CHAIN_DEBUG", false);
+    const double renderChainDebugMaxSec = juce::jlimit (0.25, 600.0,
+        static_cast<double> (getPitchEnvFloat ("OPENSTUDIO_AUDIO_CHAIN_DEBUG_MAX_SEC", 12.0f)));
+    const int renderChainCaptureSamples = renderChainDebugEnabled
+        ? static_cast<int> (std::min<juce::int64> (
+            totalSamples,
+            static_cast<juce::int64> (std::ceil (renderChainDebugMaxSec * actualSampleRate))))
+        : 0;
+    const auto renderChainDebugDirEnv = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_AUDIO_CHAIN_DEBUG_DIR", {}).trim();
+    const juce::File renderChainDebugDir = renderChainDebugDirEnv.isNotEmpty()
+        ? juce::File (renderChainDebugDirEnv)
+        : outputFile.getSiblingFile (outputFile.getFileNameWithoutExtension() + "_signal_chain_debug");
+    juce::AudioBuffer<float> chainPlaybackBlock;
+    juce::AudioBuffer<float> chainTrackPostBlock;
+    juce::AudioBuffer<float> chainMasterPreBlock;
+    juce::AudioBuffer<float> chainMasterPostBlock;
+    juce::AudioBuffer<float> chainWriterInputBlock;
+    juce::AudioBuffer<float> chainPlaybackTap;
+    juce::AudioBuffer<float> chainTrackPostTap;
+    juce::AudioBuffer<float> chainMasterPreTap;
+    juce::AudioBuffer<float> chainMasterPostTap;
+    juce::AudioBuffer<float> chainWriterInputTap;
+    juce::Array<juce::var> renderChainBlockReports;
+
+    if (renderChainDebugEnabled)
+    {
+        renderChainDebugDir.createDirectory();
+        chainPlaybackBlock.setSize (2, blockSize);
+        chainTrackPostBlock.setSize (2, blockSize);
+        chainMasterPreBlock.setSize (2, blockSize);
+        chainMasterPostBlock.setSize (2, blockSize);
+        chainWriterInputBlock.setSize (2, blockSize);
+        if (renderChainCaptureSamples > 0)
+        {
+            chainPlaybackTap.setSize (2, renderChainCaptureSamples);
+            chainTrackPostTap.setSize (2, renderChainCaptureSamples);
+            chainMasterPreTap.setSize (2, renderChainCaptureSamples);
+            chainMasterPostTap.setSize (2, renderChainCaptureSamples);
+            chainWriterInputTap.setSize (2, renderChainCaptureSamples);
+            chainPlaybackTap.clear();
+            chainTrackPostTap.clear();
+            chainMasterPreTap.clear();
+            chainMasterPostTap.clear();
+            chainWriterInputTap.clear();
+        }
+
+        logToDisk ("renderProject: signal-chain debug enabled dir=" + renderChainDebugDir.getFullPathName()
+            + " captureSamples=" + juce::String (renderChainCaptureSamples)
+            + " maxSec=" + juce::String (renderChainDebugMaxSec, 2));
+    }
+
     // ========== 6b. Save plugin state & prepare plugins for offline rendering ==========
     // Plugins were prepared for the device's buffer size (e.g. 128/256). The render
     // uses 512-sample blocks. We must re-prepare all FX plugins with the render block
@@ -6389,6 +9120,44 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
     logToDisk("renderProject: Saved & prepared " + juce::String((int)pluginBackups.size()) + " FX plugins for render");
 
+    int activeMasterFxCount = 0;
+    if (renderMasterStage)
+    {
+        for (const auto& slot : renderMasterStage->slots)
+            if (!slot.bypassed && slot.processor)
+                ++activeMasterFxCount;
+    }
+
+    const bool hasMasterAutomation = !isStemRender
+        && (automationIsActive(masterVolumeAutomation) || automationIsActive(masterPanAutomation));
+
+    bool includedTracksCanUseSimplePath = true;
+    for (const auto& snap : trackSnapshots)
+    {
+        if (isStemRender && snap.id != stemTrackId)
+            continue;
+        if (!isStemRender && snap.muted)
+            continue;
+        if (!isStemRender && anySoloed && !snap.soloed)
+            continue;
+
+        if (snap.requiresFullRender)
+        {
+            includedTracksCanUseSimplePath = false;
+            break;
+        }
+    }
+
+    const bool useSimpleNoFxRenderLoop =
+        includedTracksCanUseSimplePath
+        && activeMasterFxCount == 0
+        && !hasMasterAutomation;
+
+    logToDisk("renderProject: renderLoopMode="
+              + juce::String(useSimpleNoFxRenderLoop ? "simple_no_fx" : "full_realtime_snapshot")
+              + " activeMasterFx=" + juce::String(activeMasterFxCount)
+              + " masterAutomation=" + juce::String(hasMasterAutomation ? "true" : "false"));
+
     // ========== 7 & 8. Render loop (with optional 2-pass normalization) ==========
     int numPasses = normalize ? 2 : 1;
     float normGain = 1.0f;
@@ -6400,8 +9169,179 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     juce::Random ditherRng;
     float ditherErrorState[2] = { 0.0f, 0.0f }; // Per-channel error feedback for noise shaping
 
-    // Check if metronome was enabled for render
-    bool renderMetronomeAudio = metronome.isEnabled();
+    // Renders are silent with respect to the click by default.  Playback may
+    // have the metronome enabled, but exports must opt in explicitly.
+    bool renderMetronomeAudio = includeMetronome && metronome.isEnabled();
+    const bool useRenderLagrangeSrc = getPitchEnvFlag("OPENSTUDIO_RENDER_USE_LAGRANGE_SRC", false);
+    auto rtTracks = std::atomic_load_explicit(&realtimeTrackSnapshot, std::memory_order_acquire);
+
+    auto writeRenderRouteReport = [&]()
+    {
+        auto* root = new juce::DynamicObject();
+        root->setProperty("schemaVersion", 1);
+        root->setProperty("purpose", "manual_render_route_report");
+        root->setProperty("source", source);
+        root->setProperty("startTimeSec", startTime);
+        root->setProperty("endTimeSec", endTime);
+        root->setProperty("requestedOutputFile", outputFile.getFullPathName());
+        root->setProperty("renderFile", renderFile.getFullPathName());
+        root->setProperty("format", format);
+        root->setProperty("actualSampleRate", actualSampleRate);
+        root->setProperty("bitDepth", bitDepth);
+        root->setProperty("channels", numChannels);
+        root->setProperty("normalize", normalize);
+        root->setProperty("addTail", addTail);
+        root->setProperty("tailLengthMs", tailLengthMs);
+        root->setProperty("includeMetronome", includeMetronome);
+        root->setProperty("renderMetronomeAudio", renderMetronomeAudio);
+        root->setProperty("metronomeEnabledInProject", metronome.isEnabled());
+        root->setProperty("renderPlaybackResampler", "shared_cubic_fractional");
+        root->setProperty("renderPlaybackResamplerLegacyLagrangeRequested", useRenderLagrangeSrc);
+        root->setProperty("isStemRender", isStemRender);
+        root->setProperty("stemTrackId", stemTrackId);
+        root->setProperty("clipCount", static_cast<int>(clipSnapshot.size()));
+        root->setProperty("trackCount", static_cast<int>(trackSnapshots.size()));
+        root->setProperty("anySoloed", anySoloed);
+        root->setProperty("renderedPreviewSegmentClipCount", static_cast<int>(renderedPreviewSegmentSnapshot.size()));
+        root->setProperty("renderedPitchSegmentsDroppedBeforeSnapshot", staleRenderedPitchSegmentsDropped);
+        root->setProperty("activeMasterFxCount", activeMasterFxCount);
+        root->setProperty("hasMasterAutomation", hasMasterAutomation);
+        root->setProperty("renderLoopMode", useSimpleNoFxRenderLoop ? "simple_no_fx" : "full_realtime_snapshot");
+        root->setProperty("writtenAt", juce::Time::getCurrentTime().toISO8601(true));
+
+        juce::Array<juce::var> clipArray;
+        juce::AudioFormatManager reportFormatManager;
+        reportFormatManager.registerBasicFormats();
+        for (const auto& clip : clipSnapshot)
+        {
+            auto* obj = new juce::DynamicObject();
+            const bool usingCorrectedSource = clip.originalAudioFile.existsAsFile()
+                && clip.audioFile.existsAsFile()
+                && clip.audioFile != clip.originalAudioFile;
+            obj->setProperty("clipId", clip.clipId);
+            obj->setProperty("trackId", clip.trackId);
+            obj->setProperty("audioFile", clip.audioFile.getFullPathName());
+            obj->setProperty("originalAudioFile", clip.originalAudioFile.getFullPathName());
+            obj->setProperty("startTime", clip.startTime);
+            obj->setProperty("duration", clip.duration);
+            obj->setProperty("offset", clip.offset);
+            obj->setProperty("volumeDB", clip.volumeDB);
+            obj->setProperty("fadeIn", clip.fadeIn);
+            obj->setProperty("fadeOut", clip.fadeOut);
+            obj->setProperty("active", clip.isActive);
+            obj->setProperty("usingCorrectedSource", usingCorrectedSource);
+            if (auto reader = std::unique_ptr<juce::AudioFormatReader>(reportFormatManager.createReaderFor(clip.audioFile)))
+            {
+                obj->setProperty("audioFileSampleRate", reader->sampleRate);
+                obj->setProperty("audioFileChannels", static_cast<int>(reader->numChannels));
+                obj->setProperty("audioFileLengthSamples", static_cast<int64>(reader->lengthInSamples));
+            }
+            clipArray.add(juce::var(obj));
+        }
+        root->setProperty("clips", juce::var(clipArray));
+
+        juce::Array<juce::var> trackArray;
+        for (const auto& snap : trackSnapshots)
+        {
+            auto* obj = new juce::DynamicObject();
+            obj->setProperty("id", snap.id);
+            obj->setProperty("volumeDB", snap.volumeDB);
+            obj->setProperty("pan", snap.pan);
+            obj->setProperty("muted", snap.muted);
+            obj->setProperty("soloed", snap.soloed);
+            obj->setProperty("inputFxCount", snap.inputFxCount);
+            obj->setProperty("trackFxCount", snap.trackFxCount);
+            obj->setProperty("hasInstrument", snap.hasInstrument);
+            obj->setProperty("hasARA", snap.hasARA);
+            obj->setProperty("sendCount", snap.sendCount);
+            obj->setProperty("sidechainSourceCount", snap.sidechainSourceCount);
+            obj->setProperty("masterSendEnabled", snap.masterSendEnabled);
+            obj->setProperty("hasTrackAutomation", snap.hasTrackAutomation);
+            obj->setProperty("requiresFullRender", snap.requiresFullRender);
+            trackArray.add(juce::var(obj));
+        }
+        root->setProperty("tracks", juce::var(trackArray));
+
+        const auto reportFile = outputFile.getSiblingFile(outputFile.getFileNameWithoutExtension() + "_render_route_report.json");
+        reportFile.getParentDirectory().createDirectory();
+        const bool wrote = reportFile.replaceWithText(juce::JSON::toString(juce::var(root), true));
+        logToDisk("renderProject: route report=" + reportFile.getFullPathName()
+                  + " wrote=" + juce::String(wrote ? "true" : "false"));
+    };
+
+    writeRenderRouteReport();
+
+    auto buildRenderChainRouteTrace = [&] (const juce::String& trackId,
+                                           double blockStartSec,
+                                           int blockSamples) -> juce::var
+    {
+        juce::Array<juce::var> routes;
+        const double blockEndSec = blockStartSec + static_cast<double> (blockSamples) / actualSampleRate;
+        for (const auto& clip : clipSnapshot)
+        {
+            if (! clip.isActive || clip.trackId != trackId)
+                continue;
+
+            const double clipEndSec = clip.startTime + clip.duration;
+            if (blockStartSec >= clipEndSec || blockEndSec <= clip.startTime)
+                continue;
+
+            const double blockMidSec = (std::max (blockStartSec, clip.startTime)
+                + std::min (blockEndSec, clipEndSec)) * 0.5;
+            const double clipTimeSec = blockMidSec - clip.startTime;
+            juce::String sourceType = "original";
+            juce::String sourceFile = clip.audioFile.getFullPathName();
+            double playbackOffsetSec = clip.offset + clipTimeSec;
+            bool renderedSegmentActive = false;
+            bool correctedSourceActive = false;
+
+            auto segmentIt = renderedPreviewSegmentSnapshot.find (clip.clipId);
+            if (segmentIt != renderedPreviewSegmentSnapshot.end())
+            {
+                for (const auto& segment : segmentIt->second)
+                {
+                    if (clipTimeSec >= segment.startSec && clipTimeSec < segment.endSec)
+                    {
+                        renderedSegmentActive = true;
+                        sourceType = "rendered_segment";
+                        sourceFile = segment.audioFile.getFullPathName();
+                        playbackOffsetSec = segment.fileOffsetSec + (clipTimeSec - segment.startSec);
+                        break;
+                    }
+                }
+            }
+
+            if (! renderedSegmentActive
+                && clip.originalAudioFile.existsAsFile()
+                && clip.audioFile.existsAsFile()
+                && clip.audioFile != clip.originalAudioFile)
+            {
+                correctedSourceActive = true;
+                sourceType = "corrected_source";
+            }
+
+            auto* routeObj = new juce::DynamicObject();
+            routeObj->setProperty ("trackId", trackId);
+            routeObj->setProperty ("clipId", clip.clipId);
+            routeObj->setProperty ("sourceType", sourceType);
+            routeObj->setProperty ("audioFile", sourceFile);
+            routeObj->setProperty ("clipTimeSec", clipTimeSec);
+            routeObj->setProperty ("playbackOffsetSec", playbackOffsetSec);
+            routeObj->setProperty ("renderedSegmentActive", renderedSegmentActive);
+            routeObj->setProperty ("correctedSourceActive", correctedSourceActive);
+            routeObj->setProperty ("clipVolumeDb", clip.volumeDB);
+            routeObj->setProperty ("clipFadeInSec", clip.fadeIn);
+            routeObj->setProperty ("clipFadeOutSec", clip.fadeOut);
+            routes.add (juce::var (routeObj));
+        }
+
+        return juce::var (routes);
+    };
+
+    if (reusableMasterBuffer.getNumChannels() < 2 || reusableMasterBuffer.getNumSamples() < blockSize)
+        reusableMasterBuffer.setSize(2, blockSize, false, false, true);
+    if (reusableMasterBufferDouble.getNumChannels() < 2 || reusableMasterBufferDouble.getNumSamples() < blockSize)
+        reusableMasterBufferDouble.setSize(2, blockSize, false, false, true);
 
     for (int pass = 0; pass < numPasses; ++pass)
     {
@@ -6422,12 +9362,27 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
         // Create fresh offline playback engine for each pass (deterministic reads)
         PlaybackEngine passPlayback;
-        passPlayback.setRenderMode(true);  // Use Lagrange interpolation for high-quality resampling
+        // The Lagrange render SRC path is stateful across blocks and currently
+        // unsafe for arbitrary render offsets/ranges.  Keep exports on the
+        // exact-position stateless interpolation path unless explicitly opted in.
+        passPlayback.setRenderMode(useRenderLagrangeSrc);
+        for (const auto& entry : renderedPreviewSegmentSnapshot)
+        {
+            for (const auto& segment : entry.second)
+            {
+                passPlayback.setClipRenderedPreviewSegment(entry.first,
+                                                           segment.audioFile,
+                                                           segment.startSec,
+                                                           segment.endSec,
+                                                           segment.fileOffsetSec);
+            }
+        }
         for (const auto& clip : clipSnapshot)
         {
             passPlayback.addClip(clip.audioFile, clip.startTime, clip.duration,
                                  clip.trackId, clip.offset, clip.volumeDB,
-                                 clip.fadeIn, clip.fadeOut);
+                                 clip.fadeIn, clip.fadeOut, clip.clipId,
+                                 clip.originalAudioFile, clip.originalOffset);
         }
 
         // Create fresh metronome for each pass
@@ -6440,6 +9395,25 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             renderMet.setVolume(metronome.getVolume());
             renderMet.setAccentBeats(metronome.getAccentBeats());
             renderMet.setEnabled(true);
+        }
+
+        if (rtTracks)
+        {
+            for (const auto& entry : *rtTracks)
+            {
+                if (entry.sendAccumBuffer != nullptr)
+                {
+                    if (entry.sendAccumBuffer->getNumChannels() < 2 || entry.sendAccumBuffer->getNumSamples() < blockSize)
+                        entry.sendAccumBuffer->setSize(2, blockSize, false, false, true);
+                    entry.sendAccumBuffer->clear();
+                }
+                if (entry.sidechainOutputBuffer != nullptr)
+                {
+                    if (entry.sidechainOutputBuffer->getNumChannels() < 2 || entry.sidechainOutputBuffer->getNumSamples() < blockSize)
+                        entry.sidechainOutputBuffer->setSize(2, blockSize, false, false, true);
+                    entry.sidechainOutputBuffer->clear();
+                }
+            }
         }
 
         if (pass == 1)
@@ -6461,248 +9435,311 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         while (samplesRemaining > 0)
         {
             int samplesThisBlock = (int)std::min((juce::int64)blockSize, samplesRemaining);
+            const juce::int64 renderBlockStartSample = totalSamples - samplesRemaining;
 
             // Master buffer (always stereo internally)
             juce::AudioBuffer<float> masterBuffer(2, samplesThisBlock);
             masterBuffer.clear();
-            juce::AudioBuffer<double> masterBufferDouble(2, samplesThisBlock);
-            masterBufferDouble.clear();
             const bool renderHybrid64 = processingPrecisionMode == ProcessingPrecisionMode::Hybrid64;
+            const bool captureRenderChainBlock = renderChainDebugEnabled && pass == (numPasses - 1);
+
+            if (renderHybrid64)
+                reusableMasterBufferDouble.clear();
+
+            if (captureRenderChainBlock)
+            {
+                chainPlaybackBlock.setSize (2, samplesThisBlock, false, false, true);
+                chainTrackPostBlock.setSize (2, samplesThisBlock, false, false, true);
+                chainMasterPreBlock.setSize (2, samplesThisBlock, false, false, true);
+                chainMasterPostBlock.setSize (2, samplesThisBlock, false, false, true);
+                chainWriterInputBlock.setSize (2, samplesThisBlock, false, false, true);
+                chainPlaybackBlock.clear();
+                chainTrackPostBlock.clear();
+                chainMasterPreBlock.clear();
+                chainMasterPostBlock.clear();
+                chainWriterInputBlock.clear();
+            }
+            juce::Array<juce::var> chainBlockRoutes;
 
             // Add metronome if enabled
             if (renderMetronomeAudio)
             {
                 renderMet.getNextAudioBlock(masterBuffer, samplePositionForMetronome);
                 if (renderHybrid64)
+                    copyFloatBufferToDoubleBuffer(masterBuffer, reusableMasterBufferDouble, 2, samplesThisBlock);
+            }
+
+            if (rtTracks)
+            {
+                for (const auto& entry : *rtTracks)
                 {
-                    for (int ch = 0; ch < 2; ++ch)
-                    {
-                        auto* src = masterBuffer.getReadPointer(ch);
-                        auto* dest = masterBufferDouble.getWritePointer(ch);
-                        for (int sample = 0; sample < samplesThisBlock; ++sample)
-                            dest[sample] = static_cast<double>(src[sample]);
-                    }
+                    if (entry.sendAccumBuffer != nullptr)
+                        entry.sendAccumBuffer->clear();
+                    if (entry.sidechainOutputBuffer != nullptr)
+                        entry.sidechainOutputBuffer->clear();
                 }
             }
 
-            // Process each track
-            for (const auto& snap : trackSnapshots)
+            if (useSimpleNoFxRenderLoop)
             {
-                // Stem rendering: only process the specified track
-                if (isStemRender && snap.id != stemTrackId) continue;
-
-                // Skip muted tracks (unless stem render — always render the target track)
-                if (!isStemRender && snap.muted) continue;
-                // If any track is soloed, skip non-soloed tracks (unless stem render)
-                if (!isStemRender && anySoloed && !snap.soloed) continue;
-
-                // Fill track buffer from clips
-                juce::AudioBuffer<float> trackBuffer(2, samplesThisBlock);
-                trackBuffer.clear();
-                passPlayback.fillTrackBuffer(snap.id, trackBuffer, currentTimeSeconds,
-                                             samplesThisBlock, actualSampleRate);
-
-                // Process track FX chain BEFORE volume/pan (matches real-time signal flow)
-                // Channel-safe: expand buffer if plugin needs more channels than our stereo buffer
+                for (const auto& snap : trackSnapshots)
                 {
-                    auto it = trackMap.find(snap.id);
-                    if (it != trackMap.end() && it->second)
-                    {
-                        auto* track = it->second;
-                        juce::MidiBuffer midiMessages = buildTrackMidiBlock(snap.id, currentTimeSeconds,
-                                                                            samplesThisBlock, actualSampleRate, true);
-                        if (auto* instrument = track->getInstrument())
-                            instrument->setPlayHead(this);
-                        int numInputFX = track->getNumInputFX();
-                        int numTrackFX = track->getNumTrackFX();
-                        const bool hasInstrument = track->getTrackType() == TrackType::Instrument
-                                                && track->getInstrument() != nullptr;
-                        if (numInputFX > 0 || numTrackFX > 0 || hasInstrument)
-                        {
-                            auto safeRenderFX = [&](juce::AudioProcessor* proc) {
-                                int pluginCh = juce::jmax(proc->getTotalNumInputChannels(),
-                                                          proc->getTotalNumOutputChannels());
-                                const bool useDoublePrecision = renderHybrid64
-                                                             && proc->supportsDoublePrecisionProcessing();
-                                if (useDoublePrecision)
-                                {
-                                    juce::AudioBuffer<double> doubleBuffer(pluginCh, samplesThisBlock);
-                                    doubleBuffer.clear();
-                                    for (int ch = 0; ch < juce::jmin(trackBuffer.getNumChannels(), pluginCh); ++ch)
-                                    {
-                                        auto* src = trackBuffer.getReadPointer(ch);
-                                        auto* dest = doubleBuffer.getWritePointer(ch);
-                                        for (int sample = 0; sample < samplesThisBlock; ++sample)
-                                            dest[sample] = static_cast<double>(src[sample]);
-                                    }
-
-                                    proc->processBlock(doubleBuffer, midiMessages);
-
-                                    const int availableDoubleChannels = juce::jmax(1, pluginCh);
-                                    for (int ch = 0; ch < trackBuffer.getNumChannels(); ++ch)
-                                    {
-                                        auto* dest = trackBuffer.getWritePointer(ch);
-                                        auto* src = doubleBuffer.getReadPointer(juce::jmin(ch, availableDoubleChannels - 1));
-                                        for (int sample = 0; sample < samplesThisBlock; ++sample)
-                                            dest[sample] = static_cast<float>(src[sample]);
-                                    }
-                                }
-                                else if (pluginCh <= trackBuffer.getNumChannels())
-                                {
-                                    proc->processBlock(trackBuffer, midiMessages);
-                                    // Mono plugin on stereo track: duplicate output to all channels
-                                    int outCh = proc->getTotalNumOutputChannels();
-                                    if (outCh > 0 && outCh < trackBuffer.getNumChannels())
-                                    {
-                                        for (int ch = outCh; ch < trackBuffer.getNumChannels(); ++ch)
-                                            trackBuffer.copyFrom (ch, 0, trackBuffer, 0, 0, samplesThisBlock);
-                                    }
-                                }
-                                else
-                                {
-                                    // Expand buffer for this plugin (render thread — allocation OK)
-                                    juce::AudioBuffer<float> expanded(pluginCh, samplesThisBlock);
-                                    expanded.clear();
-                                    for (int ch = 0; ch < trackBuffer.getNumChannels(); ++ch)
-                                        expanded.copyFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
-                                    proc->processBlock(expanded, midiMessages);
-                                    for (int ch = 0; ch < trackBuffer.getNumChannels(); ++ch)
-                                        trackBuffer.copyFrom(ch, 0, expanded, ch, 0, samplesThisBlock);
-                                }
-                            };
-                            for (int fx = 0; fx < numInputFX; ++fx)
-                            {
-                                auto* proc = track->getInputFXProcessor(fx);
-                                if (proc) safeRenderFX(proc);
-                            }
-                            if (hasInstrument)
-                                safeRenderFX(track->getInstrument());
-                            for (int fx = 0; fx < numTrackFX; ++fx)
-                            {
-                                auto* proc = track->getTrackFXProcessor(fx);
-                                if (proc) safeRenderFX(proc);
-                            }
-                        }
-                    }
-                }
-
-                // Apply per-track volume/pan AFTER FX (matches real-time signal flow)
-                float volumeGain = juce::Decibels::decibelsToGain(snap.volumeDB);
-                float leftGain = 1.0f;
-                float rightGain = 1.0f;
-                computePanLawGains(currentPanLaw, snap.pan, volumeGain, leftGain, rightGain);
-
-                juce::FloatVectorOperations::multiply(trackBuffer.getWritePointer(0), leftGain, samplesThisBlock);
-                juce::FloatVectorOperations::multiply(trackBuffer.getWritePointer(1), rightGain, samplesThisBlock);
-
-                // Mix into master buffer
-                for (int ch = 0; ch < 2; ++ch)
-                {
-                    if (renderHybrid64)
-                    {
-                        auto* dest = masterBufferDouble.getWritePointer(ch);
-                        auto* src = trackBuffer.getReadPointer(ch);
-                        for (int sample = 0; sample < samplesThisBlock; ++sample)
-                            dest[sample] += static_cast<double>(src[sample]);
-                    }
-                    else
-                    {
-                        masterBuffer.addFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
-                    }
-                }
-            }
-
-            // Process master FX chain (channel-safe, render thread — allocation OK)
-            // Skip master FX for stem renders (export raw track output)
-            if (!isStemRender && renderMasterStage && !renderMasterStage->slots.empty())
-            {
-                juce::MidiBuffer dummyMidi;
-                for (const auto& slot : renderMasterStage->slots)
-                {
-                    if (!slot.processor || slot.bypassed)
+                    if (isStemRender && snap.id != stemTrackId)
+                        continue;
+                    if (!isStemRender && snap.muted)
+                        continue;
+                    if (!isStemRender && anySoloed && !snap.soloed)
                         continue;
 
-                    auto* proc = slot.processor.get();
-                    int pluginCh = juce::jmax(proc->getTotalNumInputChannels(),
-                                               proc->getTotalNumOutputChannels());
-                    const bool useDoublePrecision = renderHybrid64
-                                                 && !slot.forceFloat
-                                                 && slot.supportsDouble;
-                    if (useDoublePrecision)
+                    juce::AudioBuffer<float> trackBuffer(2, samplesThisBlock);
+                    trackBuffer.clear();
+                    passPlayback.fillTrackBuffer(snap.id, trackBuffer, currentTimeSeconds,
+                                                 samplesThisBlock, actualSampleRate);
+
+                    if (captureRenderChainBlock)
                     {
-                        juce::AudioBuffer<double> expanded(juce::jmax(2, pluginCh), samplesThisBlock);
-                        expanded.clear();
-                        for (int ch = 0; ch < juce::jmin(masterBufferDouble.getNumChannels(), expanded.getNumChannels()); ++ch)
+                        addToSignalChainCapture(chainPlaybackBlock, 0, trackBuffer, samplesThisBlock);
+                        auto routeTrace = buildRenderChainRouteTrace(snap.id, currentTimeSeconds, samplesThisBlock);
+                        if (auto* routeArray = routeTrace.getArray())
                         {
-                            auto* src = masterBufferDouble.getReadPointer(ch);
-                            auto* dest = expanded.getWritePointer(ch);
-                            for (int sample = 0; sample < samplesThisBlock; ++sample)
-                                dest[sample] = src[sample];
-                        }
-
-                        proc->processBlock(expanded, dummyMidi);
-
-                        for (int ch = 0; ch < masterBufferDouble.getNumChannels(); ++ch)
-                        {
-                            auto* dest = masterBufferDouble.getWritePointer(ch);
-                            auto* src = expanded.getReadPointer(juce::jmin(ch, expanded.getNumChannels() - 1));
-                            for (int sample = 0; sample < samplesThisBlock; ++sample)
-                                dest[sample] = src[sample];
+                            for (const auto& route : *routeArray)
+                                chainBlockRoutes.add(route);
                         }
                     }
-                    else if (pluginCh <= masterBuffer.getNumChannels())
+
+                    const float volumeGain = juce::Decibels::decibelsToGain(snap.volumeDB);
+                    float leftGain = 1.0f;
+                    float rightGain = 1.0f;
+                    computePanLawGains(currentPanLaw, snap.pan, volumeGain, leftGain, rightGain);
+                    juce::FloatVectorOperations::multiply(trackBuffer.getWritePointer(0), leftGain, samplesThisBlock);
+                    juce::FloatVectorOperations::multiply(trackBuffer.getWritePointer(1), rightGain, samplesThisBlock);
+
+                    if (captureRenderChainBlock)
+                        addToSignalChainCapture(chainTrackPostBlock, 0, trackBuffer, samplesThisBlock);
+
+                    for (int ch = 0; ch < 2; ++ch)
                     {
                         if (renderHybrid64)
-                            copyDoubleBufferToFloatBuffer(masterBufferDouble, masterBuffer, masterBuffer.getNumChannels(), samplesThisBlock);
-                        proc->processBlock(masterBuffer, dummyMidi);
-                        if (renderHybrid64)
-                            copyFloatBufferToDoubleBuffer(masterBuffer, masterBufferDouble, masterBuffer.getNumChannels(), samplesThisBlock);
+                        {
+                            auto* dest = reusableMasterBufferDouble.getWritePointer(ch);
+                            auto* src = trackBuffer.getReadPointer(ch);
+                            for (int sample = 0; sample < samplesThisBlock; ++sample)
+                                dest[sample] += static_cast<double>(src[sample]);
+                        }
+                        else
+                        {
+                            masterBuffer.addFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
+                        }
+                    }
+                }
+            }
+            else if (rtTracks && !rtTracks->empty())
+            {
+                constexpr int kMaxOfflineTracks = 64;
+                int processedOrder[kMaxOfflineTracks];
+                int orderCount = 0;
+                buildSidechainProcessingOrder(*rtTracks, processedOrder, orderCount, kMaxOfflineTracks);
+
+                for (int orderIdx = 0; orderIdx < orderCount; ++orderIdx)
+                {
+                    const auto& trackEntry = (*rtTracks)[static_cast<size_t>(processedOrder[orderIdx])];
+                    auto* track = dynamic_cast<TrackProcessor*>(trackEntry.node != nullptr ? trackEntry.node->getProcessor() : nullptr);
+                    if (track == nullptr)
+                        continue;
+
+                    if (isStemRender && trackEntry.id != stemTrackId)
+                        continue;
+
+                    auto snapshotIt = trackSnapshotById.find(trackEntry.id);
+                    if (!isStemRender)
+                    {
+                        if (snapshotIt == trackSnapshotById.end())
+                            continue;
+                        if (snapshotIt->second.muted)
+                            continue;
+                        if (anySoloed && !snapshotIt->second.soloed)
+                            continue;
+                    }
+
+                    juce::AudioBuffer<float> trackBuffer(2, samplesThisBlock);
+                    trackBuffer.clear();
+
+                    if (!isStemRender && trackEntry.sendAccumBuffer != nullptr && trackEntry.sendAccumBuffer->getNumSamples() >= samplesThisBlock)
+                    {
+                        auto& accumBuffer = *trackEntry.sendAccumBuffer;
+                        for (int ch = 0; ch < juce::jmin(2, accumBuffer.getNumChannels()); ++ch)
+                            juce::FloatVectorOperations::add(trackBuffer.getWritePointer(ch),
+                                                             accumBuffer.getReadPointer(ch),
+                                                             samplesThisBlock);
+                        accumBuffer.clear();
+                    }
+
+                    if (!track->hasActiveARA())
+                    {
+                        passPlayback.fillTrackBuffer(trackEntry.id, trackBuffer, currentTimeSeconds,
+                                                     samplesThisBlock, actualSampleRate);
+                    }
+                    if (captureRenderChainBlock)
+                    {
+                        addToSignalChainCapture (chainPlaybackBlock, 0, trackBuffer, samplesThisBlock);
+                        auto routeTrace = buildRenderChainRouteTrace (trackEntry.id, currentTimeSeconds, samplesThisBlock);
+                        if (auto* routeArray = routeTrace.getArray())
+                        {
+                            for (const auto& route : *routeArray)
+                                chainBlockRoutes.add (route);
+                        }
+                    }
+
+                    if (!isStemRender && !trackEntry.sidechainSourceIds.empty())
+                    {
+                        const juce::AudioBuffer<float>* sidechainBuffer = nullptr;
+                        for (const auto& sourceId : trackEntry.sidechainSourceIds)
+                        {
+                            if (sourceId.isEmpty())
+                                continue;
+
+                            for (const auto& candidate : *rtTracks)
+                            {
+                                if (candidate.id == sourceId && candidate.sidechainOutputBuffer != nullptr)
+                                {
+                                    sidechainBuffer = candidate.sidechainOutputBuffer.get();
+                                    break;
+                                }
+                            }
+
+                            if (sidechainBuffer != nullptr)
+                                break;
+                        }
+
+                        track->setSidechainBuffer(sidechainBuffer);
                     }
                     else
                     {
+                        track->setSidechainBuffer(nullptr);
+                    }
+
+                    track->setCurrentBlockPosition(currentTimeSeconds);
+                    if (auto* instrument = track->getInstrument())
+                        instrument->setPlayHead(this);
+                    juce::MidiBuffer midiMessages = buildTrackMidiBlock(trackEntry.id, currentTimeSeconds,
+                                                                        samplesThisBlock, actualSampleRate, true);
+                    if (!track->tryProcessBlock(trackBuffer, midiMessages))
+                        continue;
+                    if (captureRenderChainBlock)
+                        addToSignalChainCapture (chainTrackPostBlock, 0, trackBuffer, samplesThisBlock);
+
+                    if (!isStemRender && trackEntry.sidechainOutputBuffer != nullptr)
+                    {
+                        auto& sidechainOut = *trackEntry.sidechainOutputBuffer;
+                        if (sidechainOut.getNumChannels() < 2 || sidechainOut.getNumSamples() < samplesThisBlock)
+                            sidechainOut.setSize(2, samplesThisBlock, false, false, true);
+                        for (int ch = 0; ch < juce::jmin(2, trackBuffer.getNumChannels()); ++ch)
+                            sidechainOut.copyFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
+                    }
+
+                    if (!isStemRender && !trackEntry.sends.empty())
+                    {
+                        const auto& preFaderBuffer = track->getPreFaderBuffer();
+                        for (const auto& send : trackEntry.sends)
+                        {
+                            if (!send.enabled || send.level <= 0.0f || send.destTrackId.isEmpty())
+                                continue;
+
+                            for (const auto& destEntry : *rtTracks)
+                            {
+                                if (destEntry.id != send.destTrackId || destEntry.sendAccumBuffer == nullptr)
+                                    continue;
+
+                                auto& destBuffer = *destEntry.sendAccumBuffer;
+                                if (destBuffer.getNumChannels() < 2 || destBuffer.getNumSamples() < samplesThisBlock)
+                                    destBuffer.setSize(2, samplesThisBlock, false, false, true);
+
+                                const auto& sourceBuffer = send.preFader ? preFaderBuffer : trackBuffer;
+                                const int sourceChannels = sourceBuffer.getNumChannels();
+                                const int destChannels = destBuffer.getNumChannels();
+                                const float phaseMultiplier = send.phaseInvert ? -1.0f : 1.0f;
+                                const float panAngle = (send.pan + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
+                                const float leftGain = std::cos(panAngle) * send.level * phaseMultiplier;
+                                const float rightGain = std::sin(panAngle) * send.level * phaseMultiplier;
+
+                                if (destChannels >= 2 && sourceChannels >= 2)
+                                {
+                                    for (int sample = 0; sample < samplesThisBlock; ++sample)
+                                    {
+                                        destBuffer.getWritePointer(0)[sample] += sourceBuffer.getReadPointer(0)[sample] * leftGain;
+                                        destBuffer.getWritePointer(1)[sample] += sourceBuffer.getReadPointer(1)[sample] * rightGain;
+                                    }
+                                }
+                                else if (destChannels >= 1 && sourceChannels >= 1)
+                                {
+                                    for (int sample = 0; sample < samplesThisBlock; ++sample)
+                                        destBuffer.getWritePointer(0)[sample] += sourceBuffer.getReadPointer(0)[sample] * send.level;
+                                }
+
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!track->getMasterSendEnabled())
+                        continue;
+
+                    for (int ch = 0; ch < juce::jmin(2, trackBuffer.getNumChannels()); ++ch)
+                    {
                         if (renderHybrid64)
-                            copyDoubleBufferToFloatBuffer(masterBufferDouble, masterBuffer, masterBuffer.getNumChannels(), samplesThisBlock);
-                        juce::AudioBuffer<float> expanded(pluginCh, samplesThisBlock);
-                        expanded.clear();
-                        for (int ch = 0; ch < masterBuffer.getNumChannels(); ++ch)
-                            expanded.copyFrom(ch, 0, masterBuffer, ch, 0, samplesThisBlock);
-                        proc->processBlock(expanded, dummyMidi);
-                        for (int ch = 0; ch < masterBuffer.getNumChannels(); ++ch)
-                            masterBuffer.copyFrom(ch, 0, expanded, ch, 0, samplesThisBlock);
-                        if (renderHybrid64)
-                            copyFloatBufferToDoubleBuffer(masterBuffer, masterBufferDouble, masterBuffer.getNumChannels(), samplesThisBlock);
+                        {
+                            auto* dest = reusableMasterBufferDouble.getWritePointer(ch);
+                            auto* src = trackBuffer.getReadPointer(ch);
+                            for (int sample = 0; sample < samplesThisBlock; ++sample)
+                                dest[sample] += static_cast<double>(src[sample]);
+                        }
+                        else
+                        {
+                            masterBuffer.addFrom(ch, 0, trackBuffer, ch, 0, samplesThisBlock);
+                        }
                     }
                 }
             }
 
-            // Apply master pan (constant power law) — skip for stem renders
-            if (!isStemRender)
+            if (captureRenderChainBlock)
             {
-                float leftGain = 1.0f;
-                float rightGain = 1.0f;
-                computePanLawGains(currentPanLaw, masterPan, 1.0f, leftGain, rightGain);
-
                 if (renderHybrid64)
-                    applyStereoPanToDoubleBuffer(masterBufferDouble, samplesThisBlock, leftGain, rightGain);
-                else
-                {
-                    juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(0), leftGain, samplesThisBlock);
-                    juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(1), rightGain, samplesThisBlock);
-                }
+                    copyDoubleBufferToFloatBuffer (reusableMasterBufferDouble, masterBuffer, 2, samplesThisBlock);
+
+                const int chainCaptureOffset = static_cast<int> (std::min<juce::int64> (
+                    renderBlockStartSample,
+                    static_cast<juce::int64> (std::numeric_limits<int>::max())));
+                addToSignalChainCapture (chainPlaybackTap, chainCaptureOffset, chainPlaybackBlock, samplesThisBlock);
+                addToSignalChainCapture (chainTrackPostTap, chainCaptureOffset, chainTrackPostBlock, samplesThisBlock);
+                chainMasterPreBlock.copyFrom (0, 0, masterBuffer, 0, 0, samplesThisBlock);
+                chainMasterPreBlock.copyFrom (1, 0, masterBuffer, 1, 0, samplesThisBlock);
+                copyToSignalChainCapture (chainMasterPreTap, chainCaptureOffset, masterBuffer, samplesThisBlock);
             }
 
-            // Apply master volume — skip for stem renders
-            if (!isStemRender)
+            if (!isStemRender && renderMasterStage && !renderMasterStage->slots.empty())
+            {
+                float* masterChannelData[2] { masterBuffer.getWritePointer(0), masterBuffer.getWritePointer(1) };
+                processMasterFXChain(std::static_pointer_cast<const ActiveFXStage>(renderMasterStage),
+                                     masterChannelData, 2, samplesThisBlock, renderHybrid64);
+            }
+
+            if (captureRenderChainBlock)
             {
                 if (renderHybrid64)
-                {
-                    applyGainToDoubleBuffer(masterBufferDouble, 2, samplesThisBlock, masterVolume);
-                }
-                else
-                {
-                    for (int ch = 0; ch < 2; ++ch)
-                        juce::FloatVectorOperations::multiply(masterBuffer.getWritePointer(ch), masterVolume, samplesThisBlock);
-                }
+                    copyDoubleBufferToFloatBuffer (reusableMasterBufferDouble, masterBuffer, 2, samplesThisBlock);
+
+                const int chainCaptureOffset = static_cast<int> (std::min<juce::int64> (
+                    renderBlockStartSample,
+                    static_cast<juce::int64> (std::numeric_limits<int>::max())));
+                chainMasterPostBlock.copyFrom (0, 0, masterBuffer, 0, 0, samplesThisBlock);
+                chainMasterPostBlock.copyFrom (1, 0, masterBuffer, 1, 0, samplesThisBlock);
+                copyToSignalChainCapture (chainMasterPostTap, chainCaptureOffset, masterBuffer, samplesThisBlock);
+            }
+
+            if (!isStemRender)
+            {
+                float* masterChannelData[2] { masterBuffer.getWritePointer(0), masterBuffer.getWritePointer(1) };
+                applyMasterGainPanMono(masterChannelData, 2, samplesThisBlock, currentTimeSeconds, renderHybrid64);
             }
 
             // Apply normalization gain (pass 2 only)
@@ -6710,7 +9747,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             {
                 if (renderHybrid64)
                 {
-                    applyGainToDoubleBuffer(masterBufferDouble, 2, samplesThisBlock, normGain);
+                    applyGainToDoubleBuffer(reusableMasterBufferDouble, 2, samplesThisBlock, normGain);
                 }
                 else
                 {
@@ -6719,25 +9756,10 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 }
             }
 
-            if (!isStemRender && masterMono.load(std::memory_order_relaxed))
-            {
-                if (renderHybrid64)
-                    downmixDoubleBufferToMono(masterBufferDouble, samplesThisBlock);
-                else
-                {
-                    for (int sample = 0; sample < samplesThisBlock; ++sample)
-                    {
-                        float mono = (masterBuffer.getSample(0, sample) + masterBuffer.getSample(1, sample)) * 0.5f;
-                        masterBuffer.setSample(0, sample, mono);
-                        masterBuffer.setSample(1, sample, mono);
-                    }
-                }
-            }
-
             // Measure peak level
             if (renderHybrid64)
             {
-                passPeak = juce::jmax(passPeak, findPeakInDoubleBuffer(masterBufferDouble, 2, samplesThisBlock));
+                passPeak = juce::jmax(passPeak, findPeakInDoubleBuffer(reusableMasterBufferDouble, 2, samplesThisBlock));
             }
             else
             {
@@ -6760,7 +9782,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             if (isFinalPass)
             {
                 if (renderHybrid64)
-                    copyDoubleBufferToFloatBuffer(masterBufferDouble, masterBuffer, 2, samplesThisBlock);
+                    copyDoubleBufferToFloatBuffer(reusableMasterBufferDouble, masterBuffer, 2, samplesThisBlock);
 
                 // Apply dither if requested (before bit-depth truncation by the writer)
                 if (ditherMode > 0 && bitDepth < 32)
@@ -6796,6 +9818,29 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                     }
                 }
 
+                if (captureRenderChainBlock)
+                {
+                    const int chainCaptureOffset = static_cast<int> (std::min<juce::int64> (
+                        renderBlockStartSample,
+                        static_cast<juce::int64> (std::numeric_limits<int>::max())));
+                    chainWriterInputBlock.copyFrom (0, 0, masterBuffer, 0, 0, samplesThisBlock);
+                    chainWriterInputBlock.copyFrom (1, 0, masterBuffer, 1, 0, samplesThisBlock);
+                    copyToSignalChainCapture (chainWriterInputTap, chainCaptureOffset, masterBuffer, samplesThisBlock);
+
+                    auto* blockObj = new juce::DynamicObject();
+                    blockObj->setProperty ("pass", pass + 1);
+                    blockObj->setProperty ("blockStartSec", currentTimeSeconds);
+                    blockObj->setProperty ("blockStartSample", static_cast<int64> (renderBlockStartSample));
+                    blockObj->setProperty ("numSamples", samplesThisBlock);
+                    blockObj->setProperty ("playback", makeSignalChainBufferStats (chainPlaybackBlock, samplesThisBlock));
+                    blockObj->setProperty ("trackPost", makeSignalChainBufferStats (chainTrackPostBlock, samplesThisBlock));
+                    blockObj->setProperty ("masterPreFx", makeSignalChainBufferStats (chainMasterPreBlock, samplesThisBlock));
+                    blockObj->setProperty ("masterPostFx", makeSignalChainBufferStats (chainMasterPostBlock, samplesThisBlock));
+                    blockObj->setProperty ("writerInput", makeSignalChainBufferStats (chainWriterInputBlock, samplesThisBlock));
+                    blockObj->setProperty ("routes", juce::var (chainBlockRoutes));
+                    renderChainBlockReports.add (juce::var (blockObj));
+                }
+
                 if (numChannels == 1)
                 {
                     // Mono downmix: average L+R
@@ -6821,6 +9866,78 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
     // Flush and close
     writer.reset();
+
+    if (renderChainDebugEnabled)
+    {
+        auto* reportObj = new juce::DynamicObject();
+        reportObj->setProperty ("schemaVersion", 1);
+        reportObj->setProperty ("purpose", "signal_chain_first_render_debug");
+        reportObj->setProperty ("source", source);
+        reportObj->setProperty ("renderFile", renderFile.getFullPathName());
+        reportObj->setProperty ("requestedOutputFile", outputFile.getFullPathName());
+        reportObj->setProperty ("format", format);
+        reportObj->setProperty ("actualSampleRate", actualSampleRate);
+        reportObj->setProperty ("bitDepth", bitDepth);
+        reportObj->setProperty ("channels", numChannels);
+        reportObj->setProperty ("normalize", normalize);
+        reportObj->setProperty ("ditherMode", ditherMode);
+        reportObj->setProperty ("startTimeSec", startTime);
+        reportObj->setProperty ("endTimeSec", endTime);
+        reportObj->setProperty ("totalSamples", static_cast<int64> (totalSamples));
+        reportObj->setProperty ("capturedSamples", renderChainCaptureSamples);
+        reportObj->setProperty ("captureTruncated", renderChainCaptureSamples < totalSamples);
+        reportObj->setProperty ("pitchPreviewRoutesClearedBeforeSnapshot", true);
+        reportObj->setProperty ("renderedPitchSegmentsDroppedBeforeSnapshot", staleRenderedPitchSegmentsDropped);
+        reportObj->setProperty ("blockReports", juce::var (renderChainBlockReports));
+
+        auto* chainObj = new juce::DynamicObject();
+        chainObj->setProperty ("live", "clip route resolution -> PlaybackEngine read/mix -> TrackProcessor -> sends/sidechain -> master/monitoring FX -> gain/pan/mono -> meters/spectrum -> audio device");
+        chainObj->setProperty ("render", "renderProject -> render PlaybackEngine snapshot -> TrackProcessor -> master FX/gain -> writer");
+        reportObj->setProperty ("chainReference", juce::var (chainObj));
+
+        auto* stageObj = new juce::DynamicObject();
+        auto writeStage = [&] (const juce::String& name,
+                               const juce::AudioBuffer<float>& buffer)
+        {
+            auto* obj = new juce::DynamicObject();
+            const auto wav = renderChainDebugDir.getChildFile (name + ".wav");
+            const bool wrote = renderChainCaptureSamples > 0
+                && writeBufferToWavFile (buffer, renderChainCaptureSamples, actualSampleRate, wav);
+            obj->setProperty ("filePath", wrote ? wav.getFullPathName() : juce::String());
+            obj->setProperty ("wrote", wrote);
+            obj->setProperty ("stats", makeSignalChainBufferStats (buffer, renderChainCaptureSamples));
+            stageObj->setProperty (name, juce::var (obj));
+        };
+
+        writeStage ("playback_output", chainPlaybackTap);
+        writeStage ("track_post_processing", chainTrackPostTap);
+        writeStage ("master_pre_fx", chainMasterPreTap);
+        writeStage ("master_post_fx", chainMasterPostTap);
+        writeStage ("writer_input", chainWriterInputTap);
+
+        juce::AudioBuffer<float> writerOutputBuffer;
+        double writerOutputSampleRate = 0.0;
+        auto* writerOutputObj = new juce::DynamicObject();
+        writerOutputObj->setProperty ("filePath", renderFile.getFullPathName());
+        if (readAudioFileForParity (renderFile, writerOutputBuffer, writerOutputSampleRate))
+        {
+            writerOutputObj->setProperty ("readable", true);
+            writerOutputObj->setProperty ("sampleRate", writerOutputSampleRate);
+            writerOutputObj->setProperty ("stats", makeSignalChainBufferStats (
+                writerOutputBuffer,
+                juce::jmin (writerOutputBuffer.getNumSamples(), renderChainCaptureSamples)));
+        }
+        else
+        {
+            writerOutputObj->setProperty ("readable", false);
+        }
+        stageObj->setProperty ("writer_output", juce::var (writerOutputObj));
+        reportObj->setProperty ("stages", juce::var (stageObj));
+
+        const auto reportFile = renderChainDebugDir.getChildFile ("render_chain_report.json");
+        reportFile.replaceWithText (juce::JSON::toString (juce::var (reportObj), true));
+        logToDisk ("renderProject: signal-chain debug report=" + reportFile.getFullPathName());
+    }
 
     // ========== 9. FFmpeg post-processing (lossy encoding only) ==========
     if (needsFFmpegPostProcess)
@@ -6876,11 +9993,142 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     return true;
 }
 
+juce::var AudioEngine::capturePitchAuditionPlayback(const juce::String& trackId,
+                                                    const juce::String& clipId,
+                                                    double startTime,
+                                                    double duration,
+                                                    const juce::String& filePath,
+                                                    double sampleRate,
+                                                    bool offlineRenderMode)
+{
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty("success", false);
+    resultObj->setProperty("trackId", trackId);
+    resultObj->setProperty("clipId", clipId);
+    resultObj->setProperty("filePath", filePath);
+    resultObj->setProperty("offlineRenderMode", offlineRenderMode);
+
+    if (trackId.isEmpty() || filePath.isEmpty())
+    {
+        resultObj->setProperty("error", "missing trackId or output path");
+        return juce::var(resultObj);
+    }
+
+    const double safeSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const double safeStart = std::max(0.0, startTime);
+    const double safeDuration = std::max(0.0, duration);
+    if (safeDuration <= 0.0)
+    {
+        resultObj->setProperty("error", "duration must be positive");
+        return juce::var(resultObj);
+    }
+
+    const int totalSamples = juce::jmax(1, static_cast<int>(std::ceil(safeDuration * safeSampleRate)));
+    juce::AudioBuffer<float> capture(2, totalSamples);
+    capture.clear();
+
+    const bool wasRenderMode = isRendering.load();
+    playbackEngine.setRenderMode(offlineRenderMode);
+
+    int written = 0;
+    const int blockSize = 1024;
+    juce::AudioBuffer<float> block(2, blockSize);
+    float peak = 0.0f;
+    double energy = 0.0;
+    juce::int64 energySamples = 0;
+    juce::Array<juce::var> routeTrace;
+
+    while (written < totalSamples)
+    {
+        const int samplesThisBlock = juce::jmin(blockSize, totalSamples - written);
+        block.setSize(2, samplesThisBlock, false, false, true);
+        block.clear();
+
+        const double blockTime = safeStart + (static_cast<double>(written) / safeSampleRate);
+        const auto sourceStatus = playbackEngine.getClipPlaybackSourceAtTime(trackId, clipId, blockTime);
+        auto* routeObj = new juce::DynamicObject();
+        routeObj->setProperty("blockStartSec", blockTime);
+        routeObj->setProperty("blockDurationSec", static_cast<double>(samplesThisBlock) / safeSampleRate);
+        routeObj->setProperty("clipFound", sourceStatus.clipFound);
+        routeObj->setProperty("clipTimeSec", sourceStatus.clipTime);
+        routeObj->setProperty("sourceType", sourceStatus.sourceType);
+        routeObj->setProperty("audioFile", sourceStatus.audioFile);
+        routeObj->setProperty("playbackOffsetSec", sourceStatus.playbackOffset);
+        routeObj->setProperty("renderedSegmentActiveAtTime", sourceStatus.renderedSegmentActiveAtTime);
+        routeObj->setProperty("correctedSourceActiveAtTime", sourceStatus.correctedSourceActiveAtTime);
+        routeTrace.add(juce::var(routeObj));
+        playbackEngine.fillTrackBuffer(trackId, block, blockTime, samplesThisBlock, safeSampleRate);
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            capture.copyFrom(ch, written, block, ch, 0, samplesThisBlock);
+            const auto range = juce::FloatVectorOperations::findMinAndMax(block.getReadPointer(ch), samplesThisBlock);
+            peak = juce::jmax(peak, juce::jmax(std::abs(range.getStart()), std::abs(range.getEnd())));
+            const float* data = block.getReadPointer(ch);
+            for (int i = 0; i < samplesThisBlock; ++i)
+            {
+                const double s = static_cast<double>(data[i]);
+                energy += s * s;
+                ++energySamples;
+            }
+        }
+
+        written += samplesThisBlock;
+    }
+
+    playbackEngine.setRenderMode(wasRenderMode);
+
+    const juce::File outputFile(filePath);
+    outputFile.getParentDirectory().createDirectory();
+    const bool wrote = writeBufferToWavFile(capture, totalSamples, safeSampleRate, outputFile);
+    if (!wrote)
+    {
+        resultObj->setProperty("error", "failed to write audition capture wav");
+        return juce::var(resultObj);
+    }
+
+    resultObj->setProperty("success", true);
+    resultObj->setProperty("filePath", outputFile.getFullPathName());
+    resultObj->setProperty("startSec", safeStart);
+    resultObj->setProperty("durationSec", static_cast<double>(totalSamples) / safeSampleRate);
+    resultObj->setProperty("sampleRate", safeSampleRate);
+    resultObj->setProperty("peak", peak);
+    resultObj->setProperty("rms", energySamples > 0 ? std::sqrt(energy / static_cast<double>(energySamples)) : 0.0);
+    resultObj->setProperty("source", offlineRenderMode ? "offline_render_engine" : "live_playback_engine");
+    resultObj->setProperty("routeTrace", juce::var(routeTrace));
+    return juce::var(resultObj);
+}
+
+juce::var AudioEngine::capturePitchBakedContext(const juce::String& sourceFile,
+                                                double startSec,
+                                                double durationSec,
+                                                const juce::String& filePath)
+{
+    return writePitchBakedContextWav(juce::File(sourceFile),
+                                     startSec,
+                                     durationSec,
+                                     juce::File(filePath));
+}
+
+juce::var AudioEngine::comparePitchDebugAudioFiles(const juce::String& referenceFile,
+                                                   const juce::String& candidateFile,
+                                                   double captureStartClipSec,
+                                                   double noteStartClipSec,
+                                                   double noteEndClipSec)
+{
+    return comparePitchParityFiles(juce::File(referenceFile),
+                                   juce::File(candidateFile),
+                                   captureStartClipSec,
+                                   noteStartClipSec,
+                                   noteEndClipSec);
+}
+
 bool AudioEngine::renderProjectWithDither(const juce::String& source, double startTime, double endTime,
                                           const juce::String& filePath, const juce::String& format,
                                           double renderSampleRate, int bitDepth, int numChannels,
                                           bool normalize, bool addTail, double tailLengthMs,
-                                          const juce::String& ditherType)
+                                          const juce::String& ditherType,
+                                          bool includeMetronome)
 {
     // Map dither type string to mode: "tpdf" → 1, "shaped" → 2, else → 0
     if (ditherType == "tpdf")
@@ -6892,21 +10140,11 @@ bool AudioEngine::renderProjectWithDither(const juce::String& source, double sta
 
     return renderProject(source, startTime, endTime, filePath, format,
                          renderSampleRate, bitDepth, numChannels,
-                         normalize, addTail, tailLengthMs);
+                         normalize, addTail, tailLengthMs, includeMetronome);
 }
 
 //==============================================================================
-// Automation (Phase 1.1)
-
-static AutomationList* getAutomationListForParam(TrackProcessor* track, const juce::String& parameterId)
-{
-    if (parameterId == "volume")
-        return &track->getVolumeAutomation();
-    if (parameterId == "pan")
-        return &track->getPanAutomation();
-    // Future: plugin parameter automation would go here
-    return nullptr;
-}
+// Automation
 
 static AutomationMode parseAutomationMode(const juce::String& modeStr)
 {
@@ -6933,25 +10171,25 @@ static juce::String automationModeToString(AutomationMode mode)
 void AudioEngine::setAutomationPoints(const juce::String& trackId, const juce::String& parameterId,
                                        const juce::String& pointsJSON)
 {
-    // Master automation special case
     AutomationList* list = nullptr;
     if (trackId == "master")
     {
         if (parameterId == "volume") list = &masterVolumeAutomation;
         else if (parameterId == "pan") list = &masterPanAutomation;
-        if (!list) return;
+        if (!list)
+            return;
     }
     else
     {
         auto it = trackMap.find(trackId);
         if (it == trackMap.end() || !it->second)
             return;
-        list = getAutomationListForParam(it->second, parameterId);
-        if (!list)
+        auto target = it->second->resolveAutomationTarget(parameterId, true);
+        if (!target.has_value() || target->list == nullptr)
             return;
+        list = target->list;
     }
 
-    // Parse JSON array of { time: <seconds>, value: <float> }
     auto parsed = juce::JSON::parse(pointsJSON);
     if (!parsed.isArray())
         return;
@@ -6964,9 +10202,7 @@ void AudioEngine::setAutomationPoints(const juce::String& trackId, const juce::S
     {
         double timeSec = item.getProperty("time", 0.0);
         float value = static_cast<float>(static_cast<double>(item.getProperty("value", 0.0)));
-        // Convert seconds to samples for the audio thread
-        double timeSamples = timeSec * currentSampleRate;
-        points.push_back({ timeSamples, value });
+        points.push_back({ timeSec, value });
     }
 
     list->setPoints(std::move(points));
@@ -6979,30 +10215,11 @@ void AudioEngine::setAutomationMode(const juce::String& trackId, const juce::Str
                                      const juce::String& modeStr)
 {
     AutomationList* list = nullptr;
+    float defaultValue = 0.0f;
     if (trackId == "master")
     {
         if (parameterId == "volume") list = &masterVolumeAutomation;
         else if (parameterId == "pan") list = &masterPanAutomation;
-        if (!list) return;
-
-        auto mode = parseAutomationMode(modeStr);
-        list->setMode(mode);
-
-        if (mode != AutomationMode::Off)
-        {
-            if (parameterId == "volume")
-                list->setDefaultValue(masterVolume);
-            else if (parameterId == "pan")
-                list->setDefaultValue(masterPan);
-        }
-    }
-    else
-    {
-        auto it = trackMap.find(trackId);
-        if (it == trackMap.end() || !it->second)
-            return;
-
-        list = getAutomationListForParam(it->second, parameterId);
         if (!list)
             return;
 
@@ -7012,10 +10229,28 @@ void AudioEngine::setAutomationMode(const juce::String& trackId, const juce::Str
         if (mode != AutomationMode::Off)
         {
             if (parameterId == "volume")
-                list->setDefaultValue(it->second->getVolume());
+                defaultValue = masterVolume;
             else if (parameterId == "pan")
-                list->setDefaultValue(it->second->getPan());
+                defaultValue = masterPan;
+            list->setDefaultValue(defaultValue);
         }
+    }
+    else
+    {
+        auto it = trackMap.find(trackId);
+        if (it == trackMap.end() || !it->second)
+            return;
+
+        auto target = it->second->resolveAutomationTarget(parameterId, true);
+        if (!target.has_value() || target->list == nullptr)
+            return;
+        list = target->list;
+
+        auto mode = parseAutomationMode(modeStr);
+        list->setMode(mode);
+
+        if (mode != AutomationMode::Off)
+            list->setDefaultValue(it->second->getAutomationDefaultValue(*target));
     }
 
     juce::Logger::writeToLog("AudioEngine: Set automation mode for track " + trackId +
@@ -7035,7 +10270,9 @@ juce::String AudioEngine::getAutomationMode(const juce::String& trackId, const j
         auto it = trackMap.find(trackId);
         if (it == trackMap.end() || !it->second)
             return "off";
-        list = getAutomationListForParam(it->second, parameterId);
+        auto target = it->second->resolveAutomationTarget(parameterId, false);
+        if (target.has_value())
+            list = target->list;
     }
     if (!list)
         return "off";
@@ -7054,8 +10291,11 @@ void AudioEngine::clearAutomation(const juce::String& trackId, const juce::Strin
     else
     {
         auto it = trackMap.find(trackId);
-        if (it == trackMap.end() || !it->second) return;
-        list = getAutomationListForParam(it->second, parameterId);
+        if (it == trackMap.end() || !it->second)
+            return;
+        auto target = it->second->resolveAutomationTarget(parameterId, false);
+        if (target.has_value())
+            list = target->list;
     }
     if (list)
         list->clear();
@@ -7072,8 +10312,11 @@ void AudioEngine::beginTouchAutomation(const juce::String& trackId, const juce::
     else
     {
         auto it = trackMap.find(trackId);
-        if (it == trackMap.end() || !it->second) return;
-        list = getAutomationListForParam(it->second, parameterId);
+        if (it == trackMap.end() || !it->second)
+            return;
+        auto target = it->second->resolveAutomationTarget(parameterId, false);
+        if (target.has_value())
+            list = target->list;
     }
     if (list)
         list->beginTouch();
@@ -7090,8 +10333,11 @@ void AudioEngine::endTouchAutomation(const juce::String& trackId, const juce::St
     else
     {
         auto it = trackMap.find(trackId);
-        if (it == trackMap.end() || !it->second) return;
-        list = getAutomationListForParam(it->second, parameterId);
+        if (it == trackMap.end() || !it->second)
+            return;
+        auto target = it->second->resolveAutomationTarget(parameterId, false);
+        if (target.has_value())
+            list = target->list;
     }
     if (list)
         list->endTouch();
@@ -7403,7 +10649,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
         playbackEngine.fillTrackBuffer(trackId, trackBuffer, samplePos / renderRate, blockSamples, renderRate);
 
         // Process through FX chain
-        track->setCurrentBlockPosition(samplePos, renderRate);
+        track->setCurrentBlockPosition(samplePos / renderRate);
         juce::MidiBuffer midiMessages = buildTrackMidiBlock(trackId, samplePos / renderRate,
                                                             blockSamples, renderRate, true);
         juce::AudioBuffer<float> fxBuffer(trackBuffer.getArrayOfWritePointers(), 2, blockSamples);
@@ -8090,7 +11336,8 @@ juce::var AudioEngine::getPitchHistory(const juce::String& trackId, int fxIndex,
 // Pitch Corrector — Graphical Mode bridge methods
 // ============================================================================
 
-juce::var AudioEngine::analyzePitchContour(const juce::String& trackId, const juce::String& clipId)
+juce::var AudioEngine::analyzePitchContour(const juce::String& trackId, const juce::String& clipId,
+                                           std::function<bool()> shouldCancel)
 {
     // Find the clip's audio file
     auto clips = playbackEngine.getClipSnapshot();
@@ -8131,12 +11378,14 @@ juce::var AudioEngine::analyzePitchContour(const juce::String& trackId, const ju
     // Run analysis
     PitchAnalyzer analyzer;
     auto result = analyzer.analyzeClip(mono.getReadPointer(0), numSamples,
-                                        reader->sampleRate, clipId);
+                                        reader->sampleRate, clipId, shouldCancel);
 
     return PitchAnalyzer::resultToJSON(result);
 }
 
-juce::var AudioEngine::analyzePitchContourDirect(const juce::String& filePath, double offset, double duration, const juce::String& clipId)
+juce::var AudioEngine::analyzePitchContourDirect(const juce::String& filePath, double offset, double duration,
+                                                 const juce::String& clipId,
+                                                 std::function<bool()> shouldCancel)
 {
     juce::File audioFile(filePath);
     if (!audioFile.existsAsFile())
@@ -8165,7 +11414,7 @@ juce::var AudioEngine::analyzePitchContourDirect(const juce::String& filePath, d
 
     PitchAnalyzer analyzer;
     auto result = analyzer.analyzeClip(mono.getReadPointer(0), numSamples,
-                                        reader->sampleRate, clipId);
+                                        reader->sampleRate, clipId, shouldCancel);
 
     return PitchAnalyzer::resultToJSON(result);
 }
@@ -8173,10 +11422,12 @@ juce::var AudioEngine::analyzePitchContourDirect(const juce::String& filePath, d
 juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const juce::String& clipId,
                                               const juce::var& notesJson, const juce::var& framesJson,
                                               float globalFormantSemitones,
-                                              std::optional<double> windowStartSecOverride,
-                                              std::optional<double> windowEndSecOverride,
-                                              const juce::String& renderMode,
-                                              std::function<bool()> shouldCancel)
+                                               std::optional<double> windowStartSecOverride,
+                                               std::optional<double> windowEndSecOverride,
+                                               const juce::String& renderMode,
+                                               std::function<bool()> shouldCancel,
+                                               double jobStartDelayMs,
+                                               int previewRenderGenerationToken)
 {
     logPitchEditorFormant("AudioEngine::applyPitchCorrection begin clip=" + clipId
         + " track=" + trackId
@@ -8250,10 +11501,10 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
 
     const double sr = reader->sampleRate;
     const double clipDuration = static_cast<double>(clipNumSamples) / sr;
-    const bool hasGlobalFormant = std::abs(globalFormantSemitones) > 0.01f;
 
     // Parse notes first so we can limit processing to only the edited region.
     auto editedNotes = PitchAnalyzer::notesFromJSON(notesJson);
+    const bool explicitGlobalFormantRequested = std::abs(globalFormantSemitones) > 0.01f;
 
     // Find the time range covered by ACTUALLY EDITED notes only (correctedPitch != detectedPitch).
     // WORLD vocoder is NOT transparent at ratio=1.0 — it degrades audio quality even when
@@ -8268,6 +11519,9 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     int gainEditCount = 0;
     int driftEditCount = 0;
     int vibratoEditCount = 0;
+    bool hasUpwardPitchEdit = false;
+    bool hasDownwardPitchEdit = false;
+    bool explicitNoteFormantRequested = false;
     for (const auto& n : editedNotes)
     {
         const bool pitchEdited = std::abs(n.correctedPitch - n.detectedPitch) > editThreshold;
@@ -8276,19 +11530,36 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
         const bool driftEdited = n.driftCorrectionAmount > 0.01f;
         const bool vibratoEdited = std::abs(n.vibratoDepth - 1.0f) > 0.01f;
 
-        if (pitchEdited) ++pitchEditCount;
+        if (pitchEdited)
+        {
+            ++pitchEditCount;
+            const float pitchDelta = n.correctedPitch - n.detectedPitch;
+            hasUpwardPitchEdit = hasUpwardPitchEdit || pitchDelta > editThreshold;
+            hasDownwardPitchEdit = hasDownwardPitchEdit || pitchDelta < -editThreshold;
+        }
         if (gainEdited) ++gainEditCount;
-        if (noteFormantEdited) ++noteFormantEditCount;
+        if (noteFormantEdited)
+        {
+            ++noteFormantEditCount;
+            explicitNoteFormantRequested = true;
+        }
         if (driftEdited) ++driftEditCount;
         if (vibratoEdited) ++vibratoEditCount;
 
         if (pitchEdited || gainEdited || noteFormantEdited || driftEdited || vibratoEdited)
         {
-            notesStartSec = std::min(notesStartSec, static_cast<double>(n.startTime));
-            notesEndSec   = std::max(notesEndSec,   static_cast<double>(n.endTime));
+            const double noteStartSec = static_cast<double>(n.effectiveStartTime);
+            const double noteEndSec = static_cast<double>(n.effectiveEndTime);
+            notesStartSec = std::min(notesStartSec, noteStartSec);
+            notesEndSec   = std::max(notesEndSec,   noteEndSec);
             anyNoteEdited = true;
         }
     }
+
+    const bool explicitFormantRequested = explicitGlobalFormantRequested || explicitNoteFormantRequested;
+    bool pitchOnlyFormantSuppressed = false;
+
+    const bool hasGlobalFormant = std::abs(globalFormantSemitones) > 0.01f;
     const bool anyEdited = anyNoteEdited || hasGlobalFormant;
     juce::String requestMode = "none";
     const bool hasPitchEdits = pitchEditCount > 0;
@@ -8309,6 +11580,8 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
         + " driftEdits=" + juce::String(driftEditCount)
         + " vibratoEdits=" + juce::String(vibratoEditCount)
         + " globalFormant=" + juce::String(hasGlobalFormant ? "true" : "false")
+        + " explicitFormantRequested=" + juce::String(explicitFormantRequested ? "true" : "false")
+        + " pitchOnlyFormantSuppressed=" + juce::String(pitchOnlyFormantSuppressed ? "true" : "false")
         + " mode=" + requestMode);
 
     // If no notes were actually edited, restore the original audio file
@@ -8316,15 +11589,21 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     if (!anyEdited)
     {
         logPitchEditorFormant("no edits remain, restoring original clip=" + clipId);
-        if (foundClip->originalAudioFile.existsAsFile()
-            && foundClip->audioFile != foundClip->originalAudioFile)
+        playbackEngine.clearAllPitchPreviewRoutes(clipId);
+        if (foundClip->originalAudioFile.existsAsFile())
         {
             playbackEngine.replaceClipAudioFile(clipId, foundClip->originalAudioFile);
+        }
+        else
+        {
+            playbackEngine.clearPitchCorrectionFile(clipId);
         }
         juce::DynamicObject::Ptr resultObj = new juce::DynamicObject();
         resultObj->setProperty("outputFile", foundClip->originalAudioFile.getFullPathName());
         resultObj->setProperty("success", true);
         resultObj->setProperty("restored", true);
+        resultObj->setProperty("processingMode", "none");
+        resultObj->setProperty("formantCurveUsed", false);
         return juce::var(resultObj.get());
     }
 
@@ -8370,7 +11649,7 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
 
         PitchAnalyzer analyzer;
         analysis = analyzer.analyzeClip(monoBuffer.getReadPointer(0),
-                                        clipNumSamples, sr, clipId);
+                                        clipNumSamples, sr, clipId, shouldCancel);
         logPitchEditorFormant("no frontend frames supplied, re-analyzed locally clip=" + clipId);
     }
 
@@ -8378,9 +11657,226 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     int renderedOutputSamples = clipNumSamples;
     double previewCoverageStartSec = 0.0;
     double previewCoverageEndSec = clipDuration;
+    double candidateCoverageStartSec = 0.0;
+    double candidateCoverageEndSec = clipDuration;
     bool previewSegmentRender = false;
     bool fullClipHQRender = false;
     bool swapDeferred = false;
+    juce::String requestedRendererBranch = PitchResynthesizer::getRequestedPitchRendererBranchName();
+    juce::String actualRendererBranch = requestedRendererBranch;
+    if (explicitFormantRequested)
+    {
+        const juce::String reason = "graphical pitch editor formant rendering is disabled; VSF pitch-only is the only offline apply path";
+        juce::DynamicObject::Ptr resultObj = new juce::DynamicObject();
+        resultObj->setProperty ("success", false);
+        resultObj->setProperty ("clipId", clipId);
+        resultObj->setProperty ("renderMode", renderMode);
+        resultObj->setProperty ("requestedRendererBranch", requestedRendererBranch);
+        resultObj->setProperty ("actualRendererBranch", actualRendererBranch);
+        resultObj->setProperty ("processingMode", requestMode);
+        resultObj->setProperty ("explicitFormantRequested", true);
+        resultObj->setProperty ("pitchOnlyFormantSuppressed", false);
+        resultObj->setProperty ("formantCurveUsed", false);
+        resultObj->setProperty ("hardFailReason", reason);
+        resultObj->setProperty ("fallbackReason", reason);
+        resultObj->setProperty ("pitchRenderStrategy", "unsupported_formant_request");
+        return juce::var (resultObj.get());
+    }
+    juce::String pitchOnlyRecoveryPath;
+    bool pitchOnlyNeutralFormantUsed = false;
+    bool usedRendererFallback = false;
+    juce::String rendererFallbackReason;
+    bool bridgeUsed = false;
+    bool bridgeFallbackUsed = false;
+    double bridgeStartSec = 0.0;
+    double bridgeLengthMs = 0.0;
+    int bridgeAlignmentLagSamples = 0;
+    float bridgeCorrelationScore = 0.0f;
+    float bridgeGainDeltaDb = 0.0f;
+    bool bodyReplacementUsed = false;
+    bool bodyReplacementFallbackUsed = false;
+    double entryLockStartSec = 0.0;
+    double entryLockLengthMs = 0.0;
+    double exitLockStartSec = 0.0;
+    double renderedBodyStartSec = 0.0;
+    double renderedBodyEndSec = 0.0;
+    bool islandNativeUsed = false;
+    bool islandNativeFallbackUsed = false;
+    double islandRenderStartSec = 0.0;
+    double islandRenderEndSec = 0.0;
+    float transientMaskPeak = 0.0f;
+    float voicedCoreMaskPeak = 0.0f;
+    bool hpssUsed = false;
+    bool hpssFallbackUsed = false;
+    float harmonicMaskPeak = 0.0f;
+    float aperiodicMaskPeak = 0.0f;
+    bool spectralEnvelopeCorrectionUsed = false;
+    bool pitchOnlyCoreTimbreCorrectionUsed = false;
+    double pitchOnlyCoreEnvelopeMix = 0.0;
+    double pitchOnlyCoreRmsTrimDb = 0.0;
+    int pitchOnlyCoreEnvelopeLifter = 0;
+    bool pitchOnlyEntryTimbreCorrectionUsed = false;
+    double pitchOnlyEntryRmsTrimDb = 0.0;
+    double pitchOnlyEntryTiltDb = 0.0;
+    bool pitchOnlyEntryHandoffUsed = false;
+    bool pitchOnlyExitHandoffUsed = false;
+    bool vocalSourceFilterUsed = false;
+    double vocalSourceFilterVoicedCoverage = 0.0;
+    double vocalSourceFilterResidualMix = 0.0;
+    bool vocalSourceFilterFallbackUsed = false;
+    juce::String vocalSourceFilterFallbackReason;
+    double vocalSourceFilterEntryDryMs = 0.0;
+    double vocalSourceFilterExitDryMs = 0.0;
+    double vocalSourceFilterResidualMixScale = 1.0;
+    bool vocalSourceFilterEpochInterpolationUsed = false;
+    double vocalSourceFilterEpochInterpolationStrength = 0.0;
+    double vocalSourceFilterGrainRadiusScale = 1.0;
+    double vocalSourceFilterUpPresenceTrimDb = 0.0;
+    double vocalSourceFilterUpPresenceHz = 0.0;
+    double vocalSourceFilterDownNasalTrimDb = 0.0;
+    double vocalSourceFilterDownNasalHz = 0.0;
+    double vocalSourceFilterDownBodyCompDb = 0.0;
+    double vocalSourceFilterDownBodyCompHz = 0.0;
+    bool wsolaUsed = false;
+    bool wsolaFallbackUsed = false;
+    int wsolaEntryLagSamples = 0;
+    int wsolaExitLagSamples = 0;
+    float wsolaCorrelationScore = 0.0f;
+    bool phaseLockUsed = false;
+    bool phaseLockFallbackUsed = false;
+    bool phaseAlignedEntry = false;
+    bool phaseAlignedExit = false;
+    int phasePeakCount = 0;
+    bool transitionHqUsed = false;
+    bool transitionHqFallbackUsed = false;
+    double transitionStartSec = 0.0;
+    double transitionEndSec = 0.0;
+    float transitionTransientPeak = 0.0f;
+    float transitionVoicedCorePeak = 0.0f;
+    float transitionResidualPeak = 0.0f;
+    bool transitionEnvelopeCorrectionUsed = false;
+    bool engineV2Used = false;
+    bool engineV2FallbackUsed = false;
+    int engineV2TransitionCount = 0;
+    double engineV2TransitionStartSec = 0.0;
+    double engineV2TransitionEndSec = 0.0;
+    float engineV2HarmonicSupportPeak = 0.0f;
+    float engineV2ResidualSupportPeak = 0.0f;
+    float engineV2EnvelopeSupportPeak = 0.0f;
+    bool transientBypassUsed = false;
+    bool residualCarryUsed = false;
+    int cepstralCutoffUsed = 0;
+    int engineV2FftSize = 0;
+    int engineV2HopSize = 0;
+    bool immediateLeftNeighborUsed = false;
+    bool immediateRightNeighborUsed = false;
+    int leftNeighborSamplesRendered = 0;
+    int rightNeighborSamplesRendered = 0;
+    double leftNeighborSmoothMs = 0.0;
+    double rightNeighborSmoothMs = 0.0;
+    bool nonImmediateNeighborTouched = false;
+    double entryAlignmentOffsetMs = 0.0;
+    double exitAlignmentOffsetMs = 0.0;
+    bool firstVoicedCyclesEntryUsed = false;
+    bool firstVoicedCyclesExitUsed = false;
+    bool v3TransitionPairUsed = false;
+    bool v3ContinuousRenderUsed = false;
+    bool formantCurveUsed = false;
+    bool phraseHqRenderUsed = false;
+    bool phraseHqExpandedToFullClip = false;
+    juce::String pitchRenderDirection = "none";
+    bool downshiftFormantGuardUsed = false;
+    double downshiftFormantGuardAlpha = 0.0;
+    double noteHqEffectiveStartSec = 0.0;
+    double noteHqEffectiveEndSec = 0.0;
+    double noteHqContextStartSec = 0.0;
+    double noteHqContextEndSec = 0.0;
+    double noteHqAudibleCommitStartSec = 0.0;
+    double noteHqAudibleCommitEndSec = 0.0;
+    int noteHqPreBodyDryProtectedSamples = 0;
+    double noteHqEntryInsideBodyFadeMs = 12.0;
+    double noteHqExitLeadInMs = 12.0;
+    double noteHqEntryBridgeStartSec = 0.0;
+    double noteHqEntryBridgeEndSec = 0.0;
+    double noteHqEntryBridgeWetLagMs = 0.0;
+    double noteHqEntryBridgeEnvelopeGainDb = 0.0;
+    bool noteHqEntryBridgeUsed = false;
+    double noteHqEntryTransientDryPreservedMs = 0.0;
+    bool pitchOnlyEntrySimpleHandoffUsed = false;
+    bool pitchOnlyEntrySafeHandoffUsed = false;
+    double pitchOnlyEntryDryHoldMs = 0.0;
+    double pitchOnlyEntrySafeBridgeMs = 0.0;
+    double pitchOnlyEntryWetAlignmentMs = 0.0;
+    double pitchOnlyEntryWetGainDb = 0.0;
+    double pitchOnlyEntryWetVsDryRmsDb = 0.0;
+    bool pitchOnlyEntryEqualPowerBlendUsed = false;
+    bool pitchOnlyEntryRmsContinuityUsed = false;
+    double pitchOnlyEntryRmsContinuityGainDb = 0.0;
+    double pitchOnlyEntryRmsContinuityMs = 0.0;
+    bool pitchOnlyEntryTransientResidualUsed = false;
+    double pitchOnlyEntryTransientResidualMix = 0.0;
+    double pitchOnlyEntryTransientResidualMs = 0.0;
+    bool pitchOnlyEntryPhaseSafeUsed = false;
+    bool pitchOnlyEntryWetAlignmentAccepted = false;
+    double pitchOnlyEntryFirstCycleCorrelation = 0.0;
+    double pitchOnlyEntryZeroCrossOffsetMs = 0.0;
+    double pitchOnlyEntryBridgeGainRampDb = 0.0;
+    bool pitchOnlyDownshiftCoreEnvelopePassUsed = false;
+    double pitchOnlyDownshiftCoreRmsTrimDb = 0.0;
+    double pitchOnlyDownshiftCoreEnvelopeMaxDb = 0.0;
+    int pitchOnlyDownshiftCoreEnvelopeFrames = 0;
+    double pitchOnlyEntryWetLagMs = 0.0;
+    double pitchOnlyEntryBridgeDurationMs = 0.0;
+    bool pitchOnlyExitDryRestoreUsed = false;
+    double pitchOnlyExitDryRestoreStartSec = 0.0;
+    double pitchOnlyExitDryRestoreEndSec = 0.0;
+    juce::String noteHqEntryBoundaryKind = "unknown";
+    juce::String noteHqExitBoundaryKind = "unknown";
+    double noteHqEntryBoundaryScore = 0.0;
+    double noteHqExitBoundaryScore = 0.0;
+    juce::String noteHqRendererEntryBoundaryKind = "unknown";
+    juce::String noteHqRendererExitBoundaryKind = "unknown";
+    int noteHqEditIslandCount = 0;
+    int noteHqEditedNoteCount = 0;
+    juce::String pitchRenderProductPath = "preview";
+    juce::String pitchRenderBackendId;
+    juce::String pitchRenderBackendVersion;
+    juce::String pitchRenderBackendFailureCode;
+    juce::var pitchRenderBackendCapabilities;
+    juce::var pitchRenderBackendDiagnostics;
+    bool pitchRenderBackendAvailable = false;
+    juce::String pitchRenderCommitPolicy;
+    int pitchRenderDryProtectedSamples = 0;
+    double pitchRenderContextDurationSec = 0.0;
+    double pitchRenderCommitDurationSec = 0.0;
+    double pitchRenderJobStartDelayMs = jobStartDelayMs;
+    juce::String hardFailReason;
+    double phraseHqStartSec = 0.0;
+    double phraseHqEndSec = clipDuration;
+    double v3EntryAnchorMs = 0.0;
+    double v3ExitAnchorMs = 0.0;
+    int v3FirstCyclesEntryCount = 0;
+    int v3FirstCyclesExitCount = 0;
+    double v3ShellDurationMs = 0.0;
+    double v3BodyDurationMs = 0.0;
+    double v3ResidualMix = 0.0;
+    juce::String v3FormantMode;
+    double v3NeighborLeftOverlapMs = 0.0;
+    double v3NeighborRightOverlapMs = 0.0;
+    bool noteHqEntryPitchHandoffUsed = false;
+    double noteHqEntryPitchHandoffStartSec = 0.0;
+    double noteHqEntryPitchHandoffEndSec = 0.0;
+    double noteHqEntryPitchHandoffPreMs = 0.0;
+    double noteHqEntryPitchHandoffBodyMs = 0.0;
+    double noteHqEntryPitchSlopeJumpStPerSec = 0.0;
+    bool noteHqEntryPitchAccelerationLimited = false;
+
+    if (hasUpwardPitchEdit && hasDownwardPitchEdit)
+        pitchRenderDirection = "mixed";
+    else if (hasDownwardPitchEdit)
+        pitchRenderDirection = "downward";
+    else if (hasUpwardPitchEdit)
+        pitchRenderDirection = "upward";
 
     // Process only the EDITED WINDOW (with padding), or a whole-clip render for explicit formants.
     {
@@ -8389,30 +11885,72 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
         const bool hasAnyFormantEdits = hasGlobalFormant || hasNoteFormantEdits;
         previewSegmentRender = renderMode == "preview_segment";
         fullClipHQRender = renderMode == "full_clip_hq";
-        const bool processFullClip = hasAnyFormantEdits && !previewSegmentRender;
+        const bool noteHqRender = renderMode == "note_hq";
+        const bool phraseHqRender = noteHqRender
+            && requestMode == "pitch-only"
+            && ! hasAnyFormantEdits;
+        const auto phraseCommitRanges = phraseHqRender
+            ? buildDryPitchCommitRanges (editedNotes, clipDuration)
+            : std::vector<PitchCommitRange>();
+        const auto phraseRegion = (phraseHqRender && ! phraseCommitRanges.empty())
+            ? resolvePitchPhraseRenderRegion (analysis.frames,
+                                              getCommitStartSec (phraseCommitRanges),
+                                              getCommitEndSec (phraseCommitRanges),
+                                              clipDuration)
+            : PitchPhraseRenderRegion { 0.0, clipDuration, false, false, true };
+        phraseHqRenderUsed = phraseHqRender;
+        phraseHqExpandedToFullClip = phraseHqRender && phraseRegion.expandedToFullClip;
+        phraseHqStartSec = phraseHqRender ? phraseRegion.startSec : 0.0;
+        phraseHqEndSec = phraseHqRender ? phraseRegion.endSec : clipDuration;
+        if (phraseHqRender)
+        {
+            pitchRenderCommitPolicy = "dry_protect_commit_ranges";
+            pitchRenderCommitDurationSec = getAudibleCommitDurationSec (phraseCommitRanges);
+            pitchRenderContextDurationSec = std::max (0.0, phraseRegion.endSec - phraseRegion.startSec);
+            noteHqEditIslandCount = static_cast<int> (phraseCommitRanges.size());
+            for (const auto& range : phraseCommitRanges)
+                noteHqEditedNoteCount += range.editedNoteCount;
+        }
+        const bool processFullClip = (hasAnyFormantEdits && !previewSegmentRender)
+            || (phraseHqRender && phraseRegion.expandedToFullClip);
+        const bool strictNoteIslandRender = requestMode == "pitch-only"
+            && ! hasAnyFormantEdits
+            && ! phraseHqRender;
         // Preview segments must sound like the final formant result, not like a
         // watered-down proxy. Using the HQ formant path on 10-second staged
         // renders keeps preview character aligned with the final clip while
         // still avoiding a full-clip wait.
         const auto renderQuality = PitchResynthesizer::RenderQuality::FinalHQ;
-        const double kPaddingSec = previewSegmentRender ? 0.75 : 1.0;
-        double requestedWindowStartSec = processFullClip ? 0.0 : std::max (0.0, notesStartSec - kPaddingSec);
-        double requestedWindowEndSec   = processFullClip ? clipDuration : std::min (clipDuration, notesEndSec + kPaddingSec);
+        const double kPaddingSec = strictNoteIslandRender ? 0.12 : (previewSegmentRender ? 0.75 : 1.0);
+        double requestedWindowStartSec = processFullClip ? 0.0
+            : (phraseHqRender ? phraseRegion.startSec : std::max (0.0, notesStartSec - kPaddingSec));
+        double requestedWindowEndSec   = processFullClip ? clipDuration
+            : (phraseHqRender ? phraseRegion.endSec : std::min (clipDuration, notesEndSec + kPaddingSec));
         double windowStartSec = processFullClip ? 0.0 : requestedWindowStartSec;
         double windowEndSec   = processFullClip ? clipDuration : requestedWindowEndSec;
+        if (phraseHqRender)
+        {
+            noteHqEffectiveStartSec = phraseCommitRanges.empty() ? requestedWindowStartSec : getCommitStartSec (phraseCommitRanges);
+            noteHqEffectiveEndSec = phraseCommitRanges.empty() ? requestedWindowEndSec : getCommitEndSec (phraseCommitRanges);
+            noteHqContextStartSec = phraseRegion.startSec;
+            noteHqContextEndSec = phraseRegion.endSec;
+            noteHqAudibleCommitStartSec = phraseCommitRanges.empty() ? requestedWindowStartSec : getAudibleCommitStartSec (phraseCommitRanges);
+            noteHqAudibleCommitEndSec = phraseCommitRanges.empty() ? requestedWindowEndSec : getAudibleCommitEndSec (phraseCommitRanges);
+        }
         if (hasWindowOverride && processFullClip)
         {
             logPitchEditorFormant ("ignoring window override because explicit formant edits require full-clip render clip="
                 + clipId);
         }
-        if (hasWindowOverride && ! processFullClip)
+        if (hasWindowOverride && ! processFullClip && ! phraseHqRender)
         {
             requestedWindowStartSec = juce::jlimit (0.0, clipDuration, *windowStartSecOverride);
             requestedWindowEndSec   = juce::jlimit (requestedWindowStartSec, clipDuration, *windowEndSecOverride);
-            windowStartSec = previewSegmentRender
+            const bool paddedPitchOnlyOverride = requestMode == "pitch-only" && ! hasAnyFormantEdits;
+            windowStartSec = (previewSegmentRender || paddedPitchOnlyOverride)
                 ? std::max (0.0, requestedWindowStartSec - kPaddingSec)
                 : requestedWindowStartSec;
-            windowEndSec   = previewSegmentRender
+            windowEndSec   = (previewSegmentRender || paddedPitchOnlyOverride)
                 ? std::min (clipDuration, requestedWindowEndSec + kPaddingSec)
                 : requestedWindowEndSec;
         }
@@ -8423,9 +11961,13 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
         previewCoverageEndSec = requestedWindowEndSec;
 
         logPitchEditorFormant (juce::String("processing scope=")
-            + (processFullClip ? "full-clip" : (previewSegmentRender ? "preview-segment" : (hasWindowOverride ? "playhead-window" : "edited-window")))
+            + (phraseHqRender ? (phraseRegion.expandedToFullClip ? "phrase-hq-full-clip" : "phrase-hq-safe-region")
+                               : (processFullClip ? "full-clip" : (previewSegmentRender ? "preview-segment" : (noteHqRender ? "note-hq" : (hasWindowOverride ? "playhead-window" : "edited-window")))))
             + " clip=" + clipId
             + " renderMode=" + renderMode
+            + " noteIsland=" + juce::String (strictNoteIslandRender ? "true" : "false")
+            + " phraseHq=" + juce::String (phraseHqRender ? "true" : "false")
+            + " phraseFullClip=" + juce::String (phraseRegion.expandedToFullClip ? "true" : "false")
             + " requested=[" + juce::String (requestedWindowStartSec, 3) + "s - " + juce::String (requestedWindowEndSec, 3) + "s]"
             + " window=[" + juce::String (windowStartSec, 3) + "s - " + juce::String (windowEndSec, 3) + "s]"
             + " windowSamples=" + juce::String (windowNumSamples));
@@ -8460,20 +12002,165 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
             {
                 n.startTime = static_cast<float> (static_cast<double> (n.startTime) - windowStartSec);
                 n.endTime   = static_cast<float> (static_cast<double> (n.endTime)   - windowStartSec);
+                n.effectiveStartTime = static_cast<float> (static_cast<double> (n.effectiveStartTime) - windowStartSec);
+                n.effectiveEndTime   = static_cast<float> (static_cast<double> (n.effectiveEndTime)   - windowStartSec);
             }
 
-            PitchResynthesizer resynth;
-            std::vector<const float*> channelPtrs (static_cast<size_t> (numChannels));
-            for (int ch = 0; ch < numChannels; ++ch)
-                channelPtrs[static_cast<size_t> (ch)] = windowBuffer.getReadPointer (ch);
+            std::vector<std::vector<float>> correctedWindow;
+            if (phraseHqRender)
+            {
+                pitchRenderProductPath = "native_vsf_note_hq";
+                pitchRenderBackendId = "native_vsf";
+                pitchRenderBackendVersion = "vsf_default";
+                pitchRenderBackendAvailable = true;
+                pitchRenderCommitPolicy = "dry_protect_commit_ranges";
+                logPitchEditorFormant ("phrase HQ using native VSF renderer clip=" + clipId);
+            }
 
-            auto correctedWindow = resynth.processMultiChannel (
-                channelPtrs.data(), numChannels, windowNumSamples, sr,
-                windowAnalysis.frames, windowNotes,
-                PitchResynthesizer::PitchEngine::Signalsmith,
-                globalFormantSemitones,
-                renderQuality,
-                shouldCancel);
+            if (correctedWindow.empty())
+            {
+                PitchResynthesizer resynth;
+                std::vector<const float*> channelPtrs (static_cast<size_t> (numChannels));
+                for (int ch = 0; ch < numChannels; ++ch)
+                    channelPtrs[static_cast<size_t> (ch)] = windowBuffer.getReadPointer (ch);
+
+                correctedWindow = resynth.processMultiChannel (
+                    channelPtrs.data(), numChannels, windowNumSamples, sr,
+                    windowAnalysis.frames, windowNotes,
+                    PitchResynthesizer::PitchEngine::NativeVsf,
+                    globalFormantSemitones,
+                    renderQuality,
+                    shouldCancel);
+                const auto& renderDiagnostics = resynth.getLastRenderDiagnostics();
+                if (renderDiagnostics.requestedRendererBranch.isNotEmpty())
+                    requestedRendererBranch = renderDiagnostics.requestedRendererBranch;
+                if (renderDiagnostics.actualRendererBranch.isNotEmpty())
+                    actualRendererBranch = renderDiagnostics.actualRendererBranch;
+                pitchOnlyRecoveryPath = renderDiagnostics.pitchOnlyRecoveryPath;
+                pitchOnlyNeutralFormantUsed = renderDiagnostics.pitchOnlyNeutralFormantUsed;
+                pitchRenderDirection = renderDiagnostics.pitchDirection;
+                downshiftFormantGuardUsed = renderDiagnostics.downshiftFormantGuardUsed;
+                downshiftFormantGuardAlpha = renderDiagnostics.downshiftFormantGuardAlpha;
+                noteHqRendererEntryBoundaryKind = renderDiagnostics.dominantEntryBoundaryKind;
+                noteHqRendererExitBoundaryKind = renderDiagnostics.dominantExitBoundaryKind;
+                formantCurveUsed = renderDiagnostics.formantCurveUsed;
+                usedRendererFallback = usedRendererFallback || renderDiagnostics.usedFallback;
+                if (rendererFallbackReason.isEmpty())
+                    rendererFallbackReason = renderDiagnostics.fallbackReason;
+                bridgeUsed = renderDiagnostics.bridgeUsed;
+                bridgeFallbackUsed = renderDiagnostics.bridgeFallbackUsed;
+                bridgeStartSec = renderDiagnostics.bridgeStartSec;
+                bridgeLengthMs = renderDiagnostics.bridgeLengthMs;
+                bridgeAlignmentLagSamples = renderDiagnostics.bridgeAlignmentLagSamples;
+                bridgeCorrelationScore = renderDiagnostics.bridgeCorrelationScore;
+                bridgeGainDeltaDb = renderDiagnostics.bridgeGainDeltaDb;
+                bodyReplacementUsed = renderDiagnostics.bodyReplacementUsed;
+                bodyReplacementFallbackUsed = renderDiagnostics.bodyReplacementFallbackUsed;
+                entryLockStartSec = renderDiagnostics.entryLockStartSec;
+                entryLockLengthMs = renderDiagnostics.entryLockLengthMs;
+                exitLockStartSec = renderDiagnostics.exitLockStartSec;
+                renderedBodyStartSec = renderDiagnostics.renderedBodyStartSec;
+                renderedBodyEndSec = renderDiagnostics.renderedBodyEndSec;
+                islandNativeUsed = renderDiagnostics.islandNativeUsed;
+                islandNativeFallbackUsed = renderDiagnostics.islandNativeFallbackUsed;
+                islandRenderStartSec = renderDiagnostics.islandRenderStartSec;
+                islandRenderEndSec = renderDiagnostics.islandRenderEndSec;
+                transientMaskPeak = renderDiagnostics.transientMaskPeak;
+                voicedCoreMaskPeak = renderDiagnostics.voicedCoreMaskPeak;
+                hpssUsed = renderDiagnostics.hpssUsed;
+                hpssFallbackUsed = renderDiagnostics.hpssFallbackUsed;
+                harmonicMaskPeak = renderDiagnostics.harmonicMaskPeak;
+                aperiodicMaskPeak = renderDiagnostics.aperiodicMaskPeak;
+                spectralEnvelopeCorrectionUsed = renderDiagnostics.spectralEnvelopeCorrectionUsed;
+                pitchOnlyCoreTimbreCorrectionUsed = renderDiagnostics.pitchOnlyCoreTimbreCorrectionUsed;
+                pitchOnlyCoreEnvelopeMix = renderDiagnostics.pitchOnlyCoreEnvelopeMix;
+                pitchOnlyCoreRmsTrimDb = renderDiagnostics.pitchOnlyCoreRmsTrimDb;
+                pitchOnlyCoreEnvelopeLifter = renderDiagnostics.pitchOnlyCoreEnvelopeLifter;
+                pitchOnlyEntryHandoffUsed = renderDiagnostics.pitchOnlyEntryHandoffUsed;
+                pitchOnlyExitHandoffUsed = renderDiagnostics.pitchOnlyExitHandoffUsed;
+                vocalSourceFilterUsed = renderDiagnostics.vocalSourceFilterUsed;
+                vocalSourceFilterVoicedCoverage = renderDiagnostics.vocalSourceFilterVoicedCoverage;
+                vocalSourceFilterResidualMix = renderDiagnostics.vocalSourceFilterResidualMix;
+                vocalSourceFilterFallbackUsed = renderDiagnostics.vocalSourceFilterFallbackUsed;
+                vocalSourceFilterFallbackReason = renderDiagnostics.vocalSourceFilterFallbackReason;
+                vocalSourceFilterEntryDryMs = renderDiagnostics.vocalSourceFilterEntryDryMs;
+                vocalSourceFilterExitDryMs = renderDiagnostics.vocalSourceFilterExitDryMs;
+                vocalSourceFilterResidualMixScale = renderDiagnostics.vocalSourceFilterResidualMixScale;
+                vocalSourceFilterEpochInterpolationUsed = renderDiagnostics.vocalSourceFilterEpochInterpolationUsed;
+                vocalSourceFilterEpochInterpolationStrength = renderDiagnostics.vocalSourceFilterEpochInterpolationStrength;
+                vocalSourceFilterGrainRadiusScale = renderDiagnostics.vocalSourceFilterGrainRadiusScale;
+                vocalSourceFilterUpPresenceTrimDb = renderDiagnostics.vocalSourceFilterUpPresenceTrimDb;
+                vocalSourceFilterUpPresenceHz = renderDiagnostics.vocalSourceFilterUpPresenceHz;
+                vocalSourceFilterDownNasalTrimDb = renderDiagnostics.vocalSourceFilterDownNasalTrimDb;
+                vocalSourceFilterDownNasalHz = renderDiagnostics.vocalSourceFilterDownNasalHz;
+                vocalSourceFilterDownBodyCompDb = renderDiagnostics.vocalSourceFilterDownBodyCompDb;
+                vocalSourceFilterDownBodyCompHz = renderDiagnostics.vocalSourceFilterDownBodyCompHz;
+                wsolaUsed = renderDiagnostics.wsolaUsed;
+                wsolaFallbackUsed = renderDiagnostics.wsolaFallbackUsed;
+                wsolaEntryLagSamples = renderDiagnostics.wsolaEntryLagSamples;
+                wsolaExitLagSamples = renderDiagnostics.wsolaExitLagSamples;
+                wsolaCorrelationScore = renderDiagnostics.wsolaCorrelationScore;
+                phaseLockUsed = renderDiagnostics.phaseLockUsed;
+                phaseLockFallbackUsed = renderDiagnostics.phaseLockFallbackUsed;
+                phaseAlignedEntry = renderDiagnostics.phaseAlignedEntry;
+                phaseAlignedExit = renderDiagnostics.phaseAlignedExit;
+                phasePeakCount = renderDiagnostics.phasePeakCount;
+                transitionHqUsed = renderDiagnostics.transitionHqUsed;
+                transitionHqFallbackUsed = renderDiagnostics.transitionHqFallbackUsed;
+                transitionStartSec = renderDiagnostics.transitionStartSec;
+                transitionEndSec = renderDiagnostics.transitionEndSec;
+                transitionTransientPeak = renderDiagnostics.transitionTransientPeak;
+                transitionVoicedCorePeak = renderDiagnostics.transitionVoicedCorePeak;
+                transitionResidualPeak = renderDiagnostics.transitionResidualPeak;
+                transitionEnvelopeCorrectionUsed = renderDiagnostics.transitionEnvelopeCorrectionUsed;
+                engineV2Used = renderDiagnostics.engineV2Used;
+                engineV2FallbackUsed = renderDiagnostics.engineV2FallbackUsed;
+                engineV2TransitionCount = renderDiagnostics.engineV2TransitionCount;
+                engineV2TransitionStartSec = renderDiagnostics.engineV2TransitionStartSec;
+                engineV2TransitionEndSec = renderDiagnostics.engineV2TransitionEndSec;
+                engineV2HarmonicSupportPeak = renderDiagnostics.engineV2HarmonicSupportPeak;
+                engineV2ResidualSupportPeak = renderDiagnostics.engineV2ResidualSupportPeak;
+                engineV2EnvelopeSupportPeak = renderDiagnostics.engineV2EnvelopeSupportPeak;
+                transientBypassUsed = renderDiagnostics.transientBypassUsed;
+                residualCarryUsed = renderDiagnostics.residualCarryUsed;
+                cepstralCutoffUsed = renderDiagnostics.cepstralCutoffUsed;
+                engineV2FftSize = renderDiagnostics.engineV2FftSize;
+                engineV2HopSize = renderDiagnostics.engineV2HopSize;
+                immediateLeftNeighborUsed = renderDiagnostics.immediateLeftNeighborUsed;
+                immediateRightNeighborUsed = renderDiagnostics.immediateRightNeighborUsed;
+                leftNeighborSamplesRendered = renderDiagnostics.leftNeighborSamplesRendered;
+                rightNeighborSamplesRendered = renderDiagnostics.rightNeighborSamplesRendered;
+                leftNeighborSmoothMs = renderDiagnostics.leftNeighborSmoothMs;
+                rightNeighborSmoothMs = renderDiagnostics.rightNeighborSmoothMs;
+                nonImmediateNeighborTouched = renderDiagnostics.nonImmediateNeighborTouched;
+                entryAlignmentOffsetMs = renderDiagnostics.entryAlignmentOffsetMs;
+                exitAlignmentOffsetMs = renderDiagnostics.exitAlignmentOffsetMs;
+                firstVoicedCyclesEntryUsed = renderDiagnostics.firstVoicedCyclesEntryUsed;
+                firstVoicedCyclesExitUsed = renderDiagnostics.firstVoicedCyclesExitUsed;
+                v3TransitionPairUsed = renderDiagnostics.v3TransitionPairUsed;
+                v3ContinuousRenderUsed = false;
+                v3EntryAnchorMs = renderDiagnostics.v3EntryAnchorMs;
+                v3ExitAnchorMs = renderDiagnostics.v3ExitAnchorMs;
+                v3FirstCyclesEntryCount = renderDiagnostics.v3FirstCyclesEntryCount;
+                v3FirstCyclesExitCount = renderDiagnostics.v3FirstCyclesExitCount;
+                v3ShellDurationMs = renderDiagnostics.v3ShellDurationMs;
+                v3BodyDurationMs = renderDiagnostics.v3BodyDurationMs;
+                v3ResidualMix = renderDiagnostics.v3ResidualMix;
+                v3FormantMode = renderDiagnostics.v3FormantMode;
+                v3NeighborLeftOverlapMs = renderDiagnostics.v3NeighborLeftOverlapMs;
+                v3NeighborRightOverlapMs = renderDiagnostics.v3NeighborRightOverlapMs;
+                noteHqEntryPitchHandoffUsed = renderDiagnostics.noteHqEntryPitchHandoffUsed;
+                noteHqEntryPitchHandoffStartSec = renderDiagnostics.noteHqEntryPitchHandoffStartSec > 0.0
+                    ? renderDiagnostics.noteHqEntryPitchHandoffStartSec + windowStartSec
+                    : 0.0;
+                noteHqEntryPitchHandoffEndSec = renderDiagnostics.noteHqEntryPitchHandoffEndSec > 0.0
+                    ? renderDiagnostics.noteHqEntryPitchHandoffEndSec + windowStartSec
+                    : 0.0;
+                noteHqEntryPitchHandoffPreMs = renderDiagnostics.noteHqEntryPitchHandoffPreMs;
+                noteHqEntryPitchHandoffBodyMs = renderDiagnostics.noteHqEntryPitchHandoffBodyMs;
+                noteHqEntryPitchSlopeJumpStPerSec = renderDiagnostics.noteHqEntryPitchSlopeJumpStPerSec;
+                noteHqEntryPitchAccelerationLimited = renderDiagnostics.noteHqEntryPitchAccelerationLimited;
+            }
             if (shouldCancel && shouldCancel())
                 return buildCancelledResult();
 
@@ -8514,6 +12201,8 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
                     windowNumSamples - trimStart));
                 renderedOutputBuffer.setSize (numChannels, segmentSamples);
                 renderedOutputSamples = segmentSamples;
+                candidateCoverageStartSec = requestedWindowStartSec;
+                candidateCoverageEndSec = requestedWindowEndSec;
                 const int xfadeLen = std::min (384, segmentSamples / 6);
                 for (int ch = 0; ch < numChannels; ++ch)
                 {
@@ -8543,33 +12232,201 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
             }
             else
             {
-                // Blend corrected window into full clip buffer with cosine crossfade at splice points.
-                const int xfadeLen = std::min (512, windowNumSamples / 4);
-                for (int ch = 0; ch < numChannels; ++ch)
+                const bool noteLocalSingleTrim = hasWindowOverride
+                    && requestMode == "pitch-only"
+                    && ! phraseHqRender
+                    && ! hasAnyFormantEdits;
+                const bool useContinuousWindowOutput = false;
+
+                if (phraseHqRender)
                 {
-                    if (static_cast<size_t> (ch) >= correctedWindow.size()) continue;
-                    const auto& corrected = correctedWindow[static_cast<size_t> (ch)];
-                    int copyLen = std::min (windowNumSamples, static_cast<int> (corrected.size()));
-                    for (int i = 0; i < copyLen; ++i)
+                    candidateCoverageStartSec = phraseCommitRanges.empty() ? requestedWindowStartSec : getCommitStartSec (phraseCommitRanges);
+                    candidateCoverageEndSec = phraseCommitRanges.empty() ? requestedWindowEndSec : getCommitEndSec (phraseCommitRanges);
+                    renderedOutputBuffer.setSize (numChannels, clipNumSamples);
+                    renderedOutputSamples = clipNumSamples;
+                    pitchRenderCommitPolicy = "dry_protect_commit_ranges";
+                    pitchRenderContextDurationSec = std::max (0.0, windowEndSec - windowStartSec);
+                    pitchRenderCommitDurationSec = getAudibleCommitDurationSec (phraseCommitRanges);
+                    const auto compositeStats = compositeDryProtectedPitchPatch (
+                        renderedOutputBuffer,
+                        clipBuffer,
+                        correctedWindow,
+                        phraseCommitRanges,
+                        windowStartSample,
+                        sr,
+                        false,
+                        actualRendererBranch != "pitch_only_vocal_source_filter_hq"
+                            && ! getPitchEnvFlag ("OPENSTUDIO_PITCH_ENTRY_BRIDGE_DISABLE", false));
+                    pitchRenderDryProtectedSamples = compositeStats.dryProtectedSamples;
+                    noteHqPreBodyDryProtectedSamples = compositeStats.preBodyDryProtectedSamples;
+                    noteHqAudibleCommitStartSec = compositeStats.audibleCommitStartSec;
+                    noteHqAudibleCommitEndSec = compositeStats.audibleCommitEndSec;
+                    noteHqEntryInsideBodyFadeMs = compositeStats.entryInsideBodyFadeMs;
+                    noteHqExitLeadInMs = compositeStats.exitLeadInMs;
+                    noteHqEntryBridgeStartSec = compositeStats.entryBridgeStartSec;
+                    noteHqEntryBridgeEndSec = compositeStats.entryBridgeEndSec;
+                    noteHqEntryBridgeWetLagMs = compositeStats.entryBridgeWetLagMs;
+                    noteHqEntryBridgeEnvelopeGainDb = compositeStats.entryBridgeEnvelopeGainDb;
+                    noteHqEntryBridgeUsed = compositeStats.entryBridgeUsed;
+                    noteHqEntryTransientDryPreservedMs = compositeStats.entryTransientDryPreservedMs;
+                    pitchOnlyEntrySimpleHandoffUsed = compositeStats.entrySimpleHandoffUsed;
+                    pitchOnlyEntrySafeHandoffUsed = compositeStats.entrySafeHandoffUsed;
+                    pitchOnlyEntryDryHoldMs = compositeStats.entryDryHoldMs;
+                    pitchOnlyEntrySafeBridgeMs = compositeStats.entrySafeBridgeMs;
+                    pitchOnlyEntryWetAlignmentMs = compositeStats.entryWetAlignmentMs;
+                    pitchOnlyEntryWetGainDb = compositeStats.entryWetGainDb;
+                    pitchOnlyEntryWetVsDryRmsDb = compositeStats.entryWetVsDryRmsDb;
+                    pitchOnlyEntryEqualPowerBlendUsed = compositeStats.entryEqualPowerBlendUsed;
+                    pitchOnlyEntryRmsContinuityUsed = compositeStats.entryRmsContinuityUsed;
+                    pitchOnlyEntryRmsContinuityGainDb = compositeStats.entryRmsContinuityGainDb;
+                    pitchOnlyEntryRmsContinuityMs = compositeStats.entryRmsContinuityMs;
+                    pitchOnlyEntryTransientResidualUsed = compositeStats.entryTransientResidualUsed;
+                    pitchOnlyEntryTransientResidualMix = compositeStats.entryTransientResidualMix;
+                    pitchOnlyEntryTransientResidualMs = compositeStats.entryTransientResidualMs;
+                    pitchOnlyEntryPhaseSafeUsed = compositeStats.entryPhaseSafeUsed;
+                    pitchOnlyEntryWetAlignmentAccepted = compositeStats.entryWetAlignmentAccepted;
+                    pitchOnlyEntryFirstCycleCorrelation = compositeStats.entryFirstCycleCorrelation;
+                    pitchOnlyEntryZeroCrossOffsetMs = compositeStats.entryZeroCrossOffsetMs;
+                    pitchOnlyEntryBridgeGainRampDb = compositeStats.entryBridgeGainRampDb;
+                    pitchOnlyDownshiftCoreEnvelopePassUsed = compositeStats.downshiftCoreEnvelopePassUsed;
+                    pitchOnlyDownshiftCoreRmsTrimDb = compositeStats.downshiftCoreRmsTrimDb;
+                    pitchOnlyDownshiftCoreEnvelopeMaxDb = compositeStats.downshiftCoreEnvelopeMaxDb;
+                    pitchOnlyDownshiftCoreEnvelopeFrames = compositeStats.downshiftCoreEnvelopeFrames;
+                    pitchOnlyEntryWetLagMs = compositeStats.entryBridgeWetLagMs;
+                    pitchOnlyEntryBridgeDurationMs = std::max (0.0, (compositeStats.entryBridgeEndSec - compositeStats.entryBridgeStartSec) * 1000.0);
+                    pitchOnlyExitDryRestoreUsed = compositeStats.exitDryRestoreUsed;
+                    pitchOnlyExitDryRestoreStartSec = compositeStats.exitDryRestoreStartSec;
+                    pitchOnlyExitDryRestoreEndSec = compositeStats.exitDryRestoreEndSec;
+                    noteHqEntryBoundaryKind = compositeStats.entryBoundaryKind;
+                    noteHqExitBoundaryKind = compositeStats.exitBoundaryKind;
+                    noteHqEntryBoundaryScore = compositeStats.entryBoundaryScore;
+                    noteHqExitBoundaryScore = compositeStats.exitBoundaryScore;
+                    pitchOnlyEntryTimbreCorrectionUsed = compositeStats.entryTimbreCorrectionUsed;
+                    pitchOnlyEntryRmsTrimDb = compositeStats.entryRmsTrimDb;
+                    pitchOnlyEntryTiltDb = compositeStats.entryTiltDb;
+                    logPitchEditorFormant ("phrase HQ dry patch composited clip=" + clipId
+                        + " context=[" + juce::String (windowStartSec, 3) + "s - " + juce::String (windowEndSec, 3) + "s]"
+                        + " commitRanges=" + juce::String (static_cast<int> (phraseCommitRanges.size()))
+                        + " dryProtectedSamples=" + juce::String (pitchRenderDryProtectedSamples)
+                        + " entryTimbre=" + juce::String (pitchOnlyEntryTimbreCorrectionUsed ? "true" : "false")
+                        + " entryRmsTrimDb=" + juce::String (pitchOnlyEntryRmsTrimDb, 3)
+                        + " entryTiltDb=" + juce::String (pitchOnlyEntryTiltDb, 3)
+                        + " simpleEntryHandoff=" + juce::String (pitchOnlyEntrySimpleHandoffUsed ? "true" : "false")
+                        + " safeEntryHandoff=" + juce::String (pitchOnlyEntrySafeHandoffUsed ? "true" : "false")
+                        + " safeEntryAlignMs=" + juce::String (pitchOnlyEntryWetAlignmentMs, 3)
+                        + " safeEntryGainDb=" + juce::String (pitchOnlyEntryWetGainDb, 3)
+                        + " phaseSafeEntry=" + juce::String (pitchOnlyEntryPhaseSafeUsed ? "true" : "false")
+                        + " phaseSafeFirstCycleCorr=" + juce::String (pitchOnlyEntryFirstCycleCorrelation, 3)
+                        + " phaseSafeZeroCrossMs=" + juce::String (pitchOnlyEntryZeroCrossOffsetMs, 3)
+                        + " downshiftCoreEnvelope=" + juce::String (pitchOnlyDownshiftCoreEnvelopePassUsed ? "true" : "false")
+                        + " downshiftCoreRmsTrimDb=" + juce::String (pitchOnlyDownshiftCoreRmsTrimDb, 3)
+                        + " entryContinuity=" + juce::String (pitchOnlyEntryRmsContinuityUsed ? "true" : "false")
+                        + " entryContinuityGainDb=" + juce::String (pitchOnlyEntryRmsContinuityGainDb, 3)
+                        + " entryTransientResidual=" + juce::String (pitchOnlyEntryTransientResidualUsed ? "true" : "false")
+                        + " entryTransientResidualMix=" + juce::String (pitchOnlyEntryTransientResidualMix, 3)
+                        + " exitDryRestore=" + juce::String (pitchOnlyExitDryRestoreUsed ? "true" : "false"));
+                }
+                else if (useContinuousWindowOutput)
+                {
+                    renderedOutputBuffer.setSize (numChannels, windowNumSamples);
+                    renderedOutputSamples = windowNumSamples;
+                    candidateCoverageStartSec = requestedWindowStartSec;
+                    candidateCoverageEndSec = requestedWindowEndSec;
+                    for (int ch = 0; ch < numChannels; ++ch)
                     {
-                        float blend = 1.0f;
-                        if (i < xfadeLen && windowStartSample > 0)
-                            blend = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
-                                                               * static_cast<float> (i) / static_cast<float> (xfadeLen)));
-                        int distFromEnd = copyLen - 1 - i;
-                        if (distFromEnd < xfadeLen && (windowStartSample + copyLen) < clipNumSamples)
-                        {
-                            float fo = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
-                                * static_cast<float> (distFromEnd) / static_cast<float> (xfadeLen)));
-                            blend = std::min (blend, fo);
-                        }
-                        float orig = clipBuffer.getSample (ch, windowStartSample + i);
-                        float corr = corrected[static_cast<size_t> (i)];
-                        clipBuffer.setSample (ch, windowStartSample + i, orig * (1.0f - blend) + corr * blend);
+                        if (static_cast<size_t> (ch) >= correctedWindow.size())
+                            continue;
+                        const auto& corrected = correctedWindow[static_cast<size_t> (ch)];
+                        const int copyLen = std::min (windowNumSamples, static_cast<int> (corrected.size()));
+                        for (int i = 0; i < copyLen; ++i)
+                            renderedOutputBuffer.setSample (ch, i, corrected[static_cast<size_t> (i)]);
                     }
                 }
-                renderedOutputBuffer = clipBuffer;
-                renderedOutputSamples = clipNumSamples;
+                else if (noteLocalSingleTrim)
+                {
+                    const int trimStart = juce::jlimit (0, windowNumSamples,
+                        static_cast<int> ((requestedWindowStartSec - windowStartSec) * sr));
+                    const int segmentSamples = std::max (0, std::min (
+                        static_cast<int> ((requestedWindowEndSec - requestedWindowStartSec) * sr),
+                        windowNumSamples - trimStart));
+                    const int destStartSample = juce::jlimit (0, clipNumSamples, static_cast<int> (requestedWindowStartSec * sr));
+                    const int copyLen = std::min (segmentSamples, clipNumSamples - destStartSample);
+                    candidateCoverageStartSec = requestedWindowStartSec;
+                    candidateCoverageEndSec = requestedWindowEndSec;
+                    renderedOutputBuffer.setSize (numChannels, copyLen);
+                    renderedOutputBuffer.clear();
+                    renderedOutputSamples = copyLen;
+                    const int deClickLen = std::min (
+                        static_cast<int> (std::round (0.008 * sr)),
+                        copyLen / 6);
+
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        if (static_cast<size_t> (ch) >= correctedWindow.size()) continue;
+                        const auto& corrected = correctedWindow[static_cast<size_t> (ch)];
+                        for (int i = 0; i < copyLen; ++i)
+                        {
+                            const int sourceIndex = trimStart + i;
+                            const int destIndex = destStartSample + i;
+                            if (sourceIndex < 0 || sourceIndex >= static_cast<int> (corrected.size()))
+                                continue;
+
+                            float corr = corrected[static_cast<size_t> (sourceIndex)];
+                            if (deClickLen > 0 && i < deClickLen && destIndex < clipNumSamples)
+                            {
+                                const float t = static_cast<float> (i) / static_cast<float> (deClickLen);
+                                const float edgeMatch = 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+                                const float originalAtBoundary = clipBuffer.getSample (ch, destIndex);
+                                corr += (originalAtBoundary - corr) * edgeMatch;
+                            }
+                            const int distFromEnd = copyLen - 1 - i;
+                            if (deClickLen > 0 && distFromEnd < deClickLen)
+                            {
+                                const int nextOriginalIndex = juce::jlimit (0, clipNumSamples - 1, destStartSample + copyLen);
+                                const float t = static_cast<float> (distFromEnd) / static_cast<float> (deClickLen);
+                                const float edgeMatch = 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+                                const float originalAtBoundary = clipBuffer.getSample (ch, nextOriginalIndex);
+                                corr += (originalAtBoundary - corr) * edgeMatch;
+                            }
+                            renderedOutputBuffer.setSample (ch, i, corr);
+                        }
+                    }
+                }
+                else
+                {
+                    candidateCoverageStartSec = windowStartSec;
+                    candidateCoverageEndSec = windowEndSec;
+                    // Blend corrected window into full clip buffer with cosine crossfade at splice points.
+                    const int xfadeLen = std::min (2048, windowNumSamples / 4);
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        if (static_cast<size_t> (ch) >= correctedWindow.size()) continue;
+                        const auto& corrected = correctedWindow[static_cast<size_t> (ch)];
+                        int copyLen = std::min (windowNumSamples, static_cast<int> (corrected.size()));
+                        for (int i = 0; i < copyLen; ++i)
+                        {
+                            float blend = 1.0f;
+                            if (i < xfadeLen && windowStartSample > 0)
+                                blend = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                                                   * static_cast<float> (i) / static_cast<float> (xfadeLen)));
+                            int distFromEnd = copyLen - 1 - i;
+                            if (distFromEnd < xfadeLen && (windowStartSample + copyLen) < clipNumSamples)
+                            {
+                                float fo = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                    * static_cast<float> (distFromEnd) / static_cast<float> (xfadeLen)));
+                                blend = std::min (blend, fo);
+                            }
+                            float orig = clipBuffer.getSample (ch, windowStartSample + i);
+                            float corr = corrected[static_cast<size_t> (i)];
+                            clipBuffer.setSample (ch, windowStartSample + i, orig * (1.0f - blend) + corr * blend);
+                        }
+                    }
+                }
+                if (! phraseHqRender && ! useContinuousWindowOutput && ! noteLocalSingleTrim)
+                {
+                    renderedOutputBuffer = clipBuffer;
+                    renderedOutputSamples = clipNumSamples;
+                }
             }
         }
     }
@@ -8579,11 +12436,20 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     // truncated by a concurrent job — producing garbled audio.
     // A monotonic counter ensures each job writes to a different file slot.
     static std::atomic<int> s_pitchCorrSeq { 0 };
-    int seq = s_pitchCorrSeq.fetch_add(1) & 0x1F; // 32 rotating slots
-    juce::File outputFile = sourceFile.getSiblingFile(
+    const auto seq = s_pitchCorrSeq.fetch_add (1);
+    const auto modeSuffix = renderMode == "preview_segment"
+        ? juce::String ("_pcseg")
+        : (renderMode == "full_clip_hq"
+            ? juce::String ("_pcfinal")
+            : (renderMode == "note_hq" ? juce::String ("_pcnote") : juce::String ("_pc")));
+    const auto uniqueToken = juce::String::toHexString ((juce::int64) juce::Time::getHighResolutionTicks())
+        + "_" + juce::String (seq);
+    juce::File outputFile = sourceFile.getSiblingFile (
         sourceFile.getFileNameWithoutExtension()
-            + (renderMode == "preview_segment" ? "_pcseg" : renderMode == "full_clip_hq" ? "_pcfinal" : "_pc")
-            + juce::String(seq) + ".wav");
+            + modeSuffix
+            + "_"
+            + uniqueToken
+            + ".wav");
 
     // Delete the old file first to prevent stale data if the write partially fails.
     // Without this, createOutputStream may fail to fully overwrite on some OS/filesystem combos.
@@ -8615,7 +12481,22 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
 
     if (previewSegmentRender)
     {
-        playbackEngine.setClipRenderedPreviewSegment(clipId, outputFile, previewCoverageStartSec, previewCoverageEndSec);
+        const bool installedPreviewSegment = playbackEngine.setClipRenderedPreviewSegment(
+            clipId,
+            outputFile,
+            previewCoverageStartSec,
+            previewCoverageEndSec,
+            0.0,
+            previewRenderGenerationToken);
+        if (! installedPreviewSegment && previewSegmentRender)
+            return buildCancelledResult();
+    }
+    else if (renderMode == "note_hq")
+    {
+        playbackEngine.replaceClipAudioFile(clipId, outputFile);
+        playbackEngine.clearPitchScrubPreview(clipId);
+        playbackEngine.clearClipPitchPreview(clipId);
+        playbackEngine.invalidateRenderedPreviewSegments(clipId);
     }
     else if (fullClipHQRender && isPlaying.load())
     {
@@ -8626,6 +12507,178 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     {
         playbackEngine.replaceClipAudioFile(clipId, outputFile);
     }
+    const auto postApplyRouteStatus = getPitchPreviewRoutingStatus(clipId);
+    juce::var appFinalCapture;
+    juce::var appFinalBakedCapture;
+    juce::var appFinalOfflineCapture;
+    juce::var appFinalParityReport;
+    juce::var appFinalOfflineParityReport;
+    juce::var appFinalLiveVsOfflineParityReport;
+    juce::String appFinalRouteReportPath;
+    juce::String appFinalBakedContextPath;
+    juce::String appFinalBakedResampledContextPath;
+    juce::String appFinalPlaybackContextPath;
+    juce::String appFinalOfflineContextPath;
+    juce::String appFinalParityReportPath;
+    juce::var appFinalBakedResampledCapture;
+    if (renderMode == "note_hq")
+    {
+        logPitchEditorFormant("note_hq post-apply route clip=" + clipId
+            + " monitorMode=" + postApplyRouteStatus.getProperty("monitorMode", {}).toString()
+            + " correctedSource=" + juce::String(static_cast<bool>(postApplyRouteStatus.getProperty("correctedSourceActive", false)) ? "true" : "false")
+            + " renderedSegment=" + juce::String(static_cast<bool>(postApplyRouteStatus.getProperty("renderedSegmentActive", false)) ? "true" : "false")
+            + " clipLivePreview=" + juce::String(static_cast<bool>(postApplyRouteStatus.getProperty("clipLivePreviewActive", false)) ? "true" : "false")
+            + " scrub=" + juce::String(static_cast<bool>(postApplyRouteStatus.getProperty("scrubPreviewActive", false)) ? "true" : "false"));
+
+        if (! swapDeferred
+            && ! getPitchEnvFlag ("OPENSTUDIO_PITCH_APP_FINAL_CAPTURE_DISABLE", false))
+        {
+            const double captureStartClipSec = juce::jlimit (0.0, clipDuration, noteHqAudibleCommitStartSec - 0.50);
+            const double captureEndClipSec = juce::jlimit (captureStartClipSec, clipDuration, noteHqAudibleCommitEndSec + 0.60);
+            const double captureDurationSec = captureEndClipSec - captureStartClipSec;
+            if (captureDurationSec >= 0.050)
+            {
+                const auto token = juce::String (juce::Time::currentTimeMillis());
+                const auto bakedWav = outputFile.getSiblingFile (
+                    outputFile.getFileNameWithoutExtension() + "_appfinal_" + token + "_baked_context.wav");
+                const auto bakedResampledWav = outputFile.getSiblingFile (
+                    outputFile.getFileNameWithoutExtension() + "_appfinal_" + token + "_baked_context_resampled.wav");
+                const auto captureWav = outputFile.getSiblingFile (
+                    outputFile.getFileNameWithoutExtension() + "_appfinal_" + token + "_live_playback_context.wav");
+                const auto offlineWav = outputFile.getSiblingFile (
+                    outputFile.getFileNameWithoutExtension() + "_appfinal_" + token + "_offline_render_context.wav");
+                const auto routeJson = outputFile.getSiblingFile (
+                    outputFile.getFileNameWithoutExtension() + "_appfinal_" + token + "_route.json");
+                const auto parityJson = outputFile.getSiblingFile (
+                    outputFile.getFileNameWithoutExtension() + "_appfinal_" + token + "_parity.json");
+
+                appFinalBakedCapture = writePitchBakedContextWav (
+                    outputFile,
+                    captureStartClipSec,
+                    captureDurationSec,
+                    bakedWav);
+                appFinalBakedResampledCapture = writePitchBakedResampledContextWav (
+                    outputFile,
+                    captureStartClipSec,
+                    captureDurationSec,
+                    sr,
+                    bakedResampledWav);
+                appFinalCapture = capturePitchAuditionPlayback (
+                    trackId,
+                    clipId,
+                    foundClip->startTime + captureStartClipSec,
+                    captureDurationSec,
+                    captureWav.getFullPathName(),
+                    sr,
+                    false);
+                appFinalOfflineCapture = capturePitchAuditionPlayback (
+                    trackId,
+                    clipId,
+                    foundClip->startTime + captureStartClipSec,
+                    captureDurationSec,
+                    offlineWav.getFullPathName(),
+                    sr,
+                    true);
+                appFinalParityReport = comparePitchParityFiles (
+                    bakedWav,
+                    captureWav,
+                    captureStartClipSec,
+                    noteHqAudibleCommitStartSec,
+                    noteHqAudibleCommitEndSec);
+                appFinalOfflineParityReport = comparePitchParityFiles (
+                    bakedWav,
+                    offlineWav,
+                    captureStartClipSec,
+                    noteHqAudibleCommitStartSec,
+                    noteHqAudibleCommitEndSec);
+                appFinalLiveVsOfflineParityReport = comparePitchParityFiles (
+                    captureWav,
+                    offlineWav,
+                    captureStartClipSec,
+                    noteHqAudibleCommitStartSec,
+                    noteHqAudibleCommitEndSec);
+                appFinalRouteReportPath = routeJson.getFullPathName();
+                appFinalBakedContextPath = bakedWav.getFullPathName();
+                appFinalBakedResampledContextPath = bakedResampledWav.getFullPathName();
+                appFinalPlaybackContextPath = captureWav.getFullPathName();
+                appFinalOfflineContextPath = offlineWav.getFullPathName();
+                appFinalParityReportPath = parityJson.getFullPathName();
+                parityJson.getParentDirectory().createDirectory();
+                parityJson.replaceWithText (juce::JSON::toString (appFinalParityReport, true));
+
+                juce::Array<juce::var> editedNoteDiagnostics;
+                for (const auto& note : editedNotes)
+                {
+                    if (std::abs (note.correctedPitch - note.detectedPitch) <= editThreshold)
+                        continue;
+
+                    auto* noteObj = new juce::DynamicObject();
+                    noteObj->setProperty ("id", note.id);
+                    noteObj->setProperty ("startTime", static_cast<double> (note.startTime));
+                    noteObj->setProperty ("endTime", static_cast<double> (note.endTime));
+                    noteObj->setProperty ("effectiveStartTime", static_cast<double> (note.effectiveStartTime));
+                    noteObj->setProperty ("effectiveEndTime", static_cast<double> (note.effectiveEndTime));
+                    noteObj->setProperty ("detectedPitch", static_cast<double> (note.detectedPitch));
+                    noteObj->setProperty ("correctedPitch", static_cast<double> (note.correctedPitch));
+                    noteObj->setProperty ("requestedShiftSemitones", static_cast<double> (note.correctedPitch - note.detectedPitch));
+                    editedNoteDiagnostics.add (juce::var (noteObj));
+                }
+
+                juce::DynamicObject::Ptr routeObj = new juce::DynamicObject();
+                routeObj->setProperty ("clipId", clipId);
+                routeObj->setProperty ("trackId", trackId);
+                routeObj->setProperty ("renderMode", renderMode);
+                routeObj->setProperty ("outputFile", outputFile.getFullPathName());
+                routeObj->setProperty ("bakedContextPath", bakedWav.getFullPathName());
+                routeObj->setProperty ("bakedResampledContextPath", bakedResampledWav.getFullPathName());
+                routeObj->setProperty ("appPlaybackContextPath", captureWav.getFullPathName());
+                routeObj->setProperty ("offlineRenderContextPath", offlineWav.getFullPathName());
+                routeObj->setProperty ("parityReportPath", parityJson.getFullPathName());
+                routeObj->setProperty ("captureStartClipSec", captureStartClipSec);
+                routeObj->setProperty ("captureEndClipSec", captureEndClipSec);
+                routeObj->setProperty ("captureDurationSec", captureDurationSec);
+                routeObj->setProperty ("noteStartSec", noteHqAudibleCommitStartSec);
+                routeObj->setProperty ("noteEndSec", noteHqAudibleCommitEndSec);
+                routeObj->setProperty ("effectiveStartSec", noteHqEffectiveStartSec);
+                routeObj->setProperty ("effectiveEndSec", noteHqEffectiveEndSec);
+                routeObj->setProperty ("editedNotes", juce::var (editedNoteDiagnostics));
+                routeObj->setProperty ("snapMode", "unknown_backend_capture");
+                routeObj->setProperty ("capturedAt", juce::Time::getCurrentTime().toISO8601 (true));
+                routeObj->setProperty ("buildDate", juce::String (__DATE__));
+                routeObj->setProperty ("buildTime", juce::String (__TIME__));
+                routeObj->setProperty ("actualRendererBranch", actualRendererBranch);
+                routeObj->setProperty ("pitchOnlyRecoveryPath", pitchOnlyRecoveryPath);
+                routeObj->setProperty ("formantCurveUsed", formantCurveUsed);
+                routeObj->setProperty ("pitchOnlyEntrySafeHandoffUsed", pitchOnlyEntrySafeHandoffUsed);
+                routeObj->setProperty ("pitchOnlyEntryDryHoldMs", pitchOnlyEntryDryHoldMs);
+                routeObj->setProperty ("pitchOnlyEntrySafeBridgeMs", pitchOnlyEntrySafeBridgeMs);
+                routeObj->setProperty ("pitchOnlyEntryWetAlignmentMs", pitchOnlyEntryWetAlignmentMs);
+                routeObj->setProperty ("pitchOnlyEntryEqualPowerBlendUsed", pitchOnlyEntryEqualPowerBlendUsed);
+                routeObj->setProperty ("pitchOnlyEntryRmsContinuityUsed", pitchOnlyEntryRmsContinuityUsed);
+                routeObj->setProperty ("pitchOnlyEntryTransientResidualUsed", pitchOnlyEntryTransientResidualUsed);
+                routeObj->setProperty ("pitchOnlyEntryTransientResidualMix", pitchOnlyEntryTransientResidualMix);
+                routeObj->setProperty ("pitchOnlyEntryTransientResidualMs", pitchOnlyEntryTransientResidualMs);
+                routeObj->setProperty ("postApplyRouteStatus", postApplyRouteStatus);
+                routeObj->setProperty ("bakedCapture", appFinalBakedCapture);
+                routeObj->setProperty ("bakedResampledCapture", appFinalBakedResampledCapture);
+                routeObj->setProperty ("appPlaybackCapture", appFinalCapture);
+                routeObj->setProperty ("offlineRenderCapture", appFinalOfflineCapture);
+                routeObj->setProperty ("parityReport", appFinalParityReport);
+                routeObj->setProperty ("offlineParityReport", appFinalOfflineParityReport);
+                routeObj->setProperty ("liveVsOfflineParityReport", appFinalLiveVsOfflineParityReport);
+                routeJson.getParentDirectory().createDirectory();
+                routeJson.replaceWithText (juce::JSON::toString (juce::var (routeObj.get()), true));
+
+                logPitchEditorFormant ("note_hq app-final capture clip=" + clipId
+                    + " baked=" + bakedWav.getFullPathName()
+                    + " playback=" + captureWav.getFullPathName()
+                    + " offline=" + offlineWav.getFullPathName()
+                    + " route=" + routeJson.getFullPathName()
+                    + " parity=" + parityJson.getFullPathName()
+                    + " parityPassed=" + juce::String (static_cast<bool> (appFinalParityReport.getProperty ("parityPassed", false)) ? "true" : "false"));
+            }
+        }
+    }
     logPitchEditorFormant("wrote corrected file clip=" + clipId
         + " outputFile=" + outputFile.getFullPathName()
         + " swapDeferred=" + juce::String (swapDeferred ? "true" : "false"));
@@ -8635,6 +12688,232 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     resultObj->setProperty("success", true);
     resultObj->setProperty("renderMode", renderMode);
     resultObj->setProperty("swapDeferred", swapDeferred);
+    resultObj->setProperty("previewCoverageStartSec", previewCoverageStartSec);
+    resultObj->setProperty("previewCoverageEndSec", previewCoverageEndSec);
+    resultObj->setProperty("candidateCoverageStartSec", candidateCoverageStartSec);
+    resultObj->setProperty("candidateCoverageEndSec", candidateCoverageEndSec);
+    resultObj->setProperty("postApplyRouteStatus", postApplyRouteStatus);
+    if (! appFinalCapture.isVoid())
+        resultObj->setProperty("appFinalCapture", appFinalCapture);
+    if (! appFinalBakedCapture.isVoid())
+        resultObj->setProperty("appFinalBakedCapture", appFinalBakedCapture);
+    if (! appFinalBakedResampledCapture.isVoid())
+        resultObj->setProperty("appFinalBakedResampledCapture", appFinalBakedResampledCapture);
+    if (! appFinalOfflineCapture.isVoid())
+        resultObj->setProperty("appFinalOfflineCapture", appFinalOfflineCapture);
+    if (! appFinalParityReport.isVoid())
+        resultObj->setProperty("appFinalParityReport", appFinalParityReport);
+    if (! appFinalOfflineParityReport.isVoid())
+        resultObj->setProperty("appFinalOfflineParityReport", appFinalOfflineParityReport);
+    if (! appFinalLiveVsOfflineParityReport.isVoid())
+        resultObj->setProperty("appFinalLiveVsOfflineParityReport", appFinalLiveVsOfflineParityReport);
+    if (appFinalRouteReportPath.isNotEmpty())
+        resultObj->setProperty("appFinalRouteReportPath", appFinalRouteReportPath);
+    if (appFinalBakedContextPath.isNotEmpty())
+        resultObj->setProperty("appFinalBakedContextPath", appFinalBakedContextPath);
+    if (appFinalBakedResampledContextPath.isNotEmpty())
+        resultObj->setProperty("appFinalBakedResampledContextPath", appFinalBakedResampledContextPath);
+    if (appFinalPlaybackContextPath.isNotEmpty())
+        resultObj->setProperty("appFinalPlaybackContextPath", appFinalPlaybackContextPath);
+    if (appFinalOfflineContextPath.isNotEmpty())
+        resultObj->setProperty("appFinalOfflineContextPath", appFinalOfflineContextPath);
+    if (appFinalParityReportPath.isNotEmpty())
+        resultObj->setProperty("appFinalParityReportPath", appFinalParityReportPath);
+    resultObj->setProperty("requestedRendererBranch", requestedRendererBranch);
+    resultObj->setProperty("actualRendererBranch", actualRendererBranch);
+    resultObj->setProperty("pitchOnlyRecoveryPath", pitchOnlyRecoveryPath);
+    resultObj->setProperty("pitchOnlyNeutralFormantUsed", pitchOnlyNeutralFormantUsed);
+    resultObj->setProperty("processingMode", requestMode);
+    resultObj->setProperty("formantCurveUsed", formantCurveUsed);
+    resultObj->setProperty("explicitFormantRequested", explicitFormantRequested);
+    resultObj->setProperty("pitchOnlyFormantSuppressed", pitchOnlyFormantSuppressed);
+    resultObj->setProperty("usedFallback", usedRendererFallback);
+    resultObj->setProperty("fallbackReason", rendererFallbackReason);
+    resultObj->setProperty("hardFailReason", hardFailReason);
+    resultObj->setProperty("outputDurationSec", renderedOutputSamples > 0 ? static_cast<double> (renderedOutputSamples) / sr : 0.0);
+    resultObj->setProperty("pitchRenderStrategy",
+        phraseHqRenderUsed ? "native_vsf_note_hq" : "legacy_window");
+    resultObj->setProperty("pitchRenderProductPath", pitchRenderProductPath);
+    resultObj->setProperty("pitchRenderBackendId", pitchRenderBackendId);
+    resultObj->setProperty("pitchRenderBackendVersion", pitchRenderBackendVersion);
+    resultObj->setProperty("pitchRenderBackendFailureCode", pitchRenderBackendFailureCode);
+    resultObj->setProperty("pitchRenderBackendCapabilities", pitchRenderBackendCapabilities);
+    resultObj->setProperty("pitchRenderBackendDiagnostics", pitchRenderBackendDiagnostics);
+    resultObj->setProperty("phraseHqRenderUsed", phraseHqRenderUsed);
+    resultObj->setProperty("phraseHqExpandedToFullClip", phraseHqExpandedToFullClip);
+    resultObj->setProperty("phraseHqStartSec", phraseHqStartSec);
+    resultObj->setProperty("phraseHqEndSec", phraseHqEndSec);
+    resultObj->setProperty("pitchRenderCommitPolicy", pitchRenderCommitPolicy);
+    resultObj->setProperty("pitchRenderDryProtectedSamples", pitchRenderDryProtectedSamples);
+    resultObj->setProperty("pitchRenderContextDurationSec", pitchRenderContextDurationSec);
+    resultObj->setProperty("pitchRenderCommitDurationSec", pitchRenderCommitDurationSec);
+    resultObj->setProperty("pitchRenderJobStartDelayMs", pitchRenderJobStartDelayMs);
+    resultObj->setProperty("pitchRenderDirection", pitchRenderDirection);
+    resultObj->setProperty("downshiftFormantGuardUsed", downshiftFormantGuardUsed);
+    resultObj->setProperty("downshiftFormantGuardAlpha", downshiftFormantGuardAlpha);
+    resultObj->setProperty("noteHqEffectiveStartSec", noteHqEffectiveStartSec);
+    resultObj->setProperty("noteHqEffectiveEndSec", noteHqEffectiveEndSec);
+    resultObj->setProperty("noteHqContextStartSec", noteHqContextStartSec);
+    resultObj->setProperty("noteHqContextEndSec", noteHqContextEndSec);
+    resultObj->setProperty("noteHqAudibleCommitStartSec", noteHqAudibleCommitStartSec);
+    resultObj->setProperty("noteHqAudibleCommitEndSec", noteHqAudibleCommitEndSec);
+    resultObj->setProperty("noteHqPreBodyDryProtectedSamples", noteHqPreBodyDryProtectedSamples);
+    resultObj->setProperty("noteHqEntryInsideBodyFadeMs", noteHqEntryInsideBodyFadeMs);
+    resultObj->setProperty("noteHqExitLeadInMs", noteHqExitLeadInMs);
+    resultObj->setProperty("noteHqEntryBridgeStartSec", noteHqEntryBridgeStartSec);
+    resultObj->setProperty("noteHqEntryBridgeEndSec", noteHqEntryBridgeEndSec);
+    resultObj->setProperty("noteHqEntryBridgeWetLagMs", noteHqEntryBridgeWetLagMs);
+    resultObj->setProperty("noteHqEntryBridgeEnvelopeGainDb", noteHqEntryBridgeEnvelopeGainDb);
+    resultObj->setProperty("noteHqEntryBridgeUsed", noteHqEntryBridgeUsed);
+    resultObj->setProperty("noteHqEntryTransientDryPreservedMs", noteHqEntryTransientDryPreservedMs);
+    resultObj->setProperty("pitchOnlyEntrySimpleHandoffUsed", pitchOnlyEntrySimpleHandoffUsed);
+    resultObj->setProperty("pitchOnlyEntrySafeHandoffUsed", pitchOnlyEntrySafeHandoffUsed);
+    resultObj->setProperty("pitchOnlyEntryDryHoldMs", pitchOnlyEntryDryHoldMs);
+    resultObj->setProperty("pitchOnlyEntrySafeBridgeMs", pitchOnlyEntrySafeBridgeMs);
+    resultObj->setProperty("pitchOnlyEntryWetAlignmentMs", pitchOnlyEntryWetAlignmentMs);
+    resultObj->setProperty("pitchOnlyEntryWetGainDb", pitchOnlyEntryWetGainDb);
+    resultObj->setProperty("pitchOnlyEntryWetVsDryRmsDb", pitchOnlyEntryWetVsDryRmsDb);
+    resultObj->setProperty("pitchOnlyEntryEqualPowerBlendUsed", pitchOnlyEntryEqualPowerBlendUsed);
+    resultObj->setProperty("pitchOnlyEntryRmsContinuityUsed", pitchOnlyEntryRmsContinuityUsed);
+    resultObj->setProperty("pitchOnlyEntryRmsContinuityGainDb", pitchOnlyEntryRmsContinuityGainDb);
+    resultObj->setProperty("pitchOnlyEntryRmsContinuityMs", pitchOnlyEntryRmsContinuityMs);
+    resultObj->setProperty("pitchOnlyEntryTransientResidualUsed", pitchOnlyEntryTransientResidualUsed);
+    resultObj->setProperty("pitchOnlyEntryTransientResidualMix", pitchOnlyEntryTransientResidualMix);
+    resultObj->setProperty("pitchOnlyEntryTransientResidualMs", pitchOnlyEntryTransientResidualMs);
+    resultObj->setProperty("pitchOnlyEntryPhaseSafeUsed", pitchOnlyEntryPhaseSafeUsed);
+    resultObj->setProperty("pitchOnlyEntryWetAlignmentAccepted", pitchOnlyEntryWetAlignmentAccepted);
+    resultObj->setProperty("pitchOnlyEntryFirstCycleCorrelation", pitchOnlyEntryFirstCycleCorrelation);
+    resultObj->setProperty("pitchOnlyEntryZeroCrossOffsetMs", pitchOnlyEntryZeroCrossOffsetMs);
+    resultObj->setProperty("pitchOnlyEntryBridgeGainRampDb", pitchOnlyEntryBridgeGainRampDb);
+    resultObj->setProperty("pitchOnlyDownshiftCoreEnvelopePassUsed", pitchOnlyDownshiftCoreEnvelopePassUsed);
+    resultObj->setProperty("pitchOnlyDownshiftCoreRmsTrimDb", pitchOnlyDownshiftCoreRmsTrimDb);
+    resultObj->setProperty("pitchOnlyDownshiftCoreEnvelopeMaxDb", pitchOnlyDownshiftCoreEnvelopeMaxDb);
+    resultObj->setProperty("pitchOnlyDownshiftCoreEnvelopeFrames", pitchOnlyDownshiftCoreEnvelopeFrames);
+    resultObj->setProperty("pitchOnlyEntryWetLagMs", pitchOnlyEntryWetLagMs);
+    resultObj->setProperty("pitchOnlyEntryBridgeDurationMs", pitchOnlyEntryBridgeDurationMs);
+    resultObj->setProperty("pitchOnlyExitDryRestoreUsed", pitchOnlyExitDryRestoreUsed);
+    resultObj->setProperty("pitchOnlyExitDryRestoreStartSec", pitchOnlyExitDryRestoreStartSec);
+    resultObj->setProperty("pitchOnlyExitDryRestoreEndSec", pitchOnlyExitDryRestoreEndSec);
+    resultObj->setProperty("noteHqEntryBoundaryKind", noteHqEntryBoundaryKind);
+    resultObj->setProperty("noteHqExitBoundaryKind", noteHqExitBoundaryKind);
+    resultObj->setProperty("noteHqEntryBoundaryScore", noteHqEntryBoundaryScore);
+    resultObj->setProperty("noteHqExitBoundaryScore", noteHqExitBoundaryScore);
+    resultObj->setProperty("noteHqRendererEntryBoundaryKind", noteHqRendererEntryBoundaryKind);
+    resultObj->setProperty("noteHqRendererExitBoundaryKind", noteHqRendererExitBoundaryKind);
+    resultObj->setProperty("noteHqEditIslandCount", noteHqEditIslandCount);
+    resultObj->setProperty("noteHqEditedNoteCount", noteHqEditedNoteCount);
+    resultObj->setProperty("noteHqEntryPitchHandoffUsed", noteHqEntryPitchHandoffUsed);
+    resultObj->setProperty("noteHqEntryPitchHandoffStartSec", noteHqEntryPitchHandoffStartSec);
+    resultObj->setProperty("noteHqEntryPitchHandoffEndSec", noteHqEntryPitchHandoffEndSec);
+    resultObj->setProperty("noteHqEntryPitchHandoffPreMs", noteHqEntryPitchHandoffPreMs);
+    resultObj->setProperty("noteHqEntryPitchHandoffBodyMs", noteHqEntryPitchHandoffBodyMs);
+    resultObj->setProperty("noteHqEntryPitchSlopeJumpStPerSec", noteHqEntryPitchSlopeJumpStPerSec);
+    resultObj->setProperty("noteHqEntryPitchAccelerationLimited", noteHqEntryPitchAccelerationLimited);
+    resultObj->setProperty("bridgeUsed", bridgeUsed);
+    resultObj->setProperty("bridgeFallbackUsed", bridgeFallbackUsed);
+    resultObj->setProperty("bridgeStartSec", bridgeStartSec);
+    resultObj->setProperty("bridgeLengthMs", bridgeLengthMs);
+    resultObj->setProperty("bridgeAlignmentLagSamples", bridgeAlignmentLagSamples);
+    resultObj->setProperty("bridgeCorrelationScore", bridgeCorrelationScore);
+    resultObj->setProperty("bridgeGainDeltaDb", bridgeGainDeltaDb);
+    resultObj->setProperty("bodyReplacementUsed", bodyReplacementUsed);
+    resultObj->setProperty("bodyReplacementFallbackUsed", bodyReplacementFallbackUsed);
+    resultObj->setProperty("entryLockStartSec", entryLockStartSec);
+    resultObj->setProperty("entryLockLengthMs", entryLockLengthMs);
+    resultObj->setProperty("exitLockStartSec", exitLockStartSec);
+    resultObj->setProperty("renderedBodyStartSec", renderedBodyStartSec);
+    resultObj->setProperty("renderedBodyEndSec", renderedBodyEndSec);
+    resultObj->setProperty("islandNativeUsed", islandNativeUsed);
+    resultObj->setProperty("islandNativeFallbackUsed", islandNativeFallbackUsed);
+    resultObj->setProperty("islandRenderStartSec", islandRenderStartSec);
+    resultObj->setProperty("islandRenderEndSec", islandRenderEndSec);
+    resultObj->setProperty("transientMaskPeak", transientMaskPeak);
+    resultObj->setProperty("voicedCoreMaskPeak", voicedCoreMaskPeak);
+    resultObj->setProperty("hpssUsed", hpssUsed);
+    resultObj->setProperty("hpssFallbackUsed", hpssFallbackUsed);
+    resultObj->setProperty("harmonicMaskPeak", harmonicMaskPeak);
+    resultObj->setProperty("aperiodicMaskPeak", aperiodicMaskPeak);
+    resultObj->setProperty("spectralEnvelopeCorrectionUsed", spectralEnvelopeCorrectionUsed);
+    resultObj->setProperty("pitchOnlyCoreTimbreCorrectionUsed", pitchOnlyCoreTimbreCorrectionUsed);
+    resultObj->setProperty("pitchOnlyCoreEnvelopeMix", pitchOnlyCoreEnvelopeMix);
+    resultObj->setProperty("pitchOnlyCoreRmsTrimDb", pitchOnlyCoreRmsTrimDb);
+    resultObj->setProperty("pitchOnlyCoreEnvelopeLifter", pitchOnlyCoreEnvelopeLifter);
+    resultObj->setProperty("pitchOnlyEntryTimbreCorrectionUsed", pitchOnlyEntryTimbreCorrectionUsed);
+    resultObj->setProperty("pitchOnlyEntryRmsTrimDb", pitchOnlyEntryRmsTrimDb);
+    resultObj->setProperty("pitchOnlyEntryTiltDb", pitchOnlyEntryTiltDb);
+    resultObj->setProperty("pitchOnlyEntryHandoffUsed", pitchOnlyEntryHandoffUsed);
+    resultObj->setProperty("pitchOnlyExitHandoffUsed", pitchOnlyExitHandoffUsed);
+    resultObj->setProperty("vocalSourceFilterUsed", vocalSourceFilterUsed);
+    resultObj->setProperty("vocalSourceFilterVoicedCoverage", vocalSourceFilterVoicedCoverage);
+    resultObj->setProperty("vocalSourceFilterResidualMix", vocalSourceFilterResidualMix);
+    resultObj->setProperty("vocalSourceFilterFallbackUsed", vocalSourceFilterFallbackUsed);
+    resultObj->setProperty("vocalSourceFilterFallbackReason", vocalSourceFilterFallbackReason);
+    resultObj->setProperty("vocalSourceFilterEntryDryMs", vocalSourceFilterEntryDryMs);
+    resultObj->setProperty("vocalSourceFilterExitDryMs", vocalSourceFilterExitDryMs);
+    resultObj->setProperty("vocalSourceFilterResidualMixScale", vocalSourceFilterResidualMixScale);
+    resultObj->setProperty("vocalSourceFilterEpochInterpolationUsed", vocalSourceFilterEpochInterpolationUsed);
+    resultObj->setProperty("vocalSourceFilterEpochInterpolationStrength", vocalSourceFilterEpochInterpolationStrength);
+    resultObj->setProperty("vocalSourceFilterGrainRadiusScale", vocalSourceFilterGrainRadiusScale);
+    resultObj->setProperty("vocalSourceFilterUpPresenceTrimDb", vocalSourceFilterUpPresenceTrimDb);
+    resultObj->setProperty("vocalSourceFilterUpPresenceHz", vocalSourceFilterUpPresenceHz);
+    resultObj->setProperty("vocalSourceFilterDownNasalTrimDb", vocalSourceFilterDownNasalTrimDb);
+    resultObj->setProperty("vocalSourceFilterDownNasalHz", vocalSourceFilterDownNasalHz);
+    resultObj->setProperty("vocalSourceFilterDownBodyCompDb", vocalSourceFilterDownBodyCompDb);
+    resultObj->setProperty("vocalSourceFilterDownBodyCompHz", vocalSourceFilterDownBodyCompHz);
+    resultObj->setProperty("wsolaUsed", wsolaUsed);
+    resultObj->setProperty("wsolaFallbackUsed", wsolaFallbackUsed);
+    resultObj->setProperty("wsolaEntryLagSamples", wsolaEntryLagSamples);
+    resultObj->setProperty("wsolaExitLagSamples", wsolaExitLagSamples);
+    resultObj->setProperty("wsolaCorrelationScore", wsolaCorrelationScore);
+    resultObj->setProperty("phaseLockUsed", phaseLockUsed);
+    resultObj->setProperty("phaseLockFallbackUsed", phaseLockFallbackUsed);
+    resultObj->setProperty("phaseAlignedEntry", phaseAlignedEntry);
+    resultObj->setProperty("phaseAlignedExit", phaseAlignedExit);
+    resultObj->setProperty("phasePeakCount", phasePeakCount);
+    resultObj->setProperty("transitionHqUsed", transitionHqUsed);
+    resultObj->setProperty("transitionHqFallbackUsed", transitionHqFallbackUsed);
+    resultObj->setProperty("transitionStartSec", transitionStartSec);
+    resultObj->setProperty("transitionEndSec", transitionEndSec);
+    resultObj->setProperty("transitionTransientPeak", transitionTransientPeak);
+    resultObj->setProperty("transitionVoicedCorePeak", transitionVoicedCorePeak);
+    resultObj->setProperty("transitionResidualPeak", transitionResidualPeak);
+    resultObj->setProperty("transitionEnvelopeCorrectionUsed", transitionEnvelopeCorrectionUsed);
+    resultObj->setProperty("engineV2Used", engineV2Used);
+    resultObj->setProperty("engineV2FallbackUsed", engineV2FallbackUsed);
+    resultObj->setProperty("engineV2TransitionCount", engineV2TransitionCount);
+    resultObj->setProperty("engineV2TransitionStartSec", engineV2TransitionStartSec);
+    resultObj->setProperty("engineV2TransitionEndSec", engineV2TransitionEndSec);
+    resultObj->setProperty("engineV2HarmonicSupportPeak", engineV2HarmonicSupportPeak);
+    resultObj->setProperty("engineV2ResidualSupportPeak", engineV2ResidualSupportPeak);
+    resultObj->setProperty("engineV2EnvelopeSupportPeak", engineV2EnvelopeSupportPeak);
+    resultObj->setProperty("transientBypassUsed", transientBypassUsed);
+    resultObj->setProperty("residualCarryUsed", residualCarryUsed);
+    resultObj->setProperty("cepstralCutoffUsed", cepstralCutoffUsed);
+    resultObj->setProperty("fftSizeUsed", engineV2FftSize);
+    resultObj->setProperty("hopSizeUsed", engineV2HopSize);
+    resultObj->setProperty("immediateLeftNeighborUsed", immediateLeftNeighborUsed);
+    resultObj->setProperty("immediateRightNeighborUsed", immediateRightNeighborUsed);
+    resultObj->setProperty("leftNeighborSamplesRendered", leftNeighborSamplesRendered);
+    resultObj->setProperty("rightNeighborSamplesRendered", rightNeighborSamplesRendered);
+    resultObj->setProperty("leftNeighborSmoothMs", leftNeighborSmoothMs);
+    resultObj->setProperty("rightNeighborSmoothMs", rightNeighborSmoothMs);
+    resultObj->setProperty("nonImmediateNeighborTouched", nonImmediateNeighborTouched);
+    resultObj->setProperty("entryAlignmentOffsetMs", entryAlignmentOffsetMs);
+    resultObj->setProperty("exitAlignmentOffsetMs", exitAlignmentOffsetMs);
+    resultObj->setProperty("firstVoicedCyclesEntryUsed", firstVoicedCyclesEntryUsed);
+    resultObj->setProperty("firstVoicedCyclesExitUsed", firstVoicedCyclesExitUsed);
+    resultObj->setProperty("v3TransitionPairUsed", v3TransitionPairUsed);
+    resultObj->setProperty("v3ContinuousRenderUsed", v3ContinuousRenderUsed);
+    resultObj->setProperty("v3EntryAnchorMs", v3EntryAnchorMs);
+    resultObj->setProperty("v3ExitAnchorMs", v3ExitAnchorMs);
+    resultObj->setProperty("v3FirstCyclesEntryCount", v3FirstCyclesEntryCount);
+    resultObj->setProperty("v3FirstCyclesExitCount", v3FirstCyclesExitCount);
+    resultObj->setProperty("v3ShellDurationMs", v3ShellDurationMs);
+    resultObj->setProperty("v3BodyDurationMs", v3BodyDurationMs);
+    resultObj->setProperty("v3ResidualMix", v3ResidualMix);
+    resultObj->setProperty("v3FormantMode", v3FormantMode);
+    resultObj->setProperty("v3NeighborLeftOverlapMs", v3NeighborLeftOverlapMs);
+    resultObj->setProperty("v3NeighborRightOverlapMs", v3NeighborRightOverlapMs);
     return juce::var(resultObj.get());
 }
 
@@ -8642,6 +12921,313 @@ juce::var AudioEngine::previewPitchCorrection(const juce::String& trackId, const
                                                 const juce::var& notesJson)
 {
     return applyPitchCorrection(trackId, clipId, notesJson, juce::var(), 0.0f);
+}
+
+juce::var AudioEngine::startPitchScrubPreview(const juce::String& trackId,
+                                              const juce::String& clipId,
+                                              const juce::var& noteJson,
+                                              const juce::var& framesJson)
+{
+    const juce::var parsedNoteJson = noteJson.isString() ? juce::JSON::parse (noteJson.toString()) : noteJson;
+    const juce::var parsedFramesJson = framesJson.isString() ? juce::JSON::parse (framesJson.toString()) : framesJson;
+
+    juce::Array<juce::var> noteArray;
+    noteArray.add (parsedNoteJson);
+    auto parsedNotes = PitchAnalyzer::notesFromJSON (juce::var (noteArray));
+    if (parsedNotes.empty())
+        return false;
+    const auto& parsedNote = parsedNotes.front();
+
+    auto clips = playbackEngine.getClipSnapshot();
+    const PlaybackEngine::ClipInfo* foundClip = nullptr;
+    for (const auto& clip : clips)
+    {
+        if (clip.trackId == trackId && clip.clipId == clipId)
+        {
+            foundClip = &clip;
+            break;
+        }
+    }
+    if (foundClip == nullptr)
+        return false;
+
+    juce::File sourceFile = foundClip->audioFile.existsAsFile()
+        ? foundClip->audioFile
+        : foundClip->originalAudioFile;
+    if (! sourceFile.existsAsFile())
+        return false;
+
+    juce::AudioFormatManager fmtMgr;
+    fmtMgr.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fmtMgr.createReaderFor(sourceFile));
+    if (! reader)
+        return false;
+
+    auto analysisFrames = PitchAnalyzer::framesFromJSON (parsedFramesJson);
+    float noteStartTime = parsedNote.startTime;
+    float noteEndTime = parsedNote.endTime;
+    float detectedPitch = parsedNote.detectedPitch;
+    float correctedPitch = parsedNote.correctedPitch;
+    if (noteEndTime <= noteStartTime + 0.02f || detectedPitch <= 0.0f || correctedPitch <= 0.0f)
+    {
+        float derivedStartSec = std::numeric_limits<float>::max();
+        float derivedEndSec = 0.0f;
+        float derivedMidi = 0.0f;
+        int derivedCount = 0;
+        for (const auto& frame : analysisFrames)
+        {
+            if (! frame.voiced || frame.midiNote <= 0.0f || frame.confidence < 0.30f)
+                continue;
+            derivedStartSec = std::min (derivedStartSec, frame.time);
+            derivedEndSec = std::max (derivedEndSec, frame.time);
+            derivedMidi += frame.midiNote;
+            ++derivedCount;
+        }
+        if (derivedCount > 0 && derivedEndSec > derivedStartSec)
+        {
+            noteStartTime = derivedStartSec;
+            noteEndTime = derivedEndSec + 0.04f;
+            detectedPitch = derivedMidi / static_cast<float> (derivedCount);
+            correctedPitch = detectedPitch;
+        }
+    }
+    const float noteDurationSec = std::max (0.02f, noteEndTime - noteStartTime);
+
+    float basePitchHz = 0.0f;
+    int basePitchCount = 0;
+    const float innerStartSec = noteStartTime + 0.12f * noteDurationSec;
+    const float innerEndSec = noteEndTime - 0.12f * noteDurationSec;
+    for (const auto& frame : analysisFrames)
+    {
+        if (frame.time >= innerStartSec && frame.time <= innerEndSec && frame.frequency > 40.0f)
+        {
+            basePitchHz += frame.frequency;
+            ++basePitchCount;
+        }
+    }
+    if (basePitchCount > 0)
+        basePitchHz /= static_cast<float> (basePitchCount);
+    else
+        basePitchHz = 440.0f * std::pow (2.0f, (detectedPitch - 69.0f) / 12.0f);
+    basePitchHz = juce::jlimit (55.0f, 1400.0f, basePitchHz);
+
+    const float preferredPreviewSec = 0.240f;
+    const float maxPreviewSec = 0.320f;
+    const float minPreviewSec = 0.080f;
+    const float availableInteriorSec = std::max (0.02f, noteDurationSec * 0.80f);
+    const float clampedInteriorSec = std::max (0.04f, availableInteriorSec);
+    const float desiredLoopSec = juce::jlimit (std::min (minPreviewSec, clampedInteriorSec),
+                                               std::min (maxPreviewSec, clampedInteriorSec),
+                                               preferredPreviewSec);
+
+    struct CandidateSpan
+    {
+        float startSec = 0.0f;
+        float endSec = 0.0f;
+        float score = -1.0f;
+    };
+
+    CandidateSpan bestSpan;
+    CandidateSpan currentSpan;
+    float currentScoreAccum = 0.0f;
+    int currentScoreCount = 0;
+    const auto flushCurrentSpan = [&]()
+    {
+        if (currentSpan.endSec > currentSpan.startSec && currentScoreCount > 0)
+        {
+            currentSpan.score = currentScoreAccum / static_cast<float> (currentScoreCount);
+            const float currentLen = currentSpan.endSec - currentSpan.startSec;
+            const float bestLen = bestSpan.endSec - bestSpan.startSec;
+            if (currentLen > bestLen + 0.010f
+                || (std::abs (currentLen - bestLen) <= 0.010f && currentSpan.score > bestSpan.score))
+                bestSpan = currentSpan;
+        }
+        currentSpan = {};
+        currentScoreAccum = 0.0f;
+        currentScoreCount = 0;
+    };
+
+    for (const auto& frame : analysisFrames)
+    {
+        if (frame.time < innerStartSec || frame.time > innerEndSec)
+            continue;
+
+        const float linearRms = std::pow (10.0f, frame.rmsDB / 20.0f);
+        const bool stableVoiced = frame.voiced && frame.frequency > 40.0f && frame.confidence >= 0.45f && linearRms >= 0.003f;
+        if (! stableVoiced)
+        {
+            flushCurrentSpan();
+            continue;
+        }
+
+        if (currentScoreCount == 0)
+            currentSpan.startSec = frame.time;
+        currentSpan.endSec = frame.time;
+        currentScoreAccum += frame.confidence * juce::jlimit (0.0f, 1.0f, linearRms * 8.0f);
+        ++currentScoreCount;
+    }
+    flushCurrentSpan();
+
+    const float noteMidSec = 0.5f * (noteStartTime + noteEndTime);
+    float anchorMidSec = noteMidSec;
+    if (bestSpan.endSec > bestSpan.startSec)
+        anchorMidSec = 0.5f * (bestSpan.startSec + bestSpan.endSec);
+
+    float loopStartSec = anchorMidSec - 0.5f * desiredLoopSec;
+    float loopEndSec = loopStartSec + desiredLoopSec;
+    const float minAllowedStart = noteStartTime + 0.08f * noteDurationSec;
+    const float maxAllowedEnd = std::max (minAllowedStart + desiredLoopSec, noteEndTime - 0.08f * noteDurationSec);
+    if (loopStartSec < minAllowedStart)
+    {
+        loopStartSec = minAllowedStart;
+        loopEndSec = loopStartSec + desiredLoopSec;
+    }
+    if (loopEndSec > maxAllowedEnd)
+    {
+        loopEndSec = maxAllowedEnd;
+        loopStartSec = loopEndSec - desiredLoopSec;
+    }
+    loopStartSec = std::max (0.0f, loopStartSec);
+    loopEndSec = std::max (loopStartSec + std::max (0.04f, std::min (minPreviewSec, desiredLoopSec)), loopEndSec);
+
+    const double clipStartTimeInSource = foundClip->offset;
+    const juce::int64 loopStartSample = static_cast<juce::int64> (std::floor ((clipStartTimeInSource + loopStartSec) * reader->sampleRate));
+    const int loopSamples = std::max (32, static_cast<int> (std::round ((loopEndSec - loopStartSec) * reader->sampleRate)));
+    if (loopStartSample < 0 || loopSamples <= 0 || loopStartSample >= reader->lengthInSamples)
+        return false;
+
+    const int availableSamples = static_cast<int> (std::min<juce::int64> (loopSamples, reader->lengthInSamples - loopStartSample));
+    if (availableSamples <= 16)
+        return false;
+
+    juce::AudioBuffer<float> loopBuffer (static_cast<int> (reader->numChannels), availableSamples);
+    reader->read (&loopBuffer, 0, availableSamples, loopStartSample, true, true);
+
+    const int fadeSamples = juce::jlimit (16, std::max (24, availableSamples / 3), std::max (32, availableSamples / 6));
+    float seamAbsDiff = 0.0f;
+    int seamSampleCount = 0;
+    float previewPeak = 0.0f;
+    double previewEnergy = 0.0;
+    int previewEnergySamples = 0;
+    for (int ch = 0; ch < loopBuffer.getNumChannels(); ++ch)
+    {
+        for (int i = 0; i < availableSamples; ++i)
+        {
+            const float sample = loopBuffer.getSample (ch, i);
+            previewPeak = juce::jmax (previewPeak, std::abs (sample));
+            previewEnergy += static_cast<double> (sample) * static_cast<double> (sample);
+            ++previewEnergySamples;
+        }
+    }
+    const float previewRms = previewEnergySamples > 0
+        ? std::sqrt (static_cast<float> (previewEnergy / static_cast<double> (previewEnergySamples)))
+        : 0.0f;
+    for (int ch = 0; ch < loopBuffer.getNumChannels(); ++ch)
+    {
+        for (int i = 0; i < fadeSamples; ++i)
+        {
+            const float t = static_cast<float> (i) / static_cast<float> (std::max (1, fadeSamples - 1));
+            const int tailIndex = availableSamples - fadeSamples + i;
+            const float startSample = loopBuffer.getSample (ch, i);
+            const float tailSample = loopBuffer.getSample (ch, tailIndex);
+            seamAbsDiff += std::abs (startSample - tailSample);
+            ++seamSampleCount;
+            loopBuffer.setSample (ch, i, startSample * (1.0f - t) + tailSample * t);
+            loopBuffer.setSample (ch, tailIndex, tailSample * (1.0f - t) + startSample * t);
+        }
+    }
+
+    const float seamAvgDiff = seamSampleCount > 0 ? seamAbsDiff / static_cast<float> (seamSampleCount) : 1.0f;
+    const float seamDenominator = std::max (0.005f, previewPeak);
+    const float repeatStability = juce::jlimit (0.0f, 1.0f, 1.0f - (seamAvgDiff / seamDenominator));
+    const float peakTarget = 0.18f;
+    const float rmsTarget = 0.055f;
+    float previewGain = 1.0f;
+    if (previewPeak > 1.0e-5f)
+        previewGain = std::max (previewGain, peakTarget / previewPeak);
+    if (previewRms > 1.0e-5f)
+        previewGain = std::max (previewGain, rmsTarget / previewRms);
+    previewGain = juce::jlimit (1.0f, 24.0f, previewGain);
+
+    PlaybackEngine::PitchScrubPreviewData preview;
+    preview.trackId = trackId;
+    preview.clipId = clipId;
+    preview.loopBuffer = loopBuffer;
+    preview.sourceSampleRate = reader->sampleRate;
+    preview.loopStartSec = loopStartSec;
+    preview.loopEndSec = loopEndSec;
+    preview.basePitchHz = basePitchHz;
+    preview.pitchRatio = juce::jlimit (0.25f, 4.0f,
+        std::pow (2.0f, (correctedPitch - detectedPitch) / 12.0f));
+    preview.active = true;
+    preview.readPosition = 0.0;
+    preview.loopCrossfadeSamples = fadeSamples;
+    preview.gain = previewGain;
+    preview.repeatStability = repeatStability;
+    playbackEngine.setPitchScrubPreview (preview);
+
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty ("success", true);
+    resultObj->setProperty ("loopStartSec", loopStartSec);
+    resultObj->setProperty ("loopEndSec", loopEndSec);
+    resultObj->setProperty ("loopDurationMs", 1000.0 * (loopEndSec - loopStartSec));
+    resultObj->setProperty ("basePitchHz", basePitchHz);
+    resultObj->setProperty ("pitchRatio", preview.pitchRatio);
+    resultObj->setProperty ("previewGain", previewGain);
+    resultObj->setProperty ("previewPeak", previewPeak);
+    resultObj->setProperty ("previewRms", previewRms);
+    resultObj->setProperty ("repeatStability", repeatStability);
+    return juce::var (resultObj);
+}
+
+bool AudioEngine::updatePitchScrubPreview(const juce::String& clipId, float pitchRatio)
+{
+    return playbackEngine.updatePitchScrubPreview (clipId, pitchRatio);
+}
+
+bool AudioEngine::stopPitchScrubPreview(const juce::String& clipId)
+{
+    const bool hadPreview = playbackEngine.hasPitchScrubPreview (clipId);
+    playbackEngine.clearPitchScrubPreview (clipId);
+    return hadPreview;
+}
+
+juce::var AudioEngine::getPitchScrubPreviewStatus(const juce::String& clipId)
+{
+    const auto status = playbackEngine.getPitchScrubPreviewStatus (clipId);
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty ("active", status.active);
+    resultObj->setProperty ("releasePending", status.releasePending);
+    resultObj->setProperty ("audible", status.audible);
+    resultObj->setProperty ("previewArmed", status.previewArmed);
+    resultObj->setProperty ("firstCallbackServiced", status.firstCallbackServiced);
+    resultObj->setProperty ("firstDragAudible", status.firstDragAudible);
+    resultObj->setProperty ("trackId", status.trackId);
+    resultObj->setProperty ("clipId", status.clipId);
+    resultObj->setProperty ("pitchRatio", status.pitchRatio);
+    resultObj->setProperty ("basePitchHz", status.basePitchHz);
+    resultObj->setProperty ("currentGain", status.currentGain);
+    resultObj->setProperty ("targetGain", status.targetGain);
+    resultObj->setProperty ("repeatStability", status.repeatStability);
+    resultObj->setProperty ("lastPeak", status.lastPeak);
+    resultObj->setProperty ("loopDurationMs", status.loopDurationMs);
+    resultObj->setProperty ("lastRenderWallTimeMs", status.lastRenderWallTimeMs);
+    resultObj->setProperty ("mixedCallbackCount", status.mixedCallbackCount);
+    resultObj->setProperty ("mixedSampleCount", static_cast<double> (status.mixedSampleCount));
+    resultObj->setProperty ("renderMethod", status.renderMethod);
+    return juce::var (resultObj);
+}
+
+juce::var AudioEngine::getPitchPreviewRoutingStatus(const juce::String& clipId)
+{
+    const auto status = playbackEngine.getPitchPreviewRoutingStatus (clipId);
+    auto* resultObj = new juce::DynamicObject();
+    resultObj->setProperty ("scrubPreviewActive", status.scrubPreviewActive);
+    resultObj->setProperty ("clipLivePreviewActive", status.clipLivePreviewActive);
+    resultObj->setProperty ("renderedSegmentActive", status.renderedSegmentActive);
+    resultObj->setProperty ("correctedSourceActive", status.correctedSourceActive);
+    resultObj->setProperty ("monitorMode", status.monitorMode);
+    return juce::var (resultObj);
 }
 
 // =============================================================================
@@ -8935,9 +13521,14 @@ juce::var AudioEngine::refreshAiToolsStatus()
     return stemSeparator.refreshAiToolsStatus();
 }
 
-juce::var AudioEngine::installAiTools()
+juce::var AudioEngine::installAiTools(bool userConfirmedDownload)
 {
-    return stemSeparator.installAiTools();
+    return stemSeparator.installAiTools(userConfirmedDownload);
+}
+
+juce::var AudioEngine::resetAiTools()
+{
+    return stemSeparator.resetAiTools();
 }
 
 juce::var AudioEngine::separateStems(const juce::String& trackId, const juce::String& clipId)
@@ -9112,6 +13703,171 @@ void AudioEngine::cancelStemSeparation()
 void AudioEngine::cancelAiToolsInstall()
 {
     stemSeparator.cancelAiToolsInstall();
+}
+
+juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
+                                         const juce::String& workflowId,
+                                         const juce::String& paramsJSON)
+{
+    juce::ignoreUnused(trackId);
+
+    auto result = std::make_unique<juce::DynamicObject>();
+
+    if (aiTrackEngine.isRunning())
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Another AI generation is already in progress.");
+        return juce::var(result.release());
+    }
+
+    auto aiToolsStatus = stemSeparator.getAiToolsStatus();
+    if (auto* statusObject = aiToolsStatus.getDynamicObject())
+    {
+        const auto musicGenerationReady = static_cast<bool>(statusObject->getProperty("musicGenerationReady"));
+        const auto layoutValid = static_cast<bool>(statusObject->getProperty("musicGenerationLayoutValid"));
+        const auto performanceReady = ! statusObject->hasProperty("musicGenerationPerformanceReady")
+            || static_cast<bool>(statusObject->getProperty("musicGenerationPerformanceReady"));
+        const auto availableProfilesVar = statusObject->getProperty("musicGenerationAvailableProfiles");
+        auto hasNativeMusicProfile = true;
+        if (auto* availableProfilesArray = availableProfilesVar.getArray())
+        {
+            if (! availableProfilesArray->isEmpty())
+            {
+                hasNativeMusicProfile = false;
+                for (const auto& profile : *availableProfilesArray)
+                {
+                    if (profile.toString() == "native-xl-turbo")
+                    {
+                        hasNativeMusicProfile = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (! musicGenerationReady || ! layoutValid || ! performanceReady || ! hasNativeMusicProfile)
+        {
+            const auto musicGenerationStatusMessage = statusObject->getProperty("musicGenerationStatusMessage").toString();
+            const auto musicGenerationPerformanceStatusMessage = statusObject->getProperty("musicGenerationPerformanceStatusMessage").toString();
+            const auto statusMessage = statusObject->getProperty("message").toString();
+            const auto errorMessage = statusObject->getProperty("error").toString();
+            const auto modelId = statusObject->getProperty("musicGenerationModelId").toString();
+            const auto checkpointRoot = statusObject->getProperty("musicGenerationCheckpointRoot").toString();
+            result->setProperty("started", false);
+            result->setProperty(
+                "error",
+                errorMessage.isNotEmpty()
+                    ? errorMessage
+                    : (! hasNativeMusicProfile)
+                        ? "The Native XL Turbo ACE-Step profile is still missing required music-generation assets. Retry AI Tools install to finish setup."
+                    : musicGenerationPerformanceStatusMessage.isNotEmpty()
+                        ? musicGenerationPerformanceStatusMessage
+                    : musicGenerationStatusMessage.isNotEmpty()
+                        ? musicGenerationStatusMessage
+                    : (! layoutValid && modelId.isNotEmpty() && checkpointRoot.isNotEmpty())
+                        ? "Pinned ACE-Step model " + modelId + " is not ready in " + checkpointRoot + "."
+                        : statusMessage);
+            return juce::var(result.release());
+        }
+    }
+
+    auto outputDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("OpenStudio")
+        .getChildFile("generated-music");
+
+    if (! aiTrackEngine.startGeneration(workflowId, paramsJSON, outputDir))
+    {
+        auto progress = aiTrackEngine.pollProgress();
+        result->setProperty("started", false);
+        result->setProperty("error", progress.error.isNotEmpty()
+                                         ? progress.error
+                                         : "Failed to start AI generation.");
+        return juce::var(result.release());
+    }
+
+    result->setProperty("started", true);
+    return juce::var(result.release());
+}
+
+juce::var AudioEngine::getAIGenerationProgress()
+{
+    auto obj = std::make_unique<juce::DynamicObject>();
+    auto progress = aiTrackEngine.pollProgress();
+
+    obj->setProperty("state", progress.state);
+    obj->setProperty("progress", static_cast<double>(progress.progress));
+    obj->setProperty("phase", progress.phase);
+    obj->setProperty("message", progress.message);
+    obj->setProperty("backend", progress.backend);
+    obj->setProperty("elapsedMs", progress.elapsedMs);
+    obj->setProperty("heartbeatTs", progress.heartbeatTs);
+    if (progress.phaseProgress >= 0.0)
+        obj->setProperty("phaseProgress", progress.phaseProgress);
+    if (progress.etaMs >= 0.0)
+        obj->setProperty("etaMs", progress.etaMs);
+    if (progress.runMode.isNotEmpty())
+        obj->setProperty("runMode", progress.runMode);
+    if (progress.runtimeProfile.isNotEmpty())
+        obj->setProperty("runtimeProfile", progress.runtimeProfile);
+    if (progress.lmModel.isNotEmpty())
+        obj->setProperty("lmModel", progress.lmModel);
+    if (progress.statusNote.isNotEmpty())
+        obj->setProperty("statusNote", progress.statusNote);
+    if (progress.failureKind.isNotEmpty())
+        obj->setProperty("failureKind", progress.failureKind);
+    if (progress.sessionMode.isNotEmpty())
+        obj->setProperty("sessionMode", progress.sessionMode);
+    if (progress.workerExitCode != 0)
+        obj->setProperty("workerExitCode", progress.workerExitCode);
+    if (progress.lastStdoutLine.isNotEmpty())
+        obj->setProperty("lastStdoutLine", progress.lastStdoutLine);
+    if (progress.lastStderrLine.isNotEmpty())
+        obj->setProperty("lastStderrLine", progress.lastStderrLine);
+    if (progress.attemptMode.isNotEmpty())
+        obj->setProperty("attemptMode", progress.attemptMode);
+    if (progress.attemptIndex > 0)
+        obj->setProperty("attemptIndex", progress.attemptIndex);
+    if (progress.protocolVersion > 0)
+        obj->setProperty("protocolVersion", progress.protocolVersion);
+    if (progress.scriptVersion.isNotEmpty())
+        obj->setProperty("scriptVersion", progress.scriptVersion);
+    if (progress.requestId.isNotEmpty())
+        obj->setProperty("requestId", progress.requestId);
+    if (progress.priorFailure.isNotEmpty())
+        obj->setProperty("priorFailure", progress.priorFailure);
+    if (progress.lastProgressAgeMs >= 0.0)
+        obj->setProperty("lastProgressAgeMs", progress.lastProgressAgeMs);
+    if (progress.tracePath.isNotEmpty())
+        obj->setProperty("tracePath", progress.tracePath);
+    if (progress.failureDetail.isNotEmpty())
+        obj->setProperty("failureDetail", progress.failureDetail);
+    if (progress.lmBackend.isNotEmpty())
+        obj->setProperty("lmBackend", progress.lmBackend);
+    if (progress.lmStage.isNotEmpty())
+        obj->setProperty("lmStage", progress.lmStage);
+
+    if (progress.outputFile.isNotEmpty())
+    {
+        obj->setProperty("outputFile", progress.outputFile);
+
+        juce::File generatedFile(progress.outputFile);
+        if (generatedFile.existsAsFile())
+        {
+            peakCache.generateAsync(generatedFile, [generatedFile]() {
+                juce::Logger::writeToLog("PeakCache: Generated peaks for AI clip " + generatedFile.getFileName());
+            });
+        }
+    }
+
+    if (progress.error.isNotEmpty())
+        obj->setProperty("error", progress.error);
+
+    return juce::var(obj.release());
+}
+
+void AudioEngine::cancelAIGeneration()
+{
+    aiTrackEngine.cancel();
 }
 
 // =============================================================================

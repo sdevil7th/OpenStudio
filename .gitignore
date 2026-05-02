@@ -2,6 +2,7 @@
 /build
 /build-*/
 /out
+/tmp/
 /cmake-build-*
 CMakeCache.txt
 CMakeFiles
@@ -38,6 +39,50 @@ get-pip.py
 
 # Bundled Python environment (downloaded per-machine, not committed)
 /tools/python/
+/tools/ffmpeg.exe
+/tools/ffprobe.exe
+/tools/sox/
+/tools/praat/
+/tools/audio-analysis-cache/
+/tools/audio-analysis-runtime/
+/tools/openstudio_ace_backend/vendor_runtime/
+/tools/*.zip
+/tools/*-download.*
+/tools/*-extract/
+/tools/linuxdeploy-*.AppImage
+
+# Local pitch/render regression outputs
+/tmp_pitch_runs/
+/pitch_debug_captures/
+/*_signal_chain_debug/
+/signal_chain_debug/
+/tests/fixtures/pitch-regression/runs/
+/tests/fixtures/pitch-regression/**/*.wav
+/tests/fixtures/pitch-regression/**/*.png
+/tests/fixtures/pitch-regression/**/*.jsonl
+*_render_route_report.json
+*_pitch_*_analysis.json
+*_reference_match.json
+*_parity.json
+*_route.json
+*_context.wav
+*_candidate_context.wav
+
+# Local exploratory pitch tools. Keep only the lightweight source-owned runner tracked.
+/tools/pitch_*.py
+/tools/pitch_harness_common.ps1
+/tools/reference_audio_match.py
+/tools/ml_restore_benchmark.py
+/tools/register-pitch-artifact.ps1
+/tools/run-ui-pitch-*.ps1
+/tools/run-pitch-*.ps1
+!/tools/run-pitch-headless-regression.ps1
+/tools/run-own-engine-parity.ps1
+/tools/rubberband/
+/local_tools/
+
+# Linux AppImage build output
+*.AppImage
 
 # Release artifacts and local publish validation
 /dist/netlify-release-site/
@@ -93,6 +138,9 @@ get-pip.py
 /resources/models/*.ckpt
 /resources/models/*.bin
 /resources/models/*.ort
+
+# Audio test samples
+/audio_test_samples/
 
 # Logs
 *.log

@@ -51,8 +51,7 @@ Studio13-v3/
 │   ├── PitchDetector.h/cpp      # Low-level YIN pitch detection algorithm
 │   ├── PitchMapper.h/cpp        # Maps detected pitch to corrected pitch (scale/key snapping)
 │   ├── PitchShifter.h/cpp       # Phase vocoder pitch shifter (FFT 2048, hop 512, FIFO-based)
-│   ├── PitchResynthesizer.h/cpp # Offline pitch correction: builds correction curve, applies via RubberBand (default), WORLD, or phase vocoder
-│   ├── RubberBandShifter.h/cpp  # Rubber Band Library R3 wrapper: multi-channel, per-block pitch ratios, formant preservation
+│   ├── PitchResynthesizer.h/cpp # Offline graphical pitch correction via native VSF pitch-only renderer
 │   ├── FormantPreserver.h/cpp   # WORLD vocoder (DIO+StoneMask+CheapTrick+D4C) for formant-preserving pitch shift (fallback)
 │   ├── PolyPitchDetector.h/cpp  # Polyphonic pitch detection via Basic-Pitch ONNX model
 │   ├── PolyResynthesizer.h/cpp  # Polyphonic pipeline: STFT→Wiener masks→per-note shift→accumulate→ISTFT
@@ -222,11 +221,8 @@ The pitch editor enables vocal pitch correction with both real-time (auto-tune s
 
 **Architecture**:
 ```
-Monophonic pipeline (default — Rubber Band):
-  PitchAnalyzer (YIN) → PitchNotes → PitchResynthesizer::processMultiChannel() → RubberBandShifter (R3 engine)
-
-Monophonic pipeline (fallback — WORLD):
-  PitchAnalyzer (YIN) → PitchNotes → PitchResynthesizer::process() → FormantPreserver (WORLD vocoder)
+Monophonic graphical pitch pipeline:
+  PitchAnalyzer (YIN) → PitchNotes → PitchResynthesizer::processMultiChannel() → native VSF pitch-only renderer
 
 Polyphonic pipeline:
   PolyPitchDetector (Basic-Pitch ONNX) → PolyNotes → HarmonicMaskGenerator (Wiener) → SpectralPitchShifter → PolyResynthesizer
@@ -242,13 +238,10 @@ Real-time corrector:
 4. On edit commit (400ms auto-apply debounce) → `nativeBridge.applyPitchCorrection(trackId, clipId, notes)`
 5. C++ `AudioEngine::applyPitchCorrection()`:
    - Loads original clip audio → extracts window around edited notes
-   - Passes all channels to `PitchResynthesizer::processMultiChannel()` with Rubber Band (native stereo)
-   - Crossfades corrected window back into clip at splice points (512-sample crossfade)
+  - Runs the native VSF pitch-only renderer and composites the corrected region back into the clip
    - Deletes old output file, writes new rotating output file → `PlaybackEngine::replaceClipAudioFile()` swaps it in (resets `clip.offset = 0`)
 
-**Rubber Band Library** (default pitch engine): Uses R3 (Finer) engine in RealTime mode with `OptionPitchHighQuality`, `OptionFormantPreserved`, `OptionChannelsTogether`. RealTime mode is required for per-block `setPitchScale()` calls (Offline mode rejects mid-processing pitch changes). Has latency compensation: flush with silence after input, skip first `getLatency()` output samples. Built from `single/RubberBandSingle.cpp` with `USE_KISSFFT` + `NOMINMAX`. GPL v2+ license.
-
-**PitchResynthesizer engines** (`PitchEngine` enum): `RubberBand` (default, native stereo, high quality), `WorldVocoder` (WORLD, mono-only, speech-oriented fallback), `PhaseVocoder` (basic, no formant preservation).
+**PitchResynthesizer engine** (`PitchEngine` enum): native VSF pitch-only offline apply. Preview/scrub audio and the realtime pitch-corrector FX use Signalsmith Stretch directly.
 
 **PitchShifter FIFO latency**: The phase vocoder has 2048-sample FIFO latency. The first fftSize output samples are zeros. `PitchResynthesizer` compensates by flushing the FIFO with silence and trimming the latency from the output.
 

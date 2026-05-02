@@ -1,11 +1,13 @@
 import { type TrackType, useDAWStore } from "../store/useDAWStore";
+import { getDefaultWorkflowParams } from "../data/aiWorkflows";
 
-export type InsertableTrackType = Extract<TrackType, "audio" | "midi" | "instrument">;
+export type InsertableTrackType = Extract<TrackType, "audio" | "midi" | "instrument" | "ai">;
 
 const DEFAULT_PREFIX: Record<InsertableTrackType, string> = {
   audio: "Audio",
   midi: "MIDI",
   instrument: "Instrument",
+  ai: "AI",
 };
 
 function getTrackName(type: InsertableTrackType, prefix?: string) {
@@ -27,6 +29,7 @@ export async function createTrackOfType(
   const trackId = crypto.randomUUID();
   const state = useDAWStore.getState();
   const isMidiType = type === "midi" || type === "instrument";
+  const isAiType = type === "ai";
 
   state.addTrack({
     id: trackId,
@@ -36,6 +39,37 @@ export async function createTrackOfType(
     inputChannelCount: isMidiType ? 1 : 2,
     armed: type === "instrument",
     monitorEnabled: type === "instrument",
+    aiWorkflow: isAiType ? "text-to-music" : undefined,
+    aiWorkflowParams: isAiType
+      ? getDefaultWorkflowParams("text-to-music")
+      : undefined,
+    aiGenerationState: isAiType ? "idle" : undefined,
+    aiGenerationProgress: isAiType ? 0 : undefined,
+    aiGenerationError: isAiType ? "" : undefined,
+    aiGenerationPhase: isAiType ? "" : undefined,
+    aiGenerationMessage: isAiType ? "" : undefined,
+    aiGenerationBackend: isAiType ? "" : undefined,
+    aiGenerationElapsedMs: isAiType ? 0 : undefined,
+    aiGenerationHeartbeatTs: isAiType ? 0 : undefined,
+    aiGenerationPhaseProgress: isAiType ? undefined : undefined,
+    aiGenerationEtaMs: isAiType ? undefined : undefined,
+    aiGenerationRunMode: isAiType ? undefined : undefined,
+    aiGenerationRuntimeProfile: isAiType ? "" : undefined,
+    aiGenerationLmModel: isAiType ? "" : undefined,
+    aiGenerationStatusNote: isAiType ? "" : undefined,
+    aiGenerationFailureKind: isAiType ? "" : undefined,
+    aiGenerationSessionMode: isAiType ? "" : undefined,
+    aiGenerationWorkerExitCode: isAiType ? 0 : undefined,
+    aiGenerationLastStdoutLine: isAiType ? "" : undefined,
+    aiGenerationLastStderrLine: isAiType ? "" : undefined,
+    aiGenerationAttemptMode: isAiType ? "" : undefined,
+    aiGenerationAttemptIndex: isAiType ? 0 : undefined,
+    aiGenerationProtocolVersion: isAiType ? 0 : undefined,
+    aiGenerationScriptVersion: isAiType ? "" : undefined,
+    aiGenerationRequestId: isAiType ? "" : undefined,
+    aiGenerationPriorFailure: isAiType ? "" : undefined,
+    aiGenerationLastProgressAgeMs: isAiType ? 0 : undefined,
+    icon: isAiType ? "ai" : undefined,
   });
 
   state.selectTrack(trackId);

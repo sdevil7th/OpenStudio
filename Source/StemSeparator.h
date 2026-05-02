@@ -55,6 +55,19 @@ public:
         juce::String selectedBackend { "cpu" };
         juce::String runtimeVersion;
         juce::String modelVersion { "BS-Roformer-SW.ckpt" };
+        juce::String aceStepVersion;
+        juce::String musicGenerationModelId;
+        juce::String musicGenerationModelRepoId;
+        juce::String musicGenerationSharedRepoId;
+        juce::String musicGenerationCheckpointRoot;
+        juce::String musicGenerationStatusMessage;
+        juce::String musicGenerationFailureCode;
+        juce::String musicGenerationPerformanceStatusMessage;
+        juce::var musicGenerationRuntimeProfiles;
+        juce::StringArray musicGenerationAvailableProfiles;
+        juce::var musicGenerationUnavailableProfiles;
+        juce::String musicGenerationDefaultProfile;
+        bool musicGenerationWarmSessionCapable = false;
         juce::String verificationMode;
         juce::String runtimeCandidate;
         juce::String backendRequested;
@@ -63,6 +76,9 @@ public:
         juce::String terminalReason;
         bool fallbackAttempted = false;
         bool restartRequired = false;
+        bool musicGenerationReady = false;
+        bool musicGenerationLayoutValid = false;
+        bool musicGenerationPerformanceReady = true;
     };
 
     /** Check if Python environment and audio-separator are available. */
@@ -74,8 +90,11 @@ public:
     /** Schedule a background AI tools status refresh and return the current cached status. */
     juce::var refreshAiToolsStatus();
 
-    /** Start installing the optional AI tools into the user's app-data directory. */
-    juce::var installAiTools();
+    /** Start installing the optional AI tools into the user's app-data directory after explicit user confirmation. */
+    juce::var installAiTools (bool userConfirmedDownload);
+
+    /** Remove installed AI runtime files, local models, and pinned ACE-Step caches. */
+    juce::var resetAiTools();
 
     /** Cancel a running AI tools installation. */
     void cancelAiToolsInstall();
@@ -137,6 +156,9 @@ private:
     /** Get the preferred models directory under user app-data. */
     juce::File getUserModelsDir() const;
 
+    /** Get the pinned ACE-Step checkpoint root used for music generation. */
+    juce::File getMusicGenerationCheckpointRoot() const;
+
     /** Find the prepared user-runtime Python executable. */
     juce::File findPython() const;
 
@@ -189,6 +211,22 @@ private:
         juce::String runtimeVersion;
         juce::String modelVersion { "BS-Roformer-SW.ckpt" };
         bool restartRequired = false;
+        juce::String aceStepVersion;
+        bool musicGenerationReady = false;
+        bool musicGenerationLayoutValid = false;
+        juce::String musicGenerationModelId;
+        juce::String musicGenerationModelRepoId;
+        juce::String musicGenerationSharedRepoId;
+        juce::String musicGenerationCheckpointRoot;
+        juce::String musicGenerationStatusMessage;
+        juce::String musicGenerationFailureCode;
+        bool musicGenerationPerformanceReady = true;
+        juce::String musicGenerationPerformanceStatusMessage;
+        juce::var musicGenerationRuntimeProfiles;
+        juce::StringArray musicGenerationAvailableProfiles;
+        juce::var musicGenerationUnavailableProfiles;
+        juce::String musicGenerationDefaultProfile;
+        bool musicGenerationWarmSessionCapable = false;
     };
 
     /** Probe runtime capabilities via the helper script. */
@@ -256,9 +294,10 @@ private:
     static juce::var aiToolsStatusToVar (const AiToolsStatus& status);
 
     std::unique_ptr<juce::ChildProcess> childProcess;
-    std::unique_ptr<juce::ChildProcess> installProcess;
+    std::shared_ptr<juce::ChildProcess> installProcess;
     juce::String outputBuffer;  // Accumulated stdout from child
     juce::String installOutputBuffer;
+    juce::int64 installLogReadOffset = 0;
     juce::StringArray installDiagnosticLines;
     juce::String installCommandLine;
     juce::String installRuntimePythonPath;
@@ -271,6 +310,9 @@ private:
     double installFirstOutputTimeMs = 0.0;
     double installLastOutputTimeMs = 0.0;
     double installLastHeartbeatTimeMs = 0.0;
+    double installLastStructuredStatusTimeMs = 0.0;
+    double installLastDownloadProgressTimeMs = 0.0;
+    juce::int64 installLastBytesDownloaded = 0;
     bool installSawTerminalStatus = false;
     bool installFallbackAttempted = false;
     bool installOutputTimeoutLogged = false;

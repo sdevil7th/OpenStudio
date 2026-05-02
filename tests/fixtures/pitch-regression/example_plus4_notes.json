@@ -1,0 +1,20 @@
+[
+  {
+    "id": "pitch-note-1",
+    "startTime": 0.9,
+    "endTime": 1.55,
+    "effectiveStartTime": 0.86,
+    "effectiveEndTime": 1.61,
+    "detectedPitch": 60,
+    "correctedPitch": 64,
+    "driftCorrectionAmount": 0,
+    "vibratoDepth": 1,
+    "vibratoRate": 0,
+    "transitionIn": 40,
+    "transitionOut": 60,
+    "formantShift": 0,
+    "gain": 0,
+    "voiced": true,
+    "pitchDrift": []
+  }
+]

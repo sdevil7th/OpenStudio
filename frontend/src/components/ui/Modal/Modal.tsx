@@ -111,10 +111,11 @@ export function Modal({
             leaveTo="opacity-0 scale-95"
           >
             <DialogPanel
+              onKeyDown={(e) => e.stopPropagation()}
               className={classNames(
                 'bg-daw-panel border border-daw-border rounded-lg shadow-xl',
                 modalSizeStyles[size],
-                fullHeight ? 'flex max-h-[90vh] flex-col overflow-hidden' : 'overflow-y-auto',
+                fullHeight ? 'flex max-h-[90vh] flex-col overflow-hidden' : 'max-h-[90vh] flex flex-col overflow-hidden',
                 className
               )}
             >
@@ -139,7 +140,7 @@ export function Modal({
               )}
 
               {/* Content */}
-              <div className={classNames(fullHeight ? 'flex min-h-0 flex-1 flex-col' : 'p-4')}>
+              <div className={classNames('flex min-h-0 flex-1 flex-col overflow-y-auto', !fullHeight && 'p-4')}>
                 {children}
               </div>
 

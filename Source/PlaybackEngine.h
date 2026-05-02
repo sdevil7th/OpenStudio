@@ -1,7 +1,16 @@
 #pragma once
 
 #include <JuceHeader.h>
+
+#if defined(_MSC_VER)
+ #pragma warning(push)
+ #pragma warning(disable: 4244 4267 4305 4456)
+#endif
 #include "signalsmith-stretch.h"
+#if defined(_MSC_VER)
+ #pragma warning(pop)
+#endif
+
 #include <memory>
 #include <vector>
 #include <map>
@@ -41,6 +50,7 @@ public:
         int fadeOutCurve;      // Fade out curve type: 0=linear, 1=equal_power, 2=s_curve, 3=log, 4=exp
         juce::String trackId;        // Which track this clip belongs to
         juce::String clipId;         // Unique clip ID for envelope lookup
+        juce::String envelopeKey;    // Pre-computed "trackId::clipId" key — avoids string alloc in audio thread
         bool isActive;         // Whether clip is currently loaded
 
         ClipInfo(const juce::File& file, double start, double dur, const juce::String& track, double off = 0.0,
@@ -73,13 +83,33 @@ public:
         juce::File audioFile;
         double startSec = 0.0;
         double endSec = 0.0;
+        double fileOffsetSec = 0.0;
     };
 
-    void setClipRenderedPreviewSegment(const juce::String& clipId,
+    struct ClipPlaybackSourceStatus
+    {
+        bool clipFound = false;
+        bool renderedSegmentActiveAtTime = false;
+        bool correctedSourceActiveAtTime = false;
+        juce::String sourceType = "none";
+        juce::String audioFile;
+        double clipTime = 0.0;
+        double playbackOffset = 0.0;
+    };
+
+    bool setClipRenderedPreviewSegment(const juce::String& clipId,
                                        const juce::File& audioFile,
                                        double startSec,
-                                       double endSec);
+                                       double endSec,
+                                       double fileOffsetSec = 0.0,
+                                       int generation = 0);
+    void beginRenderedPreviewSegmentGeneration(const juce::String& clipId, int generation);
+    void invalidateRenderedPreviewSegments(const juce::String& clipId);
     void clearClipRenderedPreviewSegments(const juce::String& clipId);
+    std::map<juce::String, std::vector<RenderedPreviewSegment>> getRenderedPreviewSegmentSnapshot() const;
+    ClipPlaybackSourceStatus getClipPlaybackSourceAtTime(const juce::String& trackId,
+                                                         const juce::String& clipId,
+                                                         double projectTimeSec) const;
 
     // Clip gain envelope management
     void setClipGainEnvelope(const juce::String& trackId, const juce::String& clipId,
@@ -109,6 +139,67 @@ public:
         float globalFormantSemitones = 0.0f;
         double previewStartSec = 0.0;
         double previewEndSec = std::numeric_limits<double>::max();
+        bool allowReplacingCorrectedSource = false;
+    };
+
+    struct PitchScrubPreviewData
+    {
+        juce::String trackId;
+        juce::String clipId;
+        juce::AudioBuffer<float> loopBuffer;
+        double sourceSampleRate = 0.0;
+        double loopStartSec = 0.0;
+        double loopEndSec = 0.0;
+        float basePitchHz = 0.0f;
+        float pitchRatio = 1.0f;
+        bool active = false;
+        double readPosition = 0.0;
+        int loopCrossfadeSamples = 0;
+        float gain = 1.0f;
+        float currentGain = 0.0f;
+        float targetGain = 1.0f;
+        float repeatStability = 0.0f;
+        double startRampMs = 7.5;
+        double stopRampMs = 14.0;
+        bool releasePending = false;
+        bool firstCallbackServiced = false;
+        bool firstDragAudible = false;
+        float lastPeak = 0.0f;
+        double lastRenderWallTimeMs = 0.0;
+        int mixedCallbackCount = 0;
+        juce::int64 mixedSampleCount = 0;
+    };
+
+    struct PitchScrubPreviewStatus
+    {
+        bool active = false;
+        bool releasePending = false;
+        bool audible = false;
+        bool previewArmed = false;
+        bool firstCallbackServiced = false;
+        bool firstDragAudible = false;
+        juce::String trackId;
+        juce::String clipId;
+        float pitchRatio = 1.0f;
+        float basePitchHz = 0.0f;
+        float currentGain = 0.0f;
+        float targetGain = 0.0f;
+        float repeatStability = 0.0f;
+        float lastPeak = 0.0f;
+        double loopDurationMs = 0.0;
+        double lastRenderWallTimeMs = 0.0;
+        int mixedCallbackCount = 0;
+        juce::int64 mixedSampleCount = 0;
+        juce::String renderMethod;
+    };
+
+    struct PitchPreviewRoutingStatus
+    {
+        bool scrubPreviewActive = false;
+        bool clipLivePreviewActive = false;
+        bool renderedSegmentActive = false;
+        bool correctedSourceActive = false;
+        juce::String monitorMode;
     };
 
     // Set a pitch correction map for a clip (enables real-time preview)
@@ -117,9 +208,19 @@ public:
 
     // Clear pitch preview for a clip (disables real-time preview)
     void clearClipPitchPreview (const juce::String& clipId);
+    void clearAllPitchPreviewRoutes (const juce::String& clipId);
+    int clearPitchPreviewRoutesForCorrectedSources();
 
     // Check if a clip has an active pitch preview
     bool hasClipPitchPreview (const juce::String& clipId) const;
+
+    void setPitchScrubPreview (const PitchScrubPreviewData& preview);
+    bool updatePitchScrubPreview (const juce::String& clipId, float pitchRatio);
+    void clearPitchScrubPreview (const juce::String& clipId);
+    bool hasPitchScrubPreview (const juce::String& clipId) const;
+    void renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, double sampleRate);
+    PitchScrubPreviewStatus getPitchScrubPreviewStatus (const juce::String& clipId = {}) const;
+    PitchPreviewRoutingStatus getPitchPreviewRoutingStatus (const juce::String& clipId = {}) const;
 
     // Utility
     int getNumClips() const { return (int)clips.size(); }
@@ -129,6 +230,10 @@ public:
     int getLastOverlappingClipCount() const { return lastOverlappingClipCount.load(std::memory_order_relaxed); }
     int getLastMixedClipCount() const { return lastMixedClipCount.load(std::memory_order_relaxed); }
     float getLastTrackPlaybackPeak() const { return lastTrackPlaybackPeak.load(std::memory_order_relaxed); }
+    int getFileBufferResizeCount() const { return fileBufferResizeCount.load(std::memory_order_relaxed); }
+    int getPitchShiftWorkBufferResizeCount() const { return pitchShiftWorkBufferResizeCount.load(std::memory_order_relaxed); }
+    int getRenderResampleScratchResizeCount() const { return renderResampleScratchResizeCount.load(std::memory_order_relaxed); }
+    int getChunkBoundaryReserveCount() const { return chunkBoundaryReserveCount.load(std::memory_order_relaxed); }
 
     // Thread-safe snapshot of all clips (for offline rendering)
     std::vector<ClipInfo> getClipSnapshot() const;
@@ -143,7 +248,7 @@ private:
     std::vector<ClipInfo> clips;
     std::map<juce::String, std::unique_ptr<juce::AudioFormatReader>> readers;
     juce::AudioFormatManager formatManager;
-    juce::CriticalSection lock;
+    mutable juce::CriticalSection lock;
 
     // Clip gain envelopes: key = "trackId::clipId", value = sorted envelope points
     std::map<juce::String, std::vector<GainEnvelopePoint>> gainEnvelopes;
@@ -153,6 +258,8 @@ private:
 
     // Pre-allocated file read buffer (avoids heap alloc on audio thread)
     juce::AudioBuffer<float> reusableFileBuffer;
+    juce::AudioBuffer<float> renderResampleScratch;
+    std::vector<int> reusableChunkBoundaries;
 
     // Get cached audio format reader (audio-thread safe — never creates readers)
     juce::AudioFormatReader* getCachedReader(const juce::File& file);
@@ -191,9 +298,20 @@ private:
 
     // Keyed by clipId — only clips with active pitch preview have entries
     std::map<juce::String, std::unique_ptr<ClipPitchPreviewState>> clipPitchPreviews;
+    PitchScrubPreviewData pitchScrubPreview;
+    PitchScrubPreviewStatus pitchScrubPreviewStatus;
+    signalsmith::stretch::SignalsmithStretch<float> pitchScrubStretcher;
+    bool pitchScrubStretcherPrepared = false;
+    juce::AudioBuffer<float> pitchScrubInputBuffer;
+    juce::AudioBuffer<float> pitchScrubOutputBuffer;
 
     // Pre-allocated buffer for pitch-shifted audio (avoids heap alloc on audio thread)
     juce::AudioBuffer<float> pitchShiftWorkBuffer;
+
+    // Pre-allocated channel-pointer vectors for pitch-preview Signalsmith calls.
+    // Audio files are at most stereo, so size 2 covers all cases.
+    std::vector<const float*> pitchPreviewInPtrs;
+    std::vector<float*>       pitchPreviewOutPtrs;
 
     // Look up pitch ratio from correction segments at a given clip-relative time
     static float lookupPitchRatio (const std::vector<PitchCorrectionSegment>& segments, double timeInClip);
@@ -211,12 +329,17 @@ private:
     };
 
     std::map<juce::String, std::vector<RenderedPreviewSegment>> renderedPreviewSegments;
+    std::map<juce::String, int> renderedPreviewSegmentGenerations;
     std::map<juce::String, DeferredClipSwap> deferredClipSwaps;
     std::atomic<int> tryLockFailureCount { 0 };
     std::atomic<int> missingReaderCount { 0 };
     std::atomic<int> lastOverlappingClipCount { 0 };
     std::atomic<int> lastMixedClipCount { 0 };
     std::atomic<float> lastTrackPlaybackPeak { 0.0f };
+    std::atomic<int> fileBufferResizeCount { 0 };
+    std::atomic<int> pitchShiftWorkBufferResizeCount { 0 };
+    std::atomic<int> renderResampleScratchResizeCount { 0 };
+    std::atomic<int> chunkBoundaryReserveCount { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PlaybackEngine)
 };

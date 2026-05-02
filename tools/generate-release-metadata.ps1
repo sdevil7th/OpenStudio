@@ -37,6 +37,12 @@ param(
     [string]$MacAssetUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$LinuxAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$WindowsAiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
@@ -83,6 +89,24 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$MacX64AiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxAiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxAiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxX64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxX64AiRuntimeAssetUrl = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxArm64AiRuntimeAssetPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxArm64AiRuntimeAssetUrl = "",
 
     [Parameter(Mandatory = $false)]
     [string]$AiRuntimeVersion = "",
@@ -223,6 +247,7 @@ function Get-AppcastMimeType {
 
     if ($FileName -like "*.dmg") { return "application/x-apple-diskimage" }
     if ($FileName -like "*.exe") { return "application/vnd.microsoft.portable-executable" }
+    if ($FileName -like "*.AppImage") { return "application/x-iso9660-appimage" }
     return "application/octet-stream"
 }
 
@@ -265,6 +290,7 @@ if (-not [string]::IsNullOrWhiteSpace($MacMinimumSystemVersion)) {
 
 $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAssetUrl -AdditionalProperties $windowsAdditional
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
+$linux = Get-AssetMetadata -AssetPath $LinuxAssetPath -AssetUrl $LinuxAssetUrl
 $windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
 $windowsBaseAiRuntime = Get-AssetMetadata -AssetPath $WindowsBaseAiRuntimeAssetPath -AssetUrl $WindowsBaseAiRuntimeAssetUrl
 $windowsDirectmlAiRuntime = Get-AssetMetadata -AssetPath $WindowsDirectmlAiRuntimeAssetPath -AssetUrl $WindowsDirectmlAiRuntimeAssetUrl
@@ -272,6 +298,9 @@ $windowsCudaAiRuntime = Get-AssetMetadata -AssetPath $WindowsCudaAiRuntimeAssetP
 $macosAiRuntime = Get-AssetMetadata -AssetPath $MacAiRuntimeAssetPath -AssetUrl $MacAiRuntimeAssetUrl
 $macosArm64AiRuntime = Get-AssetMetadata -AssetPath $MacArm64AiRuntimeAssetPath -AssetUrl $MacArm64AiRuntimeAssetUrl
 $macosX64AiRuntime = Get-AssetMetadata -AssetPath $MacX64AiRuntimeAssetPath -AssetUrl $MacX64AiRuntimeAssetUrl
+$linuxAiRuntime = Get-AssetMetadata -AssetPath $LinuxAiRuntimeAssetPath -AssetUrl $LinuxAiRuntimeAssetUrl
+$linuxX64AiRuntime = Get-AssetMetadata -AssetPath $LinuxX64AiRuntimeAssetPath -AssetUrl $LinuxX64AiRuntimeAssetUrl
+$linuxArm64AiRuntime = Get-AssetMetadata -AssetPath $LinuxArm64AiRuntimeAssetPath -AssetUrl $LinuxArm64AiRuntimeAssetUrl
 $windowsCudaInstallPlan = Load-OptionalJsonFile -PathValue $WindowsCudaInstallPlanPath
 $windowsDirectmlInstallPlan = Load-OptionalJsonFile -PathValue $WindowsDirectmlInstallPlanPath
 
@@ -295,10 +324,12 @@ if (-not [string]::IsNullOrWhiteSpace($FullReleaseNotesUrl)) {
 
 if ($windows) { $manifest.platforms.windows = $windows }
 if ($macos) { $manifest.platforms.macos = $macos }
+if ($linux) { $manifest.platforms.linux = $linux }
 
 $checksums = @()
 if ($windows) { $checksums += "{0}  {1}" -f $windows.sha256, $windows.fileName }
 if ($macos) { $checksums += "{0}  {1}" -f $macos.sha256, $macos.fileName }
+if ($linux) { $checksums += "{0}  {1}" -f $linux.sha256, $linux.fileName }
 if ($windowsAiRuntime) { $checksums += "{0}  {1}" -f $windowsAiRuntime.sha256, $windowsAiRuntime.fileName }
 if ($windowsBaseAiRuntime) { $checksums += "{0}  {1}" -f $windowsBaseAiRuntime.sha256, $windowsBaseAiRuntime.fileName }
 if ($windowsDirectmlAiRuntime) { $checksums += "{0}  {1}" -f $windowsDirectmlAiRuntime.sha256, $windowsDirectmlAiRuntime.fileName }
@@ -306,12 +337,15 @@ if ($windowsCudaAiRuntime) { $checksums += "{0}  {1}" -f $windowsCudaAiRuntime.s
 if ($macosAiRuntime) { $checksums += "{0}  {1}" -f $macosAiRuntime.sha256, $macosAiRuntime.fileName }
 if ($macosArm64AiRuntime) { $checksums += "{0}  {1}" -f $macosArm64AiRuntime.sha256, $macosArm64AiRuntime.fileName }
 if ($macosX64AiRuntime) { $checksums += "{0}  {1}" -f $macosX64AiRuntime.sha256, $macosX64AiRuntime.fileName }
+if ($linuxAiRuntime) { $checksums += "{0}  {1}" -f $linuxAiRuntime.sha256, $linuxAiRuntime.fileName }
+if ($linuxX64AiRuntime) { $checksums += "{0}  {1}" -f $linuxX64AiRuntime.sha256, $linuxX64AiRuntime.fileName }
+if ($linuxArm64AiRuntime) { $checksums += "{0}  {1}" -f $linuxArm64AiRuntime.sha256, $linuxArm64AiRuntime.fileName }
 
 Set-Content -Path (Join-Path $resolvedOutputDir "OpenStudio-checksums.txt") -Value ($checksums -join [Environment]::NewLine)
 Set-Content -Path (Join-Path $releaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 12)
 Set-Content -Path (Join-Path $channelReleaseDir "latest.json") -Value ($manifest | ConvertTo-Json -Depth 12)
 
-if (($windowsAiRuntime -or $windowsBaseAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
+if (($windowsAiRuntime -or $windowsBaseAiRuntime -or $windowsDirectmlAiRuntime -or $windowsCudaAiRuntime -or $macosAiRuntime -or $macosArm64AiRuntime -or $macosX64AiRuntime -or $linuxAiRuntime -or $linuxX64AiRuntime -or $linuxArm64AiRuntime) -and -not [string]::IsNullOrWhiteSpace($AiRuntimeVersion)) {
     $aiRuntimeManifest = [ordered]@{
         schemaVersion = [Math]::Max($SchemaVersion, 4)
         channel = $Channel
@@ -381,6 +415,15 @@ if (($windowsAiRuntime -or $windowsBaseAiRuntime -or $windowsDirectmlAiRuntime -
         $aiRuntimeManifest.platforms.macos = $macosAiRuntime
     }
 
+    if ($linuxX64AiRuntime -or $linuxArm64AiRuntime) {
+        $aiRuntimeManifest.platforms.linux = [ordered]@{}
+        if ($linuxX64AiRuntime) { $aiRuntimeManifest.platforms.linux.x64 = $linuxX64AiRuntime }
+        if ($linuxArm64AiRuntime) { $aiRuntimeManifest.platforms.linux.arm64 = $linuxArm64AiRuntime }
+    }
+    elseif ($linuxAiRuntime) {
+        $aiRuntimeManifest.platforms.linux = $linuxAiRuntime
+    }
+
     Set-Content -Path (Join-Path $aiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 12)
     Set-Content -Path (Join-Path $channelAiRuntimeDir "latest.json") -Value ($aiRuntimeManifest | ConvertTo-Json -Depth 12)
 }
@@ -446,6 +489,38 @@ $(if (-not [string]::IsNullOrWhiteSpace($FullReleaseNotesUrl)) { "      <sparkle
     Set-Content -Path (Join-Path $appcastDir "macos-$Channel.xml") -Value $macAppcast
     if ($Channel -eq "stable") {
         Set-Content -Path (Join-Path $appcastDir "macos-stable.xml") -Value $macAppcast
+    }
+}
+
+if ($linux) {
+    $linuxPubDate = [DateTime]::Parse($PublishedAt).ToUniversalTime().ToString("r")
+    $linuxAppcast = @"
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:openstudio="https://openstudio.org.in/xmlns/appcast">
+  <channel>
+    <title>OpenStudio Linux $($Channel.Substring(0,1).ToUpper() + $Channel.Substring(1))</title>
+    <link>$ReleasePageUrl</link>
+    <description>$($Channel.Substring(0,1).ToUpper() + $Channel.Substring(1)) OpenStudio releases for Linux.</description>
+    <item>
+      <title>OpenStudio $Version</title>
+      <pubDate>$linuxPubDate</pubDate>
+      <description><![CDATA[$notes]]></description>
+      <enclosure url="$($linux.url)"
+                 sparkle:version="$Version"
+                 sparkle:shortVersionString="$Version"
+                 openstudio:channel="$Channel"
+                 openstudio:sha256="$($linux.sha256)"
+                 openstudio:fileName="$($linux.fileName)"$(if (-not [string]::IsNullOrWhiteSpace($MinimumSupportedVersion)) { "`n                 openstudio:minimumSupportedVersion=""$MinimumSupportedVersion""" })
+                 length="$($linux.size)"
+                 type="$(Get-AppcastMimeType $linux.fileName)" />
+$(if (-not [string]::IsNullOrWhiteSpace($FullReleaseNotesUrl)) { "      <sparkle:releaseNotesLink>$FullReleaseNotesUrl</sparkle:releaseNotesLink>" })
+    </item>
+  </channel>
+</rss>
+"@
+    Set-Content -Path (Join-Path $appcastDir "linux-$Channel.xml") -Value $linuxAppcast
+    if ($Channel -eq "stable") {
+        Set-Content -Path (Join-Path $appcastDir "linux-stable.xml") -Value $linuxAppcast
     }
 }
 

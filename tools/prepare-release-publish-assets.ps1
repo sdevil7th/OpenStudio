@@ -66,6 +66,7 @@ $copyPlan = @(
     @{ Source = "releases/stable/latest.json"; Target = "OpenStudio-release-stable-latest.json"; Required = $true },
     @{ Source = "appcast/windows-stable.xml"; Target = "OpenStudio-appcast-windows-stable.xml"; Required = $true },
     @{ Source = "appcast/macos-stable.xml"; Target = "OpenStudio-appcast-macos-stable.xml"; Required = $true },
+    @{ Source = "appcast/linux-stable.xml"; Target = "OpenStudio-appcast-linux-stable.xml"; Required = $false },
     @{ Source = "OpenStudio-checksums.txt"; Target = "OpenStudio-checksums.txt"; Required = $true },
     @{ Source = "releases/ai-runtime/latest.json"; Target = "OpenStudio-ai-runtime-latest.json"; Required = $false },
     @{ Source = "releases/ai-runtime/stable/latest.json"; Target = "OpenStudio-ai-runtime-stable-latest.json"; Required = $false }

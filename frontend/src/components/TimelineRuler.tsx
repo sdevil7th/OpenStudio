@@ -4,6 +4,7 @@ import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
 import { MemoizedPlayhead as Playhead } from "./Playhead";
 import { snapToGrid } from "../utils/snapToGrid";
+import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type KonvaEvent = any;
@@ -11,13 +12,14 @@ type KonvaEvent = any;
 export const TIMELINE_RULER_HEIGHT = 30;
 
 const RANGE_HANDLE_HIT_PX = 8;
+const RANGE_HANDLE_VISUAL_HEIGHT_PX = 8;
 const DRAG_THRESHOLD_PX = 4;
 
 export function TimelineRuler() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const rulerDragRef = useRef<{
-    type: "handle" | "range-create" | "pending";
+    type: "handle-pending" | "handle-drag" | "range-create" | "pending";
     handle?: "start" | "end";
     startX: number;
     startTime: number;
@@ -91,14 +93,24 @@ export function TimelineRuler() {
     const pointerPos = stage.getPointerPosition();
     if (!pointerPos) return;
 
-    const clickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    const clickedTime = getRulerClickSnapTime({
+      time: rawClickedTime,
+      pixelsPerSecond: pixelsPerSecondRef.current,
+      tempo: tempoRef.current,
+      timeSignature: timeSignatureRef.current,
+      gridSize: gridSizeRef.current,
+      snapEnabled: snapEnabledRef.current,
+      ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
+    });
 
     const startX = projectRange.start * pixelsPerSecond - scrollX;
     const endX = projectRange.end * pixelsPerSecond - scrollX;
+    const inHandleZone = pointerPos.y <= RANGE_HANDLE_VISUAL_HEIGHT_PX;
 
-    if (Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
+    if (inHandleZone && Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
       rulerDragRef.current = {
-        type: "handle",
+        type: "handle-pending",
         handle: "end",
         startX: pointerPos.x,
         startTime: clickedTime,
@@ -106,9 +118,9 @@ export function TimelineRuler() {
       setRulerDragging(true);
       return;
     }
-    if (Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
+    if (inHandleZone && Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
       rulerDragRef.current = {
-        type: "handle",
+        type: "handle-pending",
         handle: "start",
         startX: pointerPos.x,
         startTime: clickedTime,
@@ -201,7 +213,14 @@ export function TimelineRuler() {
         );
       }
 
-      if (drag.type === "handle") {
+      if (drag.type === "handle-pending") {
+        if (Math.abs(pointerX - drag.startX) <= DRAG_THRESHOLD_PX) {
+          return;
+        }
+        drag.type = "handle-drag";
+      }
+
+      if (drag.type === "handle-drag") {
         if (drag.handle === "start") {
           setProjectRange(Math.min(time, range.end), range.end);
         } else {
@@ -237,6 +256,8 @@ export function TimelineRuler() {
       if (!drag) return;
 
       if (drag.type === "pending") {
+        seekTo(drag.startTime);
+      } else if (drag.type === "handle-pending") {
         seekTo(drag.startTime);
       }
 

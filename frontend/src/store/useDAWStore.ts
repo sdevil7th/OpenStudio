@@ -24,6 +24,11 @@ import { screensetActions } from "./actions/screensets";
 import { macroActions } from "./actions/macros";
 import { renderQueueActions } from "./actions/renderQueue";
 import { quantizeActions } from "./actions/quantize";
+import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../data/aiWorkflows";
+
+export interface InstallAiToolsOptions {
+  userConfirmedDownload?: boolean;
+}
 
 
 // Module-level helpers moved to store/actions/: _editSnapshots → tracks.ts,
@@ -74,6 +79,45 @@ function getStoredString(key: string, fallback = ""): string {
   }
 }
 
+function isMusicGenerationFullyReady(
+  status: Pick<
+    AiToolsStatus,
+    | "musicGenerationReady"
+    | "musicGenerationLayoutValid"
+    | "musicGenerationPerformanceReady"
+    | "musicGenerationAvailableProfiles"
+  >,
+): boolean {
+  const availableProfiles = status.musicGenerationAvailableProfiles ?? [];
+  const nativeProfileReady =
+    availableProfiles.length === 0 || availableProfiles.includes("native-xl-turbo");
+  return Boolean(
+    status.musicGenerationReady
+    && status.musicGenerationLayoutValid
+    && (status.musicGenerationPerformanceReady ?? true)
+    && nativeProfileReady
+  );
+}
+
+function getAiToolsReadyMessage(status: AiToolsStatus): string {
+  if (isMusicGenerationFullyReady(status)) {
+    return status.message || "AI tools are ready.";
+  }
+
+  if (status.musicGenerationReady && status.musicGenerationLayoutValid && status.musicGenerationPerformanceStatusMessage) {
+    return status.musicGenerationPerformanceStatusMessage;
+  }
+
+  if ((status.musicGenerationAvailableProfiles ?? []).length > 0
+      && !(status.musicGenerationAvailableProfiles ?? []).includes("native-xl-turbo"))
+  {
+    return "Stem separation is ready, but the OpenStudio ACE split profile is still missing required music-generation assets.";
+  }
+
+  return status.musicGenerationStatusMessage
+    || "Stem separation is ready, but music generation still needs the OpenStudio ACE split backend.";
+}
+
 const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   state: "checking",
   progress: 0,
@@ -98,6 +142,8 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   activityLines: [],
   supportedBackends: ["cpu"],
   selectedBackend: "cpu",
+  musicGenerationPerformanceReady: true,
+  musicGenerationPerformanceStatusMessage: "",
   lastPhase: "checking",
   fallbackAttempted: false,
   restartRequired: false,
@@ -107,8 +153,9 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
 // Type Definitions
 // ============================================
 
-export type TrackType = "audio" | "midi" | "instrument" | "bus";
+export type TrackType = "audio" | "midi" | "instrument" | "bus" | "ai";
 export type InputType = "mono" | "stereo" | "midi";
+export type AITrackGenerationState = "idle" | "loading" | "generating" | "error";
 
 // MIDI Event structure
 export interface MIDIEvent {
@@ -191,6 +238,7 @@ export function getEffectiveTrackHeight(
 function getTrackHeaderControlWidth(track: Pick<Track, "type">): number {
   const commonWidth = 30 + 20 + 126 + 50 + 50 + 50;
   if (track.type === "audio") return commonWidth + 96;
+  if (track.type === "ai") return commonWidth + 128;
   if (track.type === "instrument") return commonWidth + 92;
   if (track.type === "midi") return commonWidth + 74;
   return commonWidth;
@@ -444,6 +492,38 @@ export interface Track {
   notes?: string; // Free-form track notes/comments
   waveformZoom?: number; // Waveform vertical zoom factor (0.1 to 5.0, default 1.0)
   spectralView?: boolean; // Show spectrogram instead of waveform
+  aiWorkflow?: string;
+  aiWorkflowParams?: Record<string, unknown>;
+  aiGenerationState?: AITrackGenerationState;
+  aiGenerationProgress?: number;
+  aiGenerationError?: string;
+  aiGenerationPhase?: string;
+  aiGenerationMessage?: string;
+  aiGenerationBackend?: string;
+  aiGenerationElapsedMs?: number;
+  aiGenerationHeartbeatTs?: number;
+  aiGenerationPhaseProgress?: number;
+  aiGenerationEtaMs?: number;
+  aiGenerationRunMode?: "cold" | "warm";
+  aiGenerationRuntimeProfile?: string;
+  aiGenerationLmModel?: string;
+  aiGenerationStatusNote?: string;
+  aiGenerationFailureKind?: string;
+  aiGenerationSessionMode?: "persistent" | "oneshot" | "oneshot-fallback" | string;
+  aiGenerationWorkerExitCode?: number;
+  aiGenerationLastStdoutLine?: string;
+  aiGenerationLastStderrLine?: string;
+  aiGenerationAttemptMode?: "lm_dit" | "dit_only" | "dit_only_retry" | string;
+  aiGenerationAttemptIndex?: number;
+  aiGenerationProtocolVersion?: number;
+  aiGenerationScriptVersion?: string;
+  aiGenerationRequestId?: string;
+  aiGenerationPriorFailure?: string;
+  aiGenerationLastProgressAgeMs?: number;
+  aiGenerationTracePath?: string;
+  aiGenerationFailureDetail?: string;
+  aiGenerationLmBackend?: string;
+  aiGenerationLmStage?: string;
 
   // Folder tracks
   isFolder?: boolean; // True if this track is a folder track
@@ -530,6 +610,31 @@ export interface RenderJob {
   };
   status: "pending" | "rendering" | "done" | "error";
   error?: string;
+}
+
+export type RenderSource = "master" | "selected_tracks" | "stems" | "selected_items" | "selected_items_master" | "razor";
+export type RenderBounds = "entire" | "custom" | "time_selection" | "project_regions" | "selected_regions";
+export type AudioFormat = "wav" | "aiff" | "flac" | "mp3" | "ogg" | "raw";
+export type SampleRate = 44100 | 48000 | 88200 | 96000 | 192000;
+export type BitDepth = 16 | 24 | 32;
+
+export interface RenderDialogOptions {
+  source: RenderSource;
+  bounds: RenderBounds;
+  startTime: number;
+  endTime: number;
+  tailLength: number;
+  addTail: boolean;
+  directory: string;
+  fileName: string;
+  format: AudioFormat;
+  sampleRate: SampleRate;
+  bitDepth: BitDepth;
+  channels: "stereo" | "mono";
+  normalize: boolean;
+  dither: boolean;
+  mp3Bitrate: number;
+  oggQuality: number;
 }
 
 // ============================================
@@ -810,6 +915,8 @@ interface DAWState {
     description: string;
     isrc: string;
   };
+  renderDialogOptions: RenderDialogOptions;
+  lastRenderDirectory: string;
   secondaryOutputEnabled: boolean;
   secondaryOutputFormat: string;
   secondaryOutputBitDepth: number;
@@ -1019,6 +1126,52 @@ interface DAWActions {
 
   // Track Notes
   setTrackNotes: (trackId: string, notes: string) => void;
+  setAITrackWorkflow: (trackId: string, workflowId: string) => void;
+  setAITrackParams: (
+    trackId: string,
+    params: Record<string, unknown>,
+  ) => void;
+  setAITrackGenerationState: (
+    trackId: string,
+    generationState: AITrackGenerationState,
+    updates?: {
+      progress?: number;
+      error?: string;
+      phase?: string;
+      message?: string;
+      backend?: string;
+      elapsedMs?: number;
+      heartbeatTs?: number;
+      phaseProgress?: number;
+      etaMs?: number;
+      runMode?: "cold" | "warm";
+      runtimeProfile?: string;
+      lmModel?: string;
+      statusNote?: string;
+      failureKind?: string;
+      sessionMode?: "persistent" | "oneshot" | "oneshot-fallback" | string;
+      workerExitCode?: number;
+      lastStdoutLine?: string;
+      lastStderrLine?: string;
+      attemptMode?: "lm_dit" | "dit_only" | "dit_only_retry" | string;
+      attemptIndex?: number;
+      protocolVersion?: number;
+      scriptVersion?: string;
+      requestId?: string;
+      priorFailure?: string;
+      lastProgressAgeMs?: number;
+      tracePath?: string;
+      failureDetail?: string;
+      lmBackend?: string;
+      lmStage?: string;
+    },
+  ) => void;
+  addGeneratedAudioClip: (
+    trackId: string,
+    filePath: string,
+    startTime: number,
+    clipName?: string,
+  ) => Promise<void>;
 
   // Track Audio Controls
   setTrackVolume: (id: string, volumeDB: number) => Promise<void>;
@@ -1266,7 +1419,8 @@ interface DAWActions {
   reopenStemSeparation: () => void;
   refreshAiToolsStatus: (force?: boolean) => Promise<AiToolsStatus>;
   applyAiToolsStatusUpdate: (status: AiToolsStatus) => void;
-  installAiTools: () => Promise<void>;
+  installAiTools: (options?: InstallAiToolsOptions) => Promise<void>;
+  resetAiTools: () => Promise<void>;
   cancelAiToolsInstall: () => Promise<void>;
   completeStemSeparation: (sourceTrackId: string, sourceClipId: string, clipName: string,
     stemFiles: Array<{ name: string; filePath: string; duration?: number; sampleRate?: number }>,
@@ -1384,6 +1538,9 @@ interface DAWActions {
   selectRegion: (id: string, modifiers?: { ctrl?: boolean }) => void;
   deselectAllRegions: () => void;
   setRenderMetadata: (metadata: Partial<DAWState["renderMetadata"]>) => void;
+  setRenderDialogOptions: (options: Partial<RenderDialogOptions>) => void;
+  resetRenderDialogOptions: () => void;
+  setLastRenderDirectory: (dir: string) => void;
   setSecondaryOutputEnabled: (enabled: boolean) => void;
   setSecondaryOutputFormat: (format: string) => void;
   setSecondaryOutputBitDepth: (bitDepth: number) => void;
@@ -1645,6 +1802,34 @@ export const createDefaultTrack = (
   playbackOffsetMs: 0,
   trackChannelCount: 2,
   midiOutputDevice: "",
+  aiWorkflow: "text-to-music",
+  aiWorkflowParams: getDefaultWorkflowParams("text-to-music"),
+  aiGenerationState: "idle",
+  aiGenerationProgress: 0,
+  aiGenerationError: "",
+  aiGenerationPhase: "",
+  aiGenerationMessage: "",
+  aiGenerationBackend: "",
+  aiGenerationElapsedMs: 0,
+  aiGenerationHeartbeatTs: 0,
+  aiGenerationPhaseProgress: undefined,
+  aiGenerationEtaMs: undefined,
+  aiGenerationRunMode: undefined,
+  aiGenerationRuntimeProfile: "",
+  aiGenerationLmModel: "",
+  aiGenerationStatusNote: "",
+  aiGenerationFailureKind: "",
+  aiGenerationSessionMode: "",
+  aiGenerationWorkerExitCode: 0,
+  aiGenerationLastStdoutLine: "",
+  aiGenerationLastStderrLine: "",
+  aiGenerationAttemptMode: "",
+  aiGenerationAttemptIndex: 0,
+  aiGenerationProtocolVersion: 0,
+  aiGenerationScriptVersion: "",
+  aiGenerationRequestId: "",
+  aiGenerationPriorFailure: "",
+  aiGenerationLastProgressAgeMs: 0,
 });
 
 export const initialTransport: TransportState = {
@@ -1677,6 +1862,27 @@ export function createDefaultRenderMetadata() {
     year: "",
     description: "",
     isrc: "",
+  };
+}
+
+export function createDefaultRenderDialogOptions(): RenderDialogOptions {
+  return {
+    source: "master",
+    bounds: "entire",
+    startTime: 0,
+    endTime: 0,
+    tailLength: 1000,
+    addTail: true,
+    directory: "",
+    fileName: "$project",
+    format: "wav",
+    sampleRate: 44100,
+    bitDepth: 24,
+    channels: "stereo",
+    normalize: false,
+    dither: false,
+    mp3Bitrate: 320,
+    oggQuality: 6,
   };
 }
 
@@ -1747,6 +1953,8 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     canRedo: false,
     trackGroups: [],
     renderMetadata: createDefaultRenderMetadata(),
+    renderDialogOptions: createDefaultRenderDialogOptions(),
+    lastRenderDirectory: "",
     secondaryOutputEnabled: false,
     secondaryOutputFormat: "mp3",
     secondaryOutputBitDepth: 16,
@@ -2086,6 +2294,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // Phase 10: Render Pipeline Expansion
     selectedRegionIds: [],
     renderMetadata: createDefaultRenderMetadata(),
+    renderDialogOptions: createDefaultRenderDialogOptions(),
+    lastRenderDirectory: "",
     secondaryOutputEnabled: false,
     secondaryOutputFormat: "mp3",
     secondaryOutputBitDepth: 16,
@@ -2244,7 +2454,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 state: "ready" as const,
                 installInProgress: false,
                 available: true,
-                message: nextStatus.message || "AI tools are ready.",
+                message: getAiToolsReadyMessage(nextStatus),
                 error: undefined,
                 errorCode: undefined,
                 terminalReason: undefined,
@@ -2307,7 +2517,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               terminalReason: undefined,
               statusWarning: undefined,
               statusWarningCode: undefined,
-              message: status.message || "AI tools are ready.",
+              message: getAiToolsReadyMessage({ ...currentStatus, ...status }),
             }
           : {
               ...currentStatus,
@@ -2320,12 +2530,25 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         aiToolsStatusLastUpdatedAt: Date.now(),
       });
     },
-    installAiTools: async () => {
+    installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
-        if (currentStatus.installInProgress || currentStatus.available) return;
+        const aiToolsFullyReady = currentStatus.available && isMusicGenerationFullyReady(currentStatus);
+        if (currentStatus.installInProgress || aiToolsFullyReady) return;
+
+        if (currentStatus.statusWarningCode === "reconciling_install_state") {
+          get().openAiToolsSetup();
+          get().showToast("OpenStudio is still confirming the previous AI tools install result.", "info");
+          return;
+        }
 
         if (currentStatus.state === "pythonMissing") {
           get().openAiToolsSetup();
+          return;
+        }
+
+        if (!options.userConfirmedDownload) {
+          get().openAiToolsSetup();
+          get().showToast("Confirm the AI Tools download before setup starts.", "info");
           return;
         }
 
@@ -2361,7 +2584,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       });
 
       try {
-        const result = await nativeBridge.installAiTools();
+        const result = await nativeBridge.installAiTools({ userConfirmedDownload: true });
         if (result.status) {
           get().applyAiToolsStatusUpdate(result.status);
         } else {
@@ -2396,6 +2619,30 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           aiToolsStatusLoading: false,
           aiToolsStatusLastUpdatedAt: Date.now(),
         });
+        get().showToast(message, "error");
+      }
+    },
+    resetAiTools: async () => {
+      const currentStatus = get().aiToolsStatus;
+      if (currentStatus.installInProgress) {
+        await nativeBridge.cancelAiToolsInstall();
+      }
+
+      try {
+        const result = await nativeBridge.resetAiTools();
+        if (result.status) {
+          get().applyAiToolsStatusUpdate(result.status);
+        } else {
+          await get().refreshAiToolsStatus(true);
+        }
+
+        if (result.success) {
+          get().showToast(result.message || "AI tools data was removed.", "success");
+        } else if (result.error) {
+          get().showToast(result.error, "error");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         get().showToast(message, "error");
       }
     },
@@ -3559,6 +3806,281 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set({
         canUndo: commandManager.canUndo(),
         canRedo: commandManager.canRedo(),
+      });
+    },
+
+    setAITrackWorkflow: (trackId, workflowId) => {
+      const state = get();
+      const track = state.tracks.find((entry) => entry.id === trackId);
+      if (!track || track.type !== "ai") return;
+
+      const previousWorkflow = track.aiWorkflow ?? "text-to-music";
+      const previousParams = { ...(track.aiWorkflowParams ?? {}) };
+      const nextParams = getDefaultWorkflowParams(workflowId);
+
+      set((store) => ({
+        tracks: store.tracks.map((entry) =>
+          entry.id === trackId
+            ? {
+                ...entry,
+                aiWorkflow: workflowId,
+                aiWorkflowParams: nextParams,
+              }
+            : entry,
+        ),
+      }));
+
+      commandManager.push({
+        type: "UPDATE_TRACK",
+        description: `Set AI workflow on "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? {
+                    ...entry,
+                    aiWorkflow: workflowId,
+                    aiWorkflowParams: nextParams,
+                  }
+                : entry,
+            ),
+          }));
+        },
+        undo: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? {
+                    ...entry,
+                    aiWorkflow: previousWorkflow,
+                    aiWorkflowParams: previousParams,
+                  }
+                : entry,
+            ),
+          }));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    setAITrackParams: (trackId, params) => {
+      const state = get();
+      const track = state.tracks.find((entry) => entry.id === trackId);
+      if (!track || track.type !== "ai") return;
+
+      const previousParams = { ...(track.aiWorkflowParams ?? {}) };
+      const nextParams = normalizeWorkflowParams(
+        track.aiWorkflow ?? "text-to-music",
+        params,
+      );
+
+      set((store) => ({
+        tracks: store.tracks.map((entry) =>
+          entry.id === trackId
+            ? { ...entry, aiWorkflowParams: nextParams }
+            : entry,
+        ),
+      }));
+
+      commandManager.push({
+        type: "UPDATE_TRACK",
+        description: `Update AI parameters on "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? { ...entry, aiWorkflowParams: nextParams }
+                : entry,
+            ),
+          }));
+        },
+        undo: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? { ...entry, aiWorkflowParams: previousParams }
+                : entry,
+            ),
+          }));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    setAITrackGenerationState: (trackId, generationState, updates = {}) => {
+      set((state) => ({
+        tracks: state.tracks.map((entry) =>
+          entry.id === trackId
+            ? {
+                ...entry,
+                aiGenerationState: generationState,
+                aiGenerationProgress:
+                  updates.progress
+                  ?? (generationState === "idle"
+                    ? 0
+                    : entry.aiGenerationProgress ?? 0),
+                aiGenerationError:
+                  updates.error
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationError ?? ""),
+                aiGenerationPhase:
+                  updates.phase
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationPhase ?? ""),
+                aiGenerationMessage:
+                  updates.message
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationMessage ?? ""),
+                aiGenerationBackend:
+                  updates.backend
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationBackend ?? ""),
+                aiGenerationElapsedMs:
+                  updates.elapsedMs
+                  ?? (generationState === "idle" ? 0 : entry.aiGenerationElapsedMs ?? 0),
+                aiGenerationHeartbeatTs:
+                  updates.heartbeatTs
+                  ?? (generationState === "idle" ? 0 : entry.aiGenerationHeartbeatTs ?? 0),
+                aiGenerationPhaseProgress:
+                  updates.phaseProgress
+                  ?? (generationState === "idle" ? undefined : entry.aiGenerationPhaseProgress),
+                aiGenerationEtaMs:
+                  updates.etaMs
+                  ?? (generationState === "idle" ? undefined : entry.aiGenerationEtaMs),
+                aiGenerationRunMode:
+                  updates.runMode
+                  ?? (generationState === "idle" ? undefined : entry.aiGenerationRunMode),
+                aiGenerationRuntimeProfile:
+                  updates.runtimeProfile
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationRuntimeProfile ?? ""),
+                aiGenerationLmModel:
+                  updates.lmModel
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationLmModel ?? ""),
+                aiGenerationStatusNote:
+                  updates.statusNote
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationStatusNote ?? ""),
+                aiGenerationFailureKind:
+                  updates.failureKind
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationFailureKind ?? ""),
+                aiGenerationSessionMode:
+                  updates.sessionMode
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationSessionMode ?? ""),
+                aiGenerationWorkerExitCode:
+                  updates.workerExitCode
+                  ?? (generationState === "idle" ? 0 : entry.aiGenerationWorkerExitCode ?? 0),
+                aiGenerationLastStdoutLine:
+                  updates.lastStdoutLine
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationLastStdoutLine ?? ""),
+                aiGenerationLastStderrLine:
+                  updates.lastStderrLine
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationLastStderrLine ?? ""),
+                aiGenerationAttemptMode:
+                  updates.attemptMode
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationAttemptMode ?? ""),
+                aiGenerationAttemptIndex:
+                  updates.attemptIndex
+                  ?? (generationState === "idle" ? 0 : entry.aiGenerationAttemptIndex ?? 0),
+                aiGenerationProtocolVersion:
+                  updates.protocolVersion
+                  ?? (generationState === "idle" ? 0 : entry.aiGenerationProtocolVersion ?? 0),
+                aiGenerationScriptVersion:
+                  updates.scriptVersion
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationScriptVersion ?? ""),
+                aiGenerationRequestId:
+                  updates.requestId
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationRequestId ?? ""),
+                aiGenerationPriorFailure:
+                  updates.priorFailure
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationPriorFailure ?? ""),
+                aiGenerationLastProgressAgeMs:
+                  updates.lastProgressAgeMs
+                  ?? (generationState === "idle" ? 0 : entry.aiGenerationLastProgressAgeMs ?? 0),
+                aiGenerationTracePath:
+                  updates.tracePath
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationTracePath ?? ""),
+                aiGenerationFailureDetail:
+                  updates.failureDetail
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationFailureDetail ?? ""),
+                aiGenerationLmBackend:
+                  updates.lmBackend
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationLmBackend ?? ""),
+                aiGenerationLmStage:
+                  updates.lmStage
+                  ?? (generationState === "idle" ? "" : entry.aiGenerationLmStage ?? ""),
+              }
+            : entry,
+        ),
+      }));
+    },
+
+    addGeneratedAudioClip: async (trackId, filePath, startTime, clipName) => {
+      const track = get().tracks.find((entry) => entry.id === trackId);
+      if (!track) {
+        throw new Error(`Track not found: ${trackId}`);
+      }
+
+      const mediaInfo = await nativeBridge.importMediaFile(filePath);
+      if (!mediaInfo?.filePath || !mediaInfo.duration) {
+        throw new Error(`Failed to prepare generated audio: ${filePath}`);
+      }
+
+      const newClip: AudioClip = {
+        id: crypto.randomUUID(),
+        filePath: mediaInfo.filePath,
+        name:
+          clipName
+          || mediaInfo.filePath.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, "")
+          || "Generated Clip",
+        startTime,
+        duration: mediaInfo.duration,
+        offset: 0,
+        color: track.color || "#4cc9f0",
+        volumeDB: 0,
+        fadeIn: 0,
+        fadeOut: 0,
+        sampleRate: mediaInfo.sampleRate,
+        sourceLength: mediaInfo.duration,
+      };
+
+      get().executeCommand({
+        type: "ADD_CLIP",
+        description: `Add generated clip to "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((state) => ({
+            tracks: state.tracks.map((entry) =>
+              entry.id === trackId
+                ? { ...entry, clips: [...entry.clips, newClip] }
+                : entry,
+            ),
+            isModified: true,
+          }));
+          void nativeBridge.addPlaybackClip(
+            trackId,
+            newClip.filePath,
+            newClip.startTime,
+            newClip.duration,
+            newClip.offset || 0,
+            newClip.volumeDB || 0,
+            newClip.fadeIn || 0,
+            newClip.fadeOut || 0,
+            newClip.id,
+            newClip.pitchCorrectionSourceFilePath,
+            newClip.pitchCorrectionSourceOffset,
+          );
+        },
+        undo: () => {
+          set((state) => ({
+            tracks: state.tracks.map((entry) =>
+              entry.id === trackId
+                ? {
+                    ...entry,
+                    clips: entry.clips.filter((clip) => clip.id !== newClip.id),
+                  }
+                : entry,
+            ),
+            isModified: true,
+          }));
+          void nativeBridge.removePlaybackClip(trackId, newClip.filePath);
+        },
       });
     },
 

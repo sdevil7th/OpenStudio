@@ -153,6 +153,34 @@ export function FolderIcon({ size = 16, className }: IconProps) {
   );
 }
 
+export function AIIcon({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M12 2v4" />
+      <path d="M12 18v4" />
+      <path d="M4.9 4.9l2.8 2.8" />
+      <path d="M16.3 16.3l2.8 2.8" />
+      <path d="M2 12h4" />
+      <path d="M18 12h4" />
+      <path d="M4.9 19.1l2.8-2.8" />
+      <path d="M16.3 7.7l2.8-2.8" />
+      <circle cx="12" cy="12" r="4.5" />
+      <path d="M10.8 10.5h2.4l1.6 4" />
+      <path d="M9.6 14.5l2.4-6 2.4 6" />
+    </svg>
+  );
+}
+
 /** All available track icons, keyed by icon ID */
 export const TRACK_ICONS: Record<string, React.FC<IconProps>> = {
   microphone: MicrophoneIcon,
@@ -164,6 +192,7 @@ export const TRACK_ICONS: Record<string, React.FC<IconProps>> = {
   midi: MIDIIcon,
   folder: FolderIcon,
   piano: PianoIcon,
+  ai: AIIcon,
 };
 
 /** Icon ID labels for UI display */
@@ -177,4 +206,5 @@ export const TRACK_ICON_LABELS: Record<string, string> = {
   midi: "MIDI",
   folder: "Folder",
   piano: "Piano",
+  ai: "AI",
 };

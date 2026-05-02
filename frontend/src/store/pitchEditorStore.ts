@@ -1,10 +1,12 @@
 import { create } from "zustand";
-import { nativeBridge, PitchNoteData, PitchContourData, PolyNoteData, PolyAnalysisResult, UnifiedNoteData, polyToUnified, monoToUnified, type ClipPitchPreviewPayload, type PitchCorrectionRenderMode } from "../services/NativeBridge";
+import { nativeBridge, PitchNoteData, PitchContourData, type PitchCorrectionCompletionData, type PitchCorrectionRenderMode, type PitchPreviewRoutingStatus } from "../services/NativeBridge";
 import { useDAWStore } from "./useDAWStore";
 import { logBridgeError } from "../utils/bridgeErrorHandler";
 
 export type PitchEditorTool = "select" | "pitch" | "drift" | "vibrato" | "transition" | "draw" | "split";
 export type PitchSnapMode = "off" | "chromatic" | "scale";
+// Keep disabled until the active final-render backend declares explicit formant control.
+export const PITCH_EDITOR_FORMANT_EDITING_ENABLED = false;
 export type PitchEditorApplyState =
   | "idle"
   | "queued"
@@ -15,12 +17,18 @@ export type PitchEditorApplyState =
   | "done"
   | "error";
 
+export type PitchAnalysisPhase = "idle" | "loading" | "analyzing";
+
 export type PitchRenderCoverageState = "pending" | "preview_ready" | "hq_ready";
+
+export type PitchRenderCoverageKind = "edited" | "edit_island" | "left_neighbor_tail" | "right_neighbor_head";
 
 export interface PitchRenderCoverageRange {
   startTime: number;
   endTime: number;
   state: PitchRenderCoverageState;
+  kind?: PitchRenderCoverageKind;
+  noteId?: string;
 }
 
 // Scale interval templates
@@ -54,6 +62,21 @@ function buildScaleNotes(key: number, type: string): boolean[] {
 interface UndoEntry {
   description: string;
   notes: PitchNoteData[];
+  selectedNoteIds: string[];
+}
+
+function clonePitchNotes(notes: PitchNoteData[]): PitchNoteData[] {
+  return JSON.parse(JSON.stringify(notes));
+}
+
+function filterSelectedNoteIdsForNotes(selectedNoteIds: string[], notes: PitchNoteData[]): string[] {
+  if (selectedNoteIds.length === 0 || notes.length === 0) return [];
+  const validIds = new Set(notes.map((note) => note.id));
+  return selectedNoteIds.filter((id) => validIds.has(id));
+}
+
+function pitchNotesEqual(a: PitchNoteData[], b: PitchNoteData[]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 const REFERENCE_COLORS = ["#f59e0b", "#ec4899", "#06b6d4", "#a855f7", "#ef4444", "#14b8a6"];
@@ -89,6 +112,7 @@ interface PitchEditorState {
   contour: PitchContourData | null;
   notes: PitchNoteData[];
   isAnalyzing: boolean;
+  analysisPhase: PitchAnalysisPhase;
   isApplying: boolean;
   progressPercent: number;   // 0-100, for analysis/correction progress display
   progressLabel: string;     // e.g. "Analyzing..." or "Applying correction..."
@@ -125,6 +149,8 @@ interface PitchEditorState {
   setSelectedNoteIds: (ids: string[]) => void;
 
   // Note editing (with undo)
+  beginInteractivePreview: (noteId: string) => void;
+  endInteractivePreview: () => void;
   updateNote: (noteId: string, changes: Partial<PitchNoteData>) => void;
   commitNoteEdit: () => void;  // Call on mouseup/drag-end to trigger auto-apply
   updateSelectedNotes: (changes: Partial<PitchNoteData>) => void;
@@ -193,39 +219,9 @@ interface PitchEditorState {
   beginDrawPitch: () => void;
   commitDrawPitch: () => void;
 
-  // Polyphonic mode (Phase 7)
-  polyMode: boolean;
-  polyNotes: PolyNoteData[];
-  polyAnalysisResult: PolyAnalysisResult | null;
-  showPitchSalience: boolean;
-  soloNoteId: string | null;
-
-  // Poly detection tuning
-  polyNoteThreshold: number;    // 0-1, default 0.15
-  polyOnsetThreshold: number;   // 0-1, default 0.3
-  polyMinDuration: number;      // ms, default 80
-
-  togglePolyMode: () => void;
-  analyzePolyphonic: () => Promise<void>;
-  updatePolyNote: (noteId: string, changes: Partial<PolyNoteData>) => void;
-  movePolyNotePitch: (noteId: string, semitones: number) => void;
-  moveSelectedPolyPitch: (semitones: number) => void;
-  soloPolyNote: (noteId: string | null) => void;
-  applyPolyCorrection: () => Promise<void>;
-  togglePitchSalience: () => void;
-  setPolyNoteThreshold: (v: number) => void;
-  setPolyOnsetThreshold: (v: number) => void;
-  setPolyMinDuration: (v: number) => void;
-
-  // Auto-detect mono vs poly
-  autoDetectMonoPoly: () => void;
-
   // A/B comparison
   abCompareMode: boolean;       // true = playing original (bypass correction)
   toggleABCompare: () => void;
-
-  // Unified note accessor — returns mono or poly notes as UnifiedNoteData[]
-  getUnifiedNotes: () => UnifiedNoteData[];
 }
 
 // Tracks the active pitchAnalysisComplete listener so stale listeners from
@@ -233,6 +229,9 @@ interface PitchEditorState {
 // Without this, a stale listener fires for the next analysis result,
 // doubling the notes and corrupting pitch correction data.
 let _pitchAnalysisUnsubscribe: (() => void) | null = null;
+let _deferredAnalysisRange: { start?: number; end?: number } | null = null;
+let _noteHqApplyInFlight = false;
+let _analysisRunSeq = 0;
 
 let _pitchCorrectionRequestSeq = 0;
 let _logicalApplySeq = 0;
@@ -244,8 +243,13 @@ let _dawTransportSubscriptionInitialized = false;
 let _editRevision = 0;
 let _requestedApplyRevision = 0;
 let _appliedRevision = 0;
+type PitchApplyRenderStage = "single" | "preview_segment" | "full_clip_hq" | "note_hq";
+type PitchPreviewMonitorMode = "none" | "scrub" | "clip_live_preview";
+let _interactivePreviewNoteId: string | null = null;
+let _interactivePreviewActive = false;
+let _activePitchPreviewMonitorMode: PitchPreviewMonitorMode = "none";
+let _dirtyPitchNoteIds = new Set<string>();
 const _requestRevisionById = new Map<string, number>();
-type PitchApplyRenderStage = "single" | "preview_segment" | "full_clip_hq";
 interface PendingPreviewSegment {
   startSec: number;
   endSec: number;
@@ -279,24 +283,23 @@ interface PitchCorrectionRequestMeta {
   summary: ApplyRequestSummary;
   windowStartSec?: number;
   windowEndSec?: number;
+  coverageRanges?: PitchRenderCoverageRange[];
   requestGroupId: string;
   segmentIndex?: number;
 }
 const _requestMetaById = new Map<string, PitchCorrectionRequestMeta>();
 
-// Auto-apply debounce — fires 400ms after the last note mutation so playback
-// always reflects the current state without a manual Apply button.
+// Auto-apply debounce — fires 300ms after the last note mutation so playback
+// swaps to a fresh note-local HQ render without requiring a manual Apply click.
 let _autoApplyTimer: ReturnType<typeof setTimeout> | null = null;
 // Throttle timer for real-time pitch preview during drag (max ~12fps, fast enough to feel live).
 let _dragPreviewThrottle: ReturnType<typeof setTimeout> | null = null;
 const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
 const PREVIEW_SEGMENT_DURATION_SEC = 10;
 const MAX_PREVIEW_SEGMENT_CONCURRENCY = 2;
-const PREVIEW_LOOKBEHIND_SEC = 0.2;
-const PREVIEW_LOOKAHEAD_PLAYING_SEC = 3.0;
-const PREVIEW_LOOKAHEAD_STOPPED_SEC = 1.5;
 const AUTO_BAKE_LOOKBEHIND_SEC = 0.25;
 const AUTO_BAKE_LOOKAHEAD_SEC = 2.5;
+const MAX_NEIGHBOR_LINK_GAP_SEC = 0.18;
 let _activePreviewRequestGroupId: string | null = null;
 let _pendingPreviewSegments: PendingPreviewSegment[] = [];
 let _runningPreviewSegmentJobs = 0;
@@ -306,6 +309,24 @@ function shouldLogPitchEditorFormant() {
   const win = window as Window & { __S13_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
   const host = win.location?.hostname ?? "";
   return win.__S13_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
+}
+
+function shouldCaptureAppFinalPitchContext(routeSuspect = false) {
+  if (routeSuspect) return true;
+  const win = window as Window & {
+    __JUCE__?: { backend?: { capturePitchAppFinalContext?: unknown } };
+    __S13_CAPTURE_APP_FINAL_PITCH__?: boolean;
+  };
+  if (win.__S13_CAPTURE_APP_FINAL_PITCH__ === false) return false;
+  if (win.__S13_CAPTURE_APP_FINAL_PITCH__ === true) return true;
+  try {
+    const stored = window.localStorage?.getItem("s13.pitch.captureAppFinal");
+    if (stored === "0") return false;
+    if (stored === "1") return true;
+  } catch {
+    // Ignore storage failures and fall through to native capability detection.
+  }
+  return typeof win.__JUCE__?.backend?.capturePitchAppFinalContext === "function";
 }
 
 function logPitchEditorFormant(message: string, extra?: Record<string, unknown>) {
@@ -353,10 +374,61 @@ function clearStagedPreviewQueue() {
   clearFullClipHqTimer();
 }
 
+function deferPitchAnalysis(start?: number, end?: number, reason = "hq_priority") {
+  _deferredAnalysisRange = { start, end };
+  logPitchEditorFormant("pitch analysis deferred", { start: start ?? null, end: end ?? null, reason });
+}
+
+function cancelActivePitchAnalysisForHq() {
+  _analysisRunSeq += 1;
+  if (_pitchAnalysisUnsubscribe) {
+    _pitchAnalysisUnsubscribe();
+    _pitchAnalysisUnsubscribe = null;
+  }
+  usePitchEditorStore.setState((prev) => (
+    prev.isAnalyzing
+      ? { ...prev, isAnalyzing: false, analysisPhase: "idle", progressPercent: 0, progressLabel: "" }
+      : prev
+  ));
+}
+
+function retryDeferredPitchAnalysis() {
+  if (_noteHqApplyInFlight || !_deferredAnalysisRange) return;
+  const deferred = _deferredAnalysisRange;
+  _deferredAnalysisRange = null;
+  window.setTimeout(() => {
+    usePitchEditorStore.getState().analyze(deferred.start, deferred.end);
+  }, 0);
+}
+
+function finishNoteHqPriority(logicalRequestId?: string) {
+  if (logicalRequestId && _activePitchCorrectionRequestId && _activePitchCorrectionRequestId !== logicalRequestId) {
+    return;
+  }
+  if (!_noteHqApplyInFlight) return;
+  _noteHqApplyInFlight = false;
+  retryDeferredPitchAnalysis();
+}
+
+function markDirtyPitchNotes(noteIds: Iterable<string>) {
+  for (const noteId of noteIds) {
+    if (noteId) _dirtyPitchNoteIds.add(noteId);
+  }
+}
+
+function replaceDirtyPitchNotes(noteIds: Iterable<string>) {
+  _dirtyPitchNoteIds.clear();
+  markDirtyPitchNotes(noteIds);
+}
+
 function resetApplyRevisions() {
   _editRevision = 0;
   _requestedApplyRevision = 0;
   _appliedRevision = 0;
+  _interactivePreviewNoteId = null;
+  _interactivePreviewActive = false;
+  _activePitchPreviewMonitorMode = "none";
+  _dirtyPitchNoteIds.clear();
   _requestRevisionById.clear();
   _requestMetaById.clear();
   _activePitchCorrectionRequestId = null;
@@ -416,20 +488,42 @@ function setApplyStatus(
   }
 }
 
+function getEffectivePitchEditorGlobalFormantSt(globalFormantSt: number) {
+  return PITCH_EDITOR_FORMANT_EDITING_ENABLED ? globalFormantSt : 0;
+}
+
+function getPitchCorrectionFailureMessage(data?: {
+  hardFailReason?: string;
+  fallbackReason?: string;
+  pitchRenderBackendFailureCode?: string;
+}) {
+  const reason = (data?.hardFailReason || data?.fallbackReason || "").trim();
+  return reason || "Pitch/formant apply failed";
+}
+
+function sanitizePitchEditorNotesForApply(notes: PitchNoteData[]) {
+  const formantSanitizedNotes = PITCH_EDITOR_FORMANT_EDITING_ENABLED
+    ? cloneNotesSnapshot(notes)
+    : notes.map((note) => ({ ...note, formantShift: 0 }));
+  return formantSanitizedNotes.map(applySampleMatchDownshiftDefaults);
+}
+
 function summarizeApplyRequest(notes: PitchNoteData[], globalFormantSt: number): ApplyRequestSummary {
+  const effectiveGlobalFormantSt = getEffectivePitchEditorGlobalFormantSt(globalFormantSt);
+  const effectiveNotes = PITCH_EDITOR_FORMANT_EDITING_ENABLED ? notes : sanitizePitchEditorNotesForApply(notes);
   let pitchEdits = 0;
   let noteFormantEdits = 0;
   let gainEdits = 0;
   let driftEdits = 0;
   let vibratoEdits = 0;
-  for (const note of notes) {
+  for (const note of effectiveNotes) {
     if (Math.abs(note.correctedPitch - note.detectedPitch) > 0.01) pitchEdits++;
     if (Math.abs(note.formantShift) > 0.01) noteFormantEdits++;
     if (Math.abs(note.gain) > 0.01) gainEdits++;
     if (note.driftCorrectionAmount > 0.01) driftEdits++;
     if (Math.abs(note.vibratoDepth - 1.0) > 0.01) vibratoEdits++;
   }
-  const hasGlobalFormant = Math.abs(globalFormantSt) > 0.01;
+  const hasGlobalFormant = Math.abs(effectiveGlobalFormantSt) > 0.01;
   let mode: "none" | "pitch-only" | "formant-only" | "mixed" = "none";
   const hasPitch = pitchEdits > 0;
   const hasFormant = hasGlobalFormant || noteFormantEdits > 0;
@@ -447,8 +541,8 @@ function summarizeApplyRequest(notes: PitchNoteData[], globalFormantSt: number):
     hasPitch,
     hasFormant,
     hasOther,
-    globalFormantCents: Math.round(globalFormantSt * 100),
-    globalFormantSemitones: globalFormantSt,
+    globalFormantCents: Math.round(effectiveGlobalFormantSt * 100),
+    globalFormantSemitones: effectiveGlobalFormantSt,
     mode,
   };
 }
@@ -460,6 +554,163 @@ function cloneNotesSnapshot(notes: PitchNoteData[]) {
 function cloneFramesSnapshot(frames?: PitchContourData["frames"]) {
   if (!frames) return undefined;
   return JSON.parse(JSON.stringify(frames)) as PitchContourData["frames"];
+}
+
+const DRAW_VOICED_TOLERANCE_SEC = 0.04;
+const IMMEDIATE_NEIGHBOR_SMOOTH_MS = 10;
+const NOTE_HQ_DEFAULT_TRANSITION_IN_MS = 40;
+const NOTE_HQ_DEFAULT_TRANSITION_OUT_MS = 60;
+const NOTE_HQ_HARD_BOUNDARY_TRANSITION_IN_MS = 24;
+const NOTE_HQ_HARD_BOUNDARY_TRANSITION_OUT_MS = 40;
+const NOTE_HQ_SOFT_BOUNDARY_TRANSITION_MS = 80;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_THRESHOLD_ST = -2.0;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_VIBRATO_DEPTH = 0.70;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_IN_MS = 80;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_OUT_MS = 100;
+const NOTE_HQ_NEXT_HEAD_OWNERSHIP_MS = 40;
+const MAX_NOTE_HQ_TRANSITION_MS = 140;
+const MAX_EDIT_ISLAND_GAP_SEC = 0.08;
+const NOTE_HQ_INTERNAL_ISLAND_RAMP_MS = 32;
+
+function noteHasPitchStyleEdit(note: PitchNoteData) {
+  return Math.abs(note.correctedPitch - note.detectedPitch) > 0.01
+    || note.driftCorrectionAmount > 0.01
+    || Math.abs(note.vibratoDepth - 1.0) > 0.01
+    || (Array.isArray(note.pitchDrift) && note.pitchDrift.some((v) => Math.abs(v) > 0.01));
+}
+
+function noteHasRenderableEdit(note: PitchNoteData) {
+  return noteHasPitchStyleEdit(note)
+    || Math.abs(note.gain) > 0.01
+    || (PITCH_EDITOR_FORMANT_EDITING_ENABLED && Math.abs(note.formantShift) > 0.01);
+}
+
+function getNoteEffectiveTransitionMs(note: PitchNoteData, edge: "in" | "out") {
+  const explicitMs = edge === "in" ? note.transitionIn : note.transitionOut;
+  return explicitMs > 0 ? explicitMs : 0;
+}
+
+function getNoteHqBoundaryTransitionFloorMs(note: PitchNoteData, edge: "in" | "out") {
+  if (isSampleMatchDownshift(note)) {
+    return edge === "in"
+      ? NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_IN_MS
+      : NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_OUT_MS;
+  }
+
+  const kind = edge === "in" ? note.entryBoundaryKind : note.exitBoundaryKind;
+  if (kind === "hard_word_like") {
+    return edge === "in" ? NOTE_HQ_HARD_BOUNDARY_TRANSITION_IN_MS : NOTE_HQ_HARD_BOUNDARY_TRANSITION_OUT_MS;
+  }
+  if (kind === "soft_legato") {
+    return NOTE_HQ_SOFT_BOUNDARY_TRANSITION_MS;
+  }
+  return edge === "in" ? NOTE_HQ_DEFAULT_TRANSITION_IN_MS : NOTE_HQ_DEFAULT_TRANSITION_OUT_MS;
+}
+
+function getNoteEffectiveStart(note: Pick<PitchNoteData, "startTime" | "effectiveStartTime">) {
+  return note.effectiveStartTime ?? note.startTime;
+}
+
+function getNoteEffectiveEnd(note: Pick<PitchNoteData, "endTime" | "effectiveEndTime">) {
+  return note.effectiveEndTime ?? note.endTime;
+}
+
+function getNoteWordGroupId(note: Pick<PitchNoteData, "id" | "wordGroupId">) {
+  return note.wordGroupId && note.wordGroupId.trim().length > 0 ? note.wordGroupId : note.id;
+}
+
+function notesShareWordGroup(
+  left: Pick<PitchNoteData, "id" | "wordGroupId">,
+  right: Pick<PitchNoteData, "id" | "wordGroupId">,
+) {
+  return getNoteWordGroupId(left) === getNoteWordGroupId(right);
+}
+
+function getPitchShiftSemitones(note: Pick<PitchNoteData, "correctedPitch" | "detectedPitch">) {
+  return note.correctedPitch - note.detectedPitch;
+}
+
+function isSampleMatchDownshift(note: Pick<PitchNoteData, "correctedPitch" | "detectedPitch">) {
+  return getPitchShiftSemitones(note) <= NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_THRESHOLD_ST;
+}
+
+function applySampleMatchDownshiftDefaults(note: PitchNoteData): PitchNoteData {
+  if (!isSampleMatchDownshift(note) || Math.abs(note.vibratoDepth - 1.0) > 0.01) {
+    return note;
+  }
+  return {
+    ...note,
+    vibratoDepth: NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_VIBRATO_DEPTH,
+  };
+}
+
+function sharesTransitionPair(
+  left: Pick<PitchNoteData, "startTime" | "endTime" | "effectiveStartTime" | "effectiveEndTime" | "correctedPitch" | "detectedPitch" | "transitionIn" | "transitionOut">,
+  right: Pick<PitchNoteData, "startTime" | "endTime" | "effectiveStartTime" | "effectiveEndTime" | "correctedPitch" | "detectedPitch" | "transitionIn" | "transitionOut">,
+) {
+  const gapSec = right.startTime - left.endTime;
+  return gapSec <= MAX_NEIGHBOR_LINK_GAP_SEC
+    || getNoteEffectiveStart(right) <= getNoteEffectiveEnd(left) + MAX_NEIGHBOR_LINK_GAP_SEC;
+}
+
+function normalizePitchNote(note: PitchNoteData): PitchNoteData {
+  const effectiveStartTime = Math.max(0, note.startTime - getNoteEffectiveTransitionMs(note, "in") / 1000);
+  const effectiveEndTime = Math.max(note.endTime, note.endTime + getNoteEffectiveTransitionMs(note, "out") / 1000);
+  return {
+    ...note,
+    wordGroupId: getNoteWordGroupId(note),
+    effectiveStartTime,
+    effectiveEndTime,
+  };
+}
+
+function normalizePitchNotes(notes: PitchNoteData[]) {
+  return notes
+    .map((note) => normalizePitchNote(note))
+    .sort((a, b) => a.startTime - b.startTime);
+}
+
+function expandDirtyPitchNoteIdsWithNeighbors(noteIds: Iterable<string>, notes: PitchNoteData[]) {
+  const sortedNotes = [...notes].sort((a, b) => a.startTime - b.startTime);
+  const dirtyIds = new Set<string>();
+  for (const noteId of noteIds) {
+    if (noteId) dirtyIds.add(noteId);
+  }
+
+  for (let index = 0; index < sortedNotes.length; index += 1) {
+    const note = sortedNotes[index];
+    if (!dirtyIds.has(note.id)) continue;
+
+    const prev = sortedNotes[index - 1];
+    if (prev && sharesTransitionPair(prev, note)) {
+      dirtyIds.add(prev.id);
+    }
+
+    const next = sortedNotes[index + 1];
+    if (next && sharesTransitionPair(note, next)) {
+      dirtyIds.add(next.id);
+    }
+  }
+
+  return dirtyIds;
+}
+
+function isVoicedAtClipTime(contour: PitchContourData | null, clipTime: number) {
+  const frames = contour?.frames;
+  if (!frames || frames.times.length === 0) return true;
+
+  let closestIndex = -1;
+  let closestDt = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < frames.times.length; i++) {
+    const dt = Math.abs(frames.times[i] - clipTime);
+    if (dt < closestDt) {
+      closestDt = dt;
+      closestIndex = i;
+    }
+  }
+
+  if (closestIndex < 0 || closestDt > DRAW_VOICED_TOLERANCE_SEC) return false;
+  return Boolean(frames.voiced[closestIndex]) && (frames.midi[closestIndex] ?? 0) > 0 && (frames.confidence[closestIndex] ?? 0) >= 0.15;
 }
 
 function buildLogicalApplyRequestId(clipId: string) {
@@ -526,6 +777,7 @@ function consumeRequestMeta(requestId?: string | null) {
 }
 
 function hasRequestedFormantWork(notes: PitchNoteData[], globalFormantSt: number) {
+  if (!PITCH_EDITOR_FORMANT_EDITING_ENABLED) return false;
   return Math.abs(globalFormantSt) > 0.01
     || notes.some((n) => Math.abs(n.formantShift) > 0.01);
 }
@@ -535,27 +787,464 @@ function hasRealtimePitchPreviewWork(notes: PitchNoteData[], globalFormantSt: nu
   return notes.some((n) => Math.abs(n.correctedPitch - n.detectedPitch) > 0.01);
 }
 
-function getPlaybackPreviewStatusMessage(notes: PitchNoteData[], globalFormantSt: number) {
-  if (hasRequestedFormantWork(notes, globalFormantSt) && hasRealtimePitchPreviewWork(notes, globalFormantSt)) {
-    return "Rendered formant + live pitch preview";
+function buildEditedNoteWindow(notes: PitchNoteData[], clipDuration: number) {
+  const edited = notes.filter((note) => noteHasRenderableEdit(note));
+  if (edited.length === 0) return null;
+
+  const sortedNotes = [...notes].sort((a, b) => a.startTime - b.startTime);
+  const noteIndexById = new Map(sortedNotes.map((note, index) => [note.id, index] as const));
+  const editedIdSet = new Set(edited.map((note) => note.id));
+  const dirtyEditedIds = [..._dirtyPitchNoteIds].filter((id) => editedIdSet.has(id) && noteIndexById.has(id));
+  const focusIdSet = new Set(dirtyEditedIds.length > 0 ? dirtyEditedIds : edited.map((note) => note.id));
+  const focusIndices = [...focusIdSet]
+    .map((id) => noteIndexById.get(id) ?? -1)
+    .filter((index) => index >= 0);
+
+  if (focusIndices.length === 0) return null;
+
+  const coverageRanges: PitchRenderCoverageRange[] = [];
+  const requestNotes = new Map<string, PitchNoteData>();
+
+  const upsertRequestNote = (note: PitchNoteData, patch?: Partial<PitchNoteData>) => {
+    const existing = requestNotes.get(note.id) ?? { ...note };
+    const merged = applySampleMatchDownshiftDefaults({ ...existing, ...patch });
+    requestNotes.set(note.id, merged);
+    return merged;
+  };
+
+  const addCoverageRange = (
+    startTime: number,
+    endTime: number,
+    kind: PitchRenderCoverageKind,
+    noteId: string,
+  ) => {
+    const clampedStart = Math.max(0, Math.min(clipDuration, startTime));
+    const clampedEnd = Math.max(clampedStart, Math.min(clipDuration, endTime));
+    if (clampedEnd - clampedStart < 0.0005) return;
+    coverageRanges.push({
+      startTime: clampedStart,
+      endTime: clampedEnd,
+      state: "pending",
+      kind,
+      noteId,
+    });
+  };
+
+  const sortedFocusIndices = [...new Set(focusIndices)].sort((a, b) => a - b);
+  const islands: number[][] = [];
+  for (const index of sortedFocusIndices) {
+    const note = sortedNotes[index];
+    if (!note || !noteHasRenderableEdit(note)) continue;
+
+    const previousIsland = islands[islands.length - 1];
+    const previousIndex = previousIsland?.[previousIsland.length - 1];
+    const previousNote = previousIndex !== undefined ? sortedNotes[previousIndex] : null;
+    const joinsPrevious = Boolean(previousNote)
+      && (
+        notesShareWordGroup(previousNote!, note)
+        || index === previousIndex! + 1
+        || note.startTime - previousNote!.endTime <= MAX_EDIT_ISLAND_GAP_SEC
+      );
+
+    if (!previousIsland || !joinsPrevious) {
+      islands.push([index]);
+    } else {
+      previousIsland.push(index);
+    }
   }
-  if (hasRequestedFormantWork(notes, globalFormantSt)) return "Formant after apply";
-  if (hasRealtimePitchPreviewWork(notes, globalFormantSt)) return "Live pitch preview";
-  return "No preview changes";
+
+  for (const island of islands) {
+    const firstIndex = island[0];
+    const lastIndex = island[island.length - 1];
+    const firstNote = sortedNotes[firstIndex];
+    const lastNote = sortedNotes[lastIndex];
+    if (!firstNote || !lastNote) continue;
+
+    const prev = sortedNotes[firstIndex - 1];
+    const next = sortedNotes[lastIndex + 1];
+    const usePrev = Boolean(prev && sharesTransitionPair(prev, firstNote));
+    const useNext = Boolean(next && sharesTransitionPair(lastNote, next));
+
+    const entryTransitionMs = Math.min(MAX_NOTE_HQ_TRANSITION_MS, Math.max(
+      getNoteEffectiveTransitionMs(firstNote, "in"),
+      getNoteHqBoundaryTransitionFloorMs(firstNote, "in"),
+      usePrev ? IMMEDIATE_NEIGHBOR_SMOOTH_MS : 0,
+    ));
+    const exitTransitionMs = Math.min(MAX_NOTE_HQ_TRANSITION_MS, Math.max(
+      getNoteEffectiveTransitionMs(lastNote, "out"),
+      getNoteHqBoundaryTransitionFloorMs(lastNote, "out"),
+      useNext ? Math.max(IMMEDIATE_NEIGHBOR_SMOOTH_MS, NOTE_HQ_NEXT_HEAD_OWNERSHIP_MS) : 0,
+    ));
+
+    for (let localIndex = 0; localIndex < island.length; localIndex += 1) {
+      const noteIndex = island[localIndex];
+      const editedNote = sortedNotes[noteIndex];
+      const previousEdited = localIndex > 0 ? sortedNotes[island[localIndex - 1]] : null;
+      const nextEdited = localIndex + 1 < island.length ? sortedNotes[island[localIndex + 1]] : null;
+      const previousShiftDiff = previousEdited
+        ? Math.abs(getPitchShiftSemitones(previousEdited) - getPitchShiftSemitones(editedNote))
+        : 0;
+      const nextShiftDiff = nextEdited
+        ? Math.abs(getPitchShiftSemitones(nextEdited) - getPitchShiftSemitones(editedNote))
+        : 0;
+      const internalInMs = previousEdited && previousShiftDiff > 0.01 ? NOTE_HQ_INTERNAL_ISLAND_RAMP_MS : 0;
+      const internalOutMs = nextEdited && nextShiftDiff > 0.01 ? NOTE_HQ_INTERNAL_ISLAND_RAMP_MS : 0;
+      const transitionInMs = localIndex === 0 ? entryTransitionMs : internalInMs;
+      const transitionOutMs = localIndex === island.length - 1 ? exitTransitionMs : internalOutMs;
+      const effectiveStartTime = Math.max(0, editedNote.startTime - transitionInMs / 1000);
+      const effectiveEndTime = Math.min(clipDuration, editedNote.endTime + transitionOutMs / 1000);
+
+      upsertRequestNote(editedNote, {
+        transitionIn: transitionInMs,
+        transitionOut: transitionOutMs,
+        effectiveStartTime,
+        effectiveEndTime,
+      });
+    }
+
+    const islandStart = Math.max(0, firstNote.startTime - entryTransitionMs / 1000);
+    const islandEnd = Math.min(clipDuration, lastNote.endTime + exitTransitionMs / 1000);
+    addCoverageRange(islandStart, islandEnd, "edit_island", firstNote.id);
+
+    if (usePrev && prev) {
+      upsertRequestNote(prev, {
+        transitionIn: 0,
+        transitionOut: 0,
+        effectiveStartTime: prev.startTime,
+        effectiveEndTime: prev.endTime,
+      });
+      addCoverageRange(islandStart, firstNote.startTime, "left_neighbor_tail", prev.id);
+    }
+
+    if (useNext && next) {
+      upsertRequestNote(next, {
+        transitionIn: 0,
+        transitionOut: 0,
+        effectiveStartTime: next.startTime,
+        effectiveEndTime: next.endTime,
+      });
+      addCoverageRange(lastNote.endTime, islandEnd, "right_neighbor_head", next.id);
+    }
+  }
+
+  if (coverageRanges.length === 0 || requestNotes.size === 0) {
+    return null;
+  }
+
+  const mergedCoverage = coverageRanges
+    .slice()
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+  let windowStartSec = mergedCoverage[0].startTime;
+  let windowEndSec = mergedCoverage[0].endTime;
+  for (const range of mergedCoverage) {
+    windowStartSec = Math.min(windowStartSec, range.startTime);
+    windowEndSec = Math.max(windowEndSec, range.endTime);
+  }
+
+  return {
+    requestNotes: [...requestNotes.values()].sort((a, b) => a.startTime - b.startTime),
+    windowStartSec: Math.max(0, windowStartSec),
+    windowEndSec: Math.min(clipDuration, windowEndSec),
+    coverageRanges: mergedCoverage,
+  };
 }
 
-function buildPreviewWindow() {
-  const pitchState = usePitchEditorStore.getState();
-  const transport = useDAWStore.getState().transport;
-  const clipDuration = pitchState.clipDuration || 0;
-  const clipTime = Math.max(0, Math.min(clipDuration, transport.currentTime - pitchState.clipStartTime));
-  const lookAhead = transport.isPlaying ? PREVIEW_LOOKAHEAD_PLAYING_SEC : PREVIEW_LOOKAHEAD_STOPPED_SEC;
+function buildInteractivePreviewPayload(note: PitchNoteData, globalFormantSt: number) {
+  const semitoneDelta = note.correctedPitch - note.detectedPitch;
+  const pitchRatio = Math.pow(2, semitoneDelta / 12);
+  const previewStartSec = Math.max(0, getNoteEffectiveStart(note) - 0.04);
+  const previewEndSec = Math.max(previewStartSec + 0.05, getNoteEffectiveEnd(note) + 0.04);
   return {
-    previewStartSec: Math.max(0, clipTime - PREVIEW_LOOKBEHIND_SEC),
-    previewEndSec: Math.min(clipDuration, clipTime + lookAhead),
-    clipTime,
-    isPlaying: transport.isPlaying,
+    pitchSegments: [{
+      startTime: note.startTime,
+      endTime: note.endTime,
+      pitchRatio,
+    }],
+    globalFormantSemitones: getEffectivePitchEditorGlobalFormantSt(globalFormantSt),
+    previewStartSec,
+    previewEndSec,
+    allowReplacingCorrectedSource: _interactivePreviewActive === true,
   };
+}
+
+function startPitchScrubPreviewForNote(noteId: string) {
+  const { trackId, clipId, notes, contour } = usePitchEditorStore.getState();
+  if (!trackId || !clipId) return;
+  const note = notes.find((candidate) => candidate.id === noteId);
+  if (!note) return;
+  nativeBridge.startPitchScrubPreview(trackId, clipId, note, contour?.frames)
+    .catch(logBridgeError("startPitchScrubPreview"));
+}
+
+function clearTransientPitchPreview(clipId: string, reason: string) {
+  nativeBridge.stopPitchScrubPreview(clipId).catch(logBridgeError("stopPitchScrubPreview"));
+  nativeBridge.clearClipPitchPreview(clipId).catch(logBridgeError("clearClipPitchPreview"));
+  _activePitchPreviewMonitorMode = "none";
+  logPitchEditorFormant("cleared transient pitch preview", { clipId, reason });
+}
+
+function clearRenderedPreviewForInteractiveEdit(clipId: string, reason: string) {
+  nativeBridge.clearClipRenderedPreviewSegments(clipId).catch(logBridgeError("clearClipRenderedPreviewSegments"));
+  logPitchEditorFormant("cleared rendered pitch preview for interactive edit", { clipId, reason });
+}
+
+function isCleanNoteHqFinalRoute(status: PitchPreviewRoutingStatus | null) {
+  return Boolean(status)
+    && status?.monitorMode === "corrected_source"
+    && status.correctedSourceActive === true
+    && status.renderedSegmentActive === false
+    && status.clipLivePreviewActive === false
+    && status.scrubPreviewActive === false;
+}
+
+function routeSummary(status: PitchPreviewRoutingStatus | null) {
+  if (!status) return null;
+  return {
+    monitorMode: status.monitorMode,
+    correctedSourceActive: status.correctedSourceActive,
+    renderedSegmentActive: status.renderedSegmentActive,
+    clipLivePreviewActive: status.clipLivePreviewActive,
+    scrubPreviewActive: status.scrubPreviewActive,
+  };
+}
+
+async function clearAllPitchPreviewRoutes(clipId: string, reason: string) {
+  _activePitchPreviewMonitorMode = "none";
+  await nativeBridge.clearAllPitchPreviewRoutes(clipId).catch(logBridgeError("clearAllPitchPreviewRoutes"));
+  logPitchEditorFormant("cleared all pitch preview routes", { clipId, reason });
+}
+
+async function clearCorrectedSourcePreviewRoutesBeforePlayback(clipId: string) {
+  let status: PitchPreviewRoutingStatus | null = null;
+  try {
+    status = await nativeBridge.getPitchPreviewRoutingStatus(clipId);
+  } catch (err) {
+    warnPitchEditorFormant("transport-start route query failed", {
+      clipId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  if (!status?.correctedSourceActive) return;
+  const previewRouteActive = status.renderedSegmentActive
+    || status.clipLivePreviewActive
+    || status.scrubPreviewActive;
+  if (!previewRouteActive) return;
+
+  warnPitchEditorFormant("transport start found corrected source with stale pitch preview route; clearing", {
+    clipId,
+    route: routeSummary(status),
+  });
+  await clearAllPitchPreviewRoutes(clipId, "transport_start_corrected_source");
+}
+
+function pathWithSuffix(filePath: string, suffix: string, extension: string) {
+  const slashIndex = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+  const dotIndex = filePath.lastIndexOf(".");
+  const base = dotIndex > slashIndex ? filePath.slice(0, dotIndex) : filePath;
+  return `${base}${suffix}${extension}`;
+}
+
+function safeCaptureToken(value: string | undefined | null) {
+  const raw = value && value.trim().length > 0 ? value : `${Date.now()}`;
+  return raw.replace(/[^a-zA-Z0-9_.-]+/g, "_").slice(-72);
+}
+
+async function captureAppFinalPitchContext(
+  meta: PitchCorrectionRequestMeta,
+  data: PitchCorrectionCompletionData,
+  routeBeforeRepair: PitchPreviewRoutingStatus | null,
+  routeAfterRepair: PitchPreviewRoutingStatus | null,
+  routeSuspect: boolean,
+) {
+  if (!data.outputFile || !shouldCaptureAppFinalPitchContext(routeSuspect)) return;
+
+  const editedNotes = meta.notes.filter((note) => Math.abs(note.correctedPitch - note.detectedPitch) > 0.01);
+  if (editedNotes.length === 0) return;
+
+  const state = usePitchEditorStore.getState();
+  const clipDuration = state.clipDuration || Math.max(...editedNotes.map(getNoteEffectiveEnd));
+  const noteStartSec = Math.max(0, Math.min(...editedNotes.map(getNoteEffectiveStart)));
+  const noteEndSec = Math.max(noteStartSec, Math.max(...editedNotes.map(getNoteEffectiveEnd)));
+  const contextStartSec = Math.max(0, noteStartSec - 0.5);
+  const contextEndSec = Math.min(clipDuration, noteEndSec + 0.6);
+  const durationSec = Math.max(0.25, contextEndSec - contextStartSec);
+  const projectStartSec = state.clipStartTime + contextStartSec;
+  const token = safeCaptureToken(meta.logicalRequestId || meta.requestId);
+  const wavPath = pathWithSuffix(data.outputFile, `_appfinal_${token}_context`, ".wav");
+  const routeJsonPath = pathWithSuffix(data.outputFile, `_appfinal_${token}_route`, ".json");
+  const shifts = editedNotes.map((note) => note.correctedPitch - note.detectedPitch);
+  const editedNoteDiagnostics = editedNotes.map((note) => ({
+    id: note.id,
+    startTime: note.startTime,
+    endTime: note.endTime,
+    effectiveStartTime: getNoteEffectiveStart(note),
+    effectiveEndTime: getNoteEffectiveEnd(note),
+    detectedPitch: note.detectedPitch,
+    correctedPitch: note.correctedPitch,
+    requestedShiftSemitones: note.correctedPitch - note.detectedPitch,
+    pitchDrift: note.pitchDrift ?? null,
+    vibratoDepth: note.vibratoDepth ?? null,
+    vibratoRate: note.vibratoRate ?? null,
+    formantShift: note.formantShift ?? null,
+    gainDb: note.gain ?? null,
+  }));
+
+  const capture = await nativeBridge.capturePitchAppFinalContext({
+    trackId: meta.trackId,
+    clipId: meta.clipId,
+    startTime: projectStartSec,
+    duration: durationSec,
+    wavPath,
+    routeJsonPath,
+    sampleRate: 44100,
+    metadata: {
+      requestId: meta.requestId,
+      logicalRequestId: meta.logicalRequestId,
+      renderMode: data.renderMode ?? meta.renderMode,
+      outputFile: data.outputFile,
+      routeSuspect,
+      routeBeforeRepair: routeSummary(routeBeforeRepair),
+      routeAfterRepair: routeSummary(routeAfterRepair),
+      postApplyRouteStatus: routeSummary(data.postApplyRouteStatus ?? null),
+      clipContextStartSec: contextStartSec,
+      clipContextEndSec: contextEndSec,
+      projectStartSec,
+      noteStartSec,
+      noteEndSec,
+      snapMode: state.snapMode,
+      scaleType: state.scaleType,
+      chromaticSnapActive: state.snapMode === "chromatic",
+      exactRelativeShiftRequested: data.targetShiftSemitones ?? null,
+      editedNoteCount: editedNotes.length,
+      editedNotes: editedNoteDiagnostics,
+      requestedShiftSemitonesMin: Math.min(...shifts),
+      requestedShiftSemitonesMax: Math.max(...shifts),
+      actualRequestedShiftSemitones: data.actualRequestedShiftSemitones ?? null,
+      requestedShiftErrorCents: data.requestedShiftErrorCents ?? null,
+      actualRendererBranch: data.actualRendererBranch ?? null,
+      formantCurveUsed: data.formantCurveUsed ?? null,
+      backendAppFinalRouteReportPath: data.appFinalRouteReportPath ?? null,
+      backendAppFinalBakedContextPath: data.appFinalBakedContextPath ?? null,
+      backendAppFinalPlaybackContextPath: data.appFinalPlaybackContextPath ?? null,
+      backendAppFinalParityReportPath: data.appFinalParityReportPath ?? null,
+      backendAppFinalParityReport: data.appFinalParityReport ?? null,
+    },
+  });
+
+  const debugPaths = {
+    backendBakedContextPath: data.appFinalBakedContextPath ?? data.appFinalBakedCapture?.filePath ?? null,
+    backendPlaybackContextPath: data.appFinalPlaybackContextPath ?? data.appFinalCapture?.capture?.filePath ?? null,
+    backendParityReportPath: data.appFinalParityReportPath ?? null,
+    backendRouteReportPath: data.appFinalRouteReportPath ?? null,
+    frontendBakedCorrectedPath: capture?.bakedCorrectedPath ?? null,
+    frontendLivePlaybackContextPath: capture?.livePlaybackPath ?? capture?.capture?.filePath ?? wavPath,
+    frontendOfflineRenderContextPath: capture?.offlineRenderPath ?? null,
+    frontendComparisonReportPath: capture?.comparisonReportPath ?? null,
+    frontendRouteReportPath: capture?.routeReportPath ?? routeJsonPath,
+  };
+
+  logPitchEditorFormant("app-final pitch context capture finished", {
+    clipId: meta.clipId,
+    requestId: meta.requestId,
+    success: capture?.success ?? false,
+    ...debugPaths,
+    routeBefore: routeSummary(capture?.routeBefore ?? null),
+    routeAfter: routeSummary(capture?.routeAfter ?? null),
+  });
+  console.info("[pitchEditor] Last app-final pitch debug capture", debugPaths);
+  useDAWStore.getState().showToast("Pitch debug capture written; paths are in the console", "success");
+}
+
+async function verifyNoteHqFinalRoute(
+  meta: PitchCorrectionRequestMeta,
+  data: PitchCorrectionCompletionData,
+  reason: string,
+  captureIfEnabled: boolean,
+) {
+  let routeBeforeRepair: PitchPreviewRoutingStatus | null = null;
+  try {
+    routeBeforeRepair = await nativeBridge.getPitchPreviewRoutingStatus(meta.clipId);
+  } catch (err) {
+    warnPitchEditorFormant("note-HQ final route query failed", {
+      clipId: meta.clipId,
+      requestId: meta.requestId,
+      reason,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    if (reason === "immediate") {
+      setApplyStatus("error", "HQ note route verification failed", meta.logicalRequestId, { autoClearMs: 2600 });
+      useDAWStore.getState().showToast("Pitch note route verification failed", "error");
+    }
+    return;
+  }
+
+  const wasClean = isCleanNoteHqFinalRoute(routeBeforeRepair);
+  let routeAfterRepair = routeBeforeRepair;
+  if (!wasClean) {
+    warnPitchEditorFormant("note-HQ final route was not clean; clearing stale pitch preview routes", {
+      clipId: meta.clipId,
+      requestId: meta.requestId,
+      logicalRequestId: meta.logicalRequestId,
+      reason,
+      route: routeSummary(routeBeforeRepair),
+    });
+    await clearAllPitchPreviewRoutes(meta.clipId, `note_hq_route_repair:${reason}`);
+    routeAfterRepair = await nativeBridge.getPitchPreviewRoutingStatus(meta.clipId).catch(() => null);
+    const repaired = isCleanNoteHqFinalRoute(routeAfterRepair);
+    setApplyStatus(
+      repaired ? "done" : "error",
+      repaired ? "HQ note render ready (route repaired)" : "HQ note render route suspect",
+      meta.logicalRequestId,
+      { autoClearMs: repaired ? 1800 : 3200 },
+    );
+    if (reason === "immediate") {
+      useDAWStore.getState().showToast(
+        repaired ? "Pitch note render ready" : "Pitch note route still suspect",
+        repaired ? "success" : "error",
+      );
+    }
+    logPitchEditorFormant("note-HQ final route repair result", {
+      clipId: meta.clipId,
+      requestId: meta.requestId,
+      reason,
+      repaired,
+      routeAfter: routeSummary(routeAfterRepair),
+    });
+  } else {
+    logPitchEditorFormant("note-HQ final route verified", {
+      clipId: meta.clipId,
+      requestId: meta.requestId,
+      reason,
+      route: routeSummary(routeBeforeRepair),
+    });
+    if (reason === "immediate") {
+      setApplyStatus("done", "HQ note render ready", meta.logicalRequestId, { autoClearMs: 1800 });
+      useDAWStore.getState().showToast("Pitch note render ready", "success");
+    }
+  }
+
+  if (captureIfEnabled || !wasClean) {
+    await captureAppFinalPitchContext(meta, data, routeBeforeRepair, routeAfterRepair, !wasClean);
+  }
+}
+
+function scheduleNoteHqFinalRouteVerification(meta: PitchCorrectionRequestMeta, data: PitchCorrectionCompletionData) {
+  void verifyNoteHqFinalRoute(meta, data, "immediate", true);
+  window.setTimeout(() => {
+    void verifyNoteHqFinalRoute(meta, data, "late_250ms", false);
+  }, 250);
+  window.setTimeout(() => {
+    void verifyNoteHqFinalRoute(meta, data, "late_1000ms", false);
+  }, 1000);
+}
+
+function resolvePitchPreviewMonitorMode(): PitchPreviewMonitorMode {
+  if (!_interactivePreviewActive || !_interactivePreviewNoteId) {
+    return "none";
+  }
+  return useDAWStore.getState().transport.isPlaying ? "clip_live_preview" : "scrub";
 }
 
 function buildAutoBakeWindow() {
@@ -571,52 +1260,61 @@ function buildAutoBakeWindow() {
   };
 }
 
-/** Build pitch correction segments and send pitch+global-formant preview to backend. */
+/** Legacy rolling preview path. Pitch/formant preview now prefers rendered segments. */
 function sendPitchPreviewMap(reason: "edit" | "transport" | "sync" = "edit") {
   const { clipId, notes, globalFormantCents } = usePitchEditorStore.getState();
   if (!clipId) return;
-  const globalFormantSt = globalFormantCents / 100;
-  const pitchSegments = notes
-    .filter(n => Math.abs(n.correctedPitch - n.detectedPitch) > 0.01)
-    .map(n => ({
-      startTime: n.startTime,
-      endTime: n.endTime,
-      pitchRatio: Math.pow(2, (n.correctedPitch - n.detectedPitch) / 12),
-    }));
-
-  if (!hasRealtimePitchPreviewWork(notes, globalFormantSt)) {
-    nativeBridge.clearClipPitchPreview(clipId).catch(logBridgeError("clearClipPitchPreview"));
-    logPitchEditorFormant(
-      hasRequestedFormantWork(notes, globalFormantSt)
-        ? "suppressed realtime preview while formant edits are active"
-        : "cleared rolling preview",
-      { clipId, reason, globalFormantSemitones: globalFormantSt },
-    );
+  const globalFormantSt = getEffectivePitchEditorGlobalFormantSt(globalFormantCents / 100);
+  const monitorMode = resolvePitchPreviewMonitorMode();
+  const previewNote = _interactivePreviewActive && _interactivePreviewNoteId
+    ? notes.find((note) => note.id === _interactivePreviewNoteId) ?? null
+    : null;
+  if (!previewNote || Math.abs(previewNote.correctedPitch - previewNote.detectedPitch) <= 0.01) {
+    clearTransientPitchPreview(clipId, reason);
+    logPitchEditorFormant("cleared live drag preview", {
+      clipId,
+      reason,
+      requestedGlobalFormantSemitones: globalFormantSt,
+      activeInteractivePreview: _interactivePreviewActive,
+      previewNoteId: _interactivePreviewNoteId,
+    });
     return;
   }
 
-  const window = buildPreviewWindow();
-  const payload: ClipPitchPreviewPayload = {
-    pitchSegments,
-    globalFormantSemitones: 0,
-    previewStartSec: window.previewStartSec,
-    previewEndSec: window.previewEndSec,
-  };
+  if (monitorMode === "scrub") {
+    const pitchRatio = Math.pow(2, (previewNote.correctedPitch - previewNote.detectedPitch) / 12);
+    if (_activePitchPreviewMonitorMode !== "scrub") {
+      startPitchScrubPreviewForNote(previewNote.id);
+    }
+    nativeBridge.updatePitchScrubPreview(clipId, pitchRatio).catch(logBridgeError("updatePitchScrubPreview"));
+    nativeBridge.clearClipPitchPreview(clipId).catch(logBridgeError("clearClipPitchPreview"));
+    _activePitchPreviewMonitorMode = "scrub";
+    logPitchEditorFormant("updated dedicated scrub preview", {
+      clipId,
+      reason,
+      previewNoteId: previewNote.id,
+      pitchRatio,
+    });
+    return;
+  }
 
-  logPitchEditorFormant("sending rolling preview", {
+  if (monitorMode !== "clip_live_preview") {
+    clearTransientPitchPreview(clipId, reason);
+    return;
+  }
+
+  nativeBridge.stopPitchScrubPreview(clipId).catch(logBridgeError("stopPitchScrubPreview"));
+  const payload = buildInteractivePreviewPayload(previewNote, globalFormantSt);
+  nativeBridge.setClipPitchPreview(clipId, payload).catch(logBridgeError("setClipPitchPreview"));
+  _activePitchPreviewMonitorMode = "clip_live_preview";
+  logPitchEditorFormant("updated live drag preview", {
     clipId,
     reason,
-    pitchSegments: pitchSegments.length,
-    requestedGlobalFormantSemitones: globalFormantSt,
-    livePreviewPitchOnly: true,
+    previewNoteId: previewNote.id,
     previewStartSec: payload.previewStartSec,
     previewEndSec: payload.previewEndSec,
-    transportPlaying: window.isPlaying,
+    pitchRatio: payload.pitchSegments[0]?.pitchRatio ?? 1,
   });
-
-  nativeBridge.setClipPitchPreview(clipId, payload).catch(err =>
-    console.warn("[pitchEditor] setClipPitchPreview failed:", err)
-  );
 }
 
 function scheduleRollingPreviewRefresh() {
@@ -644,8 +1342,18 @@ function ensureDAWTransportSubscription() {
       if (!hasRealtimePitchPreviewWork(pitchState.notes, globalFormantSt)) return;
 
       if (transport.isPlaying) {
+        if (!prevTransport?.isPlaying && !_interactivePreviewActive) {
+          void clearCorrectedSourcePreviewRoutesBeforePlayback(pitchState.clipId);
+        }
+        if (_interactivePreviewActive) {
+          sendPitchPreviewMap("transport");
+        }
         scheduleRollingPreviewRefresh();
       } else if (prevTransport?.isPlaying) {
+        if (_interactivePreviewActive) {
+          sendPitchPreviewMap("transport");
+          return;
+        }
         // Transport just stopped. If edits were skipped during playback (preview-only
         // mode for pitch-only edits), bake them now so the corrected file is up to date
         // before the user renders or exports.
@@ -709,16 +1417,25 @@ function isCurrentRevision(revision: number) {
 }
 
 function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
+  const effectiveNotes = sanitizePitchEditorNotesForApply(meta.notes);
+  const effectiveGlobalFormantSt = getEffectivePitchEditorGlobalFormantSt(meta.globalFormantSt);
   registerRequestMeta(meta);
   const statusRequestId = meta.logicalRequestId;
   _activePitchCorrectionRequestId = statusRequestId;
+  if (meta.stage === "note_hq" || meta.stage === "full_clip_hq" || meta.stage === "single") {
+    clearTransientPitchPreview(meta.clipId, `dispatch:${meta.stage}`);
+  }
+  if (meta.stage === "note_hq") {
+    clearStagedPreviewQueue();
+    clearRenderedPreviewForInteractiveEdit(meta.clipId, "dispatch:note_hq");
+  }
 
   if (meta.stage === "preview_segment") {
     if (usePitchEditorStore.getState().applyState !== "final_processing") {
-      setApplyStatus("preview_processing", getFormantPreviewStatusMessage("preview_processing", false), statusRequestId);
+      setApplyStatus("preview_processing", getRenderedPreviewStatusMessage("preview_processing", false), statusRequestId);
     }
   } else if (meta.stage === "full_clip_hq") {
-    setApplyStatus("final_processing", getFormantPreviewStatusMessage("final_processing", false), statusRequestId);
+    setApplyStatus("final_processing", getRenderedPreviewStatusMessage("final_processing", false), statusRequestId);
   } else {
     setApplyStatus("processing", "Applying...", statusRequestId);
   }
@@ -738,10 +1455,10 @@ function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
   nativeBridge.applyPitchCorrection(
     meta.trackId,
     meta.clipId,
-    meta.notes,
+    effectiveNotes,
     meta.frames,
     meta.requestId,
-    meta.globalFormantSt,
+    effectiveGlobalFormantSt,
     meta.windowStartSec,
     meta.windowEndSec,
     meta.renderMode,
@@ -753,6 +1470,9 @@ function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
     consumeRequestMeta(meta.requestId);
     if (_activePitchCorrectionRequestId === meta.logicalRequestId) {
       _activePitchCorrectionRequestId = null;
+    }
+    if (meta.stage === "note_hq") {
+      finishNoteHqPriority(meta.logicalRequestId);
     }
     setApplyStatus("error", "Failed", meta.logicalRequestId);
     useDAWStore.getState().showToast("Pitch/formant apply failed", "error");
@@ -767,6 +1487,9 @@ function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
     consumeRequestMeta(meta.requestId);
     if (_activePitchCorrectionRequestId === meta.logicalRequestId) {
       _activePitchCorrectionRequestId = null;
+    }
+    if (meta.stage === "note_hq") {
+      finishNoteHqPriority(meta.logicalRequestId);
     }
     setApplyStatus("error", "Failed", meta.logicalRequestId);
     useDAWStore.getState().showToast("Pitch/formant apply failed", "error");
@@ -811,6 +1534,52 @@ function dispatchSingleApplyRequest(
   });
 }
 
+function dispatchNoteHqApplyRequest(
+  trackId: string,
+  clipId: string,
+  notes: PitchNoteData[],
+  frames: PitchContourData["frames"] | undefined,
+  globalFormantSt: number,
+  requestRevision: number,
+  summary: ApplyRequestSummary,
+  logicalRequestId: string,
+  windowStartSec?: number,
+  windowEndSec?: number,
+  coverageRanges?: PitchRenderCoverageRange[],
+) {
+  const requestId = buildStageRequestId(logicalRequestId, "note_hq");
+  _noteHqApplyInFlight = true;
+  cancelActivePitchAnalysisForHq();
+  if (coverageRanges && coverageRanges.length > 0) {
+    setRenderCoverage(coverageRanges.map((range) => ({ ...range, state: "pending" })), logicalRequestId);
+  } else if (windowStartSec !== undefined && windowEndSec !== undefined) {
+    setRenderCoverage([{
+      startTime: windowStartSec,
+      endTime: windowEndSec,
+      state: "pending",
+    }], logicalRequestId);
+  } else {
+    setRenderCoverage([], logicalRequestId);
+  }
+  dispatchNativePitchCorrection({
+    clipId,
+    trackId,
+    requestId,
+    logicalRequestId,
+    revision: requestRevision,
+    stage: "note_hq",
+    renderMode: "note_hq",
+    notes: cloneNotesSnapshot(notes),
+    frames: cloneFramesSnapshot(frames),
+    globalFormantSt,
+    summary,
+    windowStartSec,
+    windowEndSec,
+    coverageRanges: coverageRanges?.map((range) => ({ ...range })),
+    requestGroupId: logicalRequestId,
+  });
+}
+
 function dispatchNextPreviewSegments() {
   if (!_stagedPreviewBase || _activePreviewRequestGroupId !== _stagedPreviewBase.logicalRequestId) return;
   while (_runningPreviewSegmentJobs < MAX_PREVIEW_SEGMENT_CONCURRENCY && _pendingPreviewSegments.length > 0) {
@@ -830,22 +1599,22 @@ function dispatchNextPreviewSegments() {
   }
 }
 
-function getFormantPreviewStatusMessage(state: PitchEditorApplyState, previewCoverageComplete: boolean) {
+function getRenderedPreviewStatusMessage(state: PitchEditorApplyState, previewCoverageComplete: boolean) {
   switch (state) {
     case "preview_processing":
       return "Rendering preview near playhead...";
     case "preview_ready":
-      return previewCoverageComplete ? "Rendered formant preview ready" : "Previewing rendered formant";
+      return previewCoverageComplete ? "Rendered preview ready" : "Previewing rendered audio";
     case "final_processing":
       return "Refining full clip render...";
     case "done":
-      return "Previewing rendered formant";
+      return "Previewing rendered audio";
     default:
-      return "Rendered formant preview";
+      return "Rendered preview";
   }
 }
 
-function dispatchStagedFormantApply(
+function dispatchStagedRenderedApply(
   trackId: string,
   clipId: string,
   notes: PitchNoteData[],
@@ -894,7 +1663,14 @@ function dispatchStagedFormantApply(
   }, 1000);
 }
 
-function scheduleAutoApply(delayMs = 400) {
+const _deferredPitchEditorHelpers = [
+  hasRequestedFormantWork,
+  buildAutoBakeWindow,
+  dispatchStagedRenderedApply,
+];
+void _deferredPitchEditorHelpers;
+
+function scheduleAutoApply(delayMs = 300) {
   if (_autoApplyTimer) clearTimeout(_autoApplyTimer);
   const { notes, globalFormantCents, clipId } = usePitchEditorStore.getState();
   const globalFormantSt = globalFormantCents / 100;
@@ -912,7 +1688,7 @@ function scheduleAutoApply(delayMs = 400) {
   }
   _autoApplyTimer = setTimeout(async () => {
     _autoApplyTimer = null;
-    const { trackId, clipId, notes, contour, globalFormantCents } = usePitchEditorStore.getState();
+    const { trackId, clipId, notes, contour, globalFormantCents, clipDuration } = usePitchEditorStore.getState();
     if (!trackId || !clipId) return;
     if (_editRevision <= _appliedRevision) {
       logPitchEditorFormant("skipping auto-apply because edit revision is already applied", {
@@ -933,22 +1709,10 @@ function scheduleAutoApply(delayMs = 400) {
     }
     const globalFormantSt = globalFormantCents / 100;
     const requestSummary = summarizeApplyRequest(notes, globalFormantSt);
-    const bakeWindow = buildAutoBakeWindow();
-    const requiresStagedFormantBake = hasRequestedFormantWork(notes, globalFormantSt);
     // Ensure the clip is registered in the playback engine before applying.
-    // Re-establish the real-time preview after sync (clearAllClips destroys it).
+    // Clear the legacy live stretcher preview path. We now prefer rendered preview
+    // segments so playback matches the offline/native engine more closely.
     sendPitchPreviewMap("sync");
-    if (bakeWindow.isPlaying && !requiresStagedFormantBake) {
-      setApplyStatus("done", getPlaybackPreviewStatusMessage(notes, globalFormantSt), null, { autoClearMs: 1400 });
-      logPitchEditorFormant("skipping auto-apply during playback; preview-only mode active", {
-        clipId,
-        editRevision: _editRevision,
-        appliedRevision: _appliedRevision,
-        realtimePitchPreview: hasRealtimePitchPreviewWork(notes, globalFormantSt),
-        formantDeferred: hasRequestedFormantWork(notes, globalFormantSt),
-      });
-      return;
-    }
     try {
       await useDAWStore.getState().syncClipsWithBackend();
     } catch (e) {
@@ -961,18 +1725,11 @@ function scheduleAutoApply(delayMs = 400) {
     const requestRevision = _editRevision;
     _requestedApplyRevision = requestRevision;
     const logicalRequestId = buildLogicalApplyRequestId(clipId);
-    logPitchEditorFormant("dispatching auto-bake request", {
-      clipId,
-      logicalRequestId,
-      requestRevision,
-      stagedFormant: requiresStagedFormantBake,
-      windowStartSec: requiresStagedFormantBake ? null : bakeWindow.windowStartSec,
-      windowEndSec: requiresStagedFormantBake ? null : bakeWindow.windowEndSec,
-      ...requestSummary,
-    });
-
-    if (requiresStagedFormantBake) {
-      dispatchStagedFormantApply(
+    const editedNoteWindow = buildEditedNoteWindow(notes, clipDuration || 0);
+    if (requestSummary.mode === "none") {
+      setRenderCoverage([], null);
+      nativeBridge.clearClipRenderedPreviewSegments(clipId).catch(logBridgeError("clearClipRenderedPreviewSegments"));
+      dispatchSingleApplyRequest(
         trackId,
         clipId,
         notes,
@@ -984,26 +1741,29 @@ function scheduleAutoApply(delayMs = 400) {
       );
       return;
     }
+    logPitchEditorFormant("dispatching auto-bake request", {
+      clipId,
+      logicalRequestId,
+      requestRevision,
+      renderMode: "note_hq",
+      windowStartSec: editedNoteWindow?.windowStartSec ?? null,
+      windowEndSec: editedNoteWindow?.windowEndSec ?? null,
+      ...requestSummary,
+    });
 
     clearStagedPreviewQueue();
-    setRenderCoverage([], null);
-    nativeBridge.clearClipRenderedPreviewSegments(clipId).catch(logBridgeError("clearClipRenderedPreviewSegments"));
-    // Do NOT pass a playhead-based window override for single bakes.
-    // When the playhead is inside a note, the playhead window ([clipTime-0.25, clipTime+2.5])
-    // starts mid-note, clamping the note's startSample to 0 and eliminating its pre-roll.
-    // The Signalsmith stretcher then has no warm-up before the note (analysis window = 120ms),
-    // producing edge artifacts at the splice crossfade that sound abrupt ("not smoothened").
-    // Without an override, the backend computes the window from note boundaries with 1.0s
-    // of padding on each side — always giving the stretcher time to fully initialize.
-    dispatchSingleApplyRequest(
+    dispatchNoteHqApplyRequest(
       trackId,
       clipId,
-      notes,
+      editedNoteWindow?.requestNotes ?? notes,
       contour?.frames,
       globalFormantSt,
       requestRevision,
       requestSummary,
       logicalRequestId,
+      editedNoteWindow?.windowStartSec,
+      editedNoteWindow?.windowEndSec,
+      editedNoteWindow?.coverageRanges,
     );
   }, delayMs);
 }
@@ -1026,6 +1786,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   contour: null,
   notes: [],
   isAnalyzing: false,
+  analysisPhase: "idle",
   isApplying: false,
   progressPercent: 0,
   progressLabel: "",
@@ -1040,7 +1801,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   scrollX: 0,
   scrollY: 48, // C3
   zoomX: 200,  // pixels per second
-  zoomY: 24,   // pixels per semitone
+  zoomY: 32,   // pixels per semitone (increased for finer drag control)
   undoStack: [],
   redoStack: [],
   referenceTracks: [],
@@ -1050,14 +1811,6 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   inspectorExpanded: true,
   globalFormantCents: 0,
   showCorrectPitchModal: false,
-  polyMode: false,
-  polyNotes: [],
-  polyAnalysisResult: null,
-  showPitchSalience: false,
-  soloNoteId: null,
-  polyNoteThreshold: 0.15,
-  polyOnsetThreshold: 0.3,
-  polyMinDuration: 80,
   abCompareMode: false,
 
   open: (trackId, clipId, fxIndex) => {
@@ -1087,7 +1840,10 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       redoStack: [],
       referenceTracks: [],
       isAnalyzing: false,
+      analysisPhase: "loading",
       isApplying: false,
+      progressPercent: 0,
+      progressLabel: "Loading clip...",
       applyState: "idle",
       applyMessage: "",
       lastApplyRequestId: null,
@@ -1095,11 +1851,6 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       activeLogicalRequestId: null,
       scrollY: 48, // Reset to middle C, will be auto-fit after analysis
       globalFormantCents: 0,
-      polyMode: false,
-      polyNotes: [],
-      polyAnalysisResult: null,
-      showPitchSalience: false,
-      soloNoteId: null,
     });
   },
 
@@ -1107,7 +1858,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     // Clear real-time pitch preview when closing the editor
     const { clipId } = get();
     if (clipId) {
-      nativeBridge.clearClipPitchPreview(clipId).catch(logBridgeError("clearClipPitchPreview"));
+      clearTransientPitchPreview(clipId, "close");
       nativeBridge.clearClipRenderedPreviewSegments(clipId).catch(logBridgeError("clearClipRenderedPreviewSegments"));
     }
     set({
@@ -1119,11 +1870,10 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       undoStack: [],
       redoStack: [],
       referenceTracks: [],
-      polyMode: false,
-      polyNotes: [],
-      polyAnalysisResult: null,
-      showPitchSalience: false,
-      soloNoteId: null,
+      isAnalyzing: false,
+      analysisPhase: "idle",
+      progressPercent: 0,
+      progressLabel: "",
       applyState: "idle",
       applyMessage: "",
       lastApplyRequestId: null,
@@ -1136,11 +1886,15 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   // Analyze a specific time window of the clip (viewport-based analysis).
-  // Analyzes a chunk (max ~30s) around the given time range.
+  // Analyzes a small chunk around the given time range and builds coverage incrementally.
   // Merges results with existing notes to build up the full picture as user scrolls.
   analyze: async (viewStartTime?: number, viewEndTime?: number) => {
     const { trackId, clipId, isAnalyzing, originalClipFilePath, originalClipOffset } = get();
     if (!trackId || !clipId || isAnalyzing) return;
+    if (_noteHqApplyInFlight && get().contour) {
+      deferPitchAnalysis(viewStartTime, viewEndTime, "note_hq_in_flight");
+      return;
+    }
 
     const dawState = useDAWStore.getState();
     const track = dawState.tracks.find((t) => t.id === trackId);
@@ -1153,8 +1907,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     const analysisFilePath = originalClipFilePath ?? clip.filePath;
     if (!analysisFilePath) return;
 
-    // Determine analysis window: max 30s chunk centered on viewport
-    const MAX_CHUNK = 30; // seconds
+    // Determine analysis window: keep first-open note load as light as possible
+    const MAX_CHUNK = 5; // seconds
     // Use original offset — after correction clip.offset is reset to 0 (corrected file
     // starts at 0), but the original file needs its original seek position.
     const clipOffset = originalClipOffset;
@@ -1166,17 +1920,19 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     if (viewStartTime !== undefined && viewEndTime !== undefined) {
       // Analyze around viewport with padding
       const viewDuration = viewEndTime - viewStartTime;
-      const padding = Math.min(5, viewDuration * 0.5); // 5s padding or 50% of view
+      const padding = Math.min(2, viewDuration * 0.35); // tighter padding for faster viewport fills
       analyzeStart = Math.max(0, viewStartTime - padding);
       const analyzeEnd = Math.min(clipDuration, viewEndTime + padding);
       analyzeDuration = Math.min(MAX_CHUNK, analyzeEnd - analyzeStart);
     } else {
-      // Initial analysis: first 30s of the clip
+      // Initial analysis: first 5s of the clip
       analyzeStart = 0;
       analyzeDuration = Math.min(MAX_CHUNK, clipDuration);
     }
 
-    set({ isAnalyzing: true, progressPercent: 0, progressLabel: "Analyzing pitch..." });
+    const analysisRevision = _editRevision;
+    const analysisSeq = ++_analysisRunSeq;
+    set({ isAnalyzing: true, analysisPhase: "analyzing", progressPercent: 0, progressLabel: "Analyzing pitch..." });
     console.log(`[PitchEditor] Analyzing ${analyzeStart.toFixed(1)}s - ${(analyzeStart + analyzeDuration).toFixed(1)}s of ${clipDuration.toFixed(1)}s clip`);
 
     // Cancel any stale listener before registering a new one.
@@ -1197,10 +1953,26 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       unsubscribe();
       // notification contains noteCount and ready flag only (no heavy JSON)
 
+      if (notification?.cancelled || analysisSeq !== _analysisRunSeq) {
+        set({ isAnalyzing: false, analysisPhase: "idle", progressPercent: 0, progressLabel: "" });
+        if (_noteHqApplyInFlight) {
+          deferPitchAnalysis(viewStartTime, viewEndTime, "native_analysis_cancelled");
+        }
+        return;
+      }
+
       if (notification?.ready && notification?.noteCount >= 0) {
         try {
           const fullResult = await nativeBridge.getLastPitchAnalysisResult();
           if (fullResult?.notes) {
+            if (analysisRevision !== _editRevision && get().notes.length > 0) {
+              logPitchEditorFormant("ignored stale pitch analysis after edit revision changed", {
+                analysisRevision,
+                currentEditRevision: _editRevision,
+              });
+              set({ isAnalyzing: false, analysisPhase: "idle", progressPercent: 0, progressLabel: "" });
+              return;
+            }
             // Offset note/frame times: C++ returns times from 0, but we need
             // them relative to clip start (analyzeStart offset).
             // Prefix IDs with the window start so notes from different analysis
@@ -1212,6 +1984,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
               id: idPrefix + n.id,
               startTime: n.startTime + analyzeStart,
               endTime: n.endTime + analyzeStart,
+              effectiveStartTime: (n.effectiveStartTime ?? n.startTime) + analyzeStart,
+              effectiveEndTime: (n.effectiveEndTime ?? n.endTime) + analyzeStart,
             }));
             if (fullResult.frames) {
               fullResult.frames.times = fullResult.frames.times.map(
@@ -1219,7 +1993,13 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
               );
             }
 
-            const { notes: existingNotes } = get();
+            const {
+              notes: existingNotes,
+              selectedNoteIds: existingSelectedNoteIds,
+              undoStack: existingUndoStack,
+              redoStack: existingRedoStack,
+            } = get();
+            const hadPitchHistory = existingUndoStack.length > 0 || existingRedoStack.length > 0;
 
             // Merge new notes with existing (replace overlapping range)
             let mergedNotes: PitchNoteData[];
@@ -1230,9 +2010,9 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
                 (n) => n.endTime < rangeStart || n.startTime > rangeEnd
               );
               mergedNotes.push(...offsetNotes);
-              mergedNotes.sort((a, b) => a.startTime - b.startTime);
+              mergedNotes = normalizePitchNotes(mergedNotes);
             } else {
-              mergedNotes = offsetNotes;
+              mergedNotes = normalizePitchNotes(offsetNotes);
             }
 
             console.log("[PitchEditor] Applied: " + offsetNotes.length + " new notes, " + mergedNotes.length + " total");
@@ -1291,14 +2071,19 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
             set({
               isAnalyzing: false,
+              analysisPhase: "idle",
               progressPercent: 100,
               progressLabel: "",
               contour: mergedContour,
               notes: mergedNotes,
-              selectedNoteIds: [],
-              undoStack: [],
-              redoStack: [],
+              selectedNoteIds: filterSelectedNoteIdsForNotes(existingSelectedNoteIds, mergedNotes),
             });
+            if (hadPitchHistory) {
+              logPitchEditorFormant("preserved pitch undo history across analysis refresh", {
+                undoDepth: existingUndoStack.length,
+                redoDepth: existingRedoStack.length,
+              });
+            }
 
             // Auto-fit viewport on first analysis (no existing notes)
             if (existingNotes.length === 0 && mergedNotes.length > 0) {
@@ -1308,20 +2093,18 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
                 maxMidi = Math.max(maxMidi, Math.ceil(n.detectedPitch) + 2);
               }
               set({ scrollY: minMidi, scrollX: 0 });
-              // Auto-detect mono vs poly on first analysis
-              get().autoDetectMonoPoly();
             }
           } else {
             console.warn("[PitchEditor] No notes in analysis result");
-            set({ isAnalyzing: false });
+            set({ isAnalyzing: false, analysisPhase: "idle" });
           }
         } catch (err) {
           console.error("[PitchEditor] Failed to fetch analysis result:", err);
-          set({ isAnalyzing: false });
+          set({ isAnalyzing: false, analysisPhase: "idle" });
         }
       } else {
         console.warn("[PitchEditor] Analysis completed with 0 notes or failed");
-        set({ isAnalyzing: false });
+        set({ isAnalyzing: false, analysisPhase: "idle" });
       }
     });
     _pitchAnalysisUnsubscribe = unsubscribe;
@@ -1334,14 +2117,17 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       );
       const started = !!(response as any)?.started;
       if (!started) {
+        if ((response as any)?.deferred) {
+          deferPitchAnalysis(viewStartTime, viewEndTime, "native_deferred");
+        }
         _pitchAnalysisUnsubscribe = null;
         unsubscribe();
-        set({ isAnalyzing: false });
+        set({ isAnalyzing: false, analysisPhase: "idle" });
       }
     } catch {
       _pitchAnalysisUnsubscribe = null;
       unsubscribe();
-      set({ isAnalyzing: false });
+      set({ isAnalyzing: false, analysisPhase: "idle" });
     }
   },
 
@@ -1369,10 +2155,41 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   setSelectedNoteIds: (ids) => set({ selectedNoteIds: ids }),
 
+  beginInteractivePreview: (noteId) => {
+    replaceDirtyPitchNotes(expandDirtyPitchNoteIdsWithNeighbors([noteId], get().notes));
+    _interactivePreviewNoteId = noteId;
+    _interactivePreviewActive = true;
+    if (get().clipId) {
+      clearRenderedPreviewForInteractiveEdit(get().clipId!, "beginInteractivePreview");
+    }
+    sendPitchPreviewMap("edit");
+    logPitchEditorFormant("interactive preview started", {
+      clipId: get().clipId,
+      noteId,
+    });
+  },
+
+  endInteractivePreview: () => {
+    const { clipId } = get();
+    _interactivePreviewActive = false;
+    _interactivePreviewNoteId = null;
+    if (clipId) {
+      clearTransientPitchPreview(clipId, "endInteractivePreview");
+    }
+    logPitchEditorFormant("interactive preview ended", {
+      clipId,
+    });
+  },
+
   pushUndo: (description) => {
-    const { notes, undoStack } = get();
+    const { notes, selectedNoteIds, undoStack } = get();
+    const snapshot = clonePitchNotes(notes);
+    const last = undoStack[undoStack.length - 1];
+    if (last && pitchNotesEqual(last.notes, snapshot)) {
+      return;
+    }
     set({
-      undoStack: [...undoStack, { description, notes: JSON.parse(JSON.stringify(notes)) }],
+      undoStack: [...undoStack, { description, notes: snapshot, selectedNoteIds: [...selectedNoteIds] }],
       redoStack: [],
     });
   },
@@ -1381,8 +2198,23 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   // Called many times per drag; auto-apply is deferred to commitNoteEdit() on mouseup.
   // Sends a throttled real-time preview so the user hears the new pitch while dragging.
   updateNote: (noteId, changes) => {
+    const currentNotes = get().notes;
+    const boundaryAffectingChange =
+      Object.prototype.hasOwnProperty.call(changes, "startTime")
+      || Object.prototype.hasOwnProperty.call(changes, "endTime")
+      || Object.prototype.hasOwnProperty.call(changes, "transitionIn")
+      || Object.prototype.hasOwnProperty.call(changes, "transitionOut")
+      || Object.prototype.hasOwnProperty.call(changes, "effectiveStartTime")
+      || Object.prototype.hasOwnProperty.call(changes, "effectiveEndTime");
+    const targetIds = new Set([noteId]);
+    const updatedNotes = normalizePitchNotes(currentNotes.map(n => n.id === noteId ? normalizePitchNote({ ...n, ...changes }) : n));
+    if (boundaryAffectingChange) {
+      replaceDirtyPitchNotes(expandDirtyPitchNoteIdsWithNeighbors(targetIds, updatedNotes));
+    } else {
+      markDirtyPitchNotes(targetIds);
+    }
     set({
-      notes: get().notes.map(n => n.id === noteId ? { ...n, ...changes } : n),
+      notes: updatedNotes,
     });
     if (!_dragPreviewThrottle) {
       _dragPreviewThrottle = setTimeout(() => {
@@ -1394,17 +2226,27 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Call once when an interactive drag/resize ends to schedule the debounced backend apply.
   commitNoteEdit: () => {
+    get().endInteractivePreview();
+    const { undoStack, notes } = get();
+    const last = undoStack[undoStack.length - 1];
+    if (last && pitchNotesEqual(last.notes, notes)) {
+      set({ undoStack: undoStack.slice(0, -1) });
+      return;
+    }
     onNotesChanged();
   },
 
   updateSelectedNotes: (changes) => {
     const { selectedNoteIds, notes } = get();
     if (selectedNoteIds.length === 0) return;
+    const targetIds = new Set(selectedNoteIds);
+    replaceDirtyPitchNotes(targetIds);
     get().pushUndo("Edit selected notes");
     set({
-      notes: notes.map(n =>
-        selectedNoteIds.includes(n.id) ? { ...n, ...changes } : n
-      ),
+      notes: normalizePitchNotes(notes.map(n =>
+        targetIds.has(n.id) ? normalizePitchNote({ ...n, ...changes }) : n
+      )),
+      selectedNoteIds: [...targetIds],
     });
     onNotesChanged();
   },
@@ -1412,13 +2254,16 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   moveSelectedPitch: (semitones) => {
     const { selectedNoteIds, notes } = get();
     if (selectedNoteIds.length === 0) return;
+    const targetIds = new Set(selectedNoteIds);
+    replaceDirtyPitchNotes(targetIds);
     get().pushUndo(`Move pitch ${semitones > 0 ? "up" : "down"}`);
     set({
-      notes: notes.map(n =>
-        selectedNoteIds.includes(n.id)
-          ? { ...n, correctedPitch: n.correctedPitch + semitones }
+      notes: normalizePitchNotes(notes.map(n =>
+        targetIds.has(n.id)
+          ? normalizePitchNote({ ...n, correctedPitch: n.correctedPitch + semitones })
           : n
-      ),
+      )),
+      selectedNoteIds: [...targetIds],
     });
     onNotesChanged();
   },
@@ -1440,14 +2285,18 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     const note1: PitchNoteData = {
       ...note,
       id: note.id + "_a",
+      wordGroupId: `${getNoteWordGroupId(note)}_${note.id}_a`,
       endTime: time,
+      effectiveEndTime: time,
       pitchDrift: drift.slice(0, splitIdx),
       transitionOut: 0,
     };
     const note2: PitchNoteData = {
       ...note,
       id: note.id + "_b",
+      wordGroupId: `${getNoteWordGroupId(note)}_${note.id}_b`,
       startTime: time,
+      effectiveStartTime: time,
       pitchDrift: drift.slice(splitIdx),
       transitionIn: 0,
     };
@@ -1482,54 +2331,63 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     }
 
     set({
-      notes: notes.flatMap(n => n.id === noteId ? [note1, note2] : [n]),
+      notes: normalizePitchNotes(notes.flatMap(n => n.id === noteId ? [note1, note2] : [n])),
       selectedNoteIds: [note1.id, note2.id],
     });
+    replaceDirtyPitchNotes([note1.id, note2.id]);
     onNotesChanged();
   },
 
   correctSelectedToScale: () => {
     const { selectedNoteIds, notes } = get();
     if (selectedNoteIds.length === 0) return;
+    const targetIds = new Set(selectedNoteIds);
+    replaceDirtyPitchNotes(targetIds);
     get().pushUndo("Correct to scale");
     set({
-      notes: notes.map(n => {
-        if (!selectedNoteIds.includes(n.id)) return n;
-        return { ...n, correctedPitch: Math.round(n.correctedPitch) };
-      }),
+      notes: normalizePitchNotes(notes.map(n => {
+        if (!targetIds.has(n.id)) return n;
+        return normalizePitchNote({ ...n, correctedPitch: Math.round(n.correctedPitch) });
+      })),
+      selectedNoteIds: [...targetIds],
     });
     onNotesChanged();
   },
 
   correctAllToScale: () => {
     const { notes } = get();
+    replaceDirtyPitchNotes(notes.map((note) => note.id));
     get().pushUndo("Correct all to scale");
     set({
-      notes: notes.map(n => ({ ...n, correctedPitch: Math.round(n.correctedPitch) })),
+      notes: normalizePitchNotes(notes.map(n => normalizePitchNote({ ...n, correctedPitch: Math.round(n.correctedPitch) }))),
     });
     onNotesChanged();
   },
 
   undo: () => {
-    const { undoStack, notes } = get();
+    const { undoStack, notes, selectedNoteIds } = get();
     if (undoStack.length === 0) return;
     const entry = undoStack[undoStack.length - 1];
+    replaceDirtyPitchNotes(entry.notes.map((note) => note.id));
     set({
       undoStack: undoStack.slice(0, -1),
-      redoStack: [...get().redoStack, { description: entry.description, notes: JSON.parse(JSON.stringify(notes)) }],
-      notes: entry.notes,
+      redoStack: [...get().redoStack, { description: entry.description, notes: clonePitchNotes(notes), selectedNoteIds: [...selectedNoteIds] }],
+      notes: normalizePitchNotes(entry.notes),
+      selectedNoteIds: [...(entry.selectedNoteIds ?? [])],
     });
     onNotesChanged();
   },
 
   redo: () => {
-    const { redoStack, notes } = get();
+    const { redoStack, notes, selectedNoteIds } = get();
     if (redoStack.length === 0) return;
     const entry = redoStack[redoStack.length - 1];
+    replaceDirtyPitchNotes(entry.notes.map((note) => note.id));
     set({
       redoStack: redoStack.slice(0, -1),
-      undoStack: [...get().undoStack, { description: entry.description, notes: JSON.parse(JSON.stringify(notes)) }],
-      notes: entry.notes,
+      undoStack: [...get().undoStack, { description: entry.description, notes: clonePitchNotes(notes), selectedNoteIds: [...selectedNoteIds] }],
+      notes: normalizePitchNotes(entry.notes),
+      selectedNoteIds: [...(entry.selectedNoteIds ?? [])],
     });
     onNotesChanged();
   },
@@ -1537,10 +2395,10 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   setScrollX: (x) => set({ scrollX: Math.max(0, x) }),
   setScrollY: (y) => set({ scrollY: Math.max(0, Math.min(120, y)) }),
   setZoomX: (z) => set({ zoomX: Math.max(50, Math.min(2000, z)) }),
-  setZoomY: (z) => set({ zoomY: Math.max(4, Math.min(40, z)) }),
+  setZoomY: (z) => set({ zoomY: Math.max(4, Math.min(80, z)) }),
 
   applyCorrection: async () => {
-    const { trackId, clipId, notes, contour, globalFormantCents } = get();
+    const { trackId, clipId, notes, contour, globalFormantCents, clipDuration } = get();
     if (!trackId || !clipId) return;
     const globalFormantSt = globalFormantCents / 100;
     const summary = summarizeApplyRequest(notes, globalFormantSt);
@@ -1549,8 +2407,10 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     const logicalRequestId = buildLogicalApplyRequestId(clipId);
     logPitchEditorFormant("manual apply requested", { clipId, logicalRequestId, requestRevision, ...summary });
 
-    if (hasRequestedFormantWork(notes, globalFormantSt)) {
-      dispatchStagedFormantApply(
+    if (summary.mode === "none") {
+      setRenderCoverage([], null);
+      nativeBridge.clearClipRenderedPreviewSegments(clipId).catch(logBridgeError("clearClipRenderedPreviewSegments"));
+      dispatchSingleApplyRequest(
         trackId,
         clipId,
         notes,
@@ -1563,15 +2423,19 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       return;
     }
 
-    dispatchSingleApplyRequest(
+    const editedNoteWindow = buildEditedNoteWindow(notes, clipDuration || 0);
+    dispatchNoteHqApplyRequest(
       trackId,
       clipId,
-      notes,
+      editedNoteWindow?.requestNotes ?? notes,
       contour?.frames,
       globalFormantSt,
       requestRevision,
       summary,
       logicalRequestId,
+      editedNoteWindow?.windowStartSec,
+      editedNoteWindow?.windowEndSec,
+      editedNoteWindow?.coverageRanges,
     );
   },
 
@@ -1657,6 +2521,13 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   toggleCorrectPitchModal: () => set({ showCorrectPitchModal: !get().showCorrectPitchModal }),
 
   setGlobalFormantCents: (cents) => {
+    if (!PITCH_EDITOR_FORMANT_EDITING_ENABLED) {
+      logPitchEditorFormant("ignored global formant change because pitch editor is in pitch-only rebuild mode", {
+        clipId: get().clipId,
+        requestedGlobalFormantCents: Math.round(cents),
+      });
+      return;
+    }
     const clamped = Math.max(-386, Math.min(386, Math.round(cents)));
     set({
       globalFormantCents: clamped,
@@ -1675,33 +2546,46 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Inspector editing actions
   setNoteFormant: (noteId, semitones) => {
+    if (!PITCH_EDITOR_FORMANT_EDITING_ENABLED) {
+      logPitchEditorFormant("ignored note formant change because pitch editor is in pitch-only rebuild mode", {
+        clipId: get().clipId,
+        noteId,
+        requestedSemitones: semitones,
+      });
+      return;
+    }
     get().pushUndo("Change formant");
+    replaceDirtyPitchNotes([noteId]);
     const clamped = Math.max(-3.86, Math.min(3.86, semitones));
-    set({ notes: get().notes.map(n => n.id === noteId ? { ...n, formantShift: clamped } : n) });
+    set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, formantShift: clamped }) : n)) });
     onNotesChanged();
   },
 
   setNoteGain: (noteId, dB) => {
     get().pushUndo("Change gain");
-    set({ notes: get().notes.map(n => n.id === noteId ? { ...n, gain: dB } : n) });
+    replaceDirtyPitchNotes([noteId]);
+    set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, gain: dB }) : n)) });
     onNotesChanged();
   },
 
   setNoteModulation: (noteId, percent) => {
     get().pushUndo("Change modulation");
-    set({ notes: get().notes.map(n => n.id === noteId ? { ...n, vibratoDepth: percent / 100 } : n) });
+    replaceDirtyPitchNotes([noteId]);
+    set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, vibratoDepth: percent / 100 }) : n)) });
     onNotesChanged();
   },
 
   setNoteDrift: (noteId, percent) => {
     get().pushUndo("Change drift");
-    set({ notes: get().notes.map(n => n.id === noteId ? { ...n, driftCorrectionAmount: percent / 100 } : n) });
+    replaceDirtyPitchNotes([noteId]);
+    set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, driftCorrectionAmount: percent / 100 }) : n)) });
     onNotesChanged();
   },
 
   setNoteTransition: (noteId, inMs, outMs) => {
     get().pushUndo("Change transition");
-    set({ notes: get().notes.map(n => n.id === noteId ? { ...n, transitionIn: inMs, transitionOut: outMs } : n) });
+    replaceDirtyPitchNotes([noteId]);
+    set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, transitionIn: inMs, transitionOut: outMs }) : n)) });
     onNotesChanged();
   },
 
@@ -1710,8 +2594,9 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     const { notes, scaleNotes } = get();
     if (notes.length === 0) return;
     get().pushUndo("Correct pitch macro");
+    replaceDirtyPitchNotes(notes.map((note) => note.id));
     set({
-      notes: notes.map(n => {
+      notes: normalizePitchNotes(notes.map(n => {
         // Find nearest target (semitone or scale degree)
         let nearestTarget: number;
         if (useScale) {
@@ -1740,12 +2625,12 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
           correctedPitch = n.detectedPitch - offset * pitchCenter;
         }
 
-        return {
+        return normalizePitchNote({
           ...n,
           correctedPitch,
           driftCorrectionAmount: pitchDriftAmount,
-        };
-      }),
+        });
+      })),
     });
     onNotesChanged();
   },
@@ -1772,6 +2657,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       ...toMerge[0],
       id: toMerge[0].id + "_merged",
       endTime: toMerge[toMerge.length - 1].endTime,
+      effectiveStartTime: toMerge[0].effectiveStartTime ?? toMerge[0].startTime,
+      effectiveEndTime: toMerge[toMerge.length - 1].effectiveEndTime ?? toMerge[toMerge.length - 1].endTime,
       detectedPitch: weightedPitch / totalDuration,
       correctedPitch: weightedPitch / totalDuration,
       pitchDrift: allDrift,
@@ -1781,7 +2668,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
     const mergeIds = new Set(noteIds);
     set({
-      notes: [...notes.filter(n => !mergeIds.has(n.id)), merged].sort((a, b) => a.startTime - b.startTime),
+      notes: normalizePitchNotes([...notes.filter(n => !mergeIds.has(n.id)), merged]),
       selectedNoteIds: [merged.id],
     });
     onNotesChanged();
@@ -1793,12 +2680,18 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   drawPitchOnNote: (noteId, clipTime, midiPitch) => {
-    const { notes } = get();
+    const { notes, contour } = get();
     const note = notes.find(n => n.id === noteId);
     if (!note) return;
 
     const noteDuration = note.endTime - note.startTime;
     if (noteDuration <= 0) return;
+    if (!isVoicedAtClipTime(contour, clipTime)) return;
+
+    const effectiveStart = note.effectiveStartTime ?? note.startTime;
+    const effectiveEnd = note.effectiveEndTime ?? note.endTime;
+    if (clipTime < effectiveStart || clipTime > effectiveEnd) return;
+    const clampedClipTime = Math.max(note.startTime, Math.min(note.endTime, clipTime));
 
     // Ensure pitchDrift array has adequate resolution (at least 100 points per note)
     const minLen = Math.max(100, Math.ceil(noteDuration * 100)); // ~100 points/sec
@@ -1820,7 +2713,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     }
 
     // Map clipTime to index in drift array
-    const t = (clipTime - note.startTime) / noteDuration;
+    const t = (clampedClipTime - note.startTime) / noteDuration;
     if (t < 0 || t > 1) return;
     const idx = Math.round(t * (drift.length - 1));
 
@@ -1837,152 +2730,18 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     }
 
     set({
-      notes: notes.map(n => n.id === noteId ? { ...n, pitchDrift: drift } : n),
+      notes: normalizePitchNotes(notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, pitchDrift: drift }) : n)),
     });
   },
 
   commitDrawPitch: () => {
+    const { undoStack, notes } = get();
+    const last = undoStack[undoStack.length - 1];
+    if (last && pitchNotesEqual(last.notes, notes)) {
+      set({ undoStack: undoStack.slice(0, -1) });
+      return;
+    }
     onNotesChanged();
-  },
-
-  // Polyphonic mode actions
-  togglePolyMode: () => set({ polyMode: !get().polyMode }),
-  togglePitchSalience: () => set({ showPitchSalience: !get().showPitchSalience }),
-
-  analyzePolyphonic: async () => {
-    const { trackId, clipId, polyNoteThreshold, polyOnsetThreshold, polyMinDuration } = get();
-    if (!trackId || !clipId) return;
-    set({ isAnalyzing: true });
-    try {
-      const result = await nativeBridge.analyzePolyphonic(trackId, clipId, {
-        noteThreshold: polyNoteThreshold,
-        onsetThreshold: polyOnsetThreshold,
-        minDurationMs: polyMinDuration,
-      });
-      if (result && !result.error) {
-        const polyNotes: PolyNoteData[] = result.notes.map(n => ({
-          ...n,
-          correctedPitch: n.correctedPitch ?? n.midiPitch,
-          formantShift: n.formantShift ?? 0,
-          gain: n.gain ?? 0,
-        }));
-        set({
-          polyAnalysisResult: result,
-          polyNotes,
-          polyMode: true,
-          selectedNoteIds: [],
-        });
-        // Auto-fit viewport to content
-        if (polyNotes.length > 0) {
-          let minMidi = 127, maxMidi = 0;
-          for (const n of polyNotes) {
-            minMidi = Math.min(minMidi, n.midiPitch - 2);
-            maxMidi = Math.max(maxMidi, n.midiPitch + 2);
-          }
-          set({ scrollY: minMidi });
-        }
-      } else if (result?.error) {
-        console.error("Polyphonic analysis error:", result.error);
-      }
-    } finally {
-      set({ isAnalyzing: false });
-    }
-  },
-
-  updatePolyNote: (noteId, changes) => {
-    set({
-      polyNotes: get().polyNotes.map(n => n.id === noteId ? { ...n, ...changes } : n),
-    });
-  },
-
-  movePolyNotePitch: (noteId, semitones) => {
-    set({
-      polyNotes: get().polyNotes.map(n =>
-        n.id === noteId ? { ...n, correctedPitch: n.correctedPitch + semitones } : n
-      ),
-    });
-  },
-
-  moveSelectedPolyPitch: (semitones) => {
-    const { selectedNoteIds, polyNotes } = get();
-    if (selectedNoteIds.length === 0) return;
-    set({
-      polyNotes: polyNotes.map(n =>
-        selectedNoteIds.includes(n.id)
-          ? { ...n, correctedPitch: n.correctedPitch + semitones }
-          : n
-      ),
-    });
-  },
-
-  soloPolyNote: (noteId) => set({ soloNoteId: noteId }),
-
-  applyPolyCorrection: async () => {
-    const { trackId, clipId, polyNotes } = get();
-    if (!trackId || !clipId) return;
-    set({ isApplying: true });
-    try {
-      const editedNotes = polyNotes
-        .filter(n => Math.abs(n.correctedPitch - n.midiPitch) > 0.05 || Math.abs(n.gain) > 0.1)
-        .map(n => ({
-          id: n.id,
-          originalPitch: n.midiPitch,
-          correctedPitch: n.correctedPitch,
-          formantShift: n.formantShift,
-          gain: n.gain,
-        }));
-      await nativeBridge.applyPolyPitchCorrection(trackId, clipId, editedNotes);
-    } finally {
-      set({ isApplying: false });
-    }
-  },
-
-  // Poly detection tuning
-  setPolyNoteThreshold: (v) => set({ polyNoteThreshold: Math.max(0.01, Math.min(1, v)) }),
-  setPolyOnsetThreshold: (v) => set({ polyOnsetThreshold: Math.max(0.01, Math.min(1, v)) }),
-  setPolyMinDuration: (v) => set({ polyMinDuration: Math.max(10, Math.min(500, v)) }),
-
-  // Auto-detect mono vs poly — heuristic based on mono analysis quality
-  autoDetectMonoPoly: () => {
-    const { contour, notes } = get();
-    if (!contour || notes.length === 0) return;
-
-    const frames = contour.frames;
-    if (!frames || frames.confidence.length === 0) return;
-
-    // Heuristic 1: average confidence — mono YIN struggles with polyphonic content
-    let totalConf = 0;
-    let voicedCount = 0;
-    for (let i = 0; i < frames.confidence.length; i++) {
-      if (frames.midi[i] > 0) {
-        totalConf += frames.confidence[i];
-        voicedCount++;
-      }
-    }
-    const avgConf = voicedCount > 0 ? totalConf / voicedCount : 1;
-
-    // Heuristic 2: note fragmentation — poly content produces many short notes
-    const avgDuration = notes.reduce((s, n) => s + (n.endTime - n.startTime), 0) / notes.length;
-
-    // Heuristic 3: pitch instability — large jumps between adjacent notes
-    let jumpCount = 0;
-    for (let i = 1; i < notes.length; i++) {
-      const gap = notes[i].startTime - notes[i - 1].endTime;
-      const pitchDiff = Math.abs(notes[i].detectedPitch - notes[i - 1].detectedPitch);
-      if (gap < 0.1 && pitchDiff > 7) jumpCount++;
-    }
-    const jumpRate = notes.length > 1 ? jumpCount / (notes.length - 1) : 0;
-
-    // Score: higher = more likely polyphonic
-    const isLikelyPoly = avgConf < 0.5 || avgDuration < 0.12 || jumpRate > 0.3;
-
-    if (isLikelyPoly) {
-      console.log(`[PitchEditor] Auto-detect: likely polyphonic (avgConf=${avgConf.toFixed(2)}, avgDur=${avgDuration.toFixed(2)}s, jumpRate=${jumpRate.toFixed(2)})`);
-      set({ polyMode: true });
-    } else {
-      console.log(`[PitchEditor] Auto-detect: likely monophonic (avgConf=${avgConf.toFixed(2)}, avgDur=${avgDuration.toFixed(2)}s, jumpRate=${jumpRate.toFixed(2)})`);
-      set({ polyMode: false });
-    }
   },
 
   // A/B comparison
@@ -1995,27 +2754,9 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       nativeBridge.setPitchCorrectionBypass(trackId, clipId, newBypass);
     }
   },
-
-  // Unified note accessor
-  getUnifiedNotes: () => {
-    const { polyMode, notes, polyNotes } = get();
-    if (polyMode) {
-      return polyNotes.map(polyToUnified);
-    }
-    return notes.map(n => monoToUnified(n));
-  },
 }));
 
-nativeBridge.onPitchCorrectionComplete((data: {
-  clipId: string;
-  success: boolean;
-  outputFile?: string;
-  requestId?: string;
-  restored?: boolean;
-  renderMode?: PitchCorrectionRenderMode;
-  cancelled?: boolean;
-  swapDeferred?: boolean;
-}) => {
+nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => {
   const state = usePitchEditorStore.getState();
   const meta = consumeRequestMeta(data.requestId);
   const completedRevision = consumeRequestRevision(data.requestId) ?? meta?.revision ?? null;
@@ -2048,6 +2789,9 @@ nativeBridge.onPitchCorrectionComplete((data: {
   });
 
   if (!currentClipMatches) {
+    if (meta.stage === "note_hq") {
+      finishNoteHqPriority(meta.logicalRequestId);
+    }
     return;
   }
 
@@ -2058,21 +2802,30 @@ nativeBridge.onPitchCorrectionComplete((data: {
       logicalRequestId: meta.logicalRequestId,
       stage: meta.stage,
     });
+    if (meta.stage === "note_hq") {
+      finishNoteHqPriority(meta.logicalRequestId);
+    }
     return;
   }
 
   if (!data.success || !data.outputFile) {
-    if (meta.stage === "preview_segment" || meta.stage === "single") {
+    const failureMessage = getPitchCorrectionFailureMessage(data);
+    if (meta.stage === "preview_segment" || meta.stage === "single" || meta.stage === "note_hq") {
       if (meta.stage === "preview_segment") {
         _runningPreviewSegmentJobs = Math.max(0, _runningPreviewSegmentJobs - 1);
       }
-      _activePitchCorrectionRequestId = null;
-      setApplyStatus("error", "Failed", meta.logicalRequestId);
-      useDAWStore.getState().showToast("Pitch/formant apply failed", "error");
+      if (meta.stage === "note_hq") {
+        finishNoteHqPriority(meta.logicalRequestId);
+      }
+      if (_activePitchCorrectionRequestId === meta.logicalRequestId) {
+        _activePitchCorrectionRequestId = null;
+      }
+      setApplyStatus("error", failureMessage, meta.logicalRequestId);
+      useDAWStore.getState().showToast(failureMessage, "error");
     } else if (meta.stage === "full_clip_hq") {
       _activePitchCorrectionRequestId = null;
-      setApplyStatus("error", "Preview ready, HQ failed", meta.logicalRequestId);
-      useDAWStore.getState().showToast("Pitch/formant HQ render failed", "error");
+      setApplyStatus("error", failureMessage, meta.logicalRequestId);
+      useDAWStore.getState().showToast(failureMessage, "error");
     }
     warnPitchEditorFormant("persistent completion listener received failed result", {
       clipId: data.clipId,
@@ -2080,6 +2833,12 @@ nativeBridge.onPitchCorrectionComplete((data: {
       logicalRequestId: meta.logicalRequestId,
       requestRevision: completedRevision,
       stage: meta.stage,
+      hardFailReason: data.hardFailReason ?? null,
+      fallbackReason: data.fallbackReason ?? null,
+      pitchRenderStrategy: data.pitchRenderStrategy ?? null,
+      pitchRenderProductPath: data.pitchRenderProductPath ?? null,
+      pitchRenderBackendId: data.pitchRenderBackendId ?? null,
+      pitchRenderBackendFailureCode: data.pitchRenderBackendFailureCode ?? null,
     });
     return;
   }
@@ -2094,6 +2853,12 @@ nativeBridge.onPitchCorrectionComplete((data: {
       requestedApplyRevision: _requestedApplyRevision,
       stage: meta.stage,
     });
+    if (meta.stage === "note_hq") {
+      finishNoteHqPriority(meta.logicalRequestId);
+      if (_activePitchCorrectionRequestId === meta.logicalRequestId) {
+        _activePitchCorrectionRequestId = null;
+      }
+    }
     return;
   }
 
@@ -2112,19 +2877,59 @@ nativeBridge.onPitchCorrectionComplete((data: {
       updateRenderCoverageRange(meta.windowStartSec, meta.windowEndSec, "preview_ready");
     }
     const coverageDone = usePitchEditorStore.getState().renderCoverage.every((range) => range.state !== "pending");
-    setApplyStatus("preview_ready", getFormantPreviewStatusMessage("preview_ready", coverageDone), meta.logicalRequestId);
+    setApplyStatus("preview_ready", getRenderedPreviewStatusMessage("preview_ready", coverageDone), meta.logicalRequestId);
     if (_activePreviewRequestGroupId === meta.logicalRequestId) {
       dispatchNextPreviewSegments();
     }
     return;
   }
 
+  if (meta.stage === "note_hq") {
+    clearTransientPitchPreview(data.clipId, "note_hq_complete");
+    clearStagedPreviewQueue();
+    clearRenderedPreviewForInteractiveEdit(data.clipId, "note_hq_complete");
+    if (data.outputFile) {
+      applyPitchCorrectionResultToClip(data.clipId, data.outputFile, Boolean(data.restored));
+    } else {
+      warnPitchEditorFormant("note-HQ completion did not include an output file", {
+        clipId: data.clipId,
+        requestId: data.requestId,
+        logicalRequestId: meta.logicalRequestId,
+      });
+    }
+    if (meta.coverageRanges && meta.coverageRanges.length > 0) {
+      for (const range of meta.coverageRanges) {
+        updateRenderCoverageRange(range.startTime, range.endTime, "hq_ready");
+      }
+    } else if (meta.windowStartSec !== undefined && meta.windowEndSec !== undefined) {
+      updateRenderCoverageRange(meta.windowStartSec, meta.windowEndSec, "hq_ready");
+    }
+    _dirtyPitchNoteIds.clear();
+    finishNoteHqPriority(meta.logicalRequestId);
+    _activePitchCorrectionRequestId = null;
+    setApplyStatus("final_processing", "Verifying HQ note route...", meta.logicalRequestId);
+    scheduleNoteHqFinalRouteVerification(meta, data);
+    logPitchEditorFormant("note-local HQ cache updated", {
+      clipId: data.clipId,
+      requestId: data.requestId,
+      logicalRequestId: meta.logicalRequestId,
+      outputFile: data.outputFile,
+      appFinalBakedContextPath: data.appFinalBakedContextPath,
+      appFinalPlaybackContextPath: data.appFinalPlaybackContextPath,
+      appFinalParityReportPath: data.appFinalParityReportPath,
+      windowStartSec: meta.windowStartSec,
+      windowEndSec: meta.windowEndSec,
+    });
+    return;
+  }
+
   applyPitchCorrectionResultToClip(data.clipId, data.outputFile, Boolean(data.restored));
+  _dirtyPitchNoteIds.clear();
   markAllRenderCoverage("hq_ready", meta.logicalRequestId);
   clearStagedPreviewQueue();
   _activePitchCorrectionRequestId = null;
   setApplyStatus("done", meta.stage === "full_clip_hq"
-    ? (data.swapDeferred ? "HQ ready on stop/seek" : getFormantPreviewStatusMessage("done", true))
+    ? (data.swapDeferred ? "HQ ready on stop/seek" : getRenderedPreviewStatusMessage("done", true))
     : "Applied", meta.logicalRequestId, { autoClearMs: 1800 });
   useDAWStore.getState().showToast(
     meta.stage === "full_clip_hq" ? "Pitch/formant HQ render ready" : "Pitch/formant changes applied",

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { applyTheme } from "../useDAWStore";
+import { applyTheme, createDefaultRenderDialogOptions } from "../useDAWStore";
 import { usePitchEditorStore } from "../pitchEditorStore";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
@@ -13,6 +13,7 @@ type GetFn = () => any;
 import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
+import { prepareForManualRender } from "../../utils/renderPreparation";
 
 export const renderingActions = (set: SetFn, get: GetFn) => ({
 
@@ -337,6 +338,11 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     deselectAllRegions: () => set({ selectedRegionIds: [] }),
     setRenderMetadata: (metadata) =>
       set((s) => ({ renderMetadata: { ...s.renderMetadata, ...metadata } })),
+    setRenderDialogOptions: (options) =>
+      set((s) => ({ renderDialogOptions: { ...s.renderDialogOptions, ...options } })),
+    resetRenderDialogOptions: () =>
+      set({ renderDialogOptions: createDefaultRenderDialogOptions() }),
+    setLastRenderDirectory: (dir) => set({ lastRenderDirectory: dir }),
     setSecondaryOutputEnabled: (enabled) =>
       set({ secondaryOutputEnabled: enabled }),
     setSecondaryOutputFormat: (format) =>
@@ -383,6 +389,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const fileName = `${track.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_consolidated.wav`;
       const filePath = await nativeBridge.showRenderSaveDialog(fileName, "wav");
       if (!filePath) return null;
+      await prepareForManualRender(get().syncClipsWithBackend, "consolidate-track");
       const success = await nativeBridge.renderProject({
         source: `stem:${trackId}`,
         startTime: earliest,
@@ -395,6 +402,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         normalize: false,
         addTail: false,
         tailLength: 0,
+        includeMetronome: false,
       });
       if (success) {
         // Replace track clips with single consolidated clip
@@ -439,6 +447,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const safeName = sourceClip.name.replace(/[^a-zA-Z0-9_-]/g, "_");
       const filePath = await nativeBridge.showRenderSaveDialog(`${safeName}_rendered.wav`, "wav");
       if (!filePath) return;
+      await prepareForManualRender(get().syncClipsWithBackend, "render-clip-in-place");
 
       const success = await nativeBridge.renderProject({
         source: `stem:${sourceTrack.id}`,
@@ -452,6 +461,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         normalize: false,
         addTail: true,
         tailLength: 1000,
+        includeMetronome: false,
       });
       if (!success) return;
 
@@ -506,6 +516,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const safeName = track.name.replace(/[^a-zA-Z0-9_-]/g, "_");
       const filePath = await nativeBridge.showRenderSaveDialog(`${safeName}_rendered.wav`, "wav");
       if (!filePath) return;
+      await prepareForManualRender(get().syncClipsWithBackend, "render-track-in-place");
 
       const success = await nativeBridge.renderProject({
         source: `stem:${trackId}`,
@@ -519,6 +530,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         normalize: false,
         addTail: true,
         tailLength: 1000,
+        includeMetronome: false,
       });
       if (!success) return;
 

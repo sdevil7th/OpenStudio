@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("windows", "macos")]
+    [ValidateSet("windows", "macos", "linux")]
     [string]$Platform,
 
     [Parameter(Mandatory = $true)]

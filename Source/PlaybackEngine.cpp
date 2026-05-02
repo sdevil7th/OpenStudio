@@ -1,4 +1,5 @@
 #include "PlaybackEngine.h"
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -25,6 +26,101 @@ static float peakForBuffer(const juce::AudioBuffer<float>& buffer, int numSample
     }
     return peak;
 }
+
+static float getPitchOnlyPreviewTonalityLimitHz (bool downwardShift)
+{
+    const auto specificName = downwardShift
+        ? "OPENSTUDIO_PITCH_STAGEA_TONALITY_LIMIT_HZ_DOWN"
+        : "OPENSTUDIO_PITCH_STAGEA_TONALITY_LIMIT_HZ_UP";
+    const auto specificValue = juce::SystemStats::getEnvironmentVariable (specificName, {}).trim();
+    if (specificValue.isNotEmpty())
+        return juce::jlimit (0.0f, 20000.0f, specificValue.getFloatValue());
+
+    const auto value = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_PITCH_STAGEA_TONALITY_LIMIT_HZ", {}).trim();
+    if (value.isEmpty())
+        return downwardShift ? 2600.0f : 1050.0f;
+
+    return juce::jlimit (0.0f, 20000.0f, value.getFloatValue());
+}
+
+static float sampleLoopBufferLocal (const juce::AudioBuffer<float>& buffer,
+                                    int channel,
+                                    double position,
+                                    int crossfadeSamples)
+{
+    const int numChannels = buffer.getNumChannels();
+    const int numSamples = buffer.getNumSamples();
+    if (numChannels <= 0 || numSamples <= 1)
+        return 0.0f;
+
+    const int safeChannel = juce::jlimit (0, numChannels - 1, channel);
+    auto wrapPosition = std::fmod (position, static_cast<double> (numSamples));
+    if (wrapPosition < 0.0)
+        wrapPosition += static_cast<double> (numSamples);
+
+    const auto sampleAt = [&buffer, safeChannel, numSamples] (double pos)
+    {
+        auto wrapped = std::fmod (pos, static_cast<double> (numSamples));
+        if (wrapped < 0.0)
+            wrapped += static_cast<double> (numSamples);
+        const int index0 = juce::jlimit (0, numSamples - 1, static_cast<int> (std::floor (wrapped)));
+        const int index1 = (index0 + 1) % numSamples;
+        const float frac = static_cast<float> (wrapped - static_cast<double> (index0));
+        const float s0 = buffer.getSample (safeChannel, index0);
+        const float s1 = buffer.getSample (safeChannel, index1);
+        return s0 + (s1 - s0) * frac;
+    };
+
+    float value = sampleAt (wrapPosition);
+    const int safeCrossfade = juce::jlimit (0, numSamples / 3, crossfadeSamples);
+    if (safeCrossfade <= 1)
+        return value;
+
+    const double crossfadeStart = static_cast<double> (numSamples - safeCrossfade);
+    if (wrapPosition >= crossfadeStart)
+    {
+        const float blend = static_cast<float> ((wrapPosition - crossfadeStart)
+            / static_cast<double> (safeCrossfade));
+        const float wrappedValue = sampleAt (wrapPosition - static_cast<double> (numSamples));
+        value = value * (1.0f - blend) + wrappedValue * blend;
+    }
+
+    return value;
+}
+
+static float sampleBufferCubic (const juce::AudioBuffer<float>& buffer,
+                                int channel,
+                                int availableSamples,
+                                double position)
+{
+    if (availableSamples <= 0 || buffer.getNumChannels() <= 0)
+        return 0.0f;
+
+    const int safeChannel = juce::jlimit (0, buffer.getNumChannels() - 1, channel);
+    if (availableSamples == 1)
+        return buffer.getSample (safeChannel, 0);
+
+    const double clampedPosition = juce::jlimit (0.0,
+                                                 static_cast<double> (availableSamples - 1),
+                                                 position);
+    const int i1 = juce::jlimit (0, availableSamples - 1,
+                                 static_cast<int> (std::floor (clampedPosition)));
+    const int i0 = juce::jlimit (0, availableSamples - 1, i1 - 1);
+    const int i2 = juce::jlimit (0, availableSamples - 1, i1 + 1);
+    const int i3 = juce::jlimit (0, availableSamples - 1, i1 + 2);
+    const float t = static_cast<float> (clampedPosition - static_cast<double> (i1));
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float y0 = buffer.getSample (safeChannel, i0);
+    const float y1 = buffer.getSample (safeChannel, i1);
+    const float y2 = buffer.getSample (safeChannel, i2);
+    const float y3 = buffer.getSample (safeChannel, i3);
+
+    return 0.5f * ((2.0f * y1)
+        + (-y0 + y2) * t
+        + (2.0f * y0 - 5.0f * y1 + 4.0f * y2 - y3) * t2
+        + (-y0 + 3.0f * y1 - 3.0f * y2 + y3) * t3);
+}
 }
 
 float PlaybackEngine::applyFadeCurve(float t, int curveType)
@@ -42,6 +138,11 @@ float PlaybackEngine::applyFadeCurve(float t, int curveType)
 PlaybackEngine::PlaybackEngine()
 {
     formatManager.registerBasicFormats();
+
+    // Pre-allocate pitch-preview channel-pointer vectors (max stereo = 2 channels).
+    // Avoids heap allocation inside fillTrackBuffer for every pitch-previewed clip.
+    pitchPreviewInPtrs.resize (2);
+    pitchPreviewOutPtrs.resize (2);
 }
 
 PlaybackEngine::~PlaybackEngine()
@@ -191,9 +292,22 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
 
     // Pre-load the reader on the message thread so audio thread never does disk I/O
     preloadReader(effectiveFile);
+    if (clipId.isNotEmpty())
+    {
+        auto segmentIt = renderedPreviewSegments.find (clipId);
+        if (segmentIt != renderedPreviewSegments.end())
+        {
+            for (const auto& segment : segmentIt->second)
+            {
+                if (segment.audioFile.existsAsFile())
+                    preloadReader (segment.audioFile);
+            }
+        }
+    }
 
     ClipInfo clip(effectiveFile, startTime, duration, trackId, effectiveOffset, volumeDB, fadeIn, fadeOut);
     clip.clipId = clipId;
+    clip.envelopeKey = trackId + "::" + clipId;  // Pre-compute to avoid string alloc on audio thread
     clip.originalAudioFile = sourceAudioFile.existsAsFile() ? sourceAudioFile : audioFile;
     clip.originalOffset = sourceOffset >= 0.0 ? sourceOffset : offset;
     clips.push_back(clip);
@@ -255,7 +369,17 @@ void PlaybackEngine::replaceClipAudioFile(const juce::String& clipId, const juce
             // Clear any active pitch preview — the corrected audio is now baked
             // into the file, so the real-time PitchShifter must not double-shift.
             clipPitchPreviews.erase(clipId);
+            if (pitchScrubPreview.clipId == clipId)
+            {
+                pitchScrubPreview = {};
+                pitchScrubPreviewStatus = {};
+                pitchScrubStretcherPrepared = false;
+            }
             renderedPreviewSegments.erase(clipId);
+            auto& renderedGeneration = renderedPreviewSegmentGenerations[clipId];
+            ++renderedGeneration;
+            if (renderedGeneration <= 0)
+                renderedGeneration = 1;
             deferredClipSwaps.erase(clipId);
             // Remember the corrected file so it survives clearAllClips + re-add cycles.
             if (restoringOriginal)
@@ -315,52 +439,244 @@ int PlaybackEngine::commitAllDeferredClipAudioFiles()
     return committed;
 }
 
-void PlaybackEngine::setClipRenderedPreviewSegment(const juce::String& clipId,
+bool PlaybackEngine::setClipRenderedPreviewSegment(const juce::String& clipId,
                                                    const juce::File& audioFile,
                                                    double startSec,
-                                                   double endSec)
+                                                   double endSec,
+                                                   double fileOffsetSec,
+                                                   int generation)
 {
     if (!audioFile.existsAsFile())
     {
         juce::Logger::writeToLog("PlaybackEngine::setClipRenderedPreviewSegment: file does not exist: " + audioFile.getFullPathName());
-        return;
+        return false;
     }
 
     juce::ScopedLock sl(lock);
-    preloadReader(audioFile);
-    auto& segments = renderedPreviewSegments[clipId];
-    bool replaced = false;
-    for (auto& segment : segments)
+    if (pitchCorrectedFiles.find(clipId) != pitchCorrectedFiles.end())
     {
-        if (std::abs(segment.startSec - startSec) < 0.001 && std::abs(segment.endSec - endSec) < 0.001)
+        juce::Logger::writeToLog("PlaybackEngine: Rejected rendered preview segment for corrected-source clip " + clipId);
+        return false;
+    }
+
+    if (generation > 0)
+    {
+        const auto genIt = renderedPreviewSegmentGenerations.find(clipId);
+        const int currentGeneration = genIt != renderedPreviewSegmentGenerations.end() ? genIt->second : 0;
+        if (currentGeneration != generation)
         {
-            segment.audioFile = audioFile;
-            replaced = true;
-            break;
+            juce::Logger::writeToLog("PlaybackEngine: Rejected stale rendered preview segment for clip " + clipId
+                + " generation=" + juce::String(generation)
+                + " current=" + juce::String(currentGeneration));
+            return false;
         }
     }
-    if (!replaced)
-        segments.push_back({ audioFile, startSec, endSec });
+
+    preloadReader(audioFile);
+    auto& segments = renderedPreviewSegments[clipId];
+    segments.erase(std::remove_if(segments.begin(), segments.end(),
+        [startSec, endSec](const RenderedPreviewSegment& segment)
+        {
+            const bool sameWindow = std::abs(segment.startSec - startSec) < 0.001
+                && std::abs(segment.endSec - endSec) < 0.001;
+            const bool overlaps = !(segment.endSec <= startSec || segment.startSec >= endSec);
+            return sameWindow || overlaps;
+        }),
+        segments.end());
+    segments.push_back({ audioFile, startSec, endSec, fileOffsetSec });
     std::sort(segments.begin(), segments.end(), [] (const RenderedPreviewSegment& a, const RenderedPreviewSegment& b) {
         return a.startSec < b.startSec;
     });
     juce::Logger::writeToLog("PlaybackEngine: Set rendered preview segment for clip " + clipId
         + " [" + juce::String(startSec, 3) + ", " + juce::String(endSec, 3) + "]"
+        + " fileOffset=" + juce::String(fileOffsetSec, 3)
+        + " generation=" + juce::String(generation)
         + " -> " + audioFile.getFullPathName());
+    return true;
+}
+
+void PlaybackEngine::beginRenderedPreviewSegmentGeneration(const juce::String& clipId, int generation)
+{
+    juce::ScopedLock sl(lock);
+    renderedPreviewSegments.erase(clipId);
+    renderedPreviewSegmentGenerations[clipId] = generation;
+    juce::Logger::writeToLog("PlaybackEngine: Began rendered preview generation for clip " + clipId
+        + " generation=" + juce::String(generation));
+}
+
+void PlaybackEngine::invalidateRenderedPreviewSegments(const juce::String& clipId)
+{
+    juce::ScopedLock sl(lock);
+    renderedPreviewSegments.erase(clipId);
+    auto& generation = renderedPreviewSegmentGenerations[clipId];
+    ++generation;
+    if (generation <= 0)
+        generation = 1;
+    juce::Logger::writeToLog("PlaybackEngine: Invalidated rendered preview segments for clip " + clipId
+        + " generation=" + juce::String(generation));
 }
 
 void PlaybackEngine::clearClipRenderedPreviewSegments(const juce::String& clipId)
 {
     juce::ScopedLock sl(lock);
     renderedPreviewSegments.erase(clipId);
-    juce::Logger::writeToLog("PlaybackEngine: Cleared rendered preview segments for clip " + clipId);
+    auto& generation = renderedPreviewSegmentGenerations[clipId];
+    ++generation;
+    if (generation <= 0)
+        generation = 1;
+    juce::Logger::writeToLog("PlaybackEngine: Cleared rendered preview segments for clip " + clipId
+        + " generation=" + juce::String(generation));
+}
+
+void PlaybackEngine::clearAllPitchPreviewRoutes(const juce::String& clipId)
+{
+    juce::ScopedLock sl(lock);
+    const bool clearAll = clipId.isEmpty();
+    if (clearAll)
+    {
+        clipPitchPreviews.clear();
+        renderedPreviewSegments.clear();
+        for (auto& [id, generation] : renderedPreviewSegmentGenerations)
+        {
+            juce::ignoreUnused(id);
+            ++generation;
+            if (generation <= 0)
+                generation = 1;
+        }
+        pitchScrubPreview = {};
+        pitchScrubPreviewStatus = {};
+        pitchScrubStretcherPrepared = false;
+        juce::Logger::writeToLog("PlaybackEngine: Hard-cleared all pitch preview routes");
+        return;
+    }
+
+    clipPitchPreviews.erase(clipId);
+    renderedPreviewSegments.erase(clipId);
+    auto& generation = renderedPreviewSegmentGenerations[clipId];
+    ++generation;
+    if (generation <= 0)
+        generation = 1;
+
+    if (pitchScrubPreview.clipId == clipId)
+    {
+        pitchScrubPreview = {};
+        pitchScrubPreviewStatus = {};
+        pitchScrubStretcherPrepared = false;
+    }
+
+    juce::Logger::writeToLog("PlaybackEngine: Hard-cleared pitch preview routes for clip " + clipId
+        + " generation=" + juce::String(generation));
+}
+
+int PlaybackEngine::clearPitchPreviewRoutesForCorrectedSources()
+{
+    juce::ScopedLock sl(lock);
+    int cleared = 0;
+    for (const auto& [clipId, file] : pitchCorrectedFiles)
+    {
+        juce::ignoreUnused(file);
+        const bool hadLive = clipPitchPreviews.erase(clipId) > 0;
+        const bool hadRendered = renderedPreviewSegments.erase(clipId) > 0;
+        bool hadScrub = false;
+        if (pitchScrubPreview.clipId == clipId)
+        {
+            pitchScrubPreview = {};
+            pitchScrubPreviewStatus = {};
+            pitchScrubStretcherPrepared = false;
+            hadScrub = true;
+        }
+
+        if (hadLive || hadRendered || hadScrub)
+        {
+            auto& generation = renderedPreviewSegmentGenerations[clipId];
+            ++generation;
+            if (generation <= 0)
+                generation = 1;
+            ++cleared;
+        }
+    }
+
+    if (cleared > 0)
+        juce::Logger::writeToLog("PlaybackEngine: Hard-cleared pitch preview routes for "
+            + juce::String(cleared) + " corrected-source clip(s)");
+    return cleared;
+}
+
+std::map<juce::String, std::vector<PlaybackEngine::RenderedPreviewSegment>> PlaybackEngine::getRenderedPreviewSegmentSnapshot() const
+{
+    juce::ScopedLock sl(lock);
+    return renderedPreviewSegments;
+}
+
+PlaybackEngine::ClipPlaybackSourceStatus PlaybackEngine::getClipPlaybackSourceAtTime(const juce::String& trackId,
+                                                                                      const juce::String& clipId,
+                                                                                      double projectTimeSec) const
+{
+    juce::ScopedLock sl(lock);
+    ClipPlaybackSourceStatus status;
+    for (const auto& clip : clips)
+    {
+        if (clip.trackId != trackId || clip.clipId != clipId || !clip.isActive)
+            continue;
+
+        const double clipEndTime = clip.startTime + clip.duration;
+        if (projectTimeSec < clip.startTime || projectTimeSec >= clipEndTime)
+            continue;
+
+        status.clipFound = true;
+        status.clipTime = projectTimeSec - clip.startTime;
+        status.audioFile = clip.audioFile.getFullPathName();
+        status.playbackOffset = clip.offset + status.clipTime;
+        status.sourceType = "original";
+
+        auto segmentIt = renderedPreviewSegments.find(clipId);
+        if (segmentIt != renderedPreviewSegments.end())
+        {
+            for (const auto& segment : segmentIt->second)
+            {
+                if (status.clipTime >= segment.startSec && status.clipTime < segment.endSec)
+                {
+                    status.renderedSegmentActiveAtTime = true;
+                    status.sourceType = "rendered_segment";
+                    status.audioFile = segment.audioFile.getFullPathName();
+                    status.playbackOffset = segment.fileOffsetSec + (status.clipTime - segment.startSec);
+                    return status;
+                }
+            }
+        }
+
+        auto correctedIt = pitchCorrectedFiles.find(clipId);
+        if (correctedIt != pitchCorrectedFiles.end()
+            && correctedIt->second.existsAsFile()
+            && clip.audioFile == correctedIt->second)
+        {
+            status.correctedSourceActiveAtTime = true;
+            status.sourceType = "corrected_source";
+            status.audioFile = correctedIt->second.getFullPathName();
+        }
+
+        return status;
+    }
+
+    return status;
 }
 
 void PlaybackEngine::clearPitchCorrectionFile(const juce::String& clipId)
 {
     juce::ScopedLock sl(lock);
     pitchCorrectedFiles.erase(clipId);
+    clipPitchPreviews.erase(clipId);
     renderedPreviewSegments.erase(clipId);
+    auto& generation = renderedPreviewSegmentGenerations[clipId];
+    ++generation;
+    if (generation <= 0)
+        generation = 1;
+    if (pitchScrubPreview.clipId == clipId)
+    {
+        pitchScrubPreview = {};
+        pitchScrubPreviewStatus = {};
+        pitchScrubStretcherPrepared = false;
+    }
     deferredClipSwaps.erase(clipId);
     juce::Logger::writeToLog("PlaybackEngine: Cleared pitch correction file for clip " + clipId);
 }
@@ -460,6 +776,13 @@ void PlaybackEngine::setClipPitchPreview (const juce::String& clipId,
     // has the old pitch shift baked in, and the preview would add the new ratio
     // on top — always increasing pitch regardless of direction.
     auto corrIt = pitchCorrectedFiles.find (clipId);
+    if (corrIt != pitchCorrectedFiles.end() && ! preview.allowReplacingCorrectedSource)
+    {
+        juce::Logger::writeToLog ("PlaybackEngine: Rejected pitch preview for corrected-source clip " + clipId
+            + " because the request did not opt into a new interactive preview generation");
+        return;
+    }
+
     for (auto& clip : clips)
     {
         if (clip.clipId == clipId && clip.originalAudioFile.existsAsFile())
@@ -521,6 +844,267 @@ bool PlaybackEngine::hasClipPitchPreview (const juce::String& clipId) const
     return clipPitchPreviews.find (clipId) != clipPitchPreviews.end();
 }
 
+void PlaybackEngine::setPitchScrubPreview (const PitchScrubPreviewData& preview)
+{
+    juce::ScopedLock sl (lock);
+    pitchScrubPreview = preview;
+    pitchScrubPreview.active = preview.loopBuffer.getNumSamples() > 8
+        && preview.loopBuffer.getNumChannels() > 0
+        && preview.pitchRatio > 0.0f;
+    pitchScrubPreview.readPosition = 0.0;
+    pitchScrubPreview.currentGain = 0.0f;
+    pitchScrubPreview.targetGain = juce::jlimit (0.0f, 2.0f, preview.gain);
+    pitchScrubPreview.releasePending = false;
+    pitchScrubPreview.lastPeak = 0.0f;
+    pitchScrubPreview.lastRenderWallTimeMs = 0.0;
+    pitchScrubPreview.mixedCallbackCount = 0;
+    pitchScrubPreview.mixedSampleCount = 0;
+    pitchScrubPreviewStatus.renderMethod = "formant_preserving_stretch";
+    pitchScrubStretcherPrepared = false;
+    pitchScrubPreview.loopCrossfadeSamples = juce::jlimit (8,
+        std::max (8, preview.loopBuffer.getNumSamples() / 3),
+        preview.loopCrossfadeSamples > 0
+            ? preview.loopCrossfadeSamples
+            : std::max (16, preview.loopBuffer.getNumSamples() / 8));
+
+    pitchScrubPreviewStatus = {};
+    pitchScrubPreviewStatus.active = pitchScrubPreview.active;
+    pitchScrubPreviewStatus.previewArmed = pitchScrubPreview.active;
+    pitchScrubPreviewStatus.trackId = pitchScrubPreview.trackId;
+    pitchScrubPreviewStatus.clipId = pitchScrubPreview.clipId;
+    pitchScrubPreviewStatus.pitchRatio = pitchScrubPreview.pitchRatio;
+    pitchScrubPreviewStatus.basePitchHz = pitchScrubPreview.basePitchHz;
+    pitchScrubPreviewStatus.currentGain = pitchScrubPreview.currentGain;
+    pitchScrubPreviewStatus.targetGain = pitchScrubPreview.targetGain;
+    pitchScrubPreviewStatus.repeatStability = pitchScrubPreview.repeatStability;
+    pitchScrubPreviewStatus.loopDurationMs = 1000.0 * std::max (0.0, pitchScrubPreview.loopEndSec - pitchScrubPreview.loopStartSec);
+    pitchScrubPreviewStatus.renderMethod = "formant_preserving_stretch";
+
+    const int preloadSamples = juce::jmax (512, preview.loopBuffer.getNumSamples());
+    pitchScrubInputBuffer.setSize (juce::jmax (1, preview.loopBuffer.getNumChannels()), preloadSamples, false, true, true);
+    pitchScrubOutputBuffer.setSize (juce::jmax (1, preview.loopBuffer.getNumChannels()), preloadSamples, false, true, true);
+
+    logAudioPlayback ("setPitchScrubPreview clip=" + preview.clipId
+        + " track=" + preview.trackId
+        + " samples=" + juce::String (preview.loopBuffer.getNumSamples())
+        + " channels=" + juce::String (preview.loopBuffer.getNumChannels())
+        + " pitchRatio=" + juce::String (preview.pitchRatio, 3)
+        + " basePitchHz=" + juce::String (preview.basePitchHz, 2)
+        + " active=" + juce::String (pitchScrubPreview.active ? "true" : "false"));
+}
+
+bool PlaybackEngine::updatePitchScrubPreview (const juce::String& clipId, float pitchRatio)
+{
+    juce::ScopedLock sl (lock);
+    if ((! pitchScrubPreview.active && ! pitchScrubPreview.releasePending) || pitchScrubPreview.clipId != clipId)
+        return false;
+
+    pitchScrubPreview.pitchRatio = juce::jlimit (0.25f, 4.0f, pitchRatio);
+    pitchScrubPreviewStatus.pitchRatio = pitchScrubPreview.pitchRatio;
+    pitchScrubPreviewStatus.renderMethod = "formant_preserving_stretch";
+    return true;
+}
+
+void PlaybackEngine::clearPitchScrubPreview (const juce::String& clipId)
+{
+    juce::ScopedLock sl (lock);
+    if (pitchScrubPreview.clipId == clipId && (pitchScrubPreview.active || pitchScrubPreview.releasePending))
+    {
+        pitchScrubPreview.releasePending = true;
+        pitchScrubPreview.targetGain = 0.0f;
+        pitchScrubPreviewStatus.releasePending = true;
+        logAudioPlayback ("clearPitchScrubPreview clip=" + clipId);
+    }
+}
+
+bool PlaybackEngine::hasPitchScrubPreview (const juce::String& clipId) const
+{
+    const juce::ScopedLock sl (lock);
+    return (pitchScrubPreview.active || pitchScrubPreview.releasePending) && pitchScrubPreview.clipId == clipId;
+}
+
+#if defined(_MSC_VER)
+ #pragma warning(push)
+ #pragma warning(disable: 4244 4267 4305 4456)
+#endif
+void PlaybackEngine::renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, double sampleRate)
+{
+    const juce::ScopedTryLock sl (lock);
+    if (! sl.isLocked())
+        return;
+
+    if ((! pitchScrubPreview.active && ! pitchScrubPreview.releasePending)
+        || pitchScrubPreview.loopBuffer.getNumSamples() <= 8
+        || pitchScrubPreview.loopBuffer.getNumChannels() <= 0
+        || sampleRate <= 0.0)
+        return;
+
+    const auto playbackRatio = (pitchScrubPreview.sourceSampleRate > 0.0)
+        ? (pitchScrubPreview.sourceSampleRate / sampleRate)
+        : 1.0;
+    const double readIncrement = playbackRatio;
+    const int loopChannels = pitchScrubPreview.loopBuffer.getNumChannels();
+    const int outputChannels = buffer.getNumChannels();
+    const int numSamples = buffer.getNumSamples();
+    if (pitchScrubInputBuffer.getNumChannels() < loopChannels
+        || pitchScrubInputBuffer.getNumSamples() < numSamples)
+    {
+        pitchScrubInputBuffer.setSize (loopChannels, numSamples, false, true, true);
+    }
+    if (pitchScrubOutputBuffer.getNumChannels() < loopChannels
+        || pitchScrubOutputBuffer.getNumSamples() < numSamples)
+    {
+        pitchScrubOutputBuffer.setSize (loopChannels, numSamples, false, true, true);
+    }
+    pitchScrubInputBuffer.clear (0, numSamples);
+    pitchScrubOutputBuffer.clear (0, numSamples);
+
+    const float startStep = pitchScrubPreview.targetGain
+        / static_cast<float> (std::max (1, static_cast<int> (std::round (sampleRate * pitchScrubPreview.startRampMs * 0.001))));
+    const float stopStep = std::max (pitchScrubPreview.gain, 0.001f)
+        / static_cast<float> (std::max (1, static_cast<int> (std::round (sampleRate * pitchScrubPreview.stopRampMs * 0.001))));
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        for (int ch = 0; ch < loopChannels; ++ch)
+        {
+            pitchScrubInputBuffer.setSample (ch, i, sampleLoopBufferLocal (pitchScrubPreview.loopBuffer,
+                                                                           ch,
+                                                                           pitchScrubPreview.readPosition,
+                                                                           pitchScrubPreview.loopCrossfadeSamples));
+        }
+
+        pitchScrubPreview.readPosition += readIncrement;
+        const double loopLength = static_cast<double> (pitchScrubPreview.loopBuffer.getNumSamples());
+        if (loopLength > 0.0 && pitchScrubPreview.readPosition >= loopLength)
+            pitchScrubPreview.readPosition = std::fmod (pitchScrubPreview.readPosition, loopLength);
+    }
+
+    if (! pitchScrubStretcherPrepared)
+    {
+        pitchScrubStretcher.presetCheaper (loopChannels, static_cast<float> (sampleRate));
+        pitchScrubStretcherPrepared = true;
+    }
+
+    const float pitchRatio = juce::jlimit (0.25f, 4.0f, pitchScrubPreview.pitchRatio);
+    const float tonalityLimitNorm = static_cast<float> (
+        sampleRate > 0.0
+            ? getPitchOnlyPreviewTonalityLimitHz (pitchRatio < 1.0f) / sampleRate
+            : 0.0);
+    pitchScrubStretcher.setTransposeFactor (pitchRatio, tonalityLimitNorm);
+    pitchScrubStretcher.setFormantFactor (1.0f, true);
+
+    if (static_cast<int> (pitchPreviewInPtrs.size()) < loopChannels)
+    {
+        pitchPreviewInPtrs.resize (static_cast<size_t> (loopChannels));
+        pitchPreviewOutPtrs.resize (static_cast<size_t> (loopChannels));
+    }
+    for (int ch = 0; ch < loopChannels; ++ch)
+    {
+        pitchPreviewInPtrs[static_cast<size_t> (ch)] = pitchScrubInputBuffer.getReadPointer (ch);
+        pitchPreviewOutPtrs[static_cast<size_t> (ch)] = pitchScrubOutputBuffer.getWritePointer (ch);
+    }
+    pitchScrubStretcher.process (pitchPreviewInPtrs, numSamples, pitchPreviewOutPtrs, numSamples);
+
+    float peak = 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        if (pitchScrubPreview.releasePending)
+            pitchScrubPreview.currentGain = std::max (0.0f, pitchScrubPreview.currentGain - stopStep);
+        else
+            pitchScrubPreview.currentGain = std::min (pitchScrubPreview.targetGain, pitchScrubPreview.currentGain + startStep);
+
+        for (int ch = 0; ch < outputChannels; ++ch)
+        {
+            const int loopChannel = juce::jmin (ch, loopChannels - 1);
+            const float sample = pitchScrubOutputBuffer.getSample (loopChannel, i) * pitchScrubPreview.currentGain;
+            buffer.addSample (ch, i, sample);
+            peak = juce::jmax (peak, std::abs (sample));
+        }
+    }
+
+    pitchScrubPreview.lastPeak = peak;
+    pitchScrubPreview.lastRenderWallTimeMs = juce::Time::getMillisecondCounterHiRes();
+    pitchScrubPreview.mixedCallbackCount += 1;
+    pitchScrubPreview.mixedSampleCount += numSamples;
+    pitchScrubPreview.firstCallbackServiced = true;
+
+    pitchScrubPreviewStatus.active = pitchScrubPreview.active;
+    pitchScrubPreviewStatus.releasePending = pitchScrubPreview.releasePending;
+    pitchScrubPreviewStatus.audible = pitchScrubPreview.currentGain > 0.0001f && peak > 1.0e-4f;
+    pitchScrubPreview.firstDragAudible = pitchScrubPreview.firstDragAudible || pitchScrubPreviewStatus.audible;
+    pitchScrubPreviewStatus.previewArmed = pitchScrubPreview.active || pitchScrubPreview.releasePending;
+    pitchScrubPreviewStatus.firstCallbackServiced = pitchScrubPreview.firstCallbackServiced;
+    pitchScrubPreviewStatus.firstDragAudible = pitchScrubPreview.firstDragAudible;
+    pitchScrubPreviewStatus.trackId = pitchScrubPreview.trackId;
+    pitchScrubPreviewStatus.clipId = pitchScrubPreview.clipId;
+    pitchScrubPreviewStatus.pitchRatio = pitchScrubPreview.pitchRatio;
+    pitchScrubPreviewStatus.basePitchHz = pitchScrubPreview.basePitchHz;
+    pitchScrubPreviewStatus.currentGain = pitchScrubPreview.currentGain;
+    pitchScrubPreviewStatus.targetGain = pitchScrubPreview.targetGain;
+    pitchScrubPreviewStatus.repeatStability = pitchScrubPreview.repeatStability;
+    pitchScrubPreviewStatus.lastPeak = peak;
+    pitchScrubPreviewStatus.loopDurationMs = 1000.0 * std::max (0.0, pitchScrubPreview.loopEndSec - pitchScrubPreview.loopStartSec);
+    pitchScrubPreviewStatus.lastRenderWallTimeMs = pitchScrubPreview.lastRenderWallTimeMs;
+    pitchScrubPreviewStatus.mixedCallbackCount = pitchScrubPreview.mixedCallbackCount;
+    pitchScrubPreviewStatus.mixedSampleCount = pitchScrubPreview.mixedSampleCount;
+    pitchScrubPreviewStatus.renderMethod = "formant_preserving_stretch";
+
+    if (pitchScrubPreview.releasePending && pitchScrubPreview.currentGain <= 1.0e-5f)
+    {
+        pitchScrubPreview.active = false;
+        pitchScrubPreview.releasePending = false;
+        pitchScrubPreview.currentGain = 0.0f;
+        pitchScrubPreview.targetGain = 0.0f;
+        pitchScrubPreviewStatus.active = false;
+        pitchScrubPreviewStatus.releasePending = false;
+        pitchScrubPreviewStatus.previewArmed = false;
+        pitchScrubStretcherPrepared = false;
+    }
+}
+#if defined(_MSC_VER)
+ #pragma warning(pop)
+#endif
+
+PlaybackEngine::PitchScrubPreviewStatus PlaybackEngine::getPitchScrubPreviewStatus (const juce::String& clipId) const
+{
+    const juce::ScopedLock sl (lock);
+    if (clipId.isNotEmpty() && pitchScrubPreviewStatus.clipId != clipId)
+        return {};
+    return pitchScrubPreviewStatus;
+}
+
+PlaybackEngine::PitchPreviewRoutingStatus PlaybackEngine::getPitchPreviewRoutingStatus (const juce::String& clipId) const
+{
+    const juce::ScopedLock sl (lock);
+    PitchPreviewRoutingStatus status;
+    const bool queryAll = clipId.isEmpty();
+    status.scrubPreviewActive = (pitchScrubPreview.active || pitchScrubPreview.releasePending)
+        && (queryAll || pitchScrubPreview.clipId == clipId);
+    status.clipLivePreviewActive = queryAll
+        ? ! clipPitchPreviews.empty()
+        : clipPitchPreviews.find (clipId) != clipPitchPreviews.end();
+    status.renderedSegmentActive = queryAll
+        ? ! renderedPreviewSegments.empty()
+        : renderedPreviewSegments.find (clipId) != renderedPreviewSegments.end();
+    status.correctedSourceActive = queryAll
+        ? ! pitchCorrectedFiles.empty()
+        : pitchCorrectedFiles.find (clipId) != pitchCorrectedFiles.end();
+
+    if (status.renderedSegmentActive)
+        status.monitorMode = "rendered_segment";
+    else if (status.scrubPreviewActive)
+        status.monitorMode = "scrub";
+    else if (status.clipLivePreviewActive)
+        status.monitorMode = "clip_live_preview";
+    else if (status.correctedSourceActive)
+        status.monitorMode = "corrected_source";
+    else
+        status.monitorMode = "none";
+
+    return status;
+}
+
 float PlaybackEngine::lookupPitchRatio (const std::vector<PitchCorrectionSegment>& segments, double timeInClip)
 {
     // Binary search could be used for large segment lists, but linear is fine for typical note counts
@@ -532,6 +1116,10 @@ float PlaybackEngine::lookupPitchRatio (const std::vector<PitchCorrectionSegment
     return 1.0f; // No correction at this time position
 }
 
+#if defined(_MSC_VER)
+ #pragma warning(push)
+ #pragma warning(disable: 4244 4267 4305 4456 4702)
+#endif
 void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                                      juce::AudioBuffer<float>& buffer,
                                      double currentTime,
@@ -575,6 +1163,264 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             continue;  // Clip not active in this window
         ++overlappingClipCount;
 
+        {
+        const int clipOutputStart = juce::jlimit (0, numSamples,
+            static_cast<int> (std::ceil ((clip.startTime - currentTime) * sampleRate - 1.0e-9)));
+        const int clipOutputEnd = juce::jlimit (clipOutputStart, numSamples,
+            static_cast<int> (std::ceil ((clipEndTime - currentTime) * sampleRate - 1.0e-9)));
+        if (clipOutputEnd <= clipOutputStart)
+            continue;
+
+        const std::vector<RenderedPreviewSegment>* renderedSegmentsForClip = nullptr;
+        if (clip.clipId.isNotEmpty())
+        {
+            auto segmentIt = renderedPreviewSegments.find (clip.clipId);
+            if (segmentIt != renderedPreviewSegments.end() && ! segmentIt->second.empty())
+                renderedSegmentsForClip = &segmentIt->second;
+        }
+
+        auto& chunkBoundaries = reusableChunkBoundaries;
+        chunkBoundaries.clear();
+        const auto requiredBoundaryCapacity = renderedSegmentsForClip != nullptr ? renderedSegmentsForClip->size() * 2 + 2 : 2;
+        if (chunkBoundaries.capacity() < requiredBoundaryCapacity)
+        {
+            chunkBoundaries.reserve (requiredBoundaryCapacity);
+            chunkBoundaryReserveCount.fetch_add (1, std::memory_order_relaxed);
+        }
+        chunkBoundaries.push_back (clipOutputStart);
+        chunkBoundaries.push_back (clipOutputEnd);
+        if (renderedSegmentsForClip != nullptr)
+        {
+            for (const auto& segment : *renderedSegmentsForClip)
+            {
+                const int segmentStart = juce::jlimit (clipOutputStart, clipOutputEnd,
+                    static_cast<int> (std::ceil ((clip.startTime + segment.startSec - currentTime) * sampleRate - 1.0e-9)));
+                const int segmentEnd = juce::jlimit (clipOutputStart, clipOutputEnd,
+                    static_cast<int> (std::ceil ((clip.startTime + segment.endSec - currentTime) * sampleRate - 1.0e-9)));
+                if (segmentStart > clipOutputStart && segmentStart < clipOutputEnd)
+                    chunkBoundaries.push_back (segmentStart);
+                if (segmentEnd > clipOutputStart && segmentEnd < clipOutputEnd)
+                    chunkBoundaries.push_back (segmentEnd);
+            }
+        }
+        std::sort (chunkBoundaries.begin(), chunkBoundaries.end());
+        chunkBoundaries.erase (std::unique (chunkBoundaries.begin(), chunkBoundaries.end()), chunkBoundaries.end());
+
+        const float clipGain = juce::Decibels::decibelsToGain (static_cast<float> (clip.volumeDB));
+        const std::vector<GainEnvelopePoint>* envPoints = nullptr;
+        if (clip.clipId.isNotEmpty())
+        {
+            auto envIt = gainEnvelopes.find (clip.envelopeKey);
+            if (envIt != gainEnvelopes.end() && ! envIt->second.empty())
+                envPoints = &envIt->second;
+        }
+
+        auto mixChunk = [&] (int outputStart, int requestedOutputSamples,
+                            const juce::File& playbackFile, double playbackOffset,
+                            bool usingRenderedPreviewSegment, bool usingCorrectedSource)
+        {
+            if (requestedOutputSamples <= 0)
+                return false;
+
+            auto* reader = getCachedReader (playbackFile);
+            if (reader == nullptr)
+            {
+                const int missingReaders = missingReaderCount.fetch_add (1, std::memory_order_relaxed) + 1;
+                logAudioPlayback ("fillTrackBuffer missingReader track=" + trackId
+                    + " clipId=" + clip.clipId
+                    + " file=" + playbackFile.getFullPathName()
+                    + " currentTime=" + juce::String (currentTime, 3)
+                    + " missingReaderCount=" + juce::String (missingReaders));
+                return false;
+            }
+
+            const double fileSampleRate = reader->sampleRate;
+            const double ratio = fileSampleRate / sampleRate;
+            double exactFileStart = juce::jmax (0.0, playbackOffset) * fileSampleRate;
+            const double roundedFileStart = std::round (exactFileStart);
+            if (std::abs (exactFileStart - roundedFileStart) < 1.0e-6)
+                exactFileStart = roundedFileStart;
+
+            const juce::int64 fileStartSample = static_cast<juce::int64> (std::floor (exactFileStart));
+            const juce::int64 readStartSample = fileStartSample > 0 ? fileStartSample - 1 : fileStartSample;
+            const int readStartOffset = static_cast<int> (fileStartSample - readStartSample);
+            const double fileStartFraction = exactFileStart - static_cast<double> (fileStartSample);
+            const double bufferStartPosition = static_cast<double> (readStartOffset) + fileStartFraction;
+            int outputSamples = requestedOutputSamples;
+            int fileSamplesToRead = static_cast<int> (std::ceil (bufferStartPosition + outputSamples * ratio)) + 3;
+            const juce::int64 fileSamplesAvailable = reader->lengthInSamples - readStartSample;
+            if (fileSamplesAvailable <= 0)
+                return false;
+            if (fileSamplesAvailable < fileSamplesToRead)
+            {
+                fileSamplesToRead = static_cast<int> (fileSamplesAvailable);
+                outputSamples = static_cast<int> (std::floor (
+                    (static_cast<double> (fileSamplesToRead - 1) - bufferStartPosition) / ratio));
+            }
+            if (outputSamples <= 0 || fileSamplesToRead <= 0)
+                return false;
+
+            const int readerChannels = static_cast<int> (reader->numChannels);
+            if (reusableFileBuffer.getNumChannels() < readerChannels
+                || reusableFileBuffer.getNumSamples() < fileSamplesToRead)
+            {
+                reusableFileBuffer.setSize (juce::jmax (readerChannels, reusableFileBuffer.getNumChannels()),
+                                            juce::jmax (fileSamplesToRead, reusableFileBuffer.getNumSamples()));
+                fileBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
+            }
+            reusableFileBuffer.clear (0, fileSamplesToRead);
+            reader->read (&reusableFileBuffer, 0, fileSamplesToRead, readStartSample, true, true);
+
+            const bool allowLivePitchPreviewForChunk = ! usingRenderedPreviewSegment && ! usingCorrectedSource;
+            const double chunkClipStart = currentTime + (static_cast<double> (outputStart) / sampleRate) - clip.startTime;
+
+            if (clip.clipId.isNotEmpty())
+            {
+                auto previewIt = clipPitchPreviews.find (clip.clipId);
+                if (previewIt != clipPitchPreviews.end() && previewIt->second != nullptr)
+                {
+                    juce::ScopedLock clipSl (previewIt->second->clipLock);
+                    auto& preview = *previewIt->second;
+                    const auto& previewData = preview.previewData;
+                    const double blockMidTime = chunkClipStart + (outputSamples * 0.5 / sampleRate);
+                    const bool withinPreviewWindow = blockMidTime >= previewData.previewStartSec
+                        && blockMidTime <= previewData.previewEndSec;
+                    const float pitchRatio = lookupPitchRatio (previewData.pitchSegments, blockMidTime);
+                    const bool pitchPreviewActive = allowLivePitchPreviewForChunk
+                        && withinPreviewWindow
+                        && std::abs (pitchRatio - 1.0f) > 0.001f;
+
+                    if (! pitchPreviewActive)
+                    {
+                        preview.lastPlaybackTime = -1.0;
+                    }
+                    else
+                    {
+                        if (! preview.prepared)
+                        {
+                            preview.stretcher.presetCheaper (readerChannels, static_cast<float> (fileSampleRate));
+                            preview.prepared = true;
+                        }
+                        if (preview.lastPlaybackTime < 0.0
+                            || std::abs (chunkClipStart - preview.lastPlaybackTime) > 0.1)
+                        {
+                            preview.stretcher.presetCheaper (readerChannels, static_cast<float> (fileSampleRate));
+                        }
+                        preview.lastPlaybackTime = chunkClipStart + (outputSamples / sampleRate);
+
+                        const float tonalityLimitNorm = static_cast<float> (
+                            fileSampleRate > 0.0
+                                ? getPitchOnlyPreviewTonalityLimitHz (pitchRatio < 1.0f) / fileSampleRate
+                                : 0.0);
+                        preview.stretcher.setTransposeFactor (pitchRatio, tonalityLimitNorm);
+                        preview.stretcher.setFormantFactor (1.0f, true);
+
+                        if (pitchShiftWorkBuffer.getNumSamples() < fileSamplesToRead)
+                        {
+                            pitchShiftWorkBuffer.setSize (readerChannels, fileSamplesToRead);
+                            pitchShiftWorkBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
+                        }
+                        for (int ch = 0; ch < readerChannels; ++ch)
+                        {
+                            pitchPreviewInPtrs[static_cast<size_t> (ch)] = reusableFileBuffer.getReadPointer (ch);
+                            pitchPreviewOutPtrs[static_cast<size_t> (ch)] = pitchShiftWorkBuffer.getWritePointer (ch);
+                        }
+                        preview.stretcher.process (pitchPreviewInPtrs, fileSamplesToRead, pitchPreviewOutPtrs, fileSamplesToRead);
+                        for (int ch = 0; ch < readerChannels; ++ch)
+                            reusableFileBuffer.copyFrom (ch, 0, pitchShiftWorkBuffer, ch, 0, fileSamplesToRead);
+                    }
+                }
+            }
+
+            const int outChannels = buffer.getNumChannels();
+            const int channelsToProcess = std::min (outChannels, readerChannels);
+            for (int i = 0; i < outputSamples; ++i)
+            {
+                const double filePos = bufferStartPosition + i * ratio;
+                const double sampleTimeInClip = chunkClipStart + (i / sampleRate);
+                float fadeGain = 1.0f;
+                if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
+                    fadeGain *= applyFadeCurve (static_cast<float> (sampleTimeInClip / clip.fadeIn), clip.fadeInCurve);
+                const double timeFromEnd = clip.duration - sampleTimeInClip;
+                if (clip.fadeOut > 0.0 && timeFromEnd < clip.fadeOut)
+                    fadeGain *= applyFadeCurve (static_cast<float> (timeFromEnd / clip.fadeOut), clip.fadeOutCurve);
+                const float envGain = envPoints ? interpolateGainEnvelope (*envPoints, sampleTimeInClip) : 1.0f;
+                const float totalGain = clipGain * fadeGain * envGain;
+
+                for (int ch = 0; ch < channelsToProcess; ++ch)
+                {
+                    const float sourceSample = sampleBufferCubic (reusableFileBuffer, ch, fileSamplesToRead, filePos);
+                    buffer.addSample (ch, outputStart + i, sourceSample * totalGain);
+                }
+            }
+
+            if (shouldLogDetailed)
+            {
+                logAudioPlayback ("fillTrackBuffer chunk track=" + trackId
+                    + " clipId=" + clip.clipId
+                    + " out=[" + juce::String (outputStart) + "," + juce::String (outputStart + outputSamples) + "]"
+                    + " clipStart=" + juce::String (chunkClipStart, 4)
+                    + " sourceType=" + juce::String (usingRenderedPreviewSegment ? "rendered_segment"
+                        : (usingCorrectedSource ? "corrected_source" : "original"))
+                    + " fileOffset=" + juce::String (playbackOffset, 4)
+                    + " src=shared_cubic_fractional");
+            }
+            return true;
+        };
+
+        bool mixedAnyChunk = false;
+        for (size_t boundaryIndex = 0; boundaryIndex + 1 < chunkBoundaries.size(); ++boundaryIndex)
+        {
+            const int chunkStart = chunkBoundaries[boundaryIndex];
+            const int chunkEnd = chunkBoundaries[boundaryIndex + 1];
+            if (chunkEnd <= chunkStart)
+                continue;
+
+            const double chunkClipMid = currentTime
+                + ((static_cast<double> (chunkStart + chunkEnd) * 0.5) / sampleRate)
+                - clip.startTime;
+            const RenderedPreviewSegment* activeSegment = nullptr;
+            if (renderedSegmentsForClip != nullptr)
+            {
+                for (const auto& segment : *renderedSegmentsForClip)
+                {
+                    if (chunkClipMid >= segment.startSec && chunkClipMid < segment.endSec)
+                    {
+                        activeSegment = &segment;
+                        break;
+                    }
+                }
+            }
+
+            const double chunkClipStart = currentTime + (static_cast<double> (chunkStart) / sampleRate) - clip.startTime;
+            juce::File playbackFile = clip.audioFile;
+            double playbackOffset = clip.offset + chunkClipStart;
+            bool usingRenderedPreviewSegment = false;
+            bool usingCorrectedSource = false;
+
+            if (activeSegment != nullptr)
+            {
+                playbackFile = activeSegment->audioFile;
+                playbackOffset = activeSegment->fileOffsetSec + (chunkClipStart - activeSegment->startSec);
+                usingRenderedPreviewSegment = true;
+            }
+            else if (clip.clipId.isNotEmpty())
+            {
+                auto correctedIt = pitchCorrectedFiles.find (clip.clipId);
+                usingCorrectedSource = correctedIt != pitchCorrectedFiles.end()
+                    && correctedIt->second.existsAsFile()
+                    && playbackFile == correctedIt->second;
+            }
+
+            mixedAnyChunk = mixChunk (chunkStart, chunkEnd - chunkStart, playbackFile, playbackOffset,
+                                      usingRenderedPreviewSegment, usingCorrectedSource)
+                || mixedAnyChunk;
+        }
+        if (mixedAnyChunk)
+            ++mixedClipCount;
+        }
+        continue;
+
         // Calculate read position within clip
         double offsetInClip = currentTime - clip.startTime;
         if (offsetInClip < 0)
@@ -601,9 +1447,10 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                     {
                         playbackFile = segment.audioFile;
                         usingRenderedPreviewSegment = true;
-                        // Preview segment files are rendered from their own local zero,
-                        // so map the clip-relative time back into that segment range.
-                        playbackOffset = juce::jmax(0.0, offsetInClip - segment.startSec);
+                        // Segment override files can either be local-zero window renders
+                        // or full-clip renders carrying only a covered region. fileOffsetSec
+                        // maps the clip-relative playhead back into the override file.
+                        playbackOffset = juce::jmax(0.0, offsetInClip - segment.startSec + segment.fileOffsetSec);
                         break;
                     }
                 }
@@ -741,24 +1588,30 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                     }
                     preview.lastPlaybackTime = clipTime + (fileSamplesToRead / fileSampleRate);
 
-                    preview.stretcher.setTransposeFactor (pitchRatio);
-                    // Match the old stable preview behavior: ordinary pitch edits
-                    // preserve timbre by compensating the pitch-induced formant shift.
-                    preview.stretcher.setFormantFactor (juce::jlimit (0.25f, 4.0f, 1.0f / pitchRatio), true);
+                    const float tonalityLimitNorm = static_cast<float> (
+                        fileSampleRate > 0.0
+                            ? getPitchOnlyPreviewTonalityLimitHz (pitchRatio < 1.0f) / fileSampleRate
+                            : 0.0);
+                    preview.stretcher.setTransposeFactor (pitchRatio, tonalityLimitNorm);
+                    // Keep the legacy live fallback in the same timbre family as the
+                    // note-local renderer: preserve formants directly instead of using
+                    // pitch-ratio compensation, which brightens upward edits and darkens
+                    // downward edits by construction.
+                    preview.stretcher.setFormantFactor (1.0f, true);
 
                     // Ensure pitch shift work buffer is large enough
                     if (pitchShiftWorkBuffer.getNumSamples() < fileSamplesToRead)
                         pitchShiftWorkBuffer.setSize (readerChannels, fileSamplesToRead);
 
-                    std::vector<const float*> inPtrs  (static_cast<size_t> (readerChannels));
-                    std::vector<float*>       outPtrs (static_cast<size_t> (readerChannels));
+                    // Use pre-allocated pointer vectors — avoids heap alloc per clip per callback.
+                    // readerChannels is always 1 or 2; pitchPreviewInPtrs/OutPtrs are sized to 2.
                     for (int ch = 0; ch < readerChannels; ++ch)
                     {
-                        inPtrs[static_cast<size_t> (ch)]  = reusableFileBuffer.getReadPointer (ch);
-                        outPtrs[static_cast<size_t> (ch)] = pitchShiftWorkBuffer.getWritePointer (ch);
+                        pitchPreviewInPtrs[static_cast<size_t> (ch)]  = reusableFileBuffer.getReadPointer (ch);
+                        pitchPreviewOutPtrs[static_cast<size_t> (ch)] = pitchShiftWorkBuffer.getWritePointer (ch);
                     }
 
-                    preview.stretcher.process (inPtrs, fileSamplesToRead, outPtrs, fileSamplesToRead);
+                    preview.stretcher.process (pitchPreviewInPtrs, fileSamplesToRead, pitchPreviewOutPtrs, fileSamplesToRead);
 
                     for (int ch = 0; ch < readerChannels; ++ch)
                         reusableFileBuffer.copyFrom (ch, 0, pitchShiftWorkBuffer, ch, 0, fileSamplesToRead);
@@ -775,8 +1628,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         const std::vector<GainEnvelopePoint>* envPoints = nullptr;
         if (clip.clipId.isNotEmpty())
         {
-            juce::String envKey = clip.trackId + "::" + clip.clipId;
-            auto envIt = gainEnvelopes.find(envKey);
+            auto envIt = gainEnvelopes.find(clip.envelopeKey);
             if (envIt != gainEnvelopes.end() && !envIt->second.empty())
                 envPoints = &envIt->second;
         }
@@ -879,3 +1731,6 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             + (overlappingClipCount > 0 && mixedClipCount == 0 ? " WARNING_noMixedClips" : ""));
     }
 }
+#if defined(_MSC_VER)
+ #pragma warning(pop)
+#endif
