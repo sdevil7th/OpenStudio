@@ -89,7 +89,17 @@ jobs:
             ~/Library/Caches/pip
           key: macos-arm64-${{ env.VERSION }}-${{ env.AI_RUNTIME_STANDALONE_RELEASE_TAG }}-${{ hashFiles('tools/ai-runtime-requirements-macos.txt') }}
 
+      - name: Cache packaged macOS runtime
+        id: cache-macos-runtime-package
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
+            dist/ai-runtime/reports/macos-arm64-size-report.json
+          key: macos-arm64-package-${{ env.VERSION }}-${{ env.AI_RUNTIME_STANDALONE_RELEASE_TAG }}-${{ env.AI_RUNTIME_STANDALONE_PYTHON_VERSION }}-${{ env.AI_RUNTIME_STANDALONE_FLAVOR }}-${{ hashFiles('tools/ai-runtime-requirements-macos.txt', 'tools/prepare-ai-runtime.ps1', 'tools/package-ai-runtime.ps1', 'tools/validate-ai-runtime-package.ps1', 'tools/ai_runtime_probe.py') }}
+
       - name: Prepare macOS arm64 runtime
+        if: steps.cache-macos-runtime-package.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/ai-runtime/reports | Out-Null
