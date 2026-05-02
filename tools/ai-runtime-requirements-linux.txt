@@ -1,7 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 audio-separator[cpu]==0.41.1
-torch
-torchvision
-torchaudio
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+torchaudio==2.5.1+cpu
 torchsde
 numpy>=1.25.0
 einops
