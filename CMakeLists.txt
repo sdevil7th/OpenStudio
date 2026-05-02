@@ -396,6 +396,7 @@ endif()
 # ==============================================================================
 if(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
+    find_package(CURL REQUIRED)
     pkg_check_modules(ALSA alsa)
     pkg_check_modules(JACK jack)
     # webkit2gtk-4.1 is standard on Ubuntu 24.04+; fall back to 4.0 for older distros
@@ -420,6 +421,7 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(OpenStudio PRIVATE ${GTK_LIBRARIES})
         target_include_directories(OpenStudio PRIVATE ${GTK_INCLUDE_DIRS})
     endif()
+    target_link_libraries(OpenStudio PRIVATE CURL::libcurl)
 endif()
 
 # Generate the JuceHeader.h
