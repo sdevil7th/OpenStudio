@@ -144,34 +144,6 @@ export interface PitchPlaybackRouteTraceEntry {
   correctedSourceActiveAtTime?: boolean;
 }
 
-export interface ExternalPitchRendererStatus {
-  selectedRenderer: "rubberband_hq" | "native_hq_v4" | "unavailable" | string;
-  selectedBackendId?: string;
-  pitchRenderStrategy: string;
-  pitchRenderProductPath?: "preview" | "offline_hq" | "ara_plugin" | string;
-  backendId?: string;
-  displayName?: string;
-  productPath?: string;
-  capabilities?: Record<string, unknown>;
-  available?: boolean;
-  integrationKind?: string;
-  promotionStatus?: string;
-  selectedReason?: string;
-  backendStatuses?: ExternalPitchRendererStatus[];
-  externalPitchRendererAvailable: boolean;
-  externalPitchRendererPath?: string;
-  executablePath?: string;
-  version?: string;
-  failureCode?: string;
-  failureMessage?: string;
-  diagnostics?: unknown;
-  overridePath?: string;
-  overridePathExists?: boolean;
-  versionProbeSucceeded?: boolean;
-  versionProbeExitCode?: number;
-  versionProbeOutput?: string;
-}
-
 export interface PitchRegressionJob {
   jobType?: PitchRegressionJobType;
   projectFixturePath?: string;
@@ -303,12 +275,10 @@ export interface PitchRegressionResult {
   pitchRenderBackendFailureCode?: string;
   pitchRenderBackendCapabilities?: unknown;
   pitchRenderBackendDiagnostics?: unknown;
-  pitchRenderBackendFallbackUsed?: boolean;
   pitchRenderCommitPolicy?: string;
   pitchRenderDryProtectedSamples?: number;
   pitchRenderContextDurationSec?: number;
   pitchRenderCommitDurationSec?: number;
-  pitchRenderBackendProbeCached?: boolean;
   pitchRenderJobStartDelayMs?: number;
   pitchRenderDirection?: string;
   downshiftFormantGuardUsed?: boolean;
@@ -368,14 +338,10 @@ export interface PitchRegressionResult {
   noteHqEntryPitchHandoffBodyMs?: number;
   noteHqEntryPitchSlopeJumpStPerSec?: number;
   noteHqEntryPitchAccelerationLimited?: boolean;
-  rubberBandQualityPromoted?: boolean;
   phraseHqRenderUsed?: boolean;
   phraseHqExpandedToFullClip?: boolean;
-  phraseHqExternalUsed?: boolean;
-  phraseHqExternalRendererPath?: string;
   phraseHqStartSec?: number;
   phraseHqEndSec?: number;
-  externalPitchRendererAvailable?: boolean;
   bridgeUsed?: boolean;
   bridgeFallbackUsed?: boolean;
   bridgeStartSec?: number;
@@ -779,6 +745,10 @@ export interface InstallAiToolsResponse {
   error?: string;
   message?: string;
   status?: AiToolsStatus;
+}
+
+export interface InstallAiToolsOptions {
+  userConfirmedDownload?: boolean;
 }
 
 export interface ResetAiToolsResponse {
@@ -1580,7 +1550,6 @@ declare global {
         stopPitchScrubPreview?: (clipId: string) => Promise<boolean>;
         getPitchScrubPreviewStatus?: (clipId?: string) => Promise<PitchScrubPreviewStatus>;
         getPitchPreviewRoutingStatus?: (clipId?: string) => Promise<PitchPreviewRoutingStatus>;
-        getExternalPitchRendererStatus?: () => Promise<ExternalPitchRendererStatus>;
         setClipPitchPreview?: (clipId: string, payload: ClipPitchPreviewPayload) => Promise<boolean>;
         clearClipPitchPreview?: (clipId: string) => Promise<boolean>;
         clearClipRenderedPreviewSegments?: (clipId: string) => Promise<boolean>;
@@ -1592,7 +1561,7 @@ declare global {
         isStemSeparationAvailable?: () => Promise<boolean>;
         getAiToolsStatus?: () => Promise<AiToolsStatus>;
         refreshAiToolsStatus?: () => Promise<AiToolsStatus>;
-        installAiTools?: () => Promise<InstallAiToolsResponse>;
+        installAiTools?: (userConfirmedDownload?: boolean) => Promise<InstallAiToolsResponse>;
         resetAiTools?: () => Promise<ResetAiToolsResponse>;
         separateStemsAsync?: (trackId: string, clipId: string, optionsJSON: string) => Promise<{ started: boolean; error?: string; cached?: boolean }>;
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
@@ -4801,12 +4770,6 @@ class NativeBridge {
     return null;
   }
 
-  async getExternalPitchRendererStatus(): Promise<ExternalPitchRendererStatus | null> {
-    if (this.isNative && window.__JUCE__?.backend.getExternalPitchRendererStatus)
-      return await window.__JUCE__.backend.getExternalPitchRendererStatus();
-    return null;
-  }
-
   /** Set real-time pitch/formant preview state for a clip */
   async setClipPitchPreview(clipId: string, payload: ClipPitchPreviewPayload): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setClipPitchPreview)
@@ -4879,9 +4842,9 @@ class NativeBridge {
     return this.getAiToolsStatus();
   }
 
-  async installAiTools(): Promise<InstallAiToolsResponse> {
+  async installAiTools(options: InstallAiToolsOptions = {}): Promise<InstallAiToolsResponse> {
     if (this.isNative && window.__JUCE__?.backend.installAiTools) {
-      return await window.__JUCE__.backend.installAiTools();
+      return await window.__JUCE__.backend.installAiTools(Boolean(options.userConfirmedDownload));
     }
 
     return {

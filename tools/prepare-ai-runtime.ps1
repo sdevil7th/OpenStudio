@@ -348,7 +348,7 @@ function Expand-StandaloneArchive {
 function Get-PipInstallArguments {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("windows", "macos")]
+        [ValidateSet("windows", "macos", "linux")]
         [string]$TargetPlatform,
 
         [Parameter(Mandatory = $true)]
@@ -383,7 +383,7 @@ function Get-PipInstallArguments {
 function Resolve-RequirementsFile {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("windows", "macos")]
+        [ValidateSet("windows", "macos", "linux")]
         [string]$TargetPlatform,
 
         [Parameter(Mandatory = $true)]
@@ -398,6 +398,7 @@ function Resolve-RequirementsFile {
     $preferredFile = switch ($TargetPlatform) {
         "windows" { Resolve-AbsolutePath -PathValue "tools/ai-runtime-requirements-windows.txt" }
         "macos"   { Resolve-AbsolutePath -PathValue "tools/ai-runtime-requirements-macos.txt" }
+        "linux"   { Resolve-AbsolutePath -PathValue "tools/ai-runtime-requirements-linux.txt" }
         default   { $resolved }
     }
 
@@ -411,7 +412,7 @@ function Resolve-RequirementsFile {
 function Get-DefaultRuntimeFamily {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("windows", "macos")]
+        [ValidateSet("windows", "macos", "linux")]
         [string]$TargetPlatform,
 
         [Parameter(Mandatory = $true)]
@@ -433,6 +434,12 @@ function Get-DefaultRuntimeFamily {
         }
         "macos/arm64" { return "macos-arm64" }
         "macos/x64"   { return "macos-x64" }
+        "linux/x64" {
+            if ($requirementsName -like "*linux-cuda*") { return "linux-cuda-x64" }
+            if ($requirementsName -like "*linux-rocm*") { return "linux-rocm-x64" }
+            return "linux-x64"
+        }
+        "linux/arm64" { return "linux-arm64" }
         default       { return "$TargetPlatform-$TargetArchitecture" }
     }
 }
@@ -497,6 +504,15 @@ function Optimize-RuntimePayload {
     }
     if (-not (Test-Path $sitePackages)) {
         $sitePackages = Join-Path $RuntimeRootPath "lib/python3.10/site-packages"
+    }
+    if (-not (Test-Path $sitePackages)) {
+        $pythonSitePackages = Get-ChildItem -LiteralPath (Join-Path $RuntimeRootPath "lib") -Directory -Filter "python*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "site-packages" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+        if ($pythonSitePackages) {
+            $sitePackages = $pythonSitePackages
+        }
     }
 
     if (-not (Test-Path $sitePackages)) {

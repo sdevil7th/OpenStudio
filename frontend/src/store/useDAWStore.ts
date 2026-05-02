@@ -26,6 +26,10 @@ import { renderQueueActions } from "./actions/renderQueue";
 import { quantizeActions } from "./actions/quantize";
 import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../data/aiWorkflows";
 
+export interface InstallAiToolsOptions {
+  userConfirmedDownload?: boolean;
+}
+
 
 // Module-level helpers moved to store/actions/: _editSnapshots → tracks.ts,
 // syncAutomationLaneToBackend → automation.ts, syncTempoMarkersToBackend → markers.ts,
@@ -1415,7 +1419,7 @@ interface DAWActions {
   reopenStemSeparation: () => void;
   refreshAiToolsStatus: (force?: boolean) => Promise<AiToolsStatus>;
   applyAiToolsStatusUpdate: (status: AiToolsStatus) => void;
-  installAiTools: () => Promise<void>;
+  installAiTools: (options?: InstallAiToolsOptions) => Promise<void>;
   resetAiTools: () => Promise<void>;
   cancelAiToolsInstall: () => Promise<void>;
   completeStemSeparation: (sourceTrackId: string, sourceClipId: string, clipName: string,
@@ -2526,7 +2530,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         aiToolsStatusLastUpdatedAt: Date.now(),
       });
     },
-    installAiTools: async () => {
+    installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
         const aiToolsFullyReady = currentStatus.available && isMusicGenerationFullyReady(currentStatus);
         if (currentStatus.installInProgress || aiToolsFullyReady) return;
@@ -2539,6 +2543,12 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
         if (currentStatus.state === "pythonMissing") {
           get().openAiToolsSetup();
+          return;
+        }
+
+        if (!options.userConfirmedDownload) {
+          get().openAiToolsSetup();
+          get().showToast("Confirm the AI Tools download before setup starts.", "info");
           return;
         }
 
@@ -2574,7 +2584,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       });
 
       try {
-        const result = await nativeBridge.installAiTools();
+        const result = await nativeBridge.installAiTools({ userConfirmedDownload: true });
         if (result.status) {
           get().applyAiToolsStatusUpdate(result.status);
         } else {

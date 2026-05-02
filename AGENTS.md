@@ -51,8 +51,7 @@ Studio13-v3/
 │   ├── PitchDetector.h/cpp      # Low-level YIN pitch detection algorithm
 │   ├── PitchMapper.h/cpp        # Maps detected pitch to corrected pitch (scale/key snapping)
 │   ├── PitchShifter.h/cpp       # Phase vocoder pitch shifter (FFT 2048, hop 512, FIFO-based)
-│   ├── PitchResynthesizer.h/cpp # Offline pitch correction: builds correction curve, applies via RubberBand (default), WORLD, or phase vocoder
-│   ├── RubberBandShifter.h/cpp  # Rubber Band Library R3 wrapper: multi-channel, per-block pitch ratios, formant preservation
+│   ├── PitchResynthesizer.h/cpp # Offline graphical pitch correction via native VSF pitch-only renderer
 │   ├── FormantPreserver.h/cpp   # WORLD vocoder (DIO+StoneMask+CheapTrick+D4C) for formant-preserving pitch shift (fallback)
 │   ├── PolyPitchDetector.h/cpp  # Polyphonic pitch detection via Basic-Pitch ONNX model
 │   ├── PolyResynthesizer.h/cpp  # Polyphonic pipeline: STFT→Wiener masks→per-note shift→accumulate→ISTFT
@@ -225,9 +224,8 @@ The pitch editor enables vocal pitch correction with both real-time (auto-tune s
 Monophonic graphical pitch pipeline:
   PitchAnalyzer (YIN) -> PitchNotes -> AudioEngine::applyPitchCorrection() -> selected native renderer branch
 
-Legacy/diagnostic engines:
-  Rubber Band, WORLD, phase-vocoder, and native experimental branches may exist side by side.
-  Check the active renderer branch in code and result JSON before assuming which engine is in use.
+Graphical offline apply:
+  Native VSF pitch-only rendering is the production path; historical renderer research lives in docs only.
 
 Polyphonic pipeline:
   PolyPitchDetector (Basic-Pitch ONNX) -> PolyNotes -> HarmonicMaskGenerator (Wiener) -> SpectralPitchShifter -> PolyResynthesizer
@@ -246,9 +244,7 @@ Real-time corrector:
    - Runs the selected renderer branch and composites the corrected region back into the clip
    - Deletes old output file, writes new rotating output file → `PlaybackEngine::replaceClipAudioFile()` swaps it in (resets `clip.offset = 0`)
 
-**Rubber Band Library**: Available as a legacy/diagnostic/benchmark engine when the current code path enables it. Do not assume Rubber Band is the production default; verify `actualRendererBranch`, related env flags, and result diagnostics first. Rubber Band has GPL v2+ license implications, so packaging/bundling decisions must be explicit.
-
-**PitchResynthesizer engines** (`PitchEngine` enum): `RubberBand` (default, native stereo, high quality), `WorldVocoder` (WORLD, mono-only, speech-oriented fallback), `PhaseVocoder` (basic, no formant preservation).
+**PitchResynthesizer engine**: graphical offline pitch apply uses the native VSF pitch-only path. Preview/scrub audio and the realtime pitch-corrector FX use Signalsmith Stretch directly.
 
 **PitchShifter FIFO latency**: The phase vocoder has 2048-sample FIFO latency. The first fftSize output samples are zeros. `PitchResynthesizer` compensates by flushing the FIFO with silence and trimming the latency from the output.
 

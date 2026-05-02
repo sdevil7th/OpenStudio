@@ -25,6 +25,7 @@
 #include "AITrackEngine.h"
 #include <vector>
 #include <memory>
+#include <functional>
 // ... (skip lines) ...
 
 class AudioEngine  : public juce::AudioIODeviceCallback,
@@ -481,7 +482,6 @@ public:
     bool stopPitchScrubPreview(const juce::String& clipId);
     juce::var getPitchScrubPreviewStatus(const juce::String& clipId = {});
     juce::var getPitchPreviewRoutingStatus(const juce::String& clipId = {});
-    juce::var getExternalPitchRendererStatus() const;
 
     // Polyphonic pitch detection (Phase 6)
     juce::var analyzePolyphonic(const juce::String& trackId, const juce::String& clipId);
@@ -497,7 +497,7 @@ public:
     bool isStemSeparationAvailable() const;
     juce::var getAiToolsStatus();
     juce::var refreshAiToolsStatus();
-    juce::var installAiTools();
+    juce::var installAiTools(bool userConfirmedDownload);
     juce::var resetAiTools();
     juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
     juce::var getStemSeparationProgress();
@@ -626,6 +626,10 @@ private:
     // Device settings persistence
     void saveDeviceSettings();
     void loadDeviceSettings();
+    void loadDeviceSettingsWithChannelCounts(int inputChannels, int outputChannels);
+    bool isMicrophonePermissionGrantedForInput() const;
+    void requestMicrophonePermissionIfNeeded(std::function<void(bool)> completion);
+    void applyAudioDeviceSetup(const juce::String& type, const juce::String& input, const juce::String& output, double sampleRate, int bufferSize);
     juce::File getDeviceSettingsFile() const;
 
     // MIDI message routing (Phase 2)

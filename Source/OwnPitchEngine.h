@@ -125,6 +125,16 @@ public:
         juce::String vocalSourceFilterFallbackReason;
         double vocalSourceFilterEntryDryMs = 0.0;
         double vocalSourceFilterExitDryMs = 0.0;
+        double vocalSourceFilterResidualMixScale = 1.0;
+        bool vocalSourceFilterEpochInterpolationUsed = false;
+        double vocalSourceFilterEpochInterpolationStrength = 0.0;
+        double vocalSourceFilterGrainRadiusScale = 1.0;
+        double vocalSourceFilterUpPresenceTrimDb = 0.0;
+        double vocalSourceFilterUpPresenceHz = 0.0;
+        double vocalSourceFilterDownNasalTrimDb = 0.0;
+        double vocalSourceFilterDownNasalHz = 0.0;
+        double vocalSourceFilterDownBodyCompDb = 0.0;
+        double vocalSourceFilterDownBodyCompHz = 0.0;
     };
 
     OwnPitchEngine() = default;

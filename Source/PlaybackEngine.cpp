@@ -87,6 +87,40 @@ static float sampleLoopBufferLocal (const juce::AudioBuffer<float>& buffer,
 
     return value;
 }
+
+static float sampleBufferCubic (const juce::AudioBuffer<float>& buffer,
+                                int channel,
+                                int availableSamples,
+                                double position)
+{
+    if (availableSamples <= 0 || buffer.getNumChannels() <= 0)
+        return 0.0f;
+
+    const int safeChannel = juce::jlimit (0, buffer.getNumChannels() - 1, channel);
+    if (availableSamples == 1)
+        return buffer.getSample (safeChannel, 0);
+
+    const double clampedPosition = juce::jlimit (0.0,
+                                                 static_cast<double> (availableSamples - 1),
+                                                 position);
+    const int i1 = juce::jlimit (0, availableSamples - 1,
+                                 static_cast<int> (std::floor (clampedPosition)));
+    const int i0 = juce::jlimit (0, availableSamples - 1, i1 - 1);
+    const int i2 = juce::jlimit (0, availableSamples - 1, i1 + 1);
+    const int i3 = juce::jlimit (0, availableSamples - 1, i1 + 2);
+    const float t = static_cast<float> (clampedPosition - static_cast<double> (i1));
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float y0 = buffer.getSample (safeChannel, i0);
+    const float y1 = buffer.getSample (safeChannel, i1);
+    const float y2 = buffer.getSample (safeChannel, i2);
+    const float y3 = buffer.getSample (safeChannel, i3);
+
+    return 0.5f * ((2.0f * y1)
+        + (-y0 + y2) * t
+        + (2.0f * y0 - 5.0f * y1 + 4.0f * y2 - y3) * t2
+        + (-y0 + 3.0f * y1 - 3.0f * y2 + y3) * t3);
+}
 }
 
 float PlaybackEngine::applyFadeCurve(float t, int curveType)
@@ -1208,16 +1242,20 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 exactFileStart = roundedFileStart;
 
             const juce::int64 fileStartSample = static_cast<juce::int64> (std::floor (exactFileStart));
+            const juce::int64 readStartSample = fileStartSample > 0 ? fileStartSample - 1 : fileStartSample;
+            const int readStartOffset = static_cast<int> (fileStartSample - readStartSample);
             const double fileStartFraction = exactFileStart - static_cast<double> (fileStartSample);
+            const double bufferStartPosition = static_cast<double> (readStartOffset) + fileStartFraction;
             int outputSamples = requestedOutputSamples;
-            int fileSamplesToRead = static_cast<int> (std::ceil (fileStartFraction + outputSamples * ratio)) + 2;
-            const juce::int64 fileSamplesAvailable = reader->lengthInSamples - fileStartSample;
+            int fileSamplesToRead = static_cast<int> (std::ceil (bufferStartPosition + outputSamples * ratio)) + 3;
+            const juce::int64 fileSamplesAvailable = reader->lengthInSamples - readStartSample;
             if (fileSamplesAvailable <= 0)
                 return false;
             if (fileSamplesAvailable < fileSamplesToRead)
             {
                 fileSamplesToRead = static_cast<int> (fileSamplesAvailable);
-                outputSamples = static_cast<int> ((fileSamplesToRead - 1) / ratio);
+                outputSamples = static_cast<int> (std::floor (
+                    (static_cast<double> (fileSamplesToRead - 1) - bufferStartPosition) / ratio));
             }
             if (outputSamples <= 0 || fileSamplesToRead <= 0)
                 return false;
@@ -1231,7 +1269,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 fileBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
             }
             reusableFileBuffer.clear (0, fileSamplesToRead);
-            reader->read (&reusableFileBuffer, 0, fileSamplesToRead, fileStartSample, true, true);
+            reader->read (&reusableFileBuffer, 0, fileSamplesToRead, readStartSample, true, true);
 
             const bool allowLivePitchPreviewForChunk = ! usingRenderedPreviewSegment && ! usingCorrectedSource;
             const double chunkClipStart = currentTime + (static_cast<double> (outputStart) / sampleRate) - clip.startTime;
@@ -1296,60 +1334,23 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
             const int outChannels = buffer.getNumChannels();
             const int channelsToProcess = std::min (outChannels, readerChannels);
-            if (renderMode && ratio != 1.0)
+            for (int i = 0; i < outputSamples; ++i)
             {
-                if (renderResampleScratch.getNumChannels() < channelsToProcess
-                    || renderResampleScratch.getNumSamples() < outputSamples)
-                {
-                    renderResampleScratch.setSize (juce::jmax (channelsToProcess, renderResampleScratch.getNumChannels()),
-                                                   juce::jmax (outputSamples, renderResampleScratch.getNumSamples()));
-                    renderResampleScratchResizeCount.fetch_add (1, std::memory_order_relaxed);
-                }
+                const double filePos = bufferStartPosition + i * ratio;
+                const double sampleTimeInClip = chunkClipStart + (i / sampleRate);
+                float fadeGain = 1.0f;
+                if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
+                    fadeGain *= applyFadeCurve (static_cast<float> (sampleTimeInClip / clip.fadeIn), clip.fadeInCurve);
+                const double timeFromEnd = clip.duration - sampleTimeInClip;
+                if (clip.fadeOut > 0.0 && timeFromEnd < clip.fadeOut)
+                    fadeGain *= applyFadeCurve (static_cast<float> (timeFromEnd / clip.fadeOut), clip.fadeOutCurve);
+                const float envGain = envPoints ? interpolateGainEnvelope (*envPoints, sampleTimeInClip) : 1.0f;
+                const float totalGain = clipGain * fadeGain * envGain;
+
                 for (int ch = 0; ch < channelsToProcess; ++ch)
                 {
-                    auto& interpolator = (ch == 0) ? lagrangeInterpolatorL : lagrangeInterpolatorR;
-                    interpolator.reset();
-                    auto* resampledData = renderResampleScratch.getWritePointer (ch);
-                    interpolator.process (ratio, reusableFileBuffer.getReadPointer (ch),
-                                          resampledData, outputSamples);
-                    for (int i = 0; i < outputSamples; ++i)
-                    {
-                        const double sampleTimeInClip = chunkClipStart + (i / sampleRate);
-                        float fadeGain = 1.0f;
-                        if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
-                            fadeGain *= applyFadeCurve (static_cast<float> (sampleTimeInClip / clip.fadeIn), clip.fadeInCurve);
-                        const double timeFromEnd = clip.duration - sampleTimeInClip;
-                        if (clip.fadeOut > 0.0 && timeFromEnd < clip.fadeOut)
-                            fadeGain *= applyFadeCurve (static_cast<float> (timeFromEnd / clip.fadeOut), clip.fadeOutCurve);
-                        const float envGain = envPoints ? interpolateGainEnvelope (*envPoints, sampleTimeInClip) : 1.0f;
-                        buffer.addSample (ch, outputStart + i,
-                                          resampledData[i] * clipGain * fadeGain * envGain);
-                    }
-                }
-            }
-            else
-            {
-                for (int i = 0; i < outputSamples; ++i)
-                {
-                    const double filePos = fileStartFraction + i * ratio;
-                    const int idx = static_cast<int> (filePos);
-                    const float frac = static_cast<float> (filePos - idx);
-                    const double sampleTimeInClip = chunkClipStart + (i / sampleRate);
-                    float fadeGain = 1.0f;
-                    if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
-                        fadeGain *= applyFadeCurve (static_cast<float> (sampleTimeInClip / clip.fadeIn), clip.fadeInCurve);
-                    const double timeFromEnd = clip.duration - sampleTimeInClip;
-                    if (clip.fadeOut > 0.0 && timeFromEnd < clip.fadeOut)
-                        fadeGain *= applyFadeCurve (static_cast<float> (timeFromEnd / clip.fadeOut), clip.fadeOutCurve);
-                    const float envGain = envPoints ? interpolateGainEnvelope (*envPoints, sampleTimeInClip) : 1.0f;
-                    const float totalGain = clipGain * fadeGain * envGain;
-
-                    for (int ch = 0; ch < channelsToProcess; ++ch)
-                    {
-                        const float s0 = reusableFileBuffer.getSample (ch, idx);
-                        const float s1 = (idx + 1 < fileSamplesToRead) ? reusableFileBuffer.getSample (ch, idx + 1) : s0;
-                        buffer.addSample (ch, outputStart + i, (s0 + frac * (s1 - s0)) * totalGain);
-                    }
+                    const float sourceSample = sampleBufferCubic (reusableFileBuffer, ch, fileSamplesToRead, filePos);
+                    buffer.addSample (ch, outputStart + i, sourceSample * totalGain);
                 }
             }
 
@@ -1361,7 +1362,8 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                     + " clipStart=" + juce::String (chunkClipStart, 4)
                     + " sourceType=" + juce::String (usingRenderedPreviewSegment ? "rendered_segment"
                         : (usingCorrectedSource ? "corrected_source" : "original"))
-                    + " fileOffset=" + juce::String (playbackOffset, 4));
+                    + " fileOffset=" + juce::String (playbackOffset, 4)
+                    + " src=shared_cubic_fractional");
             }
             return true;
         };

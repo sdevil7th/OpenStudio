@@ -90,8 +90,8 @@ public:
     /** Schedule a background AI tools status refresh and return the current cached status. */
     juce::var refreshAiToolsStatus();
 
-    /** Start installing the optional AI tools into the user's app-data directory. */
-    juce::var installAiTools();
+    /** Start installing the optional AI tools into the user's app-data directory after explicit user confirmation. */
+    juce::var installAiTools (bool userConfirmedDownload);
 
     /** Remove installed AI runtime files, local models, and pinned ACE-Step caches. */
     juce::var resetAiTools();

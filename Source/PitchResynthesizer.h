@@ -9,8 +9,7 @@
  * PitchResynthesizer — Offline pitch correction from graphical edits.
  *
  * Takes original audio + edited notes, produces corrected audio.
- * Uses Signalsmith Stretch for pitch shifting — handles mono and stereo
- * natively, with formant preservation and clean phase handling.
+ * Uses the Studio13 native VSF renderer for graphical offline pitch-only edits.
  *
  * Non-destructive: original audio is never modified.
  */
@@ -74,6 +73,16 @@ public:
         juce::String vocalSourceFilterFallbackReason;
         double vocalSourceFilterEntryDryMs = 0.0;
         double vocalSourceFilterExitDryMs = 0.0;
+        double vocalSourceFilterResidualMixScale = 1.0;
+        bool vocalSourceFilterEpochInterpolationUsed = false;
+        double vocalSourceFilterEpochInterpolationStrength = 0.0;
+        double vocalSourceFilterGrainRadiusScale = 1.0;
+        double vocalSourceFilterUpPresenceTrimDb = 0.0;
+        double vocalSourceFilterUpPresenceHz = 0.0;
+        double vocalSourceFilterDownNasalTrimDb = 0.0;
+        double vocalSourceFilterDownNasalHz = 0.0;
+        double vocalSourceFilterDownBodyCompDb = 0.0;
+        double vocalSourceFilterDownBodyCompHz = 0.0;
         bool wsolaUsed = false;
         bool wsolaFallbackUsed = false;
         int wsolaEntryLagSamples = 0;
@@ -139,9 +148,7 @@ public:
 
     enum class PitchEngine
     {
-        Signalsmith,    // Signalsmith Stretch — default, high quality, stereo-native
-        WorldVocoder,   // WORLD fallback (mono only, kept for compatibility)
-        PhaseVocoder    // Basic phase vocoder fallback
+        NativeVsf
     };
 
     enum class RenderQuality
@@ -163,7 +170,7 @@ public:
         double sampleRate,
         const std::vector<PitchAnalyzer::PitchFrame>& frames,
         const std::vector<PitchAnalyzer::PitchNote>& notes,
-        PitchEngine engine = PitchEngine::Signalsmith,
+        PitchEngine engine = PitchEngine::NativeVsf,
         float globalFormantSemitones = 0.0f,
         RenderQuality renderQuality = RenderQuality::FinalHQ,
         std::function<bool()> shouldCancel = {});

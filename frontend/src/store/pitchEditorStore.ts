@@ -496,29 +496,16 @@ function getPitchCorrectionFailureMessage(data?: {
   hardFailReason?: string;
   fallbackReason?: string;
   pitchRenderBackendFailureCode?: string;
-  phraseHqRenderUsed?: boolean;
-  phraseHqExternalUsed?: boolean;
-  externalPitchRendererAvailable?: boolean;
 }) {
   const reason = (data?.hardFailReason || data?.fallbackReason || "").trim();
-  const externalRendererMissing = data?.phraseHqRenderUsed === true
-    && data?.phraseHqExternalUsed !== true
-    && data?.externalPitchRendererAvailable !== true;
-
-  if (externalRendererMissing
-    || data?.pitchRenderBackendFailureCode === "offline_hq.unavailable"
-    || /rubberband executable not found/i.test(reason)) {
-    return "HQ pitch renderer unavailable. Original audio kept.";
-  }
-
   return reason || "Pitch/formant apply failed";
 }
 
 function sanitizePitchEditorNotesForApply(notes: PitchNoteData[]) {
-  if (PITCH_EDITOR_FORMANT_EDITING_ENABLED) {
-    return cloneNotesSnapshot(notes);
-  }
-  return notes.map((note) => ({ ...note, formantShift: 0 }));
+  const formantSanitizedNotes = PITCH_EDITOR_FORMANT_EDITING_ENABLED
+    ? cloneNotesSnapshot(notes)
+    : notes.map((note) => ({ ...note, formantShift: 0 }));
+  return formantSanitizedNotes.map(applySampleMatchDownshiftDefaults);
 }
 
 function summarizeApplyRequest(notes: PitchNoteData[], globalFormantSt: number): ApplyRequestSummary {
@@ -576,6 +563,10 @@ const NOTE_HQ_DEFAULT_TRANSITION_OUT_MS = 60;
 const NOTE_HQ_HARD_BOUNDARY_TRANSITION_IN_MS = 24;
 const NOTE_HQ_HARD_BOUNDARY_TRANSITION_OUT_MS = 40;
 const NOTE_HQ_SOFT_BOUNDARY_TRANSITION_MS = 80;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_THRESHOLD_ST = -2.0;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_VIBRATO_DEPTH = 0.70;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_IN_MS = 80;
+const NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_OUT_MS = 100;
 const NOTE_HQ_NEXT_HEAD_OWNERSHIP_MS = 40;
 const MAX_NOTE_HQ_TRANSITION_MS = 140;
 const MAX_EDIT_ISLAND_GAP_SEC = 0.08;
@@ -600,6 +591,12 @@ function getNoteEffectiveTransitionMs(note: PitchNoteData, edge: "in" | "out") {
 }
 
 function getNoteHqBoundaryTransitionFloorMs(note: PitchNoteData, edge: "in" | "out") {
+  if (isSampleMatchDownshift(note)) {
+    return edge === "in"
+      ? NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_IN_MS
+      : NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_TRANSITION_OUT_MS;
+  }
+
   const kind = edge === "in" ? note.entryBoundaryKind : note.exitBoundaryKind;
   if (kind === "hard_word_like") {
     return edge === "in" ? NOTE_HQ_HARD_BOUNDARY_TRANSITION_IN_MS : NOTE_HQ_HARD_BOUNDARY_TRANSITION_OUT_MS;
@@ -631,6 +628,20 @@ function notesShareWordGroup(
 
 function getPitchShiftSemitones(note: Pick<PitchNoteData, "correctedPitch" | "detectedPitch">) {
   return note.correctedPitch - note.detectedPitch;
+}
+
+function isSampleMatchDownshift(note: Pick<PitchNoteData, "correctedPitch" | "detectedPitch">) {
+  return getPitchShiftSemitones(note) <= NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_THRESHOLD_ST;
+}
+
+function applySampleMatchDownshiftDefaults(note: PitchNoteData): PitchNoteData {
+  if (!isSampleMatchDownshift(note) || Math.abs(note.vibratoDepth - 1.0) > 0.01) {
+    return note;
+  }
+  return {
+    ...note,
+    vibratoDepth: NOTE_HQ_SAMPLE_MATCH_DOWNSHIFT_VIBRATO_DEPTH,
+  };
 }
 
 function sharesTransitionPair(
@@ -796,7 +807,7 @@ function buildEditedNoteWindow(notes: PitchNoteData[], clipDuration: number) {
 
   const upsertRequestNote = (note: PitchNoteData, patch?: Partial<PitchNoteData>) => {
     const existing = requestNotes.get(note.id) ?? { ...note };
-    const merged = { ...existing, ...patch };
+    const merged = applySampleMatchDownshiftDefaults({ ...existing, ...patch });
     requestNotes.set(note.id, merged);
     return merged;
   };
@@ -2828,8 +2839,6 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
       pitchRenderProductPath: data.pitchRenderProductPath ?? null,
       pitchRenderBackendId: data.pitchRenderBackendId ?? null,
       pitchRenderBackendFailureCode: data.pitchRenderBackendFailureCode ?? null,
-      pitchRenderBackendFallbackUsed: data.pitchRenderBackendFallbackUsed ?? null,
-      phraseHqExternalUsed: data.phraseHqExternalUsed ?? null,
     });
     return;
   }

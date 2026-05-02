@@ -23,12 +23,20 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 APP_NAME="$(basename "$APP_PATH")"
 STAGED_APP="$STAGING_DIR/$APP_NAME"
 DMG_PATH="$OUTPUT_DIR/OpenStudio-macOS.dmg"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+ENTITLEMENTS_PATH="${MACOS_ENTITLEMENTS_PATH:-$ROOT_DIR/packaging/macos/OpenStudio.entitlements}"
 
 ditto "$APP_PATH" "$STAGED_APP"
 ln -s /Applications "$STAGING_DIR/Applications"
 
 if [[ -n "${MACOS_CODESIGN_IDENTITY:-}" ]]; then
-  codesign --force --deep --timestamp --options runtime --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP"
+  if [[ -f "$ENTITLEMENTS_PATH" ]]; then
+    codesign --force --deep --timestamp --options runtime --entitlements "$ENTITLEMENTS_PATH" --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP"
+  else
+    echo "macOS entitlements file not found at $ENTITLEMENTS_PATH; signing without extra runtime permissions." >&2
+    codesign --force --deep --timestamp --options runtime --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP"
+  fi
   codesign --verify --deep --strict "$STAGED_APP"
   spctl --assess --type execute "$STAGED_APP"
 else

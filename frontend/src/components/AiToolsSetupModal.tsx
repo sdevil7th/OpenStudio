@@ -239,7 +239,7 @@ export default function AiToolsSetupModal() {
   };
 
   const handleRetry = async () => {
-    await installAiTools();
+    await installAiTools({ userConfirmedDownload: true });
   };
 
   const handleReset = async () => {
@@ -272,6 +272,11 @@ export default function AiToolsSetupModal() {
                 {isDownloadedRuntimeFlow ? "OpenStudio-managed runtime setup" : "Python-based setup"}
               </p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">{recommendationText}</p>
+              {!isInstallComplete ? (
+                <p className="text-xs text-daw-text-secondary leading-relaxed">
+                  Nothing downloads until you click <span className="text-daw-text font-medium">Download and Install</span>.
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -707,13 +712,13 @@ export default function AiToolsSetupModal() {
             ? "Continue"
             : isPartiallyReady
               ? "Retry Install"
-            : aiToolsStatus.installInProgress
+              : aiToolsStatus.installInProgress
               ? "Installing..."
               : isReconcilingInstallResult
                 ? "Checking Result..."
               : requiresExternalPython && isPythonMissing
                 ? "Retry After Python Install"
-                : "Retry Install"}
+                : "Download and Install"}
         </Button>
       </ModalFooter>
     </Modal>

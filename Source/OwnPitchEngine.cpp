@@ -35,6 +35,18 @@ static float getEnvFloat (const char* name, float fallback)
     return std::isfinite (parsed) ? parsed : fallback;
 }
 
+static bool getEnvBool (const char* name, bool fallback)
+{
+    const auto value = juce::SystemStats::getEnvironmentVariable (name, {}).trim().toLowerCase();
+    if (value.isEmpty())
+        return fallback;
+    if (value == "1" || value == "true" || value == "yes" || value == "on")
+        return true;
+    if (value == "0" || value == "false" || value == "no" || value == "off")
+        return false;
+    return fallback;
+}
+
 static juce::File getVsfLayerDumpDirectory()
 {
     auto path = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_VSF_LAYER_DUMP_DIR", {}).trim();
@@ -935,12 +947,7 @@ static float getTargetPitchRatioAtSample (
 
 static bool isHybridStructuralBranchRequested()
 {
-    const auto branch = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_PITCH_RENDERER_BRANCH", {})
-        .trim()
-        .toLowerCase();
-    return branch == "pitch_only_hybrid_structural"
-        || branch == "hybrid_structural"
-        || branch == "hybrid_struct";
+    return false;
 }
 
 static int findSustainedVoicedSample (
@@ -1716,6 +1723,22 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
     int totalVoicedSamples = 0;
     double residualMixSum = 0.0;
     int residualMixCount = 0;
+    double residualMixScaleSum = 0.0;
+    int residualMixScaleCount = 0;
+    bool anyEpochInterpolationUsed = false;
+    double epochInterpolationStrengthSum = 0.0;
+    int epochInterpolationStrengthCount = 0;
+    double grainRadiusScaleSum = 0.0;
+    int grainRadiusScaleCount = 0;
+    double upPresenceTrimDbSum = 0.0;
+    double upPresenceHzSum = 0.0;
+    int upPresenceCount = 0;
+    double downNasalTrimDbSum = 0.0;
+    double downNasalHzSum = 0.0;
+    int downNasalCount = 0;
+    double downBodyCompDbSum = 0.0;
+    double downBodyCompHzSum = 0.0;
+    int downBodyCompCount = 0;
     int maxEntryDrySamples = 0;
     int maxExitDrySamples = 0;
 
@@ -1767,8 +1790,60 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
             averagePitchRatio = static_cast<float> (ratioSum / static_cast<double> (island.notes.size()));
         }
         const bool downwardShift = averagePitchRatio < 0.999f;
+        const bool upwardShift = averagePitchRatio > 1.001f;
         const float bodyDurationSec = static_cast<float> (std::max (0, bodyEnd - bodyStart)) / static_cast<float> (sampleRate);
         const bool longBody = bodyDurationSec >= 0.90f;
+        const bool interpolateEpochSourcesRequested = upwardShift
+            && getEnvBool ("OPENSTUDIO_VSF_UP_SOURCE_EPOCH_INTERP_ENABLE",
+                           getEnvBool ("OPENSTUDIO_VSF_SOURCE_EPOCH_INTERP_ENABLE", true));
+        const float effectiveEpochInterpolationStrength = interpolateEpochSourcesRequested
+            ? juce::jlimit (
+                0.0f,
+                1.0f,
+                getEnvFloat ("OPENSTUDIO_VSF_UP_SOURCE_EPOCH_INTERP_STRENGTH",
+                             getEnvFloat ("OPENSTUDIO_VSF_SOURCE_EPOCH_INTERP_STRENGTH", 0.75f)))
+            : 0.0f;
+        epochInterpolationStrengthSum += effectiveEpochInterpolationStrength;
+        ++epochInterpolationStrengthCount;
+        const float effectiveGrainRadiusScale = upwardShift
+            ? juce::jlimit (
+                0.45f,
+                1.25f,
+                getEnvFloat ("OPENSTUDIO_VSF_UP_GRAIN_RADIUS_SCALE",
+                             getEnvFloat ("OPENSTUDIO_VSF_GRAIN_RADIUS_SCALE", 0.70f)))
+            : 1.0f;
+        grainRadiusScaleSum += effectiveGrainRadiusScale;
+        ++grainRadiusScaleCount;
+        const float upBodyPresenceTrimDb = upwardShift
+            ? juce::jlimit (-6.0f, 3.0f, getEnvFloat ("OPENSTUDIO_VSF_UP_BODY_PRESENCE_TRIM_DB", 0.0f))
+            : 0.0f;
+        const float upBodyPresenceHz = upwardShift && std::abs (upBodyPresenceTrimDb) > 1.0e-4f
+            ? juce::jlimit (1200.0f, 4000.0f, getEnvFloat ("OPENSTUDIO_VSF_UP_BODY_PRESENCE_HZ", 2400.0f))
+            : 0.0f;
+        const float upBodyPresenceQ = juce::jlimit (0.35f, 3.0f, getEnvFloat ("OPENSTUDIO_VSF_UP_BODY_PRESENCE_Q", 0.90f));
+        upPresenceTrimDbSum += upBodyPresenceTrimDb;
+        upPresenceHzSum += upBodyPresenceHz;
+        ++upPresenceCount;
+        const float downBodyNasalTrimDb = downwardShift
+            ? juce::jlimit (-6.0f, 3.0f, getEnvFloat ("OPENSTUDIO_VSF_DOWN_BODY_NASAL_TRIM_DB", -1.5f))
+            : 0.0f;
+        const float downBodyNasalHz = downwardShift && std::abs (downBodyNasalTrimDb) > 1.0e-4f
+            ? juce::jlimit (750.0f, 1700.0f, getEnvFloat ("OPENSTUDIO_VSF_DOWN_BODY_NASAL_HZ", 1100.0f))
+            : 0.0f;
+        const float downBodyNasalQ = juce::jlimit (0.35f, 3.0f, getEnvFloat ("OPENSTUDIO_VSF_DOWN_BODY_NASAL_Q", 1.00f));
+        downNasalTrimDbSum += downBodyNasalTrimDb;
+        downNasalHzSum += downBodyNasalHz;
+        ++downNasalCount;
+        const float downBodyCompDb = downwardShift
+            ? juce::jlimit (-2.0f, 4.0f, getEnvFloat ("OPENSTUDIO_VSF_DOWN_BODY_COMP_DB", 0.0f))
+            : 0.0f;
+        const float downBodyCompHz = downwardShift && std::abs (downBodyCompDb) > 1.0e-4f
+            ? juce::jlimit (220.0f, 850.0f, getEnvFloat ("OPENSTUDIO_VSF_DOWN_BODY_COMP_HZ", 430.0f))
+            : 0.0f;
+        const float downBodyCompQ = juce::jlimit (0.35f, 3.0f, getEnvFloat ("OPENSTUDIO_VSF_DOWN_BODY_COMP_Q", 0.75f));
+        downBodyCompDbSum += downBodyCompDb;
+        downBodyCompHzSum += downBodyCompHz;
+        ++downBodyCompCount;
         const float envelopeLookupRatio = downwardShift
             ? juce::jlimit (0.82f, 1.0f, 1.0f + (averagePitchRatio - 1.0f) * 0.55f)
             : 1.0f;
@@ -1850,30 +1925,76 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
 
             const int sourceEpochCount = static_cast<int> (island.epochs.size());
             const int targetEpochCount = static_cast<int> (targetEpochs.size());
+            const bool interpolateEpochSources = interpolateEpochSourcesRequested
+                && effectiveEpochInterpolationStrength > 1.0e-4f
+                && sourceEpochCount > 1
+                && targetEpochCount > 1;
+            anyEpochInterpolationUsed = anyEpochInterpolationUsed || interpolateEpochSources;
             for (int k = 0; k < targetEpochCount; ++k)
             {
                 const float norm = targetEpochCount > 1
                     ? static_cast<float> (k) / static_cast<float> (targetEpochCount - 1)
                     : 0.0f;
-                const int sourceEpochIndex = juce::jlimit (0, sourceEpochCount - 1,
-                    static_cast<int> (std::round (norm * static_cast<float> (std::max (0, sourceEpochCount - 1)))));
-                const int sourceEpoch = island.epochs[static_cast<size_t> (sourceEpochIndex)];
+                const float sourceEpochPos = norm * static_cast<float> (std::max (0, sourceEpochCount - 1));
+                const int sourceEpochIndexLo = juce::jlimit (0, sourceEpochCount - 1,
+                    static_cast<int> (std::floor (sourceEpochPos)));
+                const float sourceEpochFrac = interpolateEpochSources
+                    ? juce::jlimit (0.0f, 1.0f, sourceEpochPos - static_cast<float> (sourceEpochIndexLo))
+                    : 0.0f;
+                const int nearestSourceEpochIndex = juce::jlimit (
+                    0,
+                    sourceEpochCount - 1,
+                    static_cast<int> (std::round (sourceEpochPos)));
+                const int sourceEpochIndexHi = interpolateEpochSources
+                    ? juce::jlimit (0, sourceEpochCount - 1, sourceEpochIndexLo + 1)
+                    : nearestSourceEpochIndex;
+                const int sourceEpoch = island.epochs[static_cast<size_t> (sourceEpochIndexLo)];
+                const int sourceEpochHi = island.epochs[static_cast<size_t> (sourceEpochIndexHi)];
+                const int nearestSourceEpoch = island.epochs[static_cast<size_t> (nearestSourceEpochIndex)];
                 const int targetEpoch = targetEpochs[static_cast<size_t> (k)];
 
-                const int prevSource = sourceEpochIndex > 0 ? island.epochs[static_cast<size_t> (sourceEpochIndex - 1)] : sourceEpoch;
-                const int nextSource = sourceEpochIndex + 1 < sourceEpochCount ? island.epochs[static_cast<size_t> (sourceEpochIndex + 1)] : sourceEpoch;
+                const int prevNearestSource = nearestSourceEpochIndex > 0 ? island.epochs[static_cast<size_t> (nearestSourceEpochIndex - 1)] : nearestSourceEpoch;
+                const int nextNearestSource = nearestSourceEpochIndex + 1 < sourceEpochCount ? island.epochs[static_cast<size_t> (nearestSourceEpochIndex + 1)] : nearestSourceEpoch;
+                const int nearestSourcePeriod = std::max (16, std::max (nextNearestSource - nearestSourceEpoch, nearestSourceEpoch - prevNearestSource));
+                const int prevSource = sourceEpochIndexLo > 0 ? island.epochs[static_cast<size_t> (sourceEpochIndexLo - 1)] : sourceEpoch;
+                const int nextSource = sourceEpochIndexLo + 1 < sourceEpochCount ? island.epochs[static_cast<size_t> (sourceEpochIndexLo + 1)] : sourceEpoch;
                 const int sourcePeriod = std::max (16, std::max (nextSource - sourceEpoch, sourceEpoch - prevSource));
+                const int prevSourceHi = sourceEpochIndexHi > 0 ? island.epochs[static_cast<size_t> (sourceEpochIndexHi - 1)] : sourceEpochHi;
+                const int nextSourceHi = sourceEpochIndexHi + 1 < sourceEpochCount ? island.epochs[static_cast<size_t> (sourceEpochIndexHi + 1)] : sourceEpochHi;
+                const int sourcePeriodHi = std::max (16, std::max (nextSourceHi - sourceEpochHi, sourceEpochHi - prevSourceHi));
+                const int interpolatedSourcePeriod = interpolateEpochSources
+                    ? std::max (
+                        16,
+                        static_cast<int> (std::round (
+                            static_cast<float> (sourcePeriod)
+                            + static_cast<float> (sourcePeriodHi - sourcePeriod) * sourceEpochFrac)))
+                    : sourcePeriod;
+                const int blendedSourcePeriod = interpolateEpochSources
+                    ? std::max (
+                        16,
+                        static_cast<int> (std::round (
+                            static_cast<float> (nearestSourcePeriod)
+                            + static_cast<float> (interpolatedSourcePeriod - nearestSourcePeriod)
+                                * effectiveEpochInterpolationStrength)))
+                    : nearestSourcePeriod;
                 const int prevTarget = k > 0 ? targetEpochs[static_cast<size_t> (k - 1)] : targetEpoch;
                 const int nextTarget = k + 1 < targetEpochCount ? targetEpochs[static_cast<size_t> (k + 1)] : targetEpoch;
                 const int targetPeriod = std::max (16, std::max (nextTarget - targetEpoch, targetEpoch - prevTarget));
                 const int maxGrainRadius = std::max (16, static_cast<int> (std::round (0.032 * sampleRate)));
-                const int grainRadius = juce::jlimit (16, maxGrainRadius, std::max (sourcePeriod, targetPeriod));
+                const int grainRadius = juce::jlimit (
+                    16,
+                    maxGrainRadius,
+                    static_cast<int> (std::round (
+                        static_cast<float> (std::max (blendedSourcePeriod, targetPeriod))
+                        * effectiveGrainRadiusScale)));
 
                 for (int offset = -grainRadius; offset <= grainRadius; ++offset)
                 {
                     const int sourcePos = sourceEpoch + offset;
+                    const int sourcePosHi = sourceEpochHi + offset;
+                    const int nearestSourcePos = nearestSourceEpoch + offset;
                     const int targetPos = targetEpoch + offset;
-                    if (sourcePos < 0 || sourcePos >= static_cast<int> (island.monoSignal.size()))
+                    if (nearestSourcePos < 0 || nearestSourcePos >= static_cast<int> (island.monoSignal.size()))
                         continue;
                     if (targetPos < wetStart || targetPos >= wetEnd)
                         continue;
@@ -1883,7 +2004,20 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
 
                     const float x = static_cast<float> (offset + grainRadius) / static_cast<float> (std::max (1, grainRadius * 2));
                     const float window = 0.5f - 0.5f * std::cos (static_cast<float> (twoPi) * x);
-                    synthMono[static_cast<size_t> (destIndex)] += island.monoSignal[static_cast<size_t> (sourcePos)] * window;
+                    float sourceSample = island.monoSignal[static_cast<size_t> (nearestSourcePos)];
+                    if (interpolateEpochSources
+                        && sourcePos >= 0
+                        && sourcePos < static_cast<int> (island.monoSignal.size())
+                        && sourcePosHi >= 0
+                        && sourcePosHi < static_cast<int> (island.monoSignal.size()))
+                    {
+                        float interpolatedSourceSample = island.monoSignal[static_cast<size_t> (sourcePos)];
+                        interpolatedSourceSample += (island.monoSignal[static_cast<size_t> (sourcePosHi)] - interpolatedSourceSample)
+                            * sourceEpochFrac;
+                        sourceSample += (interpolatedSourceSample - sourceSample)
+                            * effectiveEpochInterpolationStrength;
+                    }
+                    synthMono[static_cast<size_t> (destIndex)] += sourceSample * window;
                     olaWeight[static_cast<size_t> (destIndex)] += window;
                 }
             }
@@ -1978,9 +2112,16 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
         const float sourceCoreRms = computeRms (island.monoSignal, wetStart, wetEnd);
         if (synthCoreRms > 1.0e-6f && sourceCoreRms > 1.0e-6f)
         {
-            const float targetRmsScale = longBody
+            const float defaultTargetRmsScale = longBody
                 ? (downwardShift ? 0.96f : 0.78f)
                 : (downwardShift ? 0.86f : 0.92f);
+            const float targetRmsScale = juce::jlimit (
+                0.45f,
+                1.15f,
+                getEnvFloat (downwardShift
+                    ? "OPENSTUDIO_VSF_TARGET_RMS_SCALE_DOWN"
+                    : "OPENSTUDIO_VSF_TARGET_RMS_SCALE_UP",
+                    getEnvFloat ("OPENSTUDIO_VSF_TARGET_RMS_SCALE", defaultTargetRmsScale)));
             const float gain = juce::jlimit (0.20f, 3.5f, (sourceCoreRms * targetRmsScale) / synthCoreRms);
             for (int i = localCoreStart; i < localCoreEnd && i < static_cast<int> (synthMono.size()); ++i)
                 synthMono[static_cast<size_t> (i)] *= gain;
@@ -1990,9 +2131,21 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
         if (dumpLayers)
             coreBeforeResidual = synthMono;
 
-        const float residualMix = downwardShift
+        const float baseResidualMix = downwardShift
             ? juce::jlimit (0.08f, 0.20f, 0.12f + island.residualModel.voicedMix * 0.35f)
             : juce::jlimit (0.03f, 0.085f, 0.04f + island.residualModel.highBandMix * 0.20f);
+        const float defaultResidualMixScale = downwardShift ? 0.55f : 0.0f;
+        const float residualMixScale = juce::jlimit (
+            0.0f,
+            2.2f,
+            getEnvFloat (downwardShift
+                ? "OPENSTUDIO_VSF_RESIDUAL_MIX_SCALE_DOWN"
+                : "OPENSTUDIO_VSF_RESIDUAL_MIX_SCALE_UP",
+                getEnvFloat ("OPENSTUDIO_VSF_RESIDUAL_MIX_SCALE", defaultResidualMixScale)));
+        residualMixScaleSum += residualMixScale;
+        ++residualMixScaleCount;
+        const float residualMix = juce::jlimit (0.0f, downwardShift ? 0.32f : 0.18f,
+                                                baseResidualMix * residualMixScale);
         for (int i = 0; i < renderSamples; ++i)
         {
             const int localSample = localRenderStart + i;
@@ -2033,7 +2186,13 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
             channelGain[static_cast<size_t> (ch)] = juce::jlimit (0.35f, 2.30f, channelRms / monoRms);
         }
 
-        const float coreMaxWet = downwardShift ? 0.96f : 1.0f;
+        const float coreMaxWet = juce::jlimit (
+            0.55f,
+            1.0f,
+            getEnvFloat (downwardShift
+                ? "OPENSTUDIO_VSF_CORE_MAX_WET_DOWN"
+                : "OPENSTUDIO_VSF_CORE_MAX_WET_UP",
+                getEnvFloat ("OPENSTUDIO_VSF_CORE_MAX_WET", 1.0f)));
         const int fadeInSamples = std::max (1, static_cast<int> (std::round (0.016 * sampleRate)));
         const int fadeOutSamples = std::max (1, static_cast<int> (std::round ((downwardShift ? 0.030 : 0.036) * sampleRate)));
 
@@ -2096,6 +2255,53 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
                 }
                 result.output[static_cast<size_t> (ch)][static_cast<size_t> (absoluteSample)] =
                     dry * (1.0f - wet) + wetSample * wet;
+            }
+        }
+
+        const int absoluteBodyShapeStart = juce::jlimit (0, numSamples, island.contextStartSample + wetStart);
+        const int absoluteBodyShapeEnd = juce::jlimit (absoluteBodyShapeStart, numSamples, island.contextStartSample + wetEnd);
+        if (absoluteBodyShapeEnd > absoluteBodyShapeStart)
+        {
+            const int bodyEqFadeSamples = std::max (1, static_cast<int> (std::round (0.020 * sampleRate)));
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto& channel = result.output[static_cast<size_t> (ch)];
+                if (std::abs (upBodyPresenceTrimDb) > 1.0e-4f && upBodyPresenceHz > 0.0f)
+                {
+                    applyPeakingEqToRange (
+                        channel,
+                        absoluteBodyShapeStart,
+                        absoluteBodyShapeEnd,
+                        sampleRate,
+                        upBodyPresenceHz,
+                        upBodyPresenceQ,
+                        upBodyPresenceTrimDb,
+                        bodyEqFadeSamples);
+                }
+                if (std::abs (downBodyNasalTrimDb) > 1.0e-4f && downBodyNasalHz > 0.0f)
+                {
+                    applyPeakingEqToRange (
+                        channel,
+                        absoluteBodyShapeStart,
+                        absoluteBodyShapeEnd,
+                        sampleRate,
+                        downBodyNasalHz,
+                        downBodyNasalQ,
+                        downBodyNasalTrimDb,
+                        bodyEqFadeSamples);
+                }
+                if (std::abs (downBodyCompDb) > 1.0e-4f && downBodyCompHz > 0.0f)
+                {
+                    applyPeakingEqToRange (
+                        channel,
+                        absoluteBodyShapeStart,
+                        absoluteBodyShapeEnd,
+                        sampleRate,
+                        downBodyCompHz,
+                        downBodyCompQ,
+                        downBodyCompDb,
+                        bodyEqFadeSamples);
+                }
             }
         }
 
@@ -2181,6 +2387,34 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
     result.vocalSourceFilterResidualMix = residualMixCount > 0
         ? residualMixSum / static_cast<double> (residualMixCount)
         : 0.0;
+    result.vocalSourceFilterResidualMixScale = residualMixScaleCount > 0
+        ? residualMixScaleSum / static_cast<double> (residualMixScaleCount)
+        : 1.0;
+    result.vocalSourceFilterEpochInterpolationUsed = anyEpochInterpolationUsed;
+    result.vocalSourceFilterEpochInterpolationStrength = epochInterpolationStrengthCount > 0
+        ? epochInterpolationStrengthSum / static_cast<double> (epochInterpolationStrengthCount)
+        : 0.0;
+    result.vocalSourceFilterGrainRadiusScale = grainRadiusScaleCount > 0
+        ? grainRadiusScaleSum / static_cast<double> (grainRadiusScaleCount)
+        : 1.0;
+    result.vocalSourceFilterUpPresenceTrimDb = upPresenceCount > 0
+        ? upPresenceTrimDbSum / static_cast<double> (upPresenceCount)
+        : 0.0;
+    result.vocalSourceFilterUpPresenceHz = upPresenceCount > 0
+        ? upPresenceHzSum / static_cast<double> (upPresenceCount)
+        : 0.0;
+    result.vocalSourceFilterDownNasalTrimDb = downNasalCount > 0
+        ? downNasalTrimDbSum / static_cast<double> (downNasalCount)
+        : 0.0;
+    result.vocalSourceFilterDownNasalHz = downNasalCount > 0
+        ? downNasalHzSum / static_cast<double> (downNasalCount)
+        : 0.0;
+    result.vocalSourceFilterDownBodyCompDb = downBodyCompCount > 0
+        ? downBodyCompDbSum / static_cast<double> (downBodyCompCount)
+        : 0.0;
+    result.vocalSourceFilterDownBodyCompHz = downBodyCompCount > 0
+        ? downBodyCompHzSum / static_cast<double> (downBodyCompCount)
+        : 0.0;
     result.vocalSourceFilterEntryDryMs = sampleRate > 0.0
         ? 1000.0 * static_cast<double> (maxEntryDrySamples) / sampleRate
         : 0.0;
@@ -2194,6 +2428,13 @@ OwnPitchEngine::RenderResult OwnPitchEngine::renderVocalSourceFilterHq (
         + " cacheHit=" + juce::String (result.analysis.cacheHit ? "true" : "false")
         + " voicedCoverage=" + juce::String (result.vocalSourceFilterVoicedCoverage, 3)
         + " residualMix=" + juce::String (result.vocalSourceFilterResidualMix, 3)
+        + " residualScale=" + juce::String (result.vocalSourceFilterResidualMixScale, 3)
+        + " epochInterp=" + juce::String (result.vocalSourceFilterEpochInterpolationUsed ? "true" : "false")
+        + " epochInterpStrength=" + juce::String (result.vocalSourceFilterEpochInterpolationStrength, 3)
+        + " grainScale=" + juce::String (result.vocalSourceFilterGrainRadiusScale, 3)
+        + " upPresenceTrimDb=" + juce::String (result.vocalSourceFilterUpPresenceTrimDb, 2)
+        + " downNasalTrimDb=" + juce::String (result.vocalSourceFilterDownNasalTrimDb, 2)
+        + " downBodyCompDb=" + juce::String (result.vocalSourceFilterDownBodyCompDb, 2)
         + " entryDryMs=" + juce::String (result.vocalSourceFilterEntryDryMs, 1)
         + " exitDryMs=" + juce::String (result.vocalSourceFilterExitDryMs, 1)
         + " analysisMs=" + juce::String (result.analysisMs, 2)

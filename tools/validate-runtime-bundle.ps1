@@ -117,6 +117,11 @@ switch ($Platform) {
         Assert-Exists -Path $runtimeRoot -Description "OpenStudio app resources directory"
         Assert-Exists -Path $plistPath -Description "OpenStudio app Info.plist"
 
+        $microphoneUsageText = Get-PlistStringValue -PlistPath $plistPath -Key "NSMicrophoneUsageDescription"
+        if ([string]::IsNullOrWhiteSpace($microphoneUsageText)) {
+            throw "macOS bundle Info.plist is missing NSMicrophoneUsageDescription, so microphone permission prompts will not work."
+        }
+
         if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion)) {
             $bundleVersion = Get-PlistStringValue -PlistPath $plistPath -Key "CFBundleShortVersionString"
             if ([string]::IsNullOrWhiteSpace($bundleVersion)) {

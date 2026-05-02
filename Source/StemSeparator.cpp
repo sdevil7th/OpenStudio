@@ -159,6 +159,8 @@ juce::File StemSeparator::getUserDataRoot() const
     const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     if (localAppData.isNotEmpty())
         return juce::File(localAppData).getChildFile("OpenStudio");
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("OpenStudio");
    #elif JUCE_MAC
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile("Library")
@@ -1240,10 +1242,10 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
         return false;
     }
 
-   #if JUCE_MAC
+   #if JUCE_MAC || JUCE_LINUX
     {
         // juce::ZipFile::uncompressTo does not restore Unix execute bits from the zip's file
-        // attributes. On macOS this means the extracted Python binary has no +x permission and
+        // attributes. On Unix-like platforms this means the extracted Python binary has no +x permission and
         // posix_spawn() refuses to run it (EACCES), causing probeRuntimeCapabilities() to
         // return all-false defaults. Restore +x on every regular file under bin/ and lib/,
         // and on the Python binary itself (which may live elsewhere in the archive layout).
@@ -1270,6 +1272,7 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
                 ::chmod (py.getFullPathName().toUTF8(), st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH);
         }
 
+       #if JUCE_MAC
         // macOS attaches com.apple.quarantine to all files extracted from a downloaded zip.
         // Gatekeeper blocks execution of quarantined binaries. Strip the attribute recursively.
         // xattr is a system tool always present on macOS; failure here is non-fatal because
@@ -1277,6 +1280,7 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
         juce::ChildProcess xattr;
         xattr.start ("xattr -rd com.apple.quarantine " + quoteCommandPart (destinationRoot.getFullPathName()));
         xattr.waitForProcessToFinish (10000);
+       #endif
     }
    #endif
 
@@ -1376,7 +1380,7 @@ juce::var StemSeparator::refreshAiToolsStatus()
     return aiToolsStatusToVar(getCachedAiToolsStatusSnapshot());
 }
 
-juce::var StemSeparator::installAiTools()
+juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
 {
     if (! aiToolsInstallWorkInProgress.load())
         scheduleStatusRefresh();
@@ -1400,6 +1404,15 @@ juce::var StemSeparator::installAiTools()
     {
         result->setProperty("started", false);
         result->setProperty("error", "AI tools installation is already running.");
+        result->setProperty("status", aiToolsStatusToVar(cachedStatus));
+        return juce::var(result.release());
+    }
+
+    if (! userConfirmedDownload)
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "AI tools setup requires explicit confirmation before downloading runtime or model files.");
+        result->setProperty("message", "Open the AI Tools setup window and confirm the download to continue.");
         result->setProperty("status", aiToolsStatusToVar(cachedStatus));
         return juce::var(result.release());
     }

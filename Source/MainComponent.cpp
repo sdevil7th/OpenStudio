@@ -4629,23 +4629,18 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::String pitchRenderStrategy = result.isObject() ? result.getProperty ("pitchRenderStrategy", {}).toString() : juce::String();
                                 bool phraseHqRenderUsed = result.isObject() && static_cast<bool> (result.getProperty ("phraseHqRenderUsed", false));
                                 bool phraseHqExpandedToFullClip = result.isObject() && static_cast<bool> (result.getProperty ("phraseHqExpandedToFullClip", false));
-                                bool phraseHqExternalUsed = result.isObject() && static_cast<bool> (result.getProperty ("phraseHqExternalUsed", false));
-                                juce::String phraseHqExternalRendererPath = result.isObject() ? result.getProperty ("phraseHqExternalRendererPath", {}).toString() : juce::String();
                                 double phraseHqStartSec = result.isObject() ? static_cast<double> (result.getProperty ("phraseHqStartSec", 0.0)) : 0.0;
                                 double phraseHqEndSec = result.isObject() ? static_cast<double> (result.getProperty ("phraseHqEndSec", 0.0)) : 0.0;
-                                bool externalPitchRendererAvailable = result.isObject() && static_cast<bool> (result.getProperty ("externalPitchRendererAvailable", false));
                                 juce::String pitchRenderProductPath = result.isObject() ? result.getProperty ("pitchRenderProductPath", {}).toString() : juce::String();
                                 juce::String pitchRenderBackendId = result.isObject() ? result.getProperty ("pitchRenderBackendId", {}).toString() : juce::String();
                                 juce::String pitchRenderBackendVersion = result.isObject() ? result.getProperty ("pitchRenderBackendVersion", {}).toString() : juce::String();
                                 juce::String pitchRenderBackendFailureCode = result.isObject() ? result.getProperty ("pitchRenderBackendFailureCode", {}).toString() : juce::String();
                                 juce::var pitchRenderBackendCapabilities = result.isObject() ? result.getProperty ("pitchRenderBackendCapabilities", juce::var()) : juce::var();
                                 juce::var pitchRenderBackendDiagnostics = result.isObject() ? result.getProperty ("pitchRenderBackendDiagnostics", juce::var()) : juce::var();
-                                bool pitchRenderBackendFallbackUsed = result.isObject() && static_cast<bool> (result.getProperty ("pitchRenderBackendFallbackUsed", false));
                                 juce::String pitchRenderCommitPolicy = result.isObject() ? result.getProperty ("pitchRenderCommitPolicy", {}).toString() : juce::String();
                                 int pitchRenderDryProtectedSamples = result.isObject() ? static_cast<int> (result.getProperty ("pitchRenderDryProtectedSamples", 0)) : 0;
                                 double pitchRenderContextDurationSec = result.isObject() ? static_cast<double> (result.getProperty ("pitchRenderContextDurationSec", 0.0)) : 0.0;
                                 double pitchRenderCommitDurationSec = result.isObject() ? static_cast<double> (result.getProperty ("pitchRenderCommitDurationSec", 0.0)) : 0.0;
-                                bool pitchRenderBackendProbeCached = result.isObject() && static_cast<bool> (result.getProperty ("pitchRenderBackendProbeCached", false));
                                 double pitchRenderJobStartDelayMs = result.isObject() ? static_cast<double> (result.getProperty ("pitchRenderJobStartDelayMs", 0.0)) : 0.0;
                                 juce::String pitchRenderDirection = result.isObject() ? result.getProperty ("pitchRenderDirection", {}).toString() : juce::String();
                                 bool downshiftFormantGuardUsed = result.isObject() && static_cast<bool> (result.getProperty ("downshiftFormantGuardUsed", false));
@@ -4699,7 +4694,6 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 double noteHqEntryPitchHandoffBodyMs = result.isObject() ? static_cast<double> (result.getProperty ("noteHqEntryPitchHandoffBodyMs", 0.0)) : 0.0;
                                 double noteHqEntryPitchSlopeJumpStPerSec = result.isObject() ? static_cast<double> (result.getProperty ("noteHqEntryPitchSlopeJumpStPerSec", 0.0)) : 0.0;
                                 bool noteHqEntryPitchAccelerationLimited = result.isObject() && static_cast<bool> (result.getProperty ("noteHqEntryPitchAccelerationLimited", false));
-                                bool rubberBandQualityPromoted = result.isObject() && static_cast<bool> (result.getProperty ("rubberBandQualityPromoted", false));
                                 double outputDurationSec = result.isObject() ? static_cast<double> (result.getProperty ("outputDurationSec", 0.0)) : 0.0;
                                 juce::var postApplyRouteStatus = result.isObject() ? result.getProperty ("postApplyRouteStatus", juce::var()) : juce::var();
                                 juce::var appFinalCapture = result.isObject() ? result.getProperty ("appFinalCapture", juce::var()) : juce::var();
@@ -4826,23 +4820,18 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                         nativeResultObject->setProperty ("pitchRenderStrategy", pitchRenderStrategy);
                                         nativeResultObject->setProperty ("phraseHqRenderUsed", phraseHqRenderUsed);
                                         nativeResultObject->setProperty ("phraseHqExpandedToFullClip", phraseHqExpandedToFullClip);
-                                        nativeResultObject->setProperty ("phraseHqExternalUsed", phraseHqExternalUsed);
-                                        nativeResultObject->setProperty ("phraseHqExternalRendererPath", phraseHqExternalRendererPath);
                                         nativeResultObject->setProperty ("phraseHqStartSec", phraseHqStartSec);
                                         nativeResultObject->setProperty ("phraseHqEndSec", phraseHqEndSec);
-                                        nativeResultObject->setProperty ("externalPitchRendererAvailable", externalPitchRendererAvailable);
                                         nativeResultObject->setProperty ("pitchRenderProductPath", pitchRenderProductPath);
                                         nativeResultObject->setProperty ("pitchRenderBackendId", pitchRenderBackendId);
                                         nativeResultObject->setProperty ("pitchRenderBackendVersion", pitchRenderBackendVersion);
                                         nativeResultObject->setProperty ("pitchRenderBackendFailureCode", pitchRenderBackendFailureCode);
                                         nativeResultObject->setProperty ("pitchRenderBackendCapabilities", pitchRenderBackendCapabilities);
                                         nativeResultObject->setProperty ("pitchRenderBackendDiagnostics", pitchRenderBackendDiagnostics);
-                                        nativeResultObject->setProperty ("pitchRenderBackendFallbackUsed", pitchRenderBackendFallbackUsed);
                                         nativeResultObject->setProperty ("pitchRenderCommitPolicy", pitchRenderCommitPolicy);
                                         nativeResultObject->setProperty ("pitchRenderDryProtectedSamples", pitchRenderDryProtectedSamples);
                                         nativeResultObject->setProperty ("pitchRenderContextDurationSec", pitchRenderContextDurationSec);
                                         nativeResultObject->setProperty ("pitchRenderCommitDurationSec", pitchRenderCommitDurationSec);
-                                        nativeResultObject->setProperty ("pitchRenderBackendProbeCached", pitchRenderBackendProbeCached);
                                         nativeResultObject->setProperty ("pitchRenderJobStartDelayMs", pitchRenderJobStartDelayMs);
                                         nativeResultObject->setProperty ("pitchRenderDirection", pitchRenderDirection);
                                         nativeResultObject->setProperty ("downshiftFormantGuardUsed", downshiftFormantGuardUsed);
@@ -4896,7 +4885,6 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                         nativeResultObject->setProperty ("noteHqEntryPitchHandoffBodyMs", noteHqEntryPitchHandoffBodyMs);
                                         nativeResultObject->setProperty ("noteHqEntryPitchSlopeJumpStPerSec", noteHqEntryPitchSlopeJumpStPerSec);
                                         nativeResultObject->setProperty ("noteHqEntryPitchAccelerationLimited", noteHqEntryPitchAccelerationLimited);
-                                        nativeResultObject->setProperty ("rubberBandQualityPromoted", rubberBandQualityPromoted);
                                         nativeResultObject->setProperty ("outputDurationSec", outputDurationSec);
                                         nativeResultObject->setProperty ("postApplyRouteStatus", postApplyRouteStatus);
                                         if (! appFinalCapture.isVoid())
@@ -5032,7 +5020,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     + " previewCoverageEnd=" + juce::String(previewCoverageEndSec, 3)
                                     + " restored=" + juce::String(restored ? "true" : "false")
                                     + " outputFile=" + outputFile);
-                                juce::MessageManager::callAsync ([this, clipId, success, outputFile, requestId, restored, renderMode, cancelled, swapDeferred, previewCoverageStartSec, previewCoverageEndSec, candidateCoverageStartSec, candidateCoverageEndSec, requestedRendererBranch, actualRendererBranch, pitchOnlyRecoveryPath, pitchOnlyNeutralFormantUsed, processingMode, formantCurveUsed, explicitFormantRequested, pitchOnlyFormantSuppressed, usedFallback, fallbackReason, hardFailReason, pitchRenderStrategy, phraseHqRenderUsed, phraseHqExpandedToFullClip, phraseHqExternalUsed, phraseHqExternalRendererPath, phraseHqStartSec, phraseHqEndSec, externalPitchRendererAvailable, pitchRenderProductPath, pitchRenderBackendId, pitchRenderBackendVersion, pitchRenderBackendFailureCode, pitchRenderBackendCapabilities, pitchRenderBackendDiagnostics, pitchRenderBackendFallbackUsed, pitchRenderCommitPolicy, pitchRenderDryProtectedSamples, pitchRenderContextDurationSec, pitchRenderCommitDurationSec, pitchRenderBackendProbeCached, pitchRenderJobStartDelayMs, pitchRenderDirection, downshiftFormantGuardUsed, downshiftFormantGuardAlpha, noteHqEffectiveStartSec, noteHqEffectiveEndSec, noteHqContextStartSec, noteHqContextEndSec, noteHqAudibleCommitStartSec, noteHqAudibleCommitEndSec, noteHqPreBodyDryProtectedSamples, noteHqEntryInsideBodyFadeMs, noteHqExitLeadInMs, noteHqEntryBridgeStartSec, noteHqEntryBridgeEndSec, noteHqEntryBridgeWetLagMs, noteHqEntryBridgeEnvelopeGainDb, noteHqEntryBridgeUsed, noteHqEntryTransientDryPreservedMs, pitchOnlyEntrySimpleHandoffUsed, pitchOnlyEntrySafeHandoffUsed, pitchOnlyEntryDryHoldMs, pitchOnlyEntrySafeBridgeMs, pitchOnlyEntryWetAlignmentMs, pitchOnlyEntryWetGainDb, pitchOnlyEntryWetVsDryRmsDb, pitchOnlyEntryEqualPowerBlendUsed, pitchOnlyEntryRmsContinuityUsed, pitchOnlyEntryRmsContinuityGainDb, pitchOnlyEntryRmsContinuityMs, pitchOnlyEntryPhaseSafeUsed, pitchOnlyEntryWetAlignmentAccepted, pitchOnlyEntryFirstCycleCorrelation, pitchOnlyEntryZeroCrossOffsetMs, pitchOnlyEntryBridgeGainRampDb, pitchOnlyDownshiftCoreEnvelopePassUsed, pitchOnlyDownshiftCoreRmsTrimDb, pitchOnlyDownshiftCoreEnvelopeMaxDb, pitchOnlyDownshiftCoreEnvelopeFrames, pitchOnlyEntryWetLagMs, pitchOnlyEntryBridgeDurationMs, pitchOnlyExitDryRestoreUsed, pitchOnlyExitDryRestoreStartSec, pitchOnlyExitDryRestoreEndSec, noteHqEditIslandCount, noteHqEditedNoteCount, noteHqEntryPitchHandoffUsed, noteHqEntryPitchHandoffStartSec, noteHqEntryPitchHandoffEndSec, noteHqEntryPitchHandoffPreMs, noteHqEntryPitchHandoffBodyMs, noteHqEntryPitchSlopeJumpStPerSec, noteHqEntryPitchAccelerationLimited, rubberBandQualityPromoted, outputDurationSec, postApplyRouteStatus, appFinalCapture, appFinalBakedCapture, appFinalParityReport, appFinalRouteReportPath, appFinalBakedContextPath, appFinalPlaybackContextPath, appFinalParityReportPath, bridgeUsed, bridgeFallbackUsed, bridgeStartSec, bridgeLengthMs, bridgeAlignmentLagSamples, bridgeCorrelationScore, bridgeGainDeltaDb, bodyReplacementUsed, bodyReplacementFallbackUsed, entryLockStartSec, entryLockLengthMs, exitLockStartSec, renderedBodyStartSec, renderedBodyEndSec, islandNativeUsed, islandNativeFallbackUsed, islandRenderStartSec, islandRenderEndSec, transientMaskPeak, voicedCoreMaskPeak, hpssUsed, hpssFallbackUsed, harmonicMaskPeak, aperiodicMaskPeak, spectralEnvelopeCorrectionUsed, pitchOnlyCoreTimbreCorrectionUsed, pitchOnlyCoreEnvelopeMix, pitchOnlyCoreRmsTrimDb, pitchOnlyCoreEnvelopeLifter, pitchOnlyEntryTimbreCorrectionUsed, pitchOnlyEntryRmsTrimDb, pitchOnlyEntryTiltDb, pitchOnlyEntryHandoffUsed, pitchOnlyExitHandoffUsed, vocalSourceFilterUsed, vocalSourceFilterVoicedCoverage, vocalSourceFilterResidualMix, vocalSourceFilterFallbackUsed, vocalSourceFilterFallbackReason, vocalSourceFilterEntryDryMs, vocalSourceFilterExitDryMs, wsolaUsed, wsolaFallbackUsed, wsolaEntryLagSamples, wsolaExitLagSamples, wsolaCorrelationScore, phaseLockUsed, phaseLockFallbackUsed, phaseAlignedEntry, phaseAlignedExit, phasePeakCount, transitionHqUsed, transitionHqFallbackUsed, transitionStartSec, transitionEndSec, transitionTransientPeak, transitionVoicedCorePeak, transitionResidualPeak, transitionEnvelopeCorrectionUsed, engineV2Used, engineV2FallbackUsed, engineV2TransitionCount, engineV2TransitionStartSec, engineV2TransitionEndSec, engineV2HarmonicSupportPeak, engineV2ResidualSupportPeak, engineV2EnvelopeSupportPeak, transientBypassUsed, residualCarryUsed, cepstralCutoffUsed, engineV2FftSize, engineV2HopSize, immediateLeftNeighborUsed, immediateRightNeighborUsed, leftNeighborSamplesRendered, rightNeighborSamplesRendered, leftNeighborSmoothMs, rightNeighborSmoothMs, nonImmediateNeighborTouched, entryAlignmentOffsetMs, exitAlignmentOffsetMs, firstVoicedCyclesEntryUsed, firstVoicedCyclesExitUsed, v3TransitionPairUsed, v3ContinuousRenderUsed, v3EntryAnchorMs, v3ExitAnchorMs, v3FirstCyclesEntryCount, v3FirstCyclesExitCount, v3ShellDurationMs, v3BodyDurationMs, v3ResidualMix, v3FormantMode, v3NeighborLeftOverlapMs, v3NeighborRightOverlapMs]() {
+                                juce::MessageManager::callAsync ([this, clipId, success, outputFile, requestId, restored, renderMode, cancelled, swapDeferred, previewCoverageStartSec, previewCoverageEndSec, candidateCoverageStartSec, candidateCoverageEndSec, requestedRendererBranch, actualRendererBranch, pitchOnlyRecoveryPath, pitchOnlyNeutralFormantUsed, processingMode, formantCurveUsed, explicitFormantRequested, pitchOnlyFormantSuppressed, usedFallback, fallbackReason, hardFailReason, pitchRenderStrategy, phraseHqRenderUsed, phraseHqExpandedToFullClip, phraseHqStartSec, phraseHqEndSec, pitchRenderProductPath, pitchRenderBackendId, pitchRenderBackendVersion, pitchRenderBackendFailureCode, pitchRenderBackendCapabilities, pitchRenderBackendDiagnostics, pitchRenderCommitPolicy, pitchRenderDryProtectedSamples, pitchRenderContextDurationSec, pitchRenderCommitDurationSec, pitchRenderJobStartDelayMs, pitchRenderDirection, downshiftFormantGuardUsed, downshiftFormantGuardAlpha, noteHqEffectiveStartSec, noteHqEffectiveEndSec, noteHqContextStartSec, noteHqContextEndSec, noteHqAudibleCommitStartSec, noteHqAudibleCommitEndSec, noteHqPreBodyDryProtectedSamples, noteHqEntryInsideBodyFadeMs, noteHqExitLeadInMs, noteHqEntryBridgeStartSec, noteHqEntryBridgeEndSec, noteHqEntryBridgeWetLagMs, noteHqEntryBridgeEnvelopeGainDb, noteHqEntryBridgeUsed, noteHqEntryTransientDryPreservedMs, pitchOnlyEntrySimpleHandoffUsed, pitchOnlyEntrySafeHandoffUsed, pitchOnlyEntryDryHoldMs, pitchOnlyEntrySafeBridgeMs, pitchOnlyEntryWetAlignmentMs, pitchOnlyEntryWetGainDb, pitchOnlyEntryWetVsDryRmsDb, pitchOnlyEntryEqualPowerBlendUsed, pitchOnlyEntryRmsContinuityUsed, pitchOnlyEntryRmsContinuityGainDb, pitchOnlyEntryRmsContinuityMs, pitchOnlyEntryPhaseSafeUsed, pitchOnlyEntryWetAlignmentAccepted, pitchOnlyEntryFirstCycleCorrelation, pitchOnlyEntryZeroCrossOffsetMs, pitchOnlyEntryBridgeGainRampDb, pitchOnlyDownshiftCoreEnvelopePassUsed, pitchOnlyDownshiftCoreRmsTrimDb, pitchOnlyDownshiftCoreEnvelopeMaxDb, pitchOnlyDownshiftCoreEnvelopeFrames, pitchOnlyEntryWetLagMs, pitchOnlyEntryBridgeDurationMs, pitchOnlyExitDryRestoreUsed, pitchOnlyExitDryRestoreStartSec, pitchOnlyExitDryRestoreEndSec, noteHqEditIslandCount, noteHqEditedNoteCount, noteHqEntryPitchHandoffUsed, noteHqEntryPitchHandoffStartSec, noteHqEntryPitchHandoffEndSec, noteHqEntryPitchHandoffPreMs, noteHqEntryPitchHandoffBodyMs, noteHqEntryPitchSlopeJumpStPerSec, noteHqEntryPitchAccelerationLimited, outputDurationSec, postApplyRouteStatus, appFinalCapture, appFinalBakedCapture, appFinalParityReport, appFinalRouteReportPath, appFinalBakedContextPath, appFinalPlaybackContextPath, appFinalParityReportPath, bridgeUsed, bridgeFallbackUsed, bridgeStartSec, bridgeLengthMs, bridgeAlignmentLagSamples, bridgeCorrelationScore, bridgeGainDeltaDb, bodyReplacementUsed, bodyReplacementFallbackUsed, entryLockStartSec, entryLockLengthMs, exitLockStartSec, renderedBodyStartSec, renderedBodyEndSec, islandNativeUsed, islandNativeFallbackUsed, islandRenderStartSec, islandRenderEndSec, transientMaskPeak, voicedCoreMaskPeak, hpssUsed, hpssFallbackUsed, harmonicMaskPeak, aperiodicMaskPeak, spectralEnvelopeCorrectionUsed, pitchOnlyCoreTimbreCorrectionUsed, pitchOnlyCoreEnvelopeMix, pitchOnlyCoreRmsTrimDb, pitchOnlyCoreEnvelopeLifter, pitchOnlyEntryTimbreCorrectionUsed, pitchOnlyEntryRmsTrimDb, pitchOnlyEntryTiltDb, pitchOnlyEntryHandoffUsed, pitchOnlyExitHandoffUsed, vocalSourceFilterUsed, vocalSourceFilterVoicedCoverage, vocalSourceFilterResidualMix, vocalSourceFilterFallbackUsed, vocalSourceFilterFallbackReason, vocalSourceFilterEntryDryMs, vocalSourceFilterExitDryMs, wsolaUsed, wsolaFallbackUsed, wsolaEntryLagSamples, wsolaExitLagSamples, wsolaCorrelationScore, phaseLockUsed, phaseLockFallbackUsed, phaseAlignedEntry, phaseAlignedExit, phasePeakCount, transitionHqUsed, transitionHqFallbackUsed, transitionStartSec, transitionEndSec, transitionTransientPeak, transitionVoicedCorePeak, transitionResidualPeak, transitionEnvelopeCorrectionUsed, engineV2Used, engineV2FallbackUsed, engineV2TransitionCount, engineV2TransitionStartSec, engineV2TransitionEndSec, engineV2HarmonicSupportPeak, engineV2ResidualSupportPeak, engineV2EnvelopeSupportPeak, transientBypassUsed, residualCarryUsed, cepstralCutoffUsed, engineV2FftSize, engineV2HopSize, immediateLeftNeighborUsed, immediateRightNeighborUsed, leftNeighborSamplesRendered, rightNeighborSamplesRendered, leftNeighborSmoothMs, rightNeighborSmoothMs, nonImmediateNeighborTouched, entryAlignmentOffsetMs, exitAlignmentOffsetMs, firstVoicedCyclesEntryUsed, firstVoicedCyclesExitUsed, v3TransitionPairUsed, v3ContinuousRenderUsed, v3EntryAnchorMs, v3ExitAnchorMs, v3FirstCyclesEntryCount, v3FirstCyclesExitCount, v3ShellDurationMs, v3BodyDurationMs, v3ResidualMix, v3FormantMode, v3NeighborLeftOverlapMs, v3NeighborRightOverlapMs]() {
                                     logPitchEditorFormant ("emitting pitchCorrectionComplete clip=" + clipId
                                         + " requestId=" + requestId
                                         + " renderMode=" + renderMode
@@ -5072,23 +5060,18 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     obj->setProperty ("pitchRenderStrategy", pitchRenderStrategy);
                                     obj->setProperty ("phraseHqRenderUsed", phraseHqRenderUsed);
                                     obj->setProperty ("phraseHqExpandedToFullClip", phraseHqExpandedToFullClip);
-                                    obj->setProperty ("phraseHqExternalUsed", phraseHqExternalUsed);
-                                    obj->setProperty ("phraseHqExternalRendererPath", phraseHqExternalRendererPath);
                                     obj->setProperty ("phraseHqStartSec", phraseHqStartSec);
                                     obj->setProperty ("phraseHqEndSec", phraseHqEndSec);
-                                    obj->setProperty ("externalPitchRendererAvailable", externalPitchRendererAvailable);
                                     obj->setProperty ("pitchRenderProductPath", pitchRenderProductPath);
                                     obj->setProperty ("pitchRenderBackendId", pitchRenderBackendId);
                                     obj->setProperty ("pitchRenderBackendVersion", pitchRenderBackendVersion);
                                     obj->setProperty ("pitchRenderBackendFailureCode", pitchRenderBackendFailureCode);
                                     obj->setProperty ("pitchRenderBackendCapabilities", pitchRenderBackendCapabilities);
                                     obj->setProperty ("pitchRenderBackendDiagnostics", pitchRenderBackendDiagnostics);
-                                    obj->setProperty ("pitchRenderBackendFallbackUsed", pitchRenderBackendFallbackUsed);
                                     obj->setProperty ("pitchRenderCommitPolicy", pitchRenderCommitPolicy);
                                     obj->setProperty ("pitchRenderDryProtectedSamples", pitchRenderDryProtectedSamples);
                                     obj->setProperty ("pitchRenderContextDurationSec", pitchRenderContextDurationSec);
                                     obj->setProperty ("pitchRenderCommitDurationSec", pitchRenderCommitDurationSec);
-                                    obj->setProperty ("pitchRenderBackendProbeCached", pitchRenderBackendProbeCached);
                                     obj->setProperty ("pitchRenderJobStartDelayMs", pitchRenderJobStartDelayMs);
                                     obj->setProperty ("pitchRenderDirection", pitchRenderDirection);
                                     obj->setProperty ("downshiftFormantGuardUsed", downshiftFormantGuardUsed);
@@ -5142,7 +5125,6 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     obj->setProperty ("noteHqEntryPitchHandoffBodyMs", noteHqEntryPitchHandoffBodyMs);
                                     obj->setProperty ("noteHqEntryPitchSlopeJumpStPerSec", noteHqEntryPitchSlopeJumpStPerSec);
                                     obj->setProperty ("noteHqEntryPitchAccelerationLimited", noteHqEntryPitchAccelerationLimited);
-                                    obj->setProperty ("rubberBandQualityPromoted", rubberBandQualityPromoted);
                                     obj->setProperty ("outputDurationSec", outputDurationSec);
                                     obj->setProperty ("postApplyRouteStatus", postApplyRouteStatus);
                                     if (! appFinalCapture.isVoid())
@@ -5334,10 +5316,6 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         else
                             completion(audioEngine.getPitchPreviewRoutingStatus());
                     })
-                    .withNativeFunction ("getExternalPitchRendererStatus", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(args);
-                        completion(audioEngine.getExternalPitchRendererStatus());
-                    })
                     .withNativeFunction ("setClipPitchPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 2)
                         {
@@ -5425,8 +5403,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("refreshAiToolsStatus", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(audioEngine.refreshAiToolsStatus());
                     })
-                    .withNativeFunction ("installAiTools", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        completion(audioEngine.installAiTools());
+                    .withNativeFunction ("installAiTools", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const bool userConfirmedDownload = args.size() > 0 && static_cast<bool>(args[0]);
+                        completion(audioEngine.installAiTools(userConfirmedDownload));
                     })
                     .withNativeFunction ("resetAiTools", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(audioEngine.resetAiTools());
@@ -5799,23 +5778,18 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
         mergeFromNative ("pitchRenderStrategy", true);
         mergeFromNative ("phraseHqRenderUsed", true);
         mergeFromNative ("phraseHqExpandedToFullClip", true);
-        mergeFromNative ("phraseHqExternalUsed", true);
-        mergeFromNative ("phraseHqExternalRendererPath", true);
         mergeFromNative ("phraseHqStartSec", true);
         mergeFromNative ("phraseHqEndSec", true);
-        mergeFromNative ("externalPitchRendererAvailable", true);
         mergeFromNative ("pitchRenderProductPath", true);
         mergeFromNative ("pitchRenderBackendId", true);
         mergeFromNative ("pitchRenderBackendVersion", true);
         mergeFromNative ("pitchRenderBackendFailureCode", true);
         mergeFromNative ("pitchRenderBackendCapabilities", true);
         mergeFromNative ("pitchRenderBackendDiagnostics", true);
-        mergeFromNative ("pitchRenderBackendFallbackUsed", true);
         mergeFromNative ("pitchRenderCommitPolicy", true);
         mergeFromNative ("pitchRenderDryProtectedSamples", true);
         mergeFromNative ("pitchRenderContextDurationSec", true);
         mergeFromNative ("pitchRenderCommitDurationSec", true);
-        mergeFromNative ("pitchRenderBackendProbeCached", true);
         mergeFromNative ("pitchRenderJobStartDelayMs", true);
         mergeFromNative ("pitchRenderDirection", true);
         mergeFromNative ("downshiftFormantGuardUsed", true);
@@ -5869,7 +5843,6 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
         mergeFromNative ("noteHqEntryPitchHandoffBodyMs", true);
         mergeFromNative ("noteHqEntryPitchSlopeJumpStPerSec", true);
         mergeFromNative ("noteHqEntryPitchAccelerationLimited", true);
-        mergeFromNative ("rubberBandQualityPromoted", true);
         mergeFromNative ("outputDurationSec", true);
         mergeFromNative ("postApplyRouteStatus", true);
         mergeFromNative ("appFinalCapture", true);
@@ -6291,10 +6264,6 @@ juce::var MainComponent::buildStartupDiagnostics() const
     diagnostics->setProperty("missingFeatureRuntimeAssets", dependencyStatus.missingFeatureRuntimeAssets.joinIntoString("\n"));
     diagnostics->setProperty("prerequisiteRepairAvailable", dependencyStatus.repairAvailable);
     diagnostics->setProperty("startupSelfTest", selfTestReport);
-    const auto pitchRendererStatus = audioEngine.getExternalPitchRendererStatus();
-    diagnostics->setProperty("pitchRendererStatus", pitchRendererStatus);
-    diagnostics->setProperty("externalPitchRendererAvailable", pitchRendererStatus.getProperty("externalPitchRendererAvailable", false));
-    diagnostics->setProperty("externalPitchRendererPath", pitchRendererStatus.getProperty("externalPitchRendererPath", ""));
     diagnostics->setProperty("webView2UserDataPath", getWebView2UserDataFolder().getFullPathName());
 #if JUCE_WINDOWS
     diagnostics->setProperty("webView2RuntimeVersion", detectWebView2RuntimeVersion());

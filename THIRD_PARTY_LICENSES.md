@@ -84,38 +84,6 @@ encoding and sample rate conversion.
 
 ---
 
-## Rubber Band Library / Command-Line Utility (Optional)
-
-- **Website:** https://breakfastquay.com/rubberband/
-- **License:** GNU GPL for open-source distribution / commercial license for proprietary distribution
-- **Copyright:** (c) Particular Programs Ltd
-- **Usage:** Benchmark-gated offline HQ pitch-render backend for phrase/clip-level graphical pitch edits
-
-OpenStudio can use Rubber Band through an optional in-process C++ library link
-when `rubberband/RubberBandStretcher.h` and a matching library are available at
-configure time. For variable phrase pitch maps, OpenStudio also locates the
-command-line tool via `OPENSTUDIO_RUBBERBAND_EXE`, the runtime
-`tools/rubberband` directory, or `PATH`.
-
-If Rubber Band code or executables are bundled with a proprietary release, a
-suitable commercial license is required. If `rubberband_hq` is unavailable or
-fails, Studio13 falls back to the frozen adaptive selector instead of modifying
-the original media destructively.
-
----
-
-## libsndfile Runtime DLL
-
-- **Website:** https://libsndfile.github.io/libsndfile/
-- **License:** LGPLv2.1
-- **Usage:** Runtime dependency for the bundled Windows Rubber Band command-line renderer
-
-The Windows `tools/rubberband/sndfile.dll` sidecar is copied from the bundled
-Python `soundfile` runtime (`libsndfile_x64.dll`) so `rubberband.exe` can start
-without Windows status `0xC0000135`.
-
----
-
 ## ASIO SDK
 
 - **Website:** https://www.steinberg.net/developers/

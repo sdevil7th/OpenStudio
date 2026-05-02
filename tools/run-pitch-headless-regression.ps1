@@ -15,7 +15,7 @@ param(
     [string]$Label = "pitch-headless-regression",
     [string]$AppPath,
     [string]$OutputRoot,
-    [ValidateSet("default", "branch_simple_ce33", "branch_current_advanced", "branch_hybrid_reset", "baseline_safe", "pitch_only_psola_core", "pitch_only_model_core", "pitch_only_vocal_source_filter_hq", "pitch_only_own_engine", "pitch_only_hybrid_structural", "pitch_only_adaptive_selector", "pitch_only_engine_v2_program", "pitch_only_island_native", "pitch_only_island_native_psola", "formant_only_own_engine", "pitch_plus_formant_own_engine", "engine_v3_fullclip", "engine_v3_fullclip_lpc", "engine_v3_fullclip_lpc_transient")]
+    [ValidateSet("default", "pitch_only_vocal_source_filter_hq")]
     [string]$RendererBranch = "default",
     [int]$TimeoutSeconds = 180,
     [switch]$SkipBuild

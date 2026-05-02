@@ -403,6 +403,25 @@ int runHeadlessPitchRegressionJob(AudioEngine& audioEngine, const juce::String& 
     resultObj->setProperty("outputFile", outputPath);
     resultObj->setProperty("actualRendererBranch", actualRendererBranch);
     resultObj->setProperty("formantCurveUsed", formantCurveRecorded ? juce::var(formantCurveUsed) : juce::var());
+    const char* const vsfDiagnosticKeys[] = {
+        "vocalSourceFilterResidualMix",
+        "vocalSourceFilterResidualMixScale",
+        "vocalSourceFilterEpochInterpolationUsed",
+        "vocalSourceFilterEpochInterpolationStrength",
+        "vocalSourceFilterGrainRadiusScale",
+        "vocalSourceFilterUpPresenceTrimDb",
+        "vocalSourceFilterUpPresenceHz",
+        "vocalSourceFilterDownNasalTrimDb",
+        "vocalSourceFilterDownNasalHz",
+        "vocalSourceFilterDownBodyCompDb",
+        "vocalSourceFilterDownBodyCompHz"
+    };
+    for (const auto* key : vsfDiagnosticKeys)
+    {
+        const auto value = nativeResult.getProperty(key, juce::var());
+        if (! value.isVoid())
+            resultObj->setProperty(key, value);
+    }
     resultObj->setProperty("nativeResult", nativeResult);
     resultObj->setProperty("checks", juce::var(checks));
 
@@ -424,6 +443,12 @@ int runHeadlessPitchRegressionJob(AudioEngine& audioEngine, const juce::String& 
         routeObj->setProperty("chromaticSnapBypassed", hasTargetShift);
         routeObj->setProperty("actualRendererBranch", actualRendererBranch);
         routeObj->setProperty("formantCurveUsed", formantCurveRecorded ? juce::var(formantCurveUsed) : juce::var());
+        for (const auto* key : vsfDiagnosticKeys)
+        {
+            const auto value = nativeResult.getProperty(key, juce::var());
+            if (! value.isVoid())
+                routeObj->setProperty(key, value);
+        }
         routeObj->setProperty("postApplyRouteStatus", routeStatus);
         routeObj->setProperty("objectiveGateStatus", failed ? "fail" : "pass");
         routeObj->setProperty("subjectiveQuality", "not_asserted");

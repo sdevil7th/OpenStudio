@@ -5,7 +5,6 @@ set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled in
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
 option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
-option(OPENSTUDIO_ENABLE_RUBBERBAND_LIBRARY "Enable optional in-process librubberband HQ pitch rendering when headers/libs are available" ON)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
 option(OPENSTUDIO_REQUIRE_ASIO "Fail configuration when the ASIO SDK is unavailable for a Windows build" OFF)
 
@@ -161,31 +160,6 @@ else()
     endif()
 endif()
 
-# ==============================================================================
-# Rubber Band Library - optional in-process HQ pitch backend
-# ==============================================================================
-set(HAS_RUBBERBAND_LIBRARY OFF)
-if(OPENSTUDIO_ENABLE_RUBBERBAND_LIBRARY)
-    find_path(RUBBERBAND_INCLUDE_DIR
-        NAMES rubberband/RubberBandStretcher.h
-        PATHS
-            "${CMAKE_SOURCE_DIR}/thirdparty/rubberband/include"
-            "${CMAKE_SOURCE_DIR}/thirdparty/rubberband"
-    )
-    find_library(RUBBERBAND_LIBRARY
-        NAMES rubberband librubberband rubberband-static
-        PATHS
-            "${CMAKE_SOURCE_DIR}/thirdparty/rubberband/lib"
-            "${CMAKE_SOURCE_DIR}/thirdparty/rubberband/build"
-    )
-    if(RUBBERBAND_INCLUDE_DIR AND RUBBERBAND_LIBRARY)
-        set(HAS_RUBBERBAND_LIBRARY ON)
-        message(STATUS "Rubber Band library found: ${RUBBERBAND_LIBRARY}")
-    else()
-        message(STATUS "Rubber Band library not found - HQ backend will use CLI probing/fallback")
-    endif()
-endif()
-
 # Define the JUCE application
 juce_add_gui_app(OpenStudio
     PRODUCT_NAME "OpenStudio"
@@ -234,11 +208,9 @@ target_sources(OpenStudio PRIVATE
     Source/PitchMapper.cpp
     Source/S13PitchCorrector.cpp
     Source/PitchAnalyzer.cpp
-    Source/PitchRenderBackend.cpp
     Source/PitchResynthesizer.cpp
     Source/LpcEnvelopeTransfer.cpp
     Source/OwnPitchEngine.cpp
-    Source/SignalsmithShifter.cpp
     Source/TriggerEngine.cpp
     Source/SessionInterchange.cpp
     Source/PolyPitchDetector.cpp
@@ -271,16 +243,6 @@ if(HAS_ARA)
         "${ARA_SDK_ROOT}/ARA_Library"
     )
     target_compile_definitions(OpenStudio PRIVATE JUCE_PLUGINHOST_ARA=1)
-endif()
-
-# Rubber Band Library include/link (optional). The command-line backend remains
-# available through tools/rubberband or OPENSTUDIO_RUBBERBAND_EXE when this is off.
-if(HAS_RUBBERBAND_LIBRARY)
-    target_include_directories(OpenStudio PRIVATE "${RUBBERBAND_INCLUDE_DIR}")
-    target_link_libraries(OpenStudio PRIVATE "${RUBBERBAND_LIBRARY}")
-    target_compile_definitions(OpenStudio PRIVATE S13_HAS_RUBBERBAND_LIBRARY=1)
-else()
-    target_compile_definitions(OpenStudio PRIVATE S13_HAS_RUBBERBAND_LIBRARY=0)
 endif()
 
 # Platform-specific include directories
@@ -545,17 +507,6 @@ if(WIN32)
         message(WARNING "tools/ffmpeg.exe not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
     endif()
 
-    set(RUBBERBAND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rubberband")
-    if(EXISTS "${RUBBERBAND_DIR}/rubberband.exe" OR EXISTS "${RUBBERBAND_DIR}/rubberband-r3.exe")
-        openstudio_copy_runtime_directory(
-            "${RUBBERBAND_DIR}"
-            "tools/rubberband"
-            "Copying bundled Rubber Band pitch renderer to output directory"
-        )
-    else()
-        message(WARNING "Bundled Rubber Band executable not found in tools/rubberband. rubberband_hq will be unavailable unless OPENSTUDIO_RUBBERBAND_EXE points to rubberband.exe; note_hq will fall back to the adaptive selector.")
-    endif()
-
     set(OPENSTUDIO_WINDOWS_PREREQS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/windows-prereqs")
     if(EXISTS "${OPENSTUDIO_WINDOWS_PREREQS_DIR}")
         openstudio_copy_runtime_directory(
@@ -575,16 +526,6 @@ elseif(APPLE OR UNIX)
             "ffmpeg"
             "Copying bundled ffmpeg to output directory"
         )
-    endif()
-    set(RUBBERBAND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rubberband")
-    if(EXISTS "${RUBBERBAND_DIR}/rubberband" OR EXISTS "${RUBBERBAND_DIR}/rubberband-r3")
-        openstudio_copy_runtime_directory(
-            "${RUBBERBAND_DIR}"
-            "tools/rubberband"
-            "Copying bundled Rubber Band pitch renderer to output directory"
-        )
-    else()
-        message(WARNING "Bundled Rubber Band executable not found in tools/rubberband. rubberband_hq will be unavailable unless OPENSTUDIO_RUBBERBAND_EXE points to rubberband; note_hq will fall back to the adaptive selector.")
     endif()
 endif()
 

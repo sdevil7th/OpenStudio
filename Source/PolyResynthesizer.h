@@ -9,8 +9,8 @@
  *
  * The old SMS-based polyphonic resynthesis has been removed.
  * This stub provides the API surface that AudioEngine uses so it compiles.
- * Polyphonic pitch correction will be re-implemented with Signalsmith Stretch
- * as a future improvement (per pitch_corrector_feat_plan.md).
+ * Polyphonic pitch correction will be re-implemented as a future improvement
+ * (per pitch_corrector_feat_plan.md).
  */
 class PolyResynthesizer
 {

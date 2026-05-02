@@ -9,10 +9,10 @@ The fixture clip intentionally starts with an empty `filePath`. The regression d
 Example runner flow:
 
 ```powershell
-tools\run-ui-pitch-regression.ps1 `
+tools\run-pitch-headless-regression.ps1 `
   -SourceAudioPath "d:\test projects\pitchTestOrg.wav" `
-  -ReferenceAudioPath "d:\test projects\pitchTestOrg+4s.wav" `
   -NotesJsonPath "tests\fixtures\pitch-regression\example_plus4_notes.json" `
+  -TargetShiftSemitones 4.00 `
   -WindowStart 0.90 `
   -WindowEnd 1.55 `
   -Label "pitchTest_plus4"
@@ -26,30 +26,17 @@ tools\run-ui-pitch-regression.ps1 `
 
 `example_pitchTest_plus4_notes.json` and `example_pitchTest_minus4_notes.json` are clip-family-specific fixtures for the later edited note in the `pitchTestOrg` references. Those references do not use the same note timing as `pitchOrg`, so they should not reuse the older `0.90s -> 1.55s` fixture.
 
-Architecture bakeoff helpers:
+Renderer selection:
 
-- `tools\run-ui-pitch-regression.ps1 -RendererBranch branch_simple_ce33`
-- `tools\run-ui-pitch-regression.ps1 -RendererBranch branch_current_advanced`
-- `tools\run-ui-pitch-regression.ps1 -RendererBranch branch_hybrid_reset`
-- `tools\run-pitch-architecture-bakeoff.ps1`
+- The tracked deterministic harness allows `default` and `pitch_only_vocal_source_filter_hq`.
+- Historical UI/bakeoff helpers are local diagnostics only and are not part of the tracked PR gate.
 
 Harness notes:
 
-- Spectrogram-first completion rule:
-  - No pitch-renderer change may be called "done" from a reference-backed `note_hq` pitch-only run until the final spectrogram comparison has been generated and reviewed for both the upshift and downshift cases.
-  - The runner invokes `tools\pitch_spectrogram_compare.py` for reference-backed `note_hq` pitch-only renders and records `spectrogramReportPath`, spectrogram assets, key mel/formant/envelope numbers, and `spectrogramDoneGatePassed` in the summary JSON.
-  - The spectrogram report also records original-vs-reference phrase/pre/post-neighbor metrics plus local region lag and lag-aligned mel. Wider reference edits or timing shifts are visible instead of being mistaken for renderer regressions inside the edited note.
-  - The default hard done gates are: core mel MAE `<= 7.0 dB`, entry/exit mel MAE `<= 8.0 dB`, core high-band delta `<= 4.0 dB` absolute, phrase short-RMS envelope correlation `>= 0.60` when original-vs-reference pre/post neighbors are comparable, signed positive onset peak jump `<= 6.0 dB`, and signed positive onset high-band burst `<= 6.0 dB`.
-  - If original-vs-reference pre/post-neighbor mel mismatch exceeds `8 dB`, phrase-wide envelope correlation is reported but not used as a completion gate; production renderers must not widen note ownership just to copy unrelated reference phrase changes.
-  - If any spectrogram done gate fails, the run must be reported as not done and the next concrete failing region must be named. Use `-DiagnosticOnly` or `-AllowSpectrogramFailure` only for exploratory runs that are not completion claims.
-  - Subjective audition is a veto. Passing pitch/formant proxy gates is not enough if `cand_phrase.wav` still sounds robotic, hollow, doubled, crackly, gated, or otherwise unlike `ref_phrase.wav`.
-  - For user audition, prefer `tools\run-ui-pitch-org-candidate-context.ps1`. It writes exactly two long, candidate-only, stereo-preserved files for the portable `pitchOrg +4` and `pitchOrg -4` checks in one `audition_context` folder.
-  - Double-voice completion rule:
-    - Reference-backed `note_hq` pitch-only runs also invoke `tools\pitch_double_voice_analyze.py`.
-    - This pass checks stable-core original-F0 leakage, secondary pitch salience, stereo L/R correlation drift, mid/side drift, comb/notch excess, and dry-correlation excess.
-    - Mid/side drift is gated only when side energy is audible enough to matter; near-mono side residue below the analyzer floor is still reported, but it is not counted as doubled-core evidence.
-    - Double-voice failures are added to the same final done gate as spectrogram failures; a mono spectrogram pass is not enough if the doubled-core report fails.
-    - Debug layer dumps can be enabled with `tools\run-ui-pitch-regression.ps1 -DumpPitchLayers` or `OPENSTUDIO_VSF_LAYER_DUMP_ENABLE=1`; dumps include dry input, source/filter core, residual/noise layer, wet envelope, adaptive hybrid output when engaged, and final output.
+- The tracked PR gate is deterministic only: exact requested relative shift, output sanity, renderer branch recording, pitch-only formant curve disabled, and corrected-source route state.
+- Spectral, null, residual, and double-voice scripts are local diagnostics only. They must not be used as proof that subjective artifact/timbre issues are resolved.
+- Subjective audition remains the pass/fail source for start artifacts, doubled voice, robotic tone, naturalness, formant shift, and timbre.
+- Debug layer dumps can be enabled with `OPENSTUDIO_VSF_LAYER_DUMP_ENABLE=1`; dumps include dry input, source/filter core, residual/noise layer, wet envelope, optional local hybrid diagnostics, and final output.
 - The runner now derives note-body metadata from the first note by default and passes onset/release/neighbor windows into the scorer.
 - Analyzer/product segmentation gates:
   - pitch-curve corners are `boundaryCandidates` by default, not automatic editable note cuts.
@@ -80,11 +67,11 @@ Harness notes:
   - body/core pitch error must stay within the configured cents limit.
   - harmonic-envelope drift, low/mid/high band deltas, and F1/F2 proxy drift are hard failures, not informational-only spectrogram stats.
   - boundary timing, onset derivative/repeat/flux, and pre/post neighbor residual checks must pass together.
-  - current production note-HQ pitch-only defaults to `pitch_only_vocal_source_filter_hq`; the native adaptive branch remains a rollback/comparison path.
+  - current production note-HQ pitch-only defaults to `pitch_only_vocal_source_filter_hq`; retired renderer branches are not part of the tracked fixture contract.
   - upward edits should report direction `upward` and the selected renderer branch.
-  - downward edits should report direction `downward`; `downshiftFormantGuardUsed=true` is still expected on canonical native-adaptive comparison runs.
+  - downward edits should report direction `downward`; `downshiftFormantGuardUsed=true` is still expected on canonical VSF downshift runs.
   - downward primary renders should report `spectralEnvelopeCorrectionUsed=true`, because voiced-core envelope transfer is now part of the production downshift timbre guard.
-  - Rubber Band is benchmark-only unless `OPENSTUDIO_PITCH_USE_RUBBERBAND_HQ=1`; benchmark rows are reported but must not replace the native production path until they pass the same formant and boundary gates.
+  - production note-HQ pitch-only renders use the native VSF path; historical benchmark engines are not part of this fixture contract.
   - the aspirational downshift harmonic-envelope target is `<= 0.35`; the practical hard gate is currently `<= 0.36` so the measured `pitchOrg -4` native directional result at about `0.343` passes while still leaving polish room.
   - low/mid/high downshift band deltas target `<= 3 dB`.
   - F1/F2 proxy drift target is `<= 120 Hz`; on the canonical downshift case the hard gate uses the note-body proxy because the core F2 proxy is unstable on this fixture.

@@ -79,6 +79,7 @@ get-pip.py
 !/tools/run-pitch-headless-regression.ps1
 /tools/run-own-engine-parity.ps1
 /tools/rubberband/
+/local_tools/
 
 # Linux AppImage build output
 *.AppImage

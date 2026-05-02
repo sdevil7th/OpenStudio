@@ -1,7 +1,6 @@
 #include "PitchResynthesizer.h"
 #include "LpcEnvelopeTransfer.h"
 #include "OwnPitchEngine.h"
-#include "SignalsmithShifter.h"
 #include <juce_core/juce_core.h>
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
@@ -102,11 +101,6 @@ static int getEnvInt (const char* name, int fallback)
     return value.getIntValue();
 }
 
-static bool hasEnvValue (const char* name)
-{
-    return juce::SystemStats::getEnvironmentVariable (name, {}).trim().isNotEmpty();
-}
-
 static juce::File getPitchLayerDumpDirectory()
 {
     auto path = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_VSF_LAYER_DUMP_DIR", {}).trim();
@@ -179,6 +173,21 @@ static bool hasPitchStyleEdit (const PitchAnalyzer::PitchNote& note)
         if (std::abs (drift) > 0.01f)
             return true;
     return false;
+}
+
+static std::vector<std::vector<float>> copyInputChannels (const float* const* input,
+                                                          int numChannels,
+                                                          int numSamples)
+{
+    std::vector<std::vector<float>> result (static_cast<size_t> (std::max (0, numChannels)));
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        if (input == nullptr || input[ch] == nullptr || numSamples <= 0)
+            result[static_cast<size_t> (ch)].assign (static_cast<size_t> (std::max (0, numSamples)), 0.0f);
+        else
+            result[static_cast<size_t> (ch)].assign (input[ch], input[ch] + numSamples);
+    }
+    return result;
 }
 
 struct PitchEditDirectionSummary
@@ -256,32 +265,13 @@ enum class PitchOnlyRecoveryPath
 
 static PitchOnlyRecoveryPath getPitchOnlyRecoveryPath()
 {
-    const auto path = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_PITCH_ONLY_RECOVERY_PATH", {})
-        .trim()
-        .toLowerCase();
-
-    if (path == "legacy_natural" || path == "legacy" || path == "natural" || path == "old")
-        return PitchOnlyRecoveryPath::LegacyNatural;
-
-    if (path == "neutral_formant_minimal" || path == "neutral_minimal" || path == "neutral" || path == "minimal")
-        return PitchOnlyRecoveryPath::NeutralFormantMinimal;
-
-    if (path == "current_experimental" || path == "current" || path == "experimental" || path == "adaptive")
-        return PitchOnlyRecoveryPath::CurrentExperimental;
-
-    return PitchOnlyRecoveryPath::NeutralFormantMinimal;
+    return PitchOnlyRecoveryPath::CurrentExperimental;
 }
 
 static const char* getPitchOnlyRecoveryPathName (PitchOnlyRecoveryPath path)
 {
-    switch (path)
-    {
-        case PitchOnlyRecoveryPath::LegacyNatural:          return "legacy_natural";
-        case PitchOnlyRecoveryPath::NeutralFormantMinimal:  return "neutral_formant_minimal";
-        case PitchOnlyRecoveryPath::CurrentExperimental:    return "current_experimental";
-    }
-
-    return "legacy_natural";
+    juce::ignoreUnused (path);
+    return "native_vsf_only";
 }
 
 static PitchOnlyRendererBranch getPitchOnlyRendererBranch()
@@ -289,36 +279,6 @@ static PitchOnlyRendererBranch getPitchOnlyRendererBranch()
     const auto branch = juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_PITCH_RENDERER_BRANCH", {})
         .trim()
         .toLowerCase();
-
-    if (branch == "branch_simple_ce33" || branch == "simple_ce33" || branch == "ce33_simple" || branch == "simple")
-        return PitchOnlyRendererBranch::SimpleCe33;
-
-    if (branch == "branch_hybrid_reset" || branch == "hybrid_reset" || branch == "hybrid")
-        return PitchOnlyRendererBranch::HybridReset;
-
-    if (branch == "pitch_only_hybrid_structural" || branch == "hybrid_structural" || branch == "hybrid_struct")
-        return PitchOnlyRendererBranch::HybridStructural;
-
-    if (branch == "pitch_only_adaptive_selector" || branch == "adaptive_selector" || branch == "adaptive_harvest")
-        return PitchOnlyRendererBranch::AdaptiveSelector;
-
-    if (branch == "pitch_only_engine_v2_program" || branch == "engine_v2_program" || branch == "engine_v2_scaffold")
-        return PitchOnlyRendererBranch::EngineV2Program;
-
-    if (branch == "pitch_only_island_native" || branch == "island_native")
-        return PitchOnlyRendererBranch::IslandNative;
-
-    if (branch == "pitch_only_island_native_psola" || branch == "island_native_psola")
-        return PitchOnlyRendererBranch::IslandNativePsola;
-
-    if (branch == "branch_current_advanced" || branch == "current_advanced" || branch == "advanced")
-        return PitchOnlyRendererBranch::CurrentAdvanced;
-
-    if (branch == "pitch_only_psola_core" || branch == "psola_core" || branch == "dsp_core")
-        return PitchOnlyRendererBranch::PsolaCore;
-
-    if (branch == "pitch_only_model_core" || branch == "model_core")
-        return PitchOnlyRendererBranch::ModelCore;
 
     if (branch == "pitch_only_vocal_source_filter_hq"
         || branch == "vocal_source_filter_hq"
@@ -328,54 +288,16 @@ static PitchOnlyRendererBranch getPitchOnlyRendererBranch()
         return PitchOnlyRendererBranch::VocalSourceFilterHq;
     }
 
-    if (branch == "pitch_only_own_engine" || branch == "own_engine" || branch == "own_pitch")
-        return PitchOnlyRendererBranch::OwnEnginePitchOnly;
+    if (branch.isNotEmpty())
+        logPitchEditorFormant ("ignoring retired pitch renderer branch override: " + branch);
 
-    if (branch == "formant_only_own_engine" || branch == "own_formant")
-        return PitchOnlyRendererBranch::OwnEngineFormantOnly;
-
-    if (branch == "pitch_plus_formant_own_engine" || branch == "own_pitch_plus_formant")
-        return PitchOnlyRendererBranch::OwnEnginePitchPlusFormant;
-
-    if (branch == "engine_v3_fullclip" || branch == "pitch_only_engine_v3_fullclip")
-        return PitchOnlyRendererBranch::EngineV3FullClip;
-
-    if (branch == "engine_v3_fullclip_lpc" || branch == "pitch_only_engine_v3_fullclip_lpc")
-        return PitchOnlyRendererBranch::EngineV3FullClipLpc;
-
-    if (branch == "engine_v3_fullclip_lpc_transient" || branch == "pitch_only_engine_v3_fullclip_lpc_transient")
-        return PitchOnlyRendererBranch::EngineV3FullClipLpcTransient;
-
-    // Keep the simple Signalsmith renderer as the product default. Experimental
-    // renderers remain available through OPENSTUDIO_PITCH_RENDERER_BRANCH until
-    // they pass long-context audition as well as the objective gates.
-    return PitchOnlyRendererBranch::AdaptiveSelector;
+    return PitchOnlyRendererBranch::VocalSourceFilterHq;
 }
 
 static const char* getPitchOnlyRendererBranchName (PitchOnlyRendererBranch branch)
 {
-    switch (branch)
-    {
-        case PitchOnlyRendererBranch::SimpleCe33:   return "branch_simple_ce33";
-        case PitchOnlyRendererBranch::CurrentAdvanced:return "branch_current_advanced";
-        case PitchOnlyRendererBranch::HybridReset:  return "branch_hybrid_reset";
-        case PitchOnlyRendererBranch::HybridStructural: return "pitch_only_hybrid_structural";
-        case PitchOnlyRendererBranch::AdaptiveSelector: return "pitch_only_adaptive_selector";
-        case PitchOnlyRendererBranch::EngineV2Program: return "pitch_only_engine_v2_program";
-        case PitchOnlyRendererBranch::IslandNative: return "pitch_only_island_native";
-        case PitchOnlyRendererBranch::IslandNativePsola: return "pitch_only_island_native_psola";
-        case PitchOnlyRendererBranch::PsolaCore:    return "pitch_only_psola_core";
-        case PitchOnlyRendererBranch::ModelCore:    return "pitch_only_model_core";
-        case PitchOnlyRendererBranch::VocalSourceFilterHq: return "pitch_only_vocal_source_filter_hq";
-        case PitchOnlyRendererBranch::OwnEnginePitchOnly: return "pitch_only_own_engine";
-        case PitchOnlyRendererBranch::OwnEngineFormantOnly: return "formant_only_own_engine";
-        case PitchOnlyRendererBranch::OwnEnginePitchPlusFormant: return "pitch_plus_formant_own_engine";
-        case PitchOnlyRendererBranch::EngineV3FullClip: return "engine_v3_fullclip";
-        case PitchOnlyRendererBranch::EngineV3FullClipLpc: return "engine_v3_fullclip_lpc";
-        case PitchOnlyRendererBranch::EngineV3FullClipLpcTransient: return "engine_v3_fullclip_lpc_transient";
-    }
-
-    return "branch_hybrid_reset";
+    juce::ignoreUnused (branch);
+    return "pitch_only_vocal_source_filter_hq";
 }
 
 static bool isEngineV3Branch (PitchOnlyRendererBranch branch)
@@ -881,13 +803,7 @@ static AdaptiveBoundaryCorrectionResult applyAdaptiveBoundaryCorrections (
             result.transientBypassUsed = result.transientBypassUsed || transientMask > 0.20f;
         }
 
-        auto voicedCore = SignalsmithShifter::processPitchOnlyBase (
-            localInputPtrs.data(),
-            numChannels,
-            transitionSamples,
-            sampleRate,
-            localRatios,
-            localDetectedPitchHz);
+        auto voicedCore = copyInputChannels (localInputPtrs.data(), numChannels, transitionSamples);
 
         int cepstralCutoffUsed = 0;
         int fftSizeUsed = 0;
@@ -1515,13 +1431,7 @@ static EngineV2ProgramRenderResult renderEngineV2Program (
             result.transientBypassUsed = result.transientBypassUsed || transientMask > 0.20f;
         }
 
-        auto voicedCore = SignalsmithShifter::processPitchOnlyBase (
-            localInputPtrs.data(),
-            numChannels,
-            transitionSamples,
-            sampleRate,
-            localRatios,
-            localDetectedPitchHz);
+        auto voicedCore = copyInputChannels (localInputPtrs.data(), numChannels, transitionSamples);
 
         int cepstralCutoffUsed = 0;
         int fftSizeUsed = 0;
@@ -3127,9 +3037,7 @@ static std::vector<std::vector<float>> renderPitchOnlyIslands (
         for (int ch = 0; ch < numChannels; ++ch)
             islandInput[static_cast<size_t> (ch)] = input[ch] + island.contextStartSample;
 
-        auto correctedIsland = SignalsmithShifter::processPitchOnlyBase (
-            islandInput.data(), numChannels, contextSamples, sampleRate,
-            islandRatios, islandDetectedPitchHz);
+        auto correctedIsland = copyInputChannels (islandInput.data(), numChannels, contextSamples);
         if (rendererBranch == PitchOnlyRendererBranch::HybridReset
             || rendererBranch == PitchOnlyRendererBranch::HybridStructural)
         {
@@ -6347,7 +6255,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
     RenderQuality renderQuality,
     std::function<bool()> shouldCancel)
 {
-    juce::ignoreUnused (engine); // Signalsmith is always used; engine param kept for API compat
+    juce::ignoreUnused (engine);
     lastRenderDiagnostics = {};
     lastRenderDiagnostics.requestedRendererBranch = getRequestedPitchRendererBranchName();
     const auto pitchDirection = getPitchEditDirectionSummary (notes);
@@ -6476,7 +6384,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
     auto buildAdaptiveSelectorOutput = [&]() -> AdaptiveSelectorBuildResult
     {
         AdaptiveSelectorBuildResult result;
-        const bool adaptiveBoundaryCorrectionEnabled = getEnvInt ("OPENSTUDIO_PITCH_ADAPTIVE_CORRECTION_ENABLE", 0) != 0;
+        const bool adaptiveBoundaryCorrectionEnabled = false;
         OwnPitchEngine ownEngine;
         result.ownResult = ownEngine.renderPitchOnly (
             input,
@@ -6491,8 +6399,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
         auto legacyOutput = renderPitchOnlyIslands (
             input, numChannels, numSamples, sampleRate,
             frames, notes, PitchOnlyRendererBranch::HybridReset, renderQuality, shouldCancel);
-        auto simpleOutput = SignalsmithShifter::processPitchOnlyBase (
-            input, numChannels, numSamples, sampleRate, ratios, detectedPitchHz);
+        auto simpleOutput = copyInputChannels (input, numChannels, numSamples);
         result.hybridBlend = blendHybridStructuralOutputs (
             input,
             legacyOutput,
@@ -6538,7 +6445,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
             return;
 
         lastRenderDiagnostics.v3ContinuousRenderUsed = true;
-        lastRenderDiagnostics.v3FormantMode = engineV3LpcTransfer ? "lpc_transfer" : "signalsmith_preserve";
+        lastRenderDiagnostics.v3FormantMode = engineV3LpcTransfer ? "lpc_transfer" : "native_preserve";
         lastRenderDiagnostics.v3ResidualMix = 0.0;
 
         constexpr float kImmediateNeighborGapSec = 0.18f;
@@ -6615,11 +6522,9 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                     toOwnEngineQuality (renderQuality),
                     shouldCancel);
                 output = std::move (ownResult.output);
-                const bool entryHybridEnabled = getEnvInt ("OPENSTUDIO_VSF_ENTRY_HYBRID_DISABLE", 0) == 0;
-                const bool coreHybridEnabled = hasEnvValue ("OPENSTUDIO_VSF_CORE_HYBRID_ENABLE")
-                    ? getEnvInt ("OPENSTUDIO_VSF_CORE_HYBRID_ENABLE", 0) != 0
-                    : getEnvInt ("OPENSTUDIO_VSF_CORE_HYBRID_DISABLE", 1) == 0;
-                const bool exitHybridEnabled = getEnvInt ("OPENSTUDIO_VSF_EXIT_HYBRID_DISABLE", 0) == 0;
+                constexpr bool entryHybridEnabled = false;
+                constexpr bool coreHybridEnabled = false;
+                constexpr bool exitHybridEnabled = false;
                 const auto layerDumpDir = getPitchLayerDumpDirectory();
                 if (layerDumpDir != juce::File())
                     writePitchLayerDumpWav (layerDumpDir, "vsf_after_own_source_filter", output, sampleRate);
@@ -6806,6 +6711,16 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                 lastRenderDiagnostics.vocalSourceFilterFallbackReason = ownResult.vocalSourceFilterFallbackReason;
                 lastRenderDiagnostics.vocalSourceFilterEntryDryMs = ownResult.vocalSourceFilterEntryDryMs;
                 lastRenderDiagnostics.vocalSourceFilterExitDryMs = ownResult.vocalSourceFilterExitDryMs;
+                lastRenderDiagnostics.vocalSourceFilterResidualMixScale = ownResult.vocalSourceFilterResidualMixScale;
+                lastRenderDiagnostics.vocalSourceFilterEpochInterpolationUsed = ownResult.vocalSourceFilterEpochInterpolationUsed;
+                lastRenderDiagnostics.vocalSourceFilterEpochInterpolationStrength = ownResult.vocalSourceFilterEpochInterpolationStrength;
+                lastRenderDiagnostics.vocalSourceFilterGrainRadiusScale = ownResult.vocalSourceFilterGrainRadiusScale;
+                lastRenderDiagnostics.vocalSourceFilterUpPresenceTrimDb = ownResult.vocalSourceFilterUpPresenceTrimDb;
+                lastRenderDiagnostics.vocalSourceFilterUpPresenceHz = ownResult.vocalSourceFilterUpPresenceHz;
+                lastRenderDiagnostics.vocalSourceFilterDownNasalTrimDb = ownResult.vocalSourceFilterDownNasalTrimDb;
+                lastRenderDiagnostics.vocalSourceFilterDownNasalHz = ownResult.vocalSourceFilterDownNasalHz;
+                lastRenderDiagnostics.vocalSourceFilterDownBodyCompDb = ownResult.vocalSourceFilterDownBodyCompDb;
+                lastRenderDiagnostics.vocalSourceFilterDownBodyCompHz = ownResult.vocalSourceFilterDownBodyCompHz;
                 lastRenderDiagnostics.spectralEnvelopeCorrectionUsed = true;
                 if (layerDumpDir != juce::File())
                     writePitchLayerDumpWav (layerDumpDir, "vsf_final_after_hybrid_blends", output, sampleRate);
@@ -6815,15 +6730,18 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                     + " islands=" + juce::String (static_cast<int> (ownResult.analysis.islands.size()))
                     + " voicedCoverage=" + juce::String (ownResult.vocalSourceFilterVoicedCoverage, 3)
                     + " residualMix=" + juce::String (ownResult.vocalSourceFilterResidualMix, 3)
+                    + " residualScale=" + juce::String (ownResult.vocalSourceFilterResidualMixScale, 3)
+                    + " epochInterp=" + juce::String (ownResult.vocalSourceFilterEpochInterpolationUsed ? "true" : "false")
+                    + " epochInterpStrength=" + juce::String (ownResult.vocalSourceFilterEpochInterpolationStrength, 3)
+                    + " grainScale=" + juce::String (ownResult.vocalSourceFilterGrainRadiusScale, 3)
+                    + " upPresenceTrimDb=" + juce::String (ownResult.vocalSourceFilterUpPresenceTrimDb, 2)
+                    + " downNasalTrimDb=" + juce::String (ownResult.vocalSourceFilterDownNasalTrimDb, 2)
+                    + " downBodyCompDb=" + juce::String (ownResult.vocalSourceFilterDownBodyCompDb, 2)
                     + " fallback=" + juce::String (ownResult.vocalSourceFilterFallbackUsed ? "true" : "false"));
             }
             else if (pitchOnlyRecoveryPath != PitchOnlyRecoveryPath::CurrentExperimental)
             {
-                const auto formantMode = pitchOnlyRecoveryPath == PitchOnlyRecoveryPath::LegacyNatural
-                    ? SignalsmithShifter::PitchOnlyFormantMode::LegacyNatural
-                    : SignalsmithShifter::PitchOnlyFormantMode::NeutralPreserve;
-                output = SignalsmithShifter::processPitchOnlyCe33Base (
-                    input, numChannels, numSamples, sampleRate, ratios, formantMode);
+                output = copyInputChannels (input, numChannels, numSamples);
                 lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 lastRenderDiagnostics.usedFallback = false;
                 lastRenderDiagnostics.fallbackReason = {};
@@ -6841,8 +6759,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
             else if (engineV3Branch)
             {
                 // Transient bypass: keep note attack region dry so the consonant
-                // onset passes through unshifted. Applied to the ratio curve before
-                // Signalsmith sees it so the phase vocoder never tries to shift it.
+                // onset passes through unshifted.
                 if (engineV3TransientBypass)
                 {
                     const float bypassMs = juce::jlimit (6.0f, 30.0f,
@@ -6860,16 +6777,13 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                     }
                 }
 
-                // Full-clip continuous render via processPitchOnlyBase.
-                // This calls setFormantBase(detectedHz) per hop so Signalsmith's
-                // envelope estimator is calibrated to the vocal fundamental — giving
-                // better native formant preservation than the ce33 baseline.
+                // Retired full-clip experimental branch; kept dry if an old
+                // diagnostic override reaches this block.
                 // The OwnPitchEngine boundary blend is intentionally skipped: the
                 // V3-1 probe showed it regressed note-body quality on hard clips.
                 // Formant residual is handled by the LPC post-pass below when
                 // engineV3LpcTransfer is true.
-                output = SignalsmithShifter::processPitchOnlyBase (
-                    input, numChannels, numSamples, sampleRate, ratios, detectedPitchHz);
+                output = copyInputChannels (input, numChannels, numSamples);
                 lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 lastRenderDiagnostics.transientBypassUsed = engineV3TransientBypass;
                 lastRenderDiagnostics.usedFallback = false;
@@ -7050,7 +6964,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                     toOwnEngineQuality (renderQuality),
                     shouldCancel);
                 output = std::move (ownResult.output);
-                lastRenderDiagnostics.actualRendererBranch = "pitch_only_own_engine";
+                lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 lastRenderDiagnostics.usedFallback = ownResult.usedFallback;
                 lastRenderDiagnostics.fallbackReason = ownResult.fallbackReason;
                 logPitchEditorFormant ("using own-engine pitch-only renderer"
@@ -7062,9 +6976,8 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
             }
             else if (pitchRendererBranch == PitchOnlyRendererBranch::SimpleCe33)
             {
-                output = SignalsmithShifter::processPitchOnlyCe33Base (
-                    input, numChannels, numSamples, sampleRate, ratios);
-                lastRenderDiagnostics.actualRendererBranch = "branch_simple_ce33";
+                output = copyInputChannels (input, numChannels, numSamples);
+                lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 logPitchEditorFormant ("using simple ce33-style pitch-only baseline path");
             }
             else
@@ -7090,7 +7003,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                     notes,
                     OwnPitchEngine::Mode::FormantOnly,
                     toOwnEngineQuality (renderQuality));
-                lastRenderDiagnostics.actualRendererBranch = "formant_only_own_engine";
+                lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 logPitchEditorFormant ("own-engine shared analysis ready for formant-only render"
                     + juce::String (" islands=") + juce::String (static_cast<int> (analysis.islands.size()))
                     + " epochs=" + juce::String (analysis.totalEpochCount)
@@ -7105,7 +7018,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                 populateEngineV3BoundaryDiagnostics();
             for (int ch = 0; ch < numChannels; ++ch)
                 output[static_cast<size_t> (ch)].assign (input[ch], input[ch] + numSamples);
-            logPitchEditorFormant ("skipping Signalsmith pitch shifter for formant-only render");
+            logPitchEditorFormant ("formant-only render unsupported; returning dry audio");
             break;
         }
         case ProcessingMode::PitchPlusFormant:
@@ -7126,7 +7039,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
                     toOwnEngineQuality (renderQuality),
                     shouldCancel);
                 output = std::move (ownResult.output);
-                lastRenderDiagnostics.actualRendererBranch = "pitch_plus_formant_own_engine";
+                lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 lastRenderDiagnostics.usedFallback = ownResult.usedFallback;
                 lastRenderDiagnostics.fallbackReason = ownResult.fallbackReason;
                 logPitchEditorFormant ("using own-engine pitch base with explicit formant overlay"
@@ -7136,8 +7049,7 @@ std::vector<std::vector<float>> PitchResynthesizer::processMultiChannel(
             }
             else
             {
-                output = SignalsmithShifter::process (input, numChannels, numSamples, sampleRate,
-                                                      ratios, formantRatios, detectedPitchHz);
+                output = copyInputChannels (input, numChannels, numSamples);
                 lastRenderDiagnostics.actualRendererBranch = juce::String (getPitchOnlyRendererBranchName (pitchRendererBranch));
                 if (engineV3Branch)
                     populateEngineV3BoundaryDiagnostics();
