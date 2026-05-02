@@ -102,8 +102,12 @@ function Invoke-StartupSelfTest {
         Remove-Item -LiteralPath $ReportPath -Force -ErrorAction SilentlyContinue
     }
 
-    & $ExePath --startup-self-test --report $ReportPath
-    if ($LASTEXITCODE -ne 0) {
+    $process = Start-Process `
+        -FilePath $ExePath `
+        -ArgumentList @("--startup-self-test", "--report", "`"$ReportPath`"") `
+        -Wait `
+        -PassThru
+    if ($process.ExitCode -ne 0) {
         $reportContent = if (Test-Path $ReportPath) { Get-Content -LiteralPath $ReportPath -Raw } else { "No self-test report was written." }
         throw "Startup self-test failed for '$ExePath'.`n$reportContent"
     }

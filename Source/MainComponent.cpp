@@ -2073,7 +2073,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             }
                         });
                     })
-                    .withNativeFunction ("saveProjectToFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("saveProjectToFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Save project JSON to file
                         // Args: [filePath, jsonContent]
                         if (args.size() == 2 && args[0].isString() && args[1].isString()) {
@@ -2094,7 +2094,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                    .withNativeFunction ("loadProjectFromFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("loadProjectFromFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Load project JSON from file
                         // Args: [filePath]
                         if (args.size() == 1 && args[0].isString()) {
@@ -2113,7 +2113,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion("");
                         }
                     })
-                    .withNativeFunction ("consumePendingLaunchProjectPath", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("consumePendingLaunchProjectPath", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(OpenStudioLaunchState::consumePendingProjectPath());
                     })
@@ -2186,7 +2186,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                    .withNativeFunction ("importMediaFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("importMediaFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Read audio file metadata (duration, sample rate, channels, format).
                         // For video files that JUCE can't read directly, attempts FFmpeg extraction.
                         // Args: [filePath]
@@ -2274,7 +2274,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(juce::var());
                         }
                     })
-                    .withNativeFunction ("saveDroppedFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("saveDroppedFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Save a base64-encoded file dropped from the OS to a temp directory.
                         // Args: [fileName, base64Data]
                         // Returns: the full path to the saved file, or empty string on failure.
@@ -2809,7 +2809,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     // ===== Phase 12: Media & File Management =====
-                    .withNativeFunction ("browseDirectory", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("browseDirectory", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [directoryPath]
                         // Returns: Array of {name, path, size, isDirectory, format, duration, sampleRate, numChannels}
                         if (args.size() >= 1 && args[0].isString()) {
@@ -2866,7 +2866,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(juce::Array<juce::var>());
                         }
                     })
-                    .withNativeFunction ("previewAudioFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("previewAudioFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Preview an audio file through the output device (not through the track graph)
                         if (args.size() >= 1 && args[0].isString()) {
                             juce::String filePath = args[0].toString();
@@ -2877,12 +2877,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                    .withNativeFunction ("stopPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("stopPreview", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         juce::Logger::writeToLog("stopPreview called");
                         completion(true);
                     })
-                    .withNativeFunction ("cleanProjectDirectory", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("cleanProjectDirectory", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [projectDir, referencedFilesArray]
                         // Returns: { orphanedFiles: Array<{path, size}>, totalSize }
                         if (args.size() >= 2 && args[0].isString() && args[1].isArray()) {
@@ -3111,7 +3111,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                    .withNativeFunction ("getHomeDirectory", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("getHomeDirectory", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(juce::File::getSpecialLocation(juce::File::userHomeDirectory).getFullPathName());
                     })
@@ -3391,7 +3391,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         audioEngine.getControlSurfaceManager().getOSCControl().disconnect();
                         completion(true);
                     })
-                    .withNativeFunction ("getControlSurfaceMIDIDevices", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("getControlSurfaceMIDIDevices", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         juce::DynamicObject::Ptr result = new juce::DynamicObject();
                         auto inputs = ControlSurfaceManager::getAvailableMIDIInputs();
@@ -3752,7 +3752,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     // ========== Phase 3.7: Surround / Spatial Audio ==========
-                    .withNativeFunction ("getSurroundLayouts", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("getSurroundLayouts", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         juce::Array<juce::var> layouts;
                         auto addLayout = [&](const juce::String& name, int channels) {
@@ -3951,6 +3951,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                     // ==================== Window Management ====================
                     .withNativeFunction ("minimizeWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(this);
                         juce::ignoreUnused(args);
                        #if JUCE_WINDOWS
                         if (auto* peer = getTopLevelComponent()->getPeer())
@@ -5705,7 +5706,7 @@ void MainComponent::initializePitchRegressionJob(const juce::String& pitchRegres
     if (parsedJob.isVoid())
     {
         juce::Logger::writeToLog("[pitchRegression] Failed to parse job JSON: " + pitchRegressionJobFile.getFullPathName());
-        pitchRegressionJobFile = {};
+        pitchRegressionJobFile = juce::File();
         return;
     }
 

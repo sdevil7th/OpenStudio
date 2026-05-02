@@ -74,6 +74,8 @@ if [ ! -f "$LINUXDEPLOY" ]; then
 fi
 
 # ── Build AppImage ─────────────────────────────────────────────────────────────
+export APPIMAGE_EXTRACT_AND_RUN=1
+
 cd "$ROOT_DIR"
 "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
