@@ -49,6 +49,12 @@ param(
     [string]$LinuxArm64AiRuntimeAssetPath = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$LinuxCudaInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxRocmInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$LinuxAssetPath = ""
 )
 
@@ -302,6 +308,8 @@ $linuxX64AiRuntimeAsset = Get-AssetInfo $LinuxX64AiRuntimeAssetPath
 $linuxArm64AiRuntimeAsset = Get-AssetInfo $LinuxArm64AiRuntimeAssetPath
 $windowsCudaInstallPlan = Load-OptionalJson $WindowsCudaInstallPlanPath
 $windowsDirectmlInstallPlan = Load-OptionalJson $WindowsDirectmlInstallPlanPath
+$linuxCudaInstallPlan = Load-OptionalJson $LinuxCudaInstallPlanPath
+$linuxRocmInstallPlan = Load-OptionalJson $LinuxRocmInstallPlanPath
 
 Validate-PlatformEntry -PlatformName "windows" -PlatformNode $rootManifest.platforms.windows -Checksums $checksums -AssetInfo $windowsAsset
 Validate-PlatformEntry -PlatformName "macos" -PlatformNode $rootManifest.platforms.macos -Checksums $checksums -AssetInfo $macosAsset
@@ -376,6 +384,26 @@ if ((Test-Path $rootAiRuntimeManifestPath) -or (Test-Path $channelAiRuntimeManif
     if ($null -ne $linuxAiNode -and (($null -ne $linuxAiNode.x64) -or ($null -ne $linuxAiNode.arm64))) {
         Validate-PlatformEntry -PlatformName "linux x64 AI runtime" -PlatformNode $linuxAiNode.x64 -Checksums $checksums -AssetInfo $linuxX64AiRuntimeAsset
         Validate-PlatformEntry -PlatformName "linux arm64 AI runtime" -PlatformNode $linuxAiNode.arm64 -Checksums $checksums -AssetInfo $linuxArm64AiRuntimeAsset
+
+        if (($null -ne $linuxCudaInstallPlan) -or ($null -ne $linuxRocmInstallPlan)) {
+            Assert-True ($null -ne $linuxAiNode.backends) "Linux AI runtime manifest is missing backend entries."
+        }
+
+        if ($null -ne $linuxCudaInstallPlan) {
+            $cudaNode = $linuxAiNode.backends.cuda
+            Assert-True ($null -ne $cudaNode) "Linux AI runtime manifest is missing the CUDA backend entry."
+            Assert-True ($cudaNode.backend -eq "cuda") "Linux CUDA backend manifest entry is missing backend='cuda'."
+            Assert-True ($null -ne $cudaNode.installPlan) "Linux CUDA backend manifest entry is missing installPlan."
+            Assert-True (($cudaNode.installPlan | ConvertTo-Json -Depth 12) -eq ($linuxCudaInstallPlan | ConvertTo-Json -Depth 12)) "Linux CUDA installPlan does not match the repo-pinned install plan."
+        }
+
+        if ($null -ne $linuxRocmInstallPlan) {
+            $rocmNode = $linuxAiNode.backends.rocm
+            Assert-True ($null -ne $rocmNode) "Linux AI runtime manifest is missing the ROCm backend entry."
+            Assert-True ($rocmNode.backend -eq "rocm") "Linux ROCm backend manifest entry is missing backend='rocm'."
+            Assert-True ($null -ne $rocmNode.installPlan) "Linux ROCm backend manifest entry is missing installPlan."
+            Assert-True (($rocmNode.installPlan | ConvertTo-Json -Depth 12) -eq ($linuxRocmInstallPlan | ConvertTo-Json -Depth 12)) "Linux ROCm installPlan does not match the repo-pinned install plan."
+        }
     }
     elseif ($null -ne $linuxAiNode) {
         Validate-PlatformEntry -PlatformName "linux AI runtime" -PlatformNode $linuxAiNode -Checksums $checksums -AssetInfo $linuxAiRuntimeAsset

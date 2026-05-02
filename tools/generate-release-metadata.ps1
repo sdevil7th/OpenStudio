@@ -109,6 +109,12 @@ param(
     [string]$LinuxArm64AiRuntimeAssetUrl = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$LinuxCudaInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxRocmInstallPlanPath = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$AiRuntimeVersion = "",
 
     [Parameter(Mandatory = $false)]
@@ -303,6 +309,8 @@ $linuxX64AiRuntime = Get-AssetMetadata -AssetPath $LinuxX64AiRuntimeAssetPath -A
 $linuxArm64AiRuntime = Get-AssetMetadata -AssetPath $LinuxArm64AiRuntimeAssetPath -AssetUrl $LinuxArm64AiRuntimeAssetUrl
 $windowsCudaInstallPlan = Load-OptionalJsonFile -PathValue $WindowsCudaInstallPlanPath
 $windowsDirectmlInstallPlan = Load-OptionalJsonFile -PathValue $WindowsDirectmlInstallPlanPath
+$linuxCudaInstallPlan = Load-OptionalJsonFile -PathValue $LinuxCudaInstallPlanPath
+$linuxRocmInstallPlan = Load-OptionalJsonFile -PathValue $LinuxRocmInstallPlanPath
 
 $manifest = [ordered]@{
     schemaVersion = $SchemaVersion
@@ -416,9 +424,28 @@ if (($windowsAiRuntime -or $windowsBaseAiRuntime -or $windowsDirectmlAiRuntime -
     }
 
     if ($linuxX64AiRuntime -or $linuxArm64AiRuntime) {
-        $aiRuntimeManifest.platforms.linux = [ordered]@{}
-        if ($linuxX64AiRuntime) { $aiRuntimeManifest.platforms.linux.x64 = $linuxX64AiRuntime }
-        if ($linuxArm64AiRuntime) { $aiRuntimeManifest.platforms.linux.arm64 = $linuxArm64AiRuntime }
+        $linuxPlatform = [ordered]@{}
+        if ($linuxX64AiRuntime) { $linuxPlatform.x64 = $linuxX64AiRuntime }
+        if ($linuxArm64AiRuntime) { $linuxPlatform.arm64 = $linuxArm64AiRuntime }
+
+        $linuxBackends = [ordered]@{}
+        if ($linuxCudaInstallPlan) {
+            $linuxBackends.cuda = [ordered]@{
+                backend = "cuda"
+                installPlan = $linuxCudaInstallPlan
+            }
+        }
+        if ($linuxRocmInstallPlan) {
+            $linuxBackends.rocm = [ordered]@{
+                backend = "rocm"
+                installPlan = $linuxRocmInstallPlan
+            }
+        }
+        if ($linuxBackends.Count -gt 0) {
+            $linuxPlatform.backends = $linuxBackends
+        }
+
+        $aiRuntimeManifest.platforms.linux = $linuxPlatform
     }
     elseif ($linuxAiRuntime) {
         $aiRuntimeManifest.platforms.linux = $linuxAiRuntime

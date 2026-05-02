@@ -722,7 +722,7 @@ def get_music_generation_runtime_requirements(
     return [
         "transformers==4.50.0",
         "diffusers==0.35.2",
-        "accelerate>=1.12.0",
+        "accelerate==1.6.0",
         "vector-quantize-pytorch>=1.27.15",
         "torchsde>=0.2.6",
         "av>=12.0.0",
@@ -2685,6 +2685,39 @@ def probe_runtime(
             buildRuntimeMode=build_runtime_mode,
         )
 
+    requested_backend = backend_requested.strip().lower()
+    selected_backend = str(report.get("selectedBackend", "cpu")).strip().lower()
+    if requested_backend and selected_backend != requested_backend:
+        message = (
+            f"OpenStudio installed the {requested_backend} AI backend, "
+            f"but the runtime probe selected {selected_backend or 'cpu'}."
+        )
+        log_event(
+            "probe",
+            "probing_runtime",
+            "backend_probe_failed",
+            backendRequested=requested_backend,
+            supportedBackends=report.get("supportedBackends", []),
+            selectedBackend=selected_backend or "cpu",
+            fallbackReason=report.get("fallbackReason", ""),
+            probeDurationMs=report.get("probeDurationMs", 0),
+        )
+        if raise_on_error:
+            raise InstallerStepError(
+                message,
+                error_code="backend_probe_failed",
+                progress=0.96,
+            )
+        fail(
+            message,
+            progress=0.96,
+            error_code="backend_probe_failed",
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
     log_event(
         "probe",
         "probing_runtime",
@@ -2712,14 +2745,9 @@ def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested:
         return ("directml", load_backend_install_plan(fallback_plan_path))
 
     if platform.system() == "Linux":
-        # cuda/rocm failed → no further fallback (CPU base is already installed)
-        if normalized_backend not in ("cuda", "rocm"):
-            return None
-        plan_name = f"ai-runtime-install-plan-linux-{normalized_backend}.json"
-        fallback_plan_path = runtime_root / "openstudio-ai-backend-plans" / plan_name
-        if not fallback_plan_path.exists():
-            return None
-        return (normalized_backend, load_backend_install_plan(fallback_plan_path))
+        # Linux GPU backends are hardware-specific. Do not silently retry the
+        # same failed backend or fall back to CPU after GPU setup was selected.
+        return None
 
     return None
 

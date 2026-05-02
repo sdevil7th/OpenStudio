@@ -142,6 +142,31 @@ bool isLikelyNvidiaWindowsMachine()
 #endif
     return false;
 }
+
+#if JUCE_LINUX
+bool linuxCommandOutputContains (const juce::String& command, const juce::String& needle)
+{
+    juce::ChildProcess probe;
+    if (probe.start(command) && probe.waitForProcessToFinish(8000))
+        return probe.readAllProcessOutput().containsIgnoreCase(needle);
+
+    return false;
+}
+
+bool isLikelyNvidiaLinuxMachine()
+{
+    return juce::File("/proc/driver/nvidia/version").exists()
+        || juce::File("/dev/nvidiactl").exists()
+        || linuxCommandOutputContains("sh -c \"command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L\"", "nvidia");
+}
+
+bool isLikelyRocmLinuxMachine()
+{
+    return juce::File("/opt/rocm").isDirectory()
+        || linuxCommandOutputContains("sh -c \"command -v rocminfo >/dev/null 2>&1 && rocminfo\"", "AMD")
+        || linuxCommandOutputContains("sh -c \"command -v rocm-smi >/dev/null 2>&1 && rocm-smi\"", "GPU");
+}
+#endif
 }
 
 StemSeparator::StemSeparator() = default;
@@ -1801,9 +1826,36 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                         if (! architectureNode.isVoid() && ! architectureNode.isUndefined())
                         {
                             appendAiToolsLogLine("runtimeArchitecture=" + architectureKey);
+                            const auto likelyNvidia = isLikelyNvidiaLinuxMachine();
+                            const auto likelyRocm = isLikelyRocmLinuxMachine();
+                            appendAiToolsLogLine("linuxHardwareClass=" + juce::String(likelyNvidia ? "nvidia" : likelyRocm ? "rocm" : "generic"));
+
+                            if (auto* backendsObject = linuxPlatformObject->getProperty("backends").getDynamicObject())
+                            {
+                                const auto cudaNode = backendsObject->getProperty("cuda");
+                                const auto rocmNode = backendsObject->getProperty("rocm");
+                                const auto cudaInstallPlan = getPropertyString(cudaNode, "backend").isNotEmpty() ? cudaNode.getDynamicObject()->getProperty("installPlan") : juce::var();
+                                const auto rocmInstallPlan = getPropertyString(rocmNode, "backend").isNotEmpty() ? rocmNode.getDynamicObject()->getProperty("installPlan") : juce::var();
+
+                                if (likelyNvidia && ! cudaInstallPlan.isVoid())
+                                    runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey + ":cuda",
+                                                                                 "Linux " + architectureKey + " runtime + CUDA",
+                                                                                 "Selected first because NVIDIA hardware was detected.",
+                                                                                 architectureNode,
+                                                                                 "cuda",
+                                                                                 cudaInstallPlan));
+                                if (likelyRocm && ! rocmInstallPlan.isVoid())
+                                    runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey + ":rocm",
+                                                                                 "Linux " + architectureKey + " runtime + ROCm",
+                                                                                 "Selected first because AMD ROCm hardware was detected.",
+                                                                                 architectureNode,
+                                                                                 "rocm",
+                                                                                 rocmInstallPlan));
+                            }
+
                             runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey,
                                                                          "Linux " + architectureKey,
-                                                                         "Selected by current Linux architecture.",
+                                                                         runtimeCandidates.isEmpty() ? "Selected by current Linux architecture." : "Prepared as fallback if GPU backend setup fails before installation.",
                                                                          architectureNode));
                         }
                         else if (getPropertyString(platformNode, "url").isNotEmpty())

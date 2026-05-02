@@ -485,6 +485,7 @@ jobs:
           $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
           $windowsBaseAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-base-x64.zip"
           $macosArm64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-macos-arm64.zip"
+          $linuxX64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-linux-cpu-x64.zip"
           $linuxUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-$env:VERSION-linux-x86_64.AppImage"
           ./tools/generate-release-metadata.ps1 `
             -Version $env:VERSION `
@@ -505,6 +506,10 @@ jobs:
             -WindowsDirectmlInstallPlanPath "tools/ai-runtime-install-plan-windows-directml.json" `
             -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip" `
             -MacArm64AiRuntimeAssetUrl $macosArm64AiRuntimeUrl `
+            -LinuxX64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-linux-cpu-x64.zip" `
+            -LinuxX64AiRuntimeAssetUrl $linuxX64AiRuntimeUrl `
+            -LinuxCudaInstallPlanPath "tools/ai-runtime-install-plan-linux-cuda.json" `
+            -LinuxRocmInstallPlanPath "tools/ai-runtime-install-plan-linux-rocm.json" `
             -AiRuntimeVersion $env:AI_RUNTIME_VERSION
 
       - name: Validate release metadata
@@ -519,7 +524,10 @@ jobs:
             -WindowsBaseAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `
             -WindowsCudaInstallPlanPath "tools/ai-runtime-install-plan-windows-cuda.json" `
             -WindowsDirectmlInstallPlanPath "tools/ai-runtime-install-plan-windows-directml.json" `
-            -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
+            -MacArm64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip" `
+            -LinuxX64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-linux-cpu-x64.zip" `
+            -LinuxCudaInstallPlanPath "tools/ai-runtime-install-plan-linux-cuda.json" `
+            -LinuxRocmInstallPlanPath "tools/ai-runtime-install-plan-linux-rocm.json"
 
       - name: Prepare uniquely named release metadata assets
         shell: pwsh
