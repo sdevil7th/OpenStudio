@@ -156,8 +156,8 @@ jobs:
           echo "APP_BUNDLE=$APP_BUNDLE" >> "$GITHUB_ENV"
 
       - name: Validate macOS runtime bundle
-        shell: bash
-        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$APP_BUNDLE" -ExpectedVersion "$VERSION" -EnforceLeanBundle
+        shell: pwsh
+        run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$env:APP_BUNDLE" -ExpectedVersion "$env:VERSION" -EnforceLeanBundle
 
       - name: Run macOS startup self-test
         shell: bash

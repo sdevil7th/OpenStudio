@@ -56,7 +56,7 @@ static void pushVar(lua_State* L, const juce::var& v)
     else if (v.isBool())
         lua_pushboolean(L, (bool)v ? 1 : 0);
     else if (v.isInt() || v.isInt64())
-        lua_pushinteger(L, (lua_Integer)(int64_t)v);
+        lua_pushinteger(L, static_cast<lua_Integer> (static_cast<juce::int64> (v)));
     else if (v.isDouble())
         lua_pushnumber(L, (double)v);
     else if (v.isString())
