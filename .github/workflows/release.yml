@@ -451,6 +451,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p dist/ai-runtime
+          echo "AI runtime release assets available on $AI_RUNTIME_RELEASE_TAG:"
+          gh release view "$AI_RUNTIME_RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --json assets \
+            --jq '.assets[].name' \
+            | sort
           gh release download "$AI_RUNTIME_RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --pattern "OpenStudio-AI-Runtime-windows-base-x64.zip" \
@@ -471,6 +477,10 @@ jobs:
 
           foreach ($file in $requiredFiles) {
             if (-not (Test-Path $file)) {
+              Write-Host "Downloaded AI runtime files:"
+              if (Test-Path "dist/ai-runtime") {
+                Get-ChildItem -Path "dist/ai-runtime" -Recurse | ForEach-Object { Write-Host $_.FullName }
+              }
               throw "Required downloaded release asset missing: $file"
             }
           }
