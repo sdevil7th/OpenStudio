@@ -99,6 +99,29 @@ function Invoke-WithHeartbeat {
     }
 }
 
+function New-StagedRuntimeArchiveRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimeRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("OpenStudio-AIRuntime-Package-" + [System.Guid]::NewGuid().ToString("N"))
+    $stagePayload = Join-Path $stageRoot ([System.IO.Path]::GetFileName($RuntimeRoot))
+    New-Item -ItemType Directory -Force -Path $stagePayload | Out-Null
+    Get-ChildItem -LiteralPath $RuntimeRoot -Force |
+        Copy-Item -Destination $stagePayload -Recurse -Force
+
+    return [pscustomobject]@{
+        Root = $stageRoot
+        PayloadName = [System.IO.Path]::GetFileName($RuntimeRoot)
+        PayloadPath = $stagePayload
+        OutputPath = $OutputPath
+    }
+}
+
 if ($Platform -eq "macos") {
     $parentDir = Split-Path -Parent $resolvedRuntimeRoot
     $runtimeName = Split-Path -Leaf $resolvedRuntimeRoot
@@ -120,33 +143,44 @@ if ($Platform -eq "macos") {
 }
 else {
     $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+    $stagedRuntime = New-StagedRuntimeArchiveRoot -RuntimeRoot $resolvedRuntimeRoot -OutputPath $resolvedOutputPath
     if ($null -ne $sevenZip) {
         Write-Host "Packaging AI runtime archive with 7-Zip: $resolvedOutputPath"
-        Invoke-WithHeartbeat `
-            -Description "7-Zip runtime packaging" `
-            -OutputPath $resolvedOutputPath `
-            -ScriptBlock {
-                param($sevenZipPath, $runtimeRoot, $outputPath)
+        try {
+            Invoke-WithHeartbeat `
+                -Description "7-Zip runtime packaging" `
+                -OutputPath $resolvedOutputPath `
+                -ScriptBlock {
+                    param($sevenZipPath, $stageRoot, $payloadName, $outputPath)
 
-                Set-Location -LiteralPath $runtimeRoot
-                & $sevenZipPath a -tzip -mx=5 -mmt=on $outputPath *
-                if ($LASTEXITCODE -ne 0) {
-                    throw "7-Zip runtime archive packaging failed with exit code $LASTEXITCODE."
-                }
-            } `
-            -ArgumentList @($sevenZip.Source, $resolvedRuntimeRoot, $resolvedOutputPath)
+                    Set-Location -LiteralPath $stageRoot
+                    & $sevenZipPath a -tzip -mx=5 -mmt=on $outputPath $payloadName
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "7-Zip runtime archive packaging failed with exit code $LASTEXITCODE."
+                    }
+                } `
+                -ArgumentList @($sevenZip.Source, $stagedRuntime.Root, $stagedRuntime.PayloadName, $resolvedOutputPath)
+        }
+        finally {
+            Remove-Item -LiteralPath $stagedRuntime.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     else {
         Write-Host "Packaging AI runtime archive with Compress-Archive: $resolvedOutputPath"
-        Invoke-WithHeartbeat `
-            -Description "Compress-Archive runtime packaging" `
-            -OutputPath $resolvedOutputPath `
-            -ScriptBlock {
-                param($runtimeRoot, $outputPath)
+        try {
+            Invoke-WithHeartbeat `
+                -Description "Compress-Archive runtime packaging" `
+                -OutputPath $resolvedOutputPath `
+                -ScriptBlock {
+                    param($payloadPath, $outputPath)
 
-                Compress-Archive -Path (Join-Path $runtimeRoot "*") -DestinationPath $outputPath -CompressionLevel Optimal
-            } `
-            -ArgumentList @($resolvedRuntimeRoot, $resolvedOutputPath)
+                    Compress-Archive -Path $payloadPath -DestinationPath $outputPath -CompressionLevel Optimal
+                } `
+                -ArgumentList @($stagedRuntime.PayloadPath, $resolvedOutputPath)
+        }
+        finally {
+            Remove-Item -LiteralPath $stagedRuntime.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
