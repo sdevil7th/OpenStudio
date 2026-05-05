@@ -860,6 +860,15 @@ export interface BenchmarkResults {
 export interface AudioDebugTrackSnapshot {
   trackId: string;
   clipCount: number;
+  pluginBusySkipCount?: number;
+  midiOverflowCount?: number;
+  lastBuiltMidiEventCount?: number;
+  maxBuiltMidiEventCount?: number;
+  inputFXCount?: number;
+  trackFXCount?: number;
+  isInstrument?: boolean;
+  recordArmed?: boolean;
+  inputMonitoring?: boolean;
 }
 
 export interface AudioDebugSnapshot {
@@ -876,6 +885,11 @@ export interface AudioDebugSnapshot {
   audioCallbackTrackBufferResizeCount?: number;
   audioCallbackPitchScrubBufferResizeCount?: number;
   audioCallbackSidechainBufferResizeCount?: number;
+  crashBreadcrumbLogPath?: string;
+  lastCrashDumpPath?: string;
+  midiLastInputFanoutCount?: number;
+  midiMaxInputFanoutCount?: number;
+  midiMappedParameterUpdateCount?: number;
   spectrumFftPublishCount?: number;
   spectrumFftLockMissCount?: number;
   postTrackPlaybackPeak: number;
@@ -2130,11 +2144,6 @@ class NativeBridge {
     numPixels: number,
   ): Promise<WaveformPeak[]> {
     if (this.isNative && window.__JUCE__?.backend.getRecordingPeaks) {
-      console.log("[audio.record] NativeBridge.getRecordingPeaks", {
-        trackId,
-        samplesPerPixel,
-        numPixels,
-      });
       const flat = await window.__JUCE__.backend.getRecordingPeaks(
         trackId,
         samplesPerPixel,
@@ -2160,13 +2169,7 @@ class NativeBridge {
 
   async getAudioDebugSnapshot(): Promise<AudioDebugSnapshot> {
     if (this.isNative && window.__JUCE__?.backend.getAudioDebugSnapshot) {
-      console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot");
       const snapshot = await window.__JUCE__.backend.getAudioDebugSnapshot();
-      try {
-        console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot result", snapshot, JSON.stringify(snapshot, null, 2));
-      } catch {
-        console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot result", snapshot);
-      }
       return snapshot;
     }
     const fallbackSnapshot = {
@@ -2193,7 +2196,6 @@ class NativeBridge {
       lastRecordingClipCountReturned: 0,
       playbackTracks: [],
     };
-    console.log("[audio.playback] NativeBridge.getAudioDebugSnapshot fallback", fallbackSnapshot, JSON.stringify(fallbackSnapshot, null, 2));
     return fallbackSnapshot;
   }
 

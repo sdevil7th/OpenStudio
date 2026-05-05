@@ -234,6 +234,8 @@ public:
     int getPitchShiftWorkBufferResizeCount() const { return pitchShiftWorkBufferResizeCount.load(std::memory_order_relaxed); }
     int getRenderResampleScratchResizeCount() const { return renderResampleScratchResizeCount.load(std::memory_order_relaxed); }
     int getChunkBoundaryReserveCount() const { return chunkBoundaryReserveCount.load(std::memory_order_relaxed); }
+    int getAudioDataCacheMissCount() const { return audioDataCacheMissCount.load(std::memory_order_relaxed); }
+    int getAudioDataCachedFileCount() const { const juce::ScopedLock sl(lock); return static_cast<int>(audioDataCache.size()); }
 
     // Thread-safe snapshot of all clips (for offline rendering)
     std::vector<ClipInfo> getClipSnapshot() const;
@@ -247,6 +249,14 @@ public:
 private:
     std::vector<ClipInfo> clips;
     std::map<juce::String, std::unique_ptr<juce::AudioFormatReader>> readers;
+    struct CachedAudioData
+    {
+        juce::AudioBuffer<float> buffer;
+        double sampleRate = 0.0;
+        juce::int64 lengthInSamples = 0;
+        int numChannels = 0;
+    };
+    std::map<juce::String, std::shared_ptr<CachedAudioData>> audioDataCache;
     juce::AudioFormatManager formatManager;
     mutable juce::CriticalSection lock;
 
@@ -266,6 +276,7 @@ private:
 
     // Pre-load reader on message thread so it's ready for audio thread
     void preloadReader(const juce::File& file);
+    void preloadAudioData(const juce::File& file, juce::AudioFormatReader& reader);
 
     // Legacy: get or create reader (only called from message thread now)
     juce::AudioFormatReader* getReader(const juce::File& file);
@@ -340,6 +351,7 @@ private:
     std::atomic<int> pitchShiftWorkBufferResizeCount { 0 };
     std::atomic<int> renderResampleScratchResizeCount { 0 };
     std::atomic<int> chunkBoundaryReserveCount { 0 };
+    std::atomic<int> audioDataCacheMissCount { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PlaybackEngine)
 };

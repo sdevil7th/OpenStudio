@@ -239,10 +239,13 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
 
 export const trackActions = (set: SetFn, get: GetFn) => ({
     addTrack: (trackData) => {
+      const requestedType = trackData.type || "audio";
       const newTrack = createDefaultTrack(
         trackData.id,
         trackData.name,
         trackData.color,
+        requestedType,
+        get().tracks,
       );
       const fullTrack = { ...newTrack, ...trackData };
 

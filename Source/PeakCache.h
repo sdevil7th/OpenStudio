@@ -119,8 +119,9 @@ private:
     std::set<juce::String> pendingGenerations;
     juce::CriticalSection pendingLock;
 
-    // Background thread pool for concurrent peak generation
-    juce::ThreadPool backgroundPool { juce::jmax(2, juce::SystemStats::getNumCpus() / 2) };
+    // Keep waveform generation serialized and low-impact; concurrent full-file
+    // peak scans can steal disk/CPU from 32/64-sample monitoring callbacks.
+    juce::ThreadPool backgroundPool { 1 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeakCache)
 };

@@ -64,95 +64,83 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
                                int startSample,
                                int numPixels) const
 {
-    juce::Array<juce::var> peakData;
+    auto buildResult = [samplesPerPixel, startSample, numPixels](const CacheEntry& entry)
+    {
+        juce::Array<juce::var> peakData;
+        if (entry.levels.empty())
+            return juce::var(peakData);
 
-    CacheEntry entry;
-    bool loaded = false;
+        // Find the best mipmap level (closest stride <= samplesPerPixel)
+        const MipmapLevel* bestLevel = &entry.levels[0];
+        for (const auto& level : entry.levels)
+        {
+            if (level.stride <= samplesPerPixel)
+                bestLevel = &level;
+        }
 
-    // Try memory cache
+        int ratio = samplesPerPixel / bestLevel->stride;
+        if (ratio < 1) ratio = 1;
+
+        const int numChannels = bestLevel->numChannels;
+        const int startPeak = (startSample > 0) ? std::min(startSample / bestLevel->stride, bestLevel->numPeaks - 1) : 0;
+        const int remainingMipmapPeaks = std::max(0, bestLevel->numPeaks - startPeak);
+        const int actualPeaks = std::min(numPixels, remainingMipmapPeaks / std::max(1, ratio));
+
+        peakData.ensureStorageAllocated(1 + actualPeaks * numChannels * 2);
+        peakData.add(juce::var(numChannels));
+
+        const int stride2 = numChannels * 2;
+        for (int pixel = 0; pixel < actualPeaks; ++pixel)
+        {
+            const int srcStart = startPeak + pixel * ratio;
+            const int srcEnd = std::min(srcStart + ratio, bestLevel->numPeaks);
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                float minVal = 0.0f;
+                float maxVal = 0.0f;
+
+                for (int s = srcStart; s < srcEnd; ++s)
+                {
+                    const int dataIdx = s * stride2 + ch * 2;
+                    if (dataIdx + 1 < static_cast<int>(bestLevel->data.size()))
+                    {
+                        const float mn = bestLevel->data[static_cast<size_t>(dataIdx)];
+                        const float mx = bestLevel->data[static_cast<size_t>(dataIdx) + 1];
+                        if (s == srcStart || mn < minVal) minVal = mn;
+                        if (s == srcStart || mx > maxVal) maxVal = mx;
+                    }
+                }
+
+                peakData.add(juce::var(minVal));
+                peakData.add(juce::var(maxVal));
+            }
+        }
+
+        return juce::var(peakData);
+    };
+
     {
         const juce::ScopedLock sl(cacheLock);
         auto it = memoryCache.find(audioFile.getFullPathName());
         if (it != memoryCache.end())
-        {
-            entry = it->second;
-            loaded = true;
-        }
+            return buildResult(it->second);
     }
 
-    // Try loading from disk
-    if (!loaded)
+    CacheEntry entry;
+    auto peakFile = getPeakFilePath(audioFile);
+    if (!peakFile.existsAsFile())
+        peakFile = getLegacyPeakFilePath(audioFile);
+
+    if (!peakFile.existsAsFile() || !loadFromFile(peakFile, audioFile, entry))
+        return juce::var(juce::Array<juce::var>());
+
+    auto result = buildResult(entry);
     {
-        auto peakFile = getPeakFilePath(audioFile);
-        if (!peakFile.existsAsFile())
-            peakFile = getLegacyPeakFilePath(audioFile);
-
-        if (peakFile.existsAsFile() && loadFromFile(peakFile, audioFile, entry))
-        {
-            loaded = true;
-            // Store in memory cache for next time
-            const juce::ScopedLock sl(cacheLock);
-            memoryCache[audioFile.getFullPathName()] = entry;
-        }
+        const juce::ScopedLock sl(cacheLock);
+        memoryCache[audioFile.getFullPathName()] = std::move(entry);
     }
-
-    if (!loaded || entry.levels.empty())
-        return peakData;
-
-    // Find the best mipmap level (closest stride <= samplesPerPixel)
-    const MipmapLevel* bestLevel = &entry.levels[0];
-    for (const auto& level : entry.levels)
-    {
-        if (level.stride <= samplesPerPixel)
-            bestLevel = &level;
-    }
-
-    // Calculate how many source peaks we need per output pixel
-    int ratio = samplesPerPixel / bestLevel->stride;
-    if (ratio < 1) ratio = 1;
-
-    int numChannels = bestLevel->numChannels;
-
-    // Convert startSample to an index in this mipmap level, clamped to valid range
-    int startPeak = (startSample > 0) ? std::min(startSample / bestLevel->stride, bestLevel->numPeaks - 1) : 0;
-    // remainingPeaks: mipmap-level peaks left after startPeak.
-    // Divide by ratio to get output pixels. (startPeak is in mipmap units, NOT output-pixel units.)
-    int remainingMipmapPeaks = std::max(0, bestLevel->numPeaks - startPeak);
-    int actualPeaks = std::min(numPixels, remainingMipmapPeaks / std::max(1, ratio));
-
-    peakData.ensureStorageAllocated(1 + actualPeaks * numChannels * 2);
-    peakData.add(juce::var(numChannels));  // Header
-
-    int stride2 = numChannels * 2;  // Floats per peak entry in the data array
-
-    for (int pixel = 0; pixel < actualPeaks; ++pixel)
-    {
-        int srcStart = startPeak + pixel * ratio;
-        int srcEnd = std::min(srcStart + ratio, bestLevel->numPeaks);
-
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            float minVal = 0.0f;
-            float maxVal = 0.0f;
-
-            for (int s = srcStart; s < srcEnd; ++s)
-            {
-                int dataIdx = s * stride2 + ch * 2;
-                if (dataIdx + 1 < (int)bestLevel->data.size())
-                {
-                    float mn = bestLevel->data[static_cast<size_t>(dataIdx)];
-                    float mx = bestLevel->data[static_cast<size_t>(dataIdx) + 1];
-                    if (s == srcStart || mn < minVal) minVal = mn;
-                    if (s == srcStart || mx > maxVal) maxVal = mx;
-                }
-            }
-
-            peakData.add(juce::var(minVal));
-            peakData.add(juce::var(maxVal));
-        }
-    }
-
-    return peakData;
+    return result;
 }
 
 bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audioFile, CacheEntry& entry) const

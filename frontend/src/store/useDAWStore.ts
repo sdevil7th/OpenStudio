@@ -1655,8 +1655,16 @@ interface DAWActions {
   updateMIDINotes: (clipId: string, notes: MIDIEvent[]) => void;
 
   // Piano Roll: Velocity & CC editing
-  updateMIDINoteVelocity: (trackId: string, clipId: string, noteTimestamp: number, noteNumber: number, velocity: number) => void;
-  updateMIDICCEvents: (trackId: string, clipId: string, ccEvents: MIDICCEvent[]) => void;
+  syncMIDITrackToBackend: (trackId: string, options?: { debounce?: boolean }) => Promise<void>;
+  previewMIDIClipEvents: (trackId: string, clipId: string, events: MIDIEvent[]) => void;
+  commitMIDIClipEvents: (trackId: string, clipId: string, oldEvents: MIDIEvent[], newEvents: MIDIEvent[], description?: string) => void;
+  addMIDINote: (trackId: string, clipId: string, startTime: number, noteNumber: number, duration: number, velocity?: number) => string;
+  removeMIDINotes: (trackId: string, clipId: string, noteIds: string[]) => string[];
+  moveMIDINotes: (trackId: string, clipId: string, noteIds: string[], deltaTime: number, deltaNote: number) => string[];
+  resizeMIDINote: (trackId: string, clipId: string, noteId: string, startTime: number, duration: number) => string[];
+  updateMIDINoteVelocity: (trackId: string, clipId: string, noteTimestamp: number, noteNumber: number, velocity: number, options?: { transient?: boolean; oldEvents?: MIDIEvent[] }) => void;
+  updateMIDICCEvents: (trackId: string, clipId: string, ccEvents: MIDICCEvent[], options?: { transient?: boolean; oldCCEvents?: MIDICCEvent[]; description?: string }) => void;
+  commitMIDICCEvents: (trackId: string, clipId: string, oldCCEvents: MIDICCEvent[], newCCEvents: MIDICCEvent[], description?: string) => void;
   setPianoRollScaleRoot: (root: number) => void;
   setPianoRollScaleType: (scaleType: string) => void;
 
@@ -1734,32 +1742,95 @@ export type PendingProjectAction =
 // Default Values
 // ============================================
 
-const DEFAULT_TRACK_COLORS = [
-  "#4361ee",
-  "#7209b7",
-  "#f72585",
-  "#4cc9f0",
-  "#4895ef",
-  "#560bad",
-  "#3a0ca3",
-  "#f77f00",
-];
+const TRACK_COLOR_PALETTES: Record<TrackType, string[]> = {
+  audio: [
+    "#38bdf8",
+    "#34d399",
+    "#f59e0b",
+    "#fb7185",
+    "#a78bfa",
+    "#22d3ee",
+    "#f97316",
+    "#84cc16",
+    "#60a5fa",
+    "#f472b6",
+  ],
+  midi: [
+    "#7dd3fc",
+    "#86efac",
+    "#fde68a",
+    "#c4b5fd",
+    "#67e8f9",
+    "#f9a8d4",
+    "#bef264",
+    "#93c5fd",
+    "#fcd34d",
+    "#5eead4",
+  ],
+  instrument: [
+    "#a7f3d0",
+    "#bfdbfe",
+    "#fbcfe8",
+    "#ddd6fe",
+    "#fed7aa",
+    "#bbf7d0",
+    "#bae6fd",
+    "#fecdd3",
+    "#fde68a",
+    "#ccfbf1",
+  ],
+  bus: [
+    "#94a3b8",
+    "#64748b",
+    "#38bdf8",
+    "#2dd4bf",
+    "#a3e635",
+    "#fbbf24",
+  ],
+  ai: [
+    "#f0abfc",
+    "#c084fc",
+    "#818cf8",
+    "#22d3ee",
+    "#2dd4bf",
+    "#fb7185",
+    "#facc15",
+    "#60a5fa",
+  ],
+};
 
-export const getRandomTrackColor = (): string => {
-  return DEFAULT_TRACK_COLORS[
-    Math.floor(Math.random() * DEFAULT_TRACK_COLORS.length)
-  ];
+export const getRandomTrackColor = (
+  type: TrackType = "audio",
+  existingTracks: Array<Pick<Track, "type" | "color">> = [],
+): string => {
+  const palette = TRACK_COLOR_PALETTES[type] || TRACK_COLOR_PALETTES.audio;
+  const sameTypeTracks = existingTracks.filter((track) => track.type === type && track.color);
+  const lastColor = sameTypeTracks[sameTypeTracks.length - 1]?.color;
+  const lastIndex = lastColor ? palette.indexOf(lastColor) : -1;
+  const recentlyUsed = new Set(sameTypeTracks.slice(-Math.min(4, palette.length)).map((track) => track.color));
+  const preferred = palette.filter((color, index) => {
+    if (recentlyUsed.has(color)) return false;
+    if (lastIndex < 0) return true;
+    return Math.abs(index - lastIndex) > 1;
+  });
+  const candidates = preferred.length > 0
+    ? preferred
+    : palette.filter((color) => color !== lastColor);
+  const pool = candidates.length > 0 ? candidates : palette;
+  return pool[Math.floor(Math.random() * pool.length)];
 };
 
 export const createDefaultTrack = (
   id: string,
   name: string,
   color?: string,
+  type: TrackType = "audio",
+  existingTracks: Array<Pick<Track, "type" | "color">> = [],
 ): Track => ({
   id,
   name,
-  color: color || getRandomTrackColor(),
-  type: "audio",
+  color: color || getRandomTrackColor(type, existingTracks),
+  type,
   inputType: "stereo",
   volume: 0.8,
   volumeDB: 0,
@@ -2879,7 +2950,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     createVCAFader: (name, memberTrackIds) => {
       const vcaGroupId = crypto.randomUUID();
       const vcaTrackId = crypto.randomUUID();
-      const vcaTrack = createDefaultTrack(vcaTrackId, name);
+      const vcaTrack = createDefaultTrack(vcaTrackId, name, undefined, "bus", get().tracks);
       const faderTrack: Track = { ...vcaTrack, isVCALeader: true, vcaGroupId, type: "bus" as TrackType, icon: "bus" };
 
       const command: Command = {
@@ -4195,9 +4266,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...automationActions(set, get),
     ...renderingActions(set, get),
     ...projectActions(set, get),
-    ...midiActions(set, get),
     ...routingActions(set, get),
     ...clipLauncherActions(set, get),
+    ...midiActions(set, get),
     ...markerActions(set, get),
     ...screensetActions(set, get),
     ...macroActions(set, get),

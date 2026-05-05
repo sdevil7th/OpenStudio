@@ -127,6 +127,15 @@ function getCategoryIcon(category: string) {
   return { match: "Other", Icon: Box, color: "#6b7280" };
 }
 
+function getPluginDisplayName(pluginPath: string | undefined, plugins: Plugin[]) {
+  if (!pluginPath) return "Instrument";
+  const knownPlugin = plugins.find((plugin) => plugin.fileOrIdentifier === pluginPath);
+  if (knownPlugin) return knownPlugin.name;
+
+  const fileName = pluginPath.split(/[\\/]/).pop() || pluginPath;
+  return fileName.replace(/\.(vst3|dll|clap|lv2)$/i, "");
+}
+
 export function FXChainPanel({
   trackId,
   trackName,
@@ -261,6 +270,12 @@ export function FXChainPanel({
   const [pluginsLoading, setPluginsLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
+  const currentTrack = tracks.find((track) => track.id === trackId);
+  const instrumentPluginPath =
+    chainType === "track" ? currentTrack?.instrumentPlugin : undefined;
+  const hasLoadedInstrument = Boolean(instrumentPluginPath);
+  const loadedPluginCount = fxSlots.length + (hasLoadedInstrument ? 1 : 0);
+  const instrumentDisplayName = getPluginDisplayName(instrumentPluginPath, plugins);
 
   const applyLoadedPlugins = useCallback((loadedPlugins: FXSlot[]) => {
     setFxSlots(loadedPlugins);
@@ -388,7 +403,7 @@ export function FXChainPanel({
     try {
       let success = false;
       const expectedLength =
-        chainType === "master"
+        chainType === "master" || (plugin.isInstrument && chainType === "track")
           ? null
           : (await getFXChainSlots(trackId, chainType)).length + 1;
 
@@ -413,7 +428,10 @@ export function FXChainPanel({
         // track is set to Instrument type and receives MIDI for synthesis.
         success = await nativeBridge.loadInstrument(trackId, plugin.fileOrIdentifier);
         if (success) {
-          updateTrack(trackId, { instrumentPlugin: plugin.fileOrIdentifier });
+          updateTrack(trackId, {
+            type: "instrument",
+            instrumentPlugin: plugin.fileOrIdentifier,
+          });
           notifyInstrumentChanged({
             trackId,
             instrumentPlugin: plugin.fileOrIdentifier,
@@ -534,6 +552,15 @@ export function FXChainPanel({
       );
     } catch (e) {
       console.error("[FXChain] Failed to open editor:", e);
+    }
+  };
+
+  const handleOpenInstrumentEditor = async () => {
+    try {
+      await nativeBridge.openInstrumentEditor(trackId);
+      console.log(`[FXChain] Opened instrument editor on track ${trackId}`);
+    } catch (e) {
+      console.error("[FXChain] Failed to open instrument editor:", e);
     }
   };
 
@@ -808,7 +835,7 @@ export function FXChainPanel({
               <h4>Loaded FX</h4>
               <div className="flex items-center gap-1.5">
                 <span className="fx-count">
-                  {fxSlots.length} plugin{fxSlots.length !== 1 ? "s" : ""}
+                  {loadedPluginCount} plugin{loadedPluginCount !== 1 ? "s" : ""}
                 </span>
                 <button
                   onClick={() => setShowPresetMenu(!showPresetMenu)}
@@ -904,13 +931,61 @@ export function FXChainPanel({
                 <div className="fx-empty-state">
                   <p>Loading plugins...</p>
                 </div>
-              ) : fxSlots.length === 0 ? (
+              ) : loadedPluginCount === 0 ? (
                 <div className="fx-empty-state">
                   <p>No plugins loaded</p>
                   <p className="hint">Add plugins from the browser →</p>
                 </div>
               ) : (
-                fxSlots.map((fx, index) => {
+                <>
+                  {hasLoadedInstrument && (
+                    <div>
+                      <div
+                        className="fx-slot-item border-l-2 border-l-purple-500"
+                        onClick={handleOpenInstrumentEditor}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            void handleOpenInstrumentEditor();
+                          }
+                        }}
+                      >
+                        <div className="fx-drag-handle" title="Instrument slot">
+                          <Music size={14} className="text-purple-400" />
+                        </div>
+                        <div className="fx-slot-info">
+                          <div className="fx-slot-number">
+                            <Music size={12} className="text-purple-400" />
+                          </div>
+                          <div
+                            className="fx-slot-name"
+                            title={instrumentPluginPath || "Click to open instrument editor"}
+                          >
+                            {instrumentDisplayName}
+                          </div>
+                        </div>
+                        <span className="text-[10px] text-purple-300 border border-purple-500/40 rounded px-1.5 py-0.5">
+                          Instrument
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleOpenInstrumentEditor();
+                          }}
+                          title="Open instrument editor"
+                          aria-label={`Open instrument editor for ${instrumentDisplayName}`}
+                          className="fx-remove-btn"
+                        >
+                          <ExternalLink size={12} />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {fxSlots.map((fx, index) => {
                   const isS13FX = fx.type === "s13fx";
                   const isBuiltIn = fx.type === "builtin";
                   return (
@@ -1280,7 +1355,8 @@ export function FXChainPanel({
                       )}
                     </div>
                   );
-                })
+                  })}
+                </>
               )}
             </div>
           </div>

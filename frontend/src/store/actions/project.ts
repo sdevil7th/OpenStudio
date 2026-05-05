@@ -622,6 +622,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               inputChCount,
             );
 
+            let restoredInstrumentPlugin: string | undefined;
+            if (!bypassFX && trackData.instrumentPlugin) {
+              set({ projectLoadingMessage: `Restoring instrument for ${trackData.name}...` });
+              await new Promise((r) => setTimeout(r, 0));
+              const success = await nativeBridge.loadInstrument(trackData.id, trackData.instrumentPlugin);
+              console.log(`[DEBUG LOAD]   loadInstrument result: ${success}`);
+              if (success) {
+                restoredInstrumentPlugin = trackData.instrumentPlugin;
+              }
+            }
+
             if (trackData.clips) {
               for (const clip of trackData.clips) {
                 if (clip.filePath) {
@@ -683,6 +694,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
             const frontendTrack: Track = {
               ...trackData,
+              type: restoredInstrumentPlugin ? "instrument" : trackData.type,
               aiWorkflow:
                 trackData.type === "ai"
                   ? trackData.aiWorkflow || "text-to-music"
@@ -804,6 +816,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               meterLevel: 0,
               peakLevel: 0,
               clipping: false,
+              instrumentPlugin: restoredInstrumentPlugin,
               suspendedAutomationState: null,
             };
 

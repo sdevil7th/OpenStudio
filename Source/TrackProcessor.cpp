@@ -3,6 +3,7 @@
 // Maximum channel count for the pre-allocated FX processing buffer.
 // Must be large enough for multi-output instruments (e.g. Komplete Kontrol = 32 out).
 static constexpr int kMaxFXChannels = 64;
+static constexpr int kMinimumHostedPluginBlockSize = 512;
 
 // Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
@@ -13,6 +14,12 @@ static void logToDisk(const juce::String& msg)
     auto f = !openStudioLog.existsAsFile() && legacyLog.existsAsFile() ? legacyLog : openStudioLog;
     f.getParentDirectory().createDirectory();
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
+}
+
+static int getSafeHostedPluginBlockSize(int requestedBlockSize)
+{
+    return juce::jmax(kMinimumHostedPluginBlockSize,
+                      requestedBlockSize > 0 ? requestedBlockSize : kMinimumHostedPluginBlockSize);
 }
 
 static void computePanLawGains(PanLaw panLaw, float pan, float volumeGain,
@@ -503,7 +510,8 @@ void TrackProcessor::changeProgramName (int index, const juce::String& newName)
 static void preparePluginPreservingLayout(juce::AudioProcessor* plugin, double sampleRate,
                                           int maxBlock, ProcessingPrecisionMode precisionMode)
 {
-    const juce::ScopedLock callbackLock(plugin->getCallbackLock());
+    const juce::ScopedLock pluginCallbackGuard(plugin->getCallbackLock());
+    const int safeMaxBlock = getSafeHostedPluginBlockSize(maxBlock);
 
     if (plugin->supportsDoublePrecisionProcessing())
     {
@@ -514,14 +522,23 @@ static void preparePluginPreservingLayout(juce::AudioProcessor* plugin, double s
     }
 
     auto savedLayout = plugin->getBusesLayout();
-    plugin->prepareToPlay(sampleRate, maxBlock);
+    plugin->prepareToPlay(sampleRate, safeMaxBlock);
 
     // If prepareToPlay changed the bus layout, restore and re-prepare so the
     // plugin operates with its original (createPluginInstance) channel config.
     if (plugin->getBusesLayout() != savedLayout)
     {
-        plugin->setBusesLayout(savedLayout);
-        plugin->prepareToPlay(sampleRate, maxBlock);
+        if (plugin->setBusesLayout(savedLayout))
+        {
+            plugin->prepareToPlay(sampleRate, safeMaxBlock);
+        }
+        else
+        {
+            juce::Logger::writeToLog("TrackProcessor: Plugin refused saved bus layout during prepare: "
+                                     + plugin->getName()
+                                     + " requestedBlock=" + juce::String(maxBlock)
+                                     + " safeBlock=" + juce::String(safeMaxBlock));
+        }
     }
 }
 
@@ -551,7 +568,7 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     // Prepare plugins with the actual device block size so realtime hosting
     // matches the hardware callback configuration.
-    int pluginMaxBlock = samplesPerBlock > 0 ? samplesPerBlock : 512;
+    int pluginMaxBlock = getSafeHostedPluginBlockSize(samplesPerBlock);
 
     // Propagate new sample rate and buffer size to all internal FX plugins,
     // preserving each plugin's bus layout (see preparePluginPreservingLayout).
@@ -677,8 +694,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
 
     // One-time diagnostic log on first processBlock call with FX loaded
     // (helps diagnose crashes — last log entry before crash shows where it stopped)
+    static bool enableRealtimeFirstFXLog = false;
     static bool loggedFirstFXProcess = false;
-    if (hasAnyFX && !loggedFirstFXProcess)
+    if (enableRealtimeFirstFXLog && hasAnyFX && !loggedFirstFXProcess)
     {
         loggedFirstFXProcess = true;
         logToDisk("TrackProcessor::processBlock FIRST CALL WITH FX");
@@ -734,6 +752,13 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     // Channel-safe FX processing helper
     auto safeProcessFX = [&](juce::AudioProcessor* proc, bool forceFloat, bool isInputFXChain, int fxIndex)
     {
+        juce::ScopedTryLock pluginProcessLock(proc->getCallbackLock());
+        if (!pluginProcessLock.isLocked())
+        {
+            pluginBusySkipCount.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
         applyPluginAutomationForProcessor(proc, isInputFXChain, fxIndex, blockTimeSeconds);
 
         // Compute isARAProcessor first so we can gate expensive QPC calls on it.
@@ -1036,6 +1061,13 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
 
         if (hasSidechain)
         {
+            juce::ScopedTryLock pluginProcessLock(proc->getCallbackLock());
+            if (!pluginProcessLock.isLocked())
+            {
+                pluginBusySkipCount.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
             applyPluginAutomationForProcessor(proc, false, fxIdx, blockTimeSeconds);
 
             // Sidechain path: expand buffer to include sidechain channels after
@@ -1393,7 +1425,7 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     if (!plugin)
         return false;
 
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
 
     // Only set stereo layout if the plugin has no channels configured
     // (some plugins start at 0-in/0-out and need explicit bus setup).
@@ -1412,9 +1444,9 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
     // then to 44100 as last resort. Use the realtime device block size when known.
     double sr = callerSampleRate > 0 ? callerSampleRate : getSampleRate();
-    int bs = callerBlockSize > 0 ? callerBlockSize : getBlockSize();
+    int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize());
     if (sr <= 0) sr = 44100.0;
-    if (bs <= 0) bs = 512;
+    if (bs <= 0) bs = kMinimumHostedPluginBlockSize;
 
     // Prepare while preserving bus layout (see preparePluginPreservingLayout).
     preparePluginPreservingLayout(plugin.get(), sr, bs,
@@ -1435,7 +1467,7 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     if (!plugin)
         return false;
 
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
 
     // Only set stereo layout if the plugin has no channels configured
     // (same rationale as addInputFX — preserve the plugin's default layout).
@@ -1450,9 +1482,9 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
     // then to 44100 as last resort. Use the realtime device block size when known.
     double sr = callerSampleRate > 0 ? callerSampleRate : getSampleRate();
-    int bs = callerBlockSize > 0 ? callerBlockSize : getBlockSize();
+    int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize());
     if (sr <= 0) sr = 44100.0;
-    if (bs <= 0) bs = 512;
+    if (bs <= 0) bs = kMinimumHostedPluginBlockSize;
 
     // Prepare while preserving bus layout (see preparePluginPreservingLayout).
     preparePluginPreservingLayout(plugin.get(), sr, bs,
@@ -1470,7 +1502,7 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
 
 void TrackProcessor::removeInputFX(int index)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (index >= 0 && index < (int)inputFXPlugins.size())
     {
         inputFXPlugins.erase(inputFXPlugins.begin() + index);
@@ -1497,7 +1529,7 @@ void TrackProcessor::removeInputFX(int index)
 
 void TrackProcessor::removeTrackFX(int index)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (index >= 0 && index < (int)trackFXPlugins.size())
     {
         if (index == araFXIndex)
@@ -1537,7 +1569,7 @@ void TrackProcessor::removeTrackFX(int index)
 
 void TrackProcessor::bypassInputFX(int index, bool bypassed)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (index >= 0 && index < (int)inputFXPlugins.size())
     {
         if (bypassed)
@@ -1551,7 +1583,7 @@ void TrackProcessor::bypassInputFX(int index, bool bypassed)
 
 void TrackProcessor::bypassTrackFX(int index, bool bypassed)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (index >= 0 && index < (int)trackFXPlugins.size())
     {
         if (bypassed)
@@ -1607,6 +1639,20 @@ const juce::AudioProcessor* TrackProcessor::getTrackFXProcessor(int index) const
     return nullptr;
 }
 
+std::shared_ptr<juce::AudioProcessor> TrackProcessor::getInputFXProcessorShared(int index) const
+{
+    if (index >= 0 && index < (int)inputFXPlugins.size())
+        return inputFXPlugins[static_cast<size_t>(index)];
+    return {};
+}
+
+std::shared_ptr<juce::AudioProcessor> TrackProcessor::getTrackFXProcessorShared(int index) const
+{
+    if (index >= 0 && index < (int)trackFXPlugins.size())
+        return trackFXPlugins[static_cast<size_t>(index)];
+    return {};
+}
+
 std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>> TrackProcessor::getInputFXSnapshot() const
 {
     return std::atomic_load_explicit(&realtimeInputFXSnapshot, std::memory_order_acquire);
@@ -1639,7 +1685,7 @@ std::shared_ptr<const std::map<int, bool>> TrackProcessor::getTrackFXPrecisionOv
 
 bool TrackProcessor::reorderInputFX(int fromIndex, int toIndex)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (fromIndex < 0 || fromIndex >= (int)inputFXPlugins.size() ||
         toIndex < 0 || toIndex >= (int)inputFXPlugins.size() ||
         fromIndex == toIndex)
@@ -1683,7 +1729,7 @@ bool TrackProcessor::reorderInputFX(int fromIndex, int toIndex)
 
 bool TrackProcessor::reorderTrackFX(int fromIndex, int toIndex)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (fromIndex < 0 || fromIndex >= (int)trackFXPlugins.size() ||
         toIndex < 0 || toIndex >= (int)trackFXPlugins.size() ||
         fromIndex == toIndex)
@@ -1918,13 +1964,13 @@ void TrackProcessor::fillSendBuffer(int sendIndex, const juce::AudioBuffer<float
 void TrackProcessor::setInstrument(std::unique_ptr<juce::AudioPluginInstance> plugin,
                                    double callerSampleRate, int callerBlockSize)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (plugin)
     {
         double sr = callerSampleRate > 0 ? callerSampleRate : getSampleRate();
-        int bs = callerBlockSize > 0 ? callerBlockSize : getBlockSize();
+        int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize());
         if (sr <= 0) sr = 44100.0;
-        if (bs <= 0) bs = 512;
+        if (bs <= 0) bs = kMinimumHostedPluginBlockSize;
 
         preparePluginPreservingLayout(plugin.get(), sr, bs,
                                       resolvePluginPrecisionMode(processingPrecisionMode,
@@ -2167,7 +2213,7 @@ void TrackProcessor::setInputFXPrecisionOverride(int index, bool forceFloat)
     if (auto* plugin = inputFXPlugins[static_cast<size_t>(index)].get())
     {
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-        int bs = getBlockSize() > 0 ? getBlockSize() : 512;
+        int bs = getSafeHostedPluginBlockSize(getBlockSize());
         preparePluginPreservingLayout(plugin, sr, bs,
                                       resolvePluginPrecisionMode(processingPrecisionMode, forceFloat));
     }
@@ -2184,7 +2230,7 @@ void TrackProcessor::setTrackFXPrecisionOverride(int index, bool forceFloat)
     if (auto* plugin = trackFXPlugins[static_cast<size_t>(index)].get())
     {
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-        int bs = getBlockSize() > 0 ? getBlockSize() : 512;
+        int bs = getSafeHostedPluginBlockSize(getBlockSize());
         preparePluginPreservingLayout(plugin, sr, bs,
                                       resolvePluginPrecisionMode(processingPrecisionMode, forceFloat));
     }
@@ -2198,7 +2244,7 @@ void TrackProcessor::setInstrumentPrecisionOverride(bool forceFloat)
     if (instrumentPlugin)
     {
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-        int bs = getBlockSize() > 0 ? getBlockSize() : 512;
+        int bs = getSafeHostedPluginBlockSize(getBlockSize());
         preparePluginPreservingLayout(instrumentPlugin.get(), sr, bs,
                                       resolvePluginPrecisionMode(processingPrecisionMode, forceFloat));
     }
@@ -2230,14 +2276,14 @@ bool TrackProcessor::getTrackFXBypassed(int index) const
 
 void TrackProcessor::setProcessingPrecisionMode(ProcessingPrecisionMode mode)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (processingPrecisionMode == mode)
         return;
 
     processingPrecisionMode = mode;
 
     double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-    int bs = getBlockSize() > 0 ? getBlockSize() : 512;
+    int bs = getSafeHostedPluginBlockSize(getBlockSize());
 
     for (int index = 0; index < static_cast<int>(inputFXPlugins.size()); ++index)
         if (auto* plugin = inputFXPlugins[static_cast<size_t>(index)].get())
@@ -2341,7 +2387,7 @@ void TrackProcessor::setOutputChannels(int startChannel, int numChannels)
 
 void TrackProcessor::setMIDIOutputDevice(const juce::String& deviceName)
 {
-    const juce::ScopedLock callbackLock(getCallbackLock());
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (deviceName == midiOutputDeviceName)
         return;
 

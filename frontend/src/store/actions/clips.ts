@@ -8,6 +8,7 @@ import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { syncTempoMarkersToBackend } from "./storeHelpers";
+import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
 
 const AUDIO_PLAYBACK_LOG_PREFIX = "[audio.playback]";
 
@@ -163,29 +164,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       for (const track of tracks) {
         if (track.type !== "midi" && track.type !== "instrument") continue;
 
-        const midiClipsPayload = track.midiClips.map((clip) => ({
-          id: clip.id,
-          startTime: clip.startTime,
-          duration: clip.duration,
-          events: [
-            ...clip.events.map((e) => ({
-              type: e.type,
-              timestamp: e.timestamp,
-              note: e.note,
-              velocity: e.velocity,
-              controller: e.controller,
-              value: e.value,
-              channel: 1,
-            })),
-            ...(clip.ccEvents || []).map((e) => ({
-              type: "cc",
-              timestamp: e.time,
-              controller: e.cc,
-              value: e.value,
-              channel: 1,
-            })),
-          ].sort((a, b) => a.timestamp - b.timestamp),
-        }));
+        const midiClipsPayload = serializeMIDIClipsForBackend(track.midiClips);
 
         syncPromises.push(
           nativeBridge.setTrackMIDIClips(track.id, midiClipsPayload).catch(logBridgeError("sync")),

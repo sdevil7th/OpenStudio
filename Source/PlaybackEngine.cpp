@@ -4,11 +4,7 @@
 
 namespace
 {
-#if JUCE_DEBUG
-constexpr bool kAudioPlaybackDebugLogs = true;
-#else
 constexpr bool kAudioPlaybackDebugLogs = false;
-#endif
 
 static void logAudioPlayback(const juce::String& message)
 {
@@ -149,6 +145,7 @@ PlaybackEngine::~PlaybackEngine()
 {
     juce::ScopedLock sl(lock);
     readers.clear();
+    audioDataCache.clear();
     clips.clear();
 }
 
@@ -166,6 +163,7 @@ void PlaybackEngine::preloadReader(const juce::File& file)
     std::unique_ptr<juce::AudioFormatReader> newReader(formatManager.createReaderFor(file));
     if (newReader)
     {
+        preloadAudioData(file, *newReader);
         readers[filePath] = std::move(newReader);
         readerAccessTimes[filePath] = juce::Time::currentTimeMillis();
         evictOldReaders();
@@ -173,15 +171,42 @@ void PlaybackEngine::preloadReader(const juce::File& file)
     }
 }
 
+void PlaybackEngine::preloadAudioData(const juce::File& file, juce::AudioFormatReader& reader)
+{
+    constexpr juce::int64 maxCachedAudioBytesPerFile = 256LL * 1024LL * 1024LL;
+    const auto filePath = file.getFullPathName();
+    const int channels = static_cast<int>(reader.numChannels);
+    const auto length = reader.lengthInSamples;
+    if (channels <= 0 || length <= 0 || length > std::numeric_limits<int>::max())
+    {
+        audioDataCache.erase(filePath);
+        return;
+    }
+
+    const juce::int64 requiredBytes = length * static_cast<juce::int64>(channels) * static_cast<juce::int64>(sizeof(float));
+    if (requiredBytes > maxCachedAudioBytesPerFile)
+    {
+        audioDataCache.erase(filePath);
+        return;
+    }
+
+    auto cached = std::make_shared<CachedAudioData>();
+    cached->sampleRate = reader.sampleRate;
+    cached->lengthInSamples = length;
+    cached->numChannels = channels;
+    cached->buffer.setSize(channels, static_cast<int>(length));
+    if (reader.read(&cached->buffer, 0, static_cast<int>(length), 0, true, true))
+        audioDataCache[filePath] = std::move(cached);
+    else
+        audioDataCache.erase(filePath);
+}
+
 juce::AudioFormatReader* PlaybackEngine::getCachedReader(const juce::File& file)
 {
     // Audio-thread safe: only looks up, never creates readers
     auto it = readers.find(file.getFullPathName());
     if (it != readers.end() && it->second != nullptr)
-    {
-        readerAccessTimes[file.getFullPathName()] = juce::Time::currentTimeMillis();
         return it->second.get();
-    }
     return nullptr;
 }
 
@@ -205,6 +230,7 @@ void PlaybackEngine::evictOldReaders()
     {
         const auto& path = entries[i].second;
         readers.erase(path);
+        audioDataCache.erase(path);
         readerAccessTimes.erase(path);
     }
 
@@ -358,6 +384,7 @@ void PlaybackEngine::replaceClipAudioFile(const juce::String& clipId, const juce
         {
             // Evict old reader so the audio thread stops reading the old file
             readers.erase(clip.audioFile.getFullPathName());
+            audioDataCache.erase(clip.audioFile.getFullPathName());
             readerAccessTimes.erase(clip.audioFile.getFullPathName());
             // Swap in the new file. Corrected files start at sample 0, but restoring
             // the original file should also restore the original trim offset.
@@ -689,6 +716,7 @@ void PlaybackEngine::clearAllClips()
     const int preservedCorrectedCount = static_cast<int>(pitchCorrectedFiles.size());
     clips.clear();
     readers.clear();
+    audioDataCache.clear();
     readerAccessTimes.clear();
     // NOTE: clipPitchPreviews is NOT cleared here — it must survive sync cycles.
     // syncClipsWithBackend calls clearAllClips + re-adds clips, and the preview
@@ -792,6 +820,7 @@ void PlaybackEngine::setClipPitchPreview (const juce::String& clipId,
             if (! usingOriginalAlready)
             {
                 readers.erase (clip.audioFile.getFullPathName());
+                audioDataCache.erase (clip.audioFile.getFullPathName());
                 readerAccessTimes.erase (clip.audioFile.getFullPathName());
                 clip.audioFile = clip.originalAudioFile;
                 clip.offset = clip.originalOffset;
@@ -1222,8 +1251,10 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             if (requestedOutputSamples <= 0)
                 return false;
 
-            auto* reader = getCachedReader (playbackFile);
-            if (reader == nullptr)
+            const auto cacheIt = audioDataCache.find(playbackFile.getFullPathName());
+            const auto cachedAudio = cacheIt != audioDataCache.end() ? cacheIt->second : nullptr;
+            auto* reader = cachedAudio ? nullptr : getCachedReader (playbackFile);
+            if (cachedAudio == nullptr && reader == nullptr)
             {
                 const int missingReaders = missingReaderCount.fetch_add (1, std::memory_order_relaxed) + 1;
                 logAudioPlayback ("fillTrackBuffer missingReader track=" + trackId
@@ -1234,7 +1265,10 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 return false;
             }
 
-            const double fileSampleRate = reader->sampleRate;
+            if (cachedAudio == nullptr)
+                audioDataCacheMissCount.fetch_add(1, std::memory_order_relaxed);
+
+            const double fileSampleRate = cachedAudio ? cachedAudio->sampleRate : reader->sampleRate;
             const double ratio = fileSampleRate / sampleRate;
             double exactFileStart = juce::jmax (0.0, playbackOffset) * fileSampleRate;
             const double roundedFileStart = std::round (exactFileStart);
@@ -1248,7 +1282,8 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             const double bufferStartPosition = static_cast<double> (readStartOffset) + fileStartFraction;
             int outputSamples = requestedOutputSamples;
             int fileSamplesToRead = static_cast<int> (std::ceil (bufferStartPosition + outputSamples * ratio)) + 3;
-            const juce::int64 fileSamplesAvailable = reader->lengthInSamples - readStartSample;
+            const juce::int64 sourceLengthInSamples = cachedAudio ? cachedAudio->lengthInSamples : reader->lengthInSamples;
+            const juce::int64 fileSamplesAvailable = sourceLengthInSamples - readStartSample;
             if (fileSamplesAvailable <= 0)
                 return false;
             if (fileSamplesAvailable < fileSamplesToRead)
@@ -1260,7 +1295,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             if (outputSamples <= 0 || fileSamplesToRead <= 0)
                 return false;
 
-            const int readerChannels = static_cast<int> (reader->numChannels);
+            const int readerChannels = cachedAudio ? cachedAudio->numChannels : static_cast<int> (reader->numChannels);
             if (reusableFileBuffer.getNumChannels() < readerChannels
                 || reusableFileBuffer.getNumSamples() < fileSamplesToRead)
             {
@@ -1269,7 +1304,16 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 fileBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
             }
             reusableFileBuffer.clear (0, fileSamplesToRead);
-            reader->read (&reusableFileBuffer, 0, fileSamplesToRead, readStartSample, true, true);
+            if (cachedAudio)
+            {
+                const int sourceStart = static_cast<int>(readStartSample);
+                for (int ch = 0; ch < readerChannels; ++ch)
+                    reusableFileBuffer.copyFrom(ch, 0, cachedAudio->buffer, ch, sourceStart, fileSamplesToRead);
+            }
+            else
+            {
+                reader->read (&reusableFileBuffer, 0, fileSamplesToRead, readStartSample, true, true);
+            }
 
             const bool allowLivePitchPreviewForChunk = ! usingRenderedPreviewSegment && ! usingCorrectedSource;
             const double chunkClipStart = currentTime + (static_cast<double> (outputStart) / sampleRate) - clip.startTime;
@@ -1717,10 +1761,16 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         } // end real-time path
     }
 
-    const float playbackPeak = peakForBuffer(buffer, numSamples);
+    const bool shouldUpdatePlaybackPeak = mixedClipCount > 0 && ((fillCall & 15) == 0 || shouldLogDetailed);
+    const float playbackPeak = mixedClipCount == 0
+        ? 0.0f
+        : (shouldUpdatePlaybackPeak
+            ? peakForBuffer(buffer, numSamples)
+            : lastTrackPlaybackPeak.load(std::memory_order_relaxed));
     lastOverlappingClipCount.store(overlappingClipCount, std::memory_order_relaxed);
     lastMixedClipCount.store(mixedClipCount, std::memory_order_relaxed);
-    lastTrackPlaybackPeak.store(playbackPeak, std::memory_order_relaxed);
+    if (shouldUpdatePlaybackPeak || mixedClipCount == 0)
+        lastTrackPlaybackPeak.store(playbackPeak, std::memory_order_relaxed);
     if (shouldLogDetailed || (overlappingClipCount > 0 && mixedClipCount == 0))
     {
         logAudioPlayback("fillTrackBuffer summary track=" + trackId

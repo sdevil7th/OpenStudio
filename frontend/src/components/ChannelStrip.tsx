@@ -128,7 +128,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   }, [track.id]);
 
   const [showFXChain, setShowFXChain] = useState(false);
-  const hasFx = track.inputFxCount + track.trackFxCount > 0;
+  const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
+  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin);
 
   // Find the clip under the playhead for gain staging display.
   // Reads currentTime from a snapshot (not a selector) to avoid 60fps re-renders.
@@ -424,7 +425,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
                 className={classNames(
                   "h-4 w-4 rounded rounded-r-none text-[7px] flex items-center justify-center cursor-pointer transition-colors p-0",
                   hasFx
-                    ? track.fxBypassed
+                    ? hasBypassableFx && track.fxBypassed
                       ? "bg-neutral-800 border border-red-500 text-red-400 shadow-[0_0_6px_rgba(239,68,68,0.4)]"
                       : "bg-neutral-800 border border-green-500 text-green-400 shadow-[0_0_6px_rgba(34,197,94,0.4)]"
                     : "bg-neutral-800 border border-dashed border-neutral-600 text-neutral-500 hover:border-green-500 hover:text-green-500",
@@ -434,7 +435,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               </button>
               <button
                 onClick={() => {
-                  if (!hasFx) {
+                  if (!hasBypassableFx) {
                     setShowFXChain(true);
                   } else {
                     toggleTrackFXBypass(track.id);
@@ -442,13 +443,15 @@ export const ChannelStrip = React.memo(function ChannelStrip({
                 }}
                 title={
                   hasFx
-                    ? track.fxBypassed
-                      ? "Enable FX"
-                      : "Bypass FX"
+                    ? hasBypassableFx
+                      ? track.fxBypassed
+                        ? "Enable FX"
+                        : "Bypass FX"
+                      : "Instrument loaded"
                     : "No FX loaded"
                 }
                 aria-label={
-                  hasFx
+                  hasBypassableFx
                     ? track.fxBypassed
                       ? `Enable FX on ${track.name}`
                       : `Bypass FX on ${track.name}`
@@ -459,9 +462,9 @@ export const ChannelStrip = React.memo(function ChannelStrip({
                   !hasFx &&
                     "border-neutral-700 text-neutral-600 bg-neutral-800",
                   hasFx &&
-                    !track.fxBypassed &&
+                    !(hasBypassableFx && track.fxBypassed) &&
                     "border-green-500 text-green-400 bg-neutral-800",
-                  hasFx &&
+                  hasBypassableFx &&
                     track.fxBypassed &&
                     "border-red-500 text-red-400 bg-neutral-800",
                 )}
