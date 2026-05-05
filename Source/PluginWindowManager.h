@@ -38,6 +38,8 @@ public:
     // Open plugin editor for a specific processor
     void openEditor(juce::AudioProcessor* processor, const juce::String& windowTitle,
                     const PluginEditorTarget& target);
+    void openEditor(std::shared_ptr<juce::AudioProcessor> processor, const juce::String& windowTitle,
+                    const PluginEditorTarget& target);
     
     // Close editor for a specific processor (async, safe from any thread)
     void closeEditor(juce::AudioProcessor* processor);
@@ -75,7 +77,8 @@ private:
     struct PluginWindow : public juce::DocumentWindow
     {
         PluginWindow(PluginWindowManager& ownerIn, juce::AudioProcessor& proc,
-                     const juce::String& title, const PluginEditorTarget& targetIn);
+                     const juce::String& title, const PluginEditorTarget& targetIn,
+                     std::shared_ptr<juce::AudioProcessor> keepAliveIn = {});
         ~PluginWindow() override;
         
         void closeButtonPressed() override;
@@ -84,6 +87,7 @@ private:
         
         PluginWindowManager& owner;
         juce::AudioProcessor& processor;
+        std::shared_ptr<juce::AudioProcessor> keepAlive;
         PluginEditorTarget target;
     };
 

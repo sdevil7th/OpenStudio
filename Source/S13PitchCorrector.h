@@ -3,7 +3,14 @@
 #include <JuceHeader.h>
 #include "PitchDetector.h"
 #include "PitchMapper.h"
+#if defined(_MSC_VER)
+ #pragma warning(push)
+ #pragma warning(disable: 4244 4267 4305 4456)
+#endif
 #include "signalsmith-stretch.h"
+#if defined(_MSC_VER)
+ #pragma warning(pop)
+#endif
 #include <atomic>
 #include <vector>
 

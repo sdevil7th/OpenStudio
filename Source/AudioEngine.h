@@ -708,6 +708,9 @@ private:
     std::atomic<int> midiLateEventCount { 0 };
     std::atomic<int> midiMaxEventsPerBlock { 0 };
     std::atomic<int> midiLastComputedSampleOffset { 0 };
+    std::atomic<int> midiLastInputFanoutCount { 0 };
+    std::atomic<int> midiMaxInputFanoutCount { 0 };
+    std::atomic<int> midiMappedParameterUpdateCount { 0 };
     ProcessingPrecisionMode processingPrecisionMode { ProcessingPrecisionMode::Float32 };
     
     // Master FX (Phase 5)
@@ -840,6 +843,7 @@ private:
     float spectrumInputBuffer[FFT_SIZE * 2] = {};  // ring buffer for FFT input
     float spectrumOutputBuffer[FFT_SIZE] = {};      // magnitude spectrum
     int spectrumWritePos { 0 };
+    int spectrumFftDecimationCounter { 0 };
     bool spectrumReady { false };
     juce::CriticalSection spectrumLock;
     std::atomic<uint64> spectrumFftPublishCount { 0 };

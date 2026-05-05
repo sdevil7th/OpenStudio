@@ -10,10 +10,14 @@
 .piano-roll-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  padding: 8px 12px;
+  box-sizing: border-box;
+  min-height: 40px;
+  padding: 6px 12px;
   background: rgba(0, 0, 0, 0.3);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: visible;
 }
 
 .tool-btn {
@@ -52,7 +56,7 @@
 }
 
 .zoom-slider {
-  width: 100px;
+  width: 112px;
   height: 4px;
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2px;
@@ -99,6 +103,59 @@
   cursor: pointer;
   outline: none;
   min-width: 60px;
+}
+
+.piano-roll-horizontal-scroll {
+  height: 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #111;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  scrollbar-color: #5a5a5a #151515;
+  scrollbar-width: thin;
+}
+
+.piano-roll-horizontal-scroll::-webkit-scrollbar {
+  height: 12px;
+}
+
+.piano-roll-horizontal-scroll::-webkit-scrollbar-track {
+  background: #151515;
+}
+
+.piano-roll-horizontal-scroll::-webkit-scrollbar-thumb {
+  background: #5a5a5a;
+  border: 2px solid #151515;
+  border-radius: 8px;
+}
+
+.piano-roll-horizontal-scroll::-webkit-scrollbar-thumb:hover {
+  background: #777;
+}
+
+.piano-roll-transform-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  min-width: 200px;
+  padding: 4px 0;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.piano-roll-transform-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: #444;
+}
+
+.piano-roll-step-octave,
+.piano-roll-multi-clip {
+  font-size: 10px;
+  color: #aaa;
 }
 
 .piano-roll-select:hover {

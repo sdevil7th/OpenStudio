@@ -108,6 +108,8 @@ export function Timeline({
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
   const [recordingWaveformCache, setRecordingWaveformCache] = useState<RecordingWaveformCache>(new Map());
+  const waveformCacheRef = useRef(waveformCache);
+  waveformCacheRef.current = waveformCache;
   const recordingWaveformCacheRef = useRef(recordingWaveformCache);
   recordingWaveformCacheRef.current = recordingWaveformCache;
   // Marks recording-waveform updates as low-priority so React won't interrupt
@@ -1552,7 +1554,7 @@ export function Timeline({
                tileSample < endSampleInFile;
                tileSample += tileSamples) {
             const cacheKey = `${clip.filePath}-${cacheSpp}-${tileSample}`;
-            if (!waveformCache.has(cacheKey) && !inFlightRef.current.has(cacheKey)) {
+            if (!waveformCacheRef.current.has(cacheKey) && !inFlightRef.current.has(cacheKey)) {
               const numPeaks = Math.min(8000, Math.ceil((endSampleInFile - tileSample) / cacheSpp) + 4096);
               fetchWaveformDataRef.current(clip.filePath, cacheSpp, tileSample, numPeaks);
             }
@@ -1571,7 +1573,7 @@ export function Timeline({
         prefetchIntervalRef.current = null;
       }
     };
-  }, [isPlaying, dimensions.width, waveformCache]);
+  }, [isPlaying, dimensions.width]);
 
   // Fetch recording waveforms on a short throttle while recording so short takes
   // also produce visible waveforms during record.
@@ -1581,19 +1583,8 @@ export function Timeline({
       if (recordingWaveformCache.size > 0) {
         setRecordingWaveformCache(new Map());
       }
-      console.log(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:stop`, {
-        isRecording,
-        activeRecordingClips: recordingClips.length,
-      });
       return;
     }
-
-    console.log(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:start`, {
-      recordingTracks: recordingClips.map((clip) => clip.trackId),
-      pixelsPerSecond,
-      tempo,
-      timeSignature,
-    });
 
     let cancelled = false;
     const fetchRecordingPeaks = async () => {
@@ -1609,21 +1600,11 @@ export function Timeline({
 
         const recordingDuration = currentTime - rc.startTime;
         if (recordingDuration <= 0) {
-          console.log(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:skipNotStarted`, {
-            trackId: rc.trackId,
-            currentTime,
-            startTime: rc.startTime,
-          });
           continue;
         }
 
         const widthPixels = Math.ceil(recordingDuration * pixelsPerSecond);
         if (widthPixels < 2) {
-          console.log(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:skipTinyWidth`, {
-            trackId: rc.trackId,
-            widthPixels,
-            recordingDuration,
-          });
           continue;
         }
 
@@ -1635,13 +1616,6 @@ export function Timeline({
             samplesPerPixel,
             widthPixels,
           );
-          console.log(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:result`, {
-            trackId: rc.trackId,
-            recordingDuration,
-            widthPixels,
-            samplesPerPixel,
-            peaksReturned: peaks.length,
-          });
 
           if (peaks && peaks.length > 0) {
             newCache.set(rc.trackId, { peaks, widthPixels });
@@ -1662,7 +1636,7 @@ export function Timeline({
     void fetchRecordingPeaks();
     const intervalId = window.setInterval(() => {
       void fetchRecordingPeaks();
-    }, 150);
+    }, 250);
 
     return () => {
       cancelled = true;

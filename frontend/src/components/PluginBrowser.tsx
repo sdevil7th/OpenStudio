@@ -14,6 +14,7 @@ import {
   Code,
   Star,
   FolderOpen,
+  Search,
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
@@ -396,6 +397,7 @@ export function PluginBrowser({
         );
         if (success) {
           store.updateTrack(trackId, {
+            type: "instrument",
             instrumentPlugin: plugin.fileOrIdentifier,
           });
           await waitForInstrumentPlugin(
@@ -516,26 +518,34 @@ export function PluginBrowser({
       <div
         className={
           embedded
-            ? "flex gap-2 p-2 bg-neutral-800"
-            : "flex gap-2 p-3 border-b border-neutral-700 bg-neutral-800 rounded-t-lg"
+            ? "flex flex-wrap items-center gap-2 p-2 bg-neutral-800"
+            : "flex flex-wrap items-center gap-2 p-3 border-b border-neutral-700 bg-neutral-800 rounded-t-lg"
         }
       >
-        <Input
-          type="text"
-          variant="default"
-          size="md"
-          placeholder="Search by name, manufacturer, or category..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="flex-1"
-        />
+        <div className="relative flex-[2_1_360px] min-w-[280px]">
+          <Search
+            size={15}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-300 pointer-events-none"
+          />
+          <Input
+            type="text"
+            variant="default"
+            size="md"
+            placeholder="Search plugins, makers, categories..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            fullWidth
+            className="block w-full"
+            inputClassName="w-full pl-9 bg-neutral-950 border-neutral-500 text-white placeholder:text-neutral-400 shadow-inner focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+          />
+        </div>
         <Select
           variant="default"
           size="md"
           value={categoryFilter}
           onChange={(val) => setCategoryFilter(val as string)}
           options={categories.map((cat) => ({ value: cat, label: cat }))}
-          className="min-w-[150px]"
+          className="min-w-[170px] flex-[1_1_180px]"
         />
         <Button
           variant={showFavoritesOnly ? "primary" : "default"}

@@ -134,8 +134,8 @@ export function PeakMeter({
       const ctx = canvas.getContext("2d");
       if (!ctx) { animFrameRef.current = requestAnimationFrame(draw); return; }
 
-      // Throttle to ~30fps to reduce CPU
-      if (timestamp - lastDrawTimeRef.current < 33) {
+      // Throttle to ~20fps; backend meter events arrive around 10Hz.
+      if (timestamp - lastDrawTimeRef.current < 50) {
         animFrameRef.current = requestAnimationFrame(draw);
         return;
       }

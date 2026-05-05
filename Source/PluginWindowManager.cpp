@@ -165,12 +165,14 @@ std::optional<PluginWindowManager::PluginEditorTarget> PluginWindowManager::Plug
 PluginWindowManager::PluginWindow::PluginWindow(PluginWindowManager& ownerIn,
                                                 juce::AudioProcessor& proc,
                                                 const juce::String& title,
-                                                const PluginEditorTarget& targetIn)
+                                                const PluginEditorTarget& targetIn,
+                                                std::shared_ptr<juce::AudioProcessor> keepAliveIn)
     : DocumentWindow(title,
                      juce::Colours::darkgrey,
                      DocumentWindow::allButtons),
       owner(ownerIn),
       processor(proc),
+      keepAlive(std::move(keepAliveIn)),
       target(targetIn)
 {
     setUsingNativeTitleBar(true);
@@ -288,6 +290,36 @@ void PluginWindowManager::openEditor(juce::AudioProcessor* processor, const juce
         return;
 
     activeWindows[processor] = std::move(window);
+}
+
+void PluginWindowManager::openEditor(std::shared_ptr<juce::AudioProcessor> processor, const juce::String& windowTitle,
+                                     const PluginEditorTarget& target)
+{
+    if (!processor)
+        return;
+
+    auto* rawProcessor = processor.get();
+    auto it = activeWindows.find(rawProcessor);
+    if (it != activeWindows.end())
+    {
+        if (it->second != nullptr)
+        {
+            it->second->setVisible(true);
+            positionWindow(*it->second);
+            it->second->toFront(true);
+            logWindowEvent(target, "editor_reopened_to_front");
+        }
+        return;
+    }
+
+    if (!rawProcessor->hasEditor())
+        return;
+
+    auto window = std::make_unique<PluginWindow>(*this, *rawProcessor, windowTitle, target, std::move(processor));
+    if (window->getContentComponent() == nullptr)
+        return;
+
+    activeWindows[rawProcessor] = std::move(window);
 }
 
 void PluginWindowManager::closeEditor(juce::AudioProcessor* processor)

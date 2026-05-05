@@ -177,6 +177,7 @@ target_sources(OpenStudio PRIVATE
     Source/MainComponent.cpp
     Source/MixerWindowManager.cpp
     Source/AppUpdater.cpp
+    Source/CrashDiagnostics.cpp
     Source/AudioEngine.cpp
     Source/AudioRecorder.cpp
     Source/PlaybackEngine.cpp
@@ -370,6 +371,7 @@ if(WIN32)
     if(MSVC)
         target_link_libraries(OpenStudio PRIVATE
             "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
+            dbghelp
             dwmapi
         )
     endif()

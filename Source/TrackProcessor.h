@@ -154,6 +154,8 @@ public:
     const juce::AudioProcessor* getInputFXProcessor(int index) const;
     juce::AudioProcessor* getTrackFXProcessor(int index);
     const juce::AudioProcessor* getTrackFXProcessor(int index) const;
+    std::shared_ptr<juce::AudioProcessor> getInputFXProcessorShared(int index) const;
+    std::shared_ptr<juce::AudioProcessor> getTrackFXProcessorShared(int index) const;
     std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>> getInputFXSnapshot() const;
     std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>> getTrackFXSnapshot() const;
     std::shared_ptr<const std::map<int, bool>> getInputFXBypassSnapshot() const;
@@ -225,6 +227,7 @@ public:
     // Instrument plugin (Phase 2)
     void setInstrument(std::unique_ptr<juce::AudioPluginInstance> plugin, double callerSampleRate = 0.0, int callerBlockSize = 0);
     juce::AudioPluginInstance* getInstrument() const { return instrumentPlugin.get(); }
+    std::shared_ptr<juce::AudioPluginInstance> getInstrumentShared() const { return instrumentPlugin; }
 
     // MIDI intake / scheduling
     bool enqueueMidiMessage(const juce::MidiMessage& message, int sampleOffset = 0);
@@ -239,6 +242,7 @@ public:
     int getLastBuiltMidiEventCount() const { return lastBuiltMidiEventCount.load(std::memory_order_relaxed); }
     int getMaxBuiltMidiEventCount() const { return maxBuiltMidiEventCount.load(std::memory_order_relaxed); }
     int getRealtimeFallbackReuseCount() const { return realtimeFallbackReuseCount.load(std::memory_order_relaxed); }
+    int getPluginBusySkipCount() const { return pluginBusySkipCount.load(std::memory_order_relaxed); }
 
     void setProcessingPrecisionMode(ProcessingPrecisionMode mode);
     ProcessingPrecisionMode getProcessingPrecisionMode() const { return processingPrecisionMode; }
@@ -518,6 +522,7 @@ private:
     std::unique_ptr<juce::MidiOutput> midiOutputDevice;
     juce::AudioBuffer<float> realtimeFallbackBuffer;
     std::atomic<int> realtimeFallbackReuseCount { 0 };
+    std::atomic<int> pluginBusySkipCount { 0 };
 
     struct PendingMIDIEvent
     {

@@ -13,7 +13,6 @@ import {
   Scissors,
   VolumeX,
   Wand2,
-  Cpu,
 } from "lucide-react";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
 import { getDisplayShortcut, getActionShortcutScopeLabel } from "../store/actionRegistry";
@@ -352,7 +351,7 @@ export function MainToolbar({
           aria-label="AI Tools"
           style={aiButtonHaloStyle}
         >
-          <Cpu size={16} />
+          <span className="text-[10px] font-black leading-none tracking-normal">AI</span>
         </Button>
         <Button
           variant="default"

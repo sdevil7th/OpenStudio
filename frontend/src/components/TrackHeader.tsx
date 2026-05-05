@@ -135,9 +135,10 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
     });
   }, [track.id]);
 
-  const hasFx = track.inputFxCount + track.trackFxCount > 0;
+  const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
+  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin);
   let fxButtonClass = "hover:text-green-500 hover:border-green-500";
-  if (hasFx && track.fxBypassed)
+  if (hasBypassableFx && track.fxBypassed)
     fxButtonClass =
       "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]";
   else if (hasFx)
@@ -145,13 +146,15 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
       "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]";
 
   let fxBypassClass = "hover:text-green-500 hover:border-green-500";
-  if (hasFx && track.fxBypassed)
+  if (hasBypassableFx && track.fxBypassed)
     fxBypassClass = "text-red-400! border-red-500!";
   else if (hasFx) fxBypassClass = "text-green-400! border-green-500!";
   const fxBypassTitle = hasFx
-    ? track.fxBypassed
-      ? "Enable FX"
-      : "Bypass FX"
+    ? hasBypassableFx
+      ? track.fxBypassed
+        ? "Enable FX"
+        : "Bypass FX"
+      : "Instrument loaded"
     : "No FX loaded";
 
   const hasAutomation =
@@ -415,7 +418,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
               size="icon-xs"
               shape="square"
               onClick={() => {
-                if (!hasFx) {
+                if (!hasBypassableFx) {
                   setShowFXChain(true);
                 } else {
                   toggleTrackFXBypass(track.id);
