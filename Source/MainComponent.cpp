@@ -69,6 +69,115 @@ juce::File getRuntimeAssetRoot()
     return getExecutableDirectory();
 }
 
+juce::String quoteProcessArg(const juce::String& arg)
+{
+#if JUCE_WINDOWS
+    return "\"" + arg.replace("\"", "\\\"") + "\"";
+#else
+    return "'" + arg.replace("'", "'\\''") + "'";
+#endif
+}
+
+juce::File getDefaultAssistantStatusFile()
+{
+    return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+        .getChildFile(".openstudio")
+        .getChildFile("assistant-runtime-status.json");
+}
+
+juce::File getDefaultAudioUnderstandingStatusFile()
+{
+    return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+        .getChildFile(".openstudio")
+        .getChildFile("audio-understanding-runtime-status.json");
+}
+
+juce::File getAssistantServiceScript()
+{
+    const auto runtimeRoot = getRuntimeAssetRoot();
+    const juce::Array<juce::File> candidates {
+        runtimeRoot.getChildFile("scripts").getChildFile("assistant_service.py"),
+        getExecutableDirectory().getChildFile("../../../tools/assistant_service.py"),
+        getExecutableDirectory().getParentDirectory().getChildFile("tools").getChildFile("assistant_service.py")
+    };
+
+    for (const auto& candidate : candidates)
+        if (candidate.existsAsFile())
+            return candidate;
+
+    return {};
+}
+
+juce::var makeAssistantSetupResponse(const juce::String& message)
+{
+    const auto suffix = juce::String(juce::Time::currentTimeMillis());
+
+    auto* action = new juce::DynamicObject();
+    action->setProperty("id", "act_setup_" + suffix);
+    action->setProperty("kind", "ai.openSetup");
+    action->setProperty("risk", "ui");
+    action->setProperty("params", juce::var(new juce::DynamicObject()));
+    action->setProperty("summary", "Open AI Tools Setup.");
+
+    juce::Array<juce::var> actions;
+    actions.add(juce::var(action));
+
+    auto* plan = new juce::DynamicObject();
+    plan->setProperty("id", "plan_setup_" + suffix);
+    plan->setProperty("title", "Open AI Tools Setup");
+    plan->setProperty("intent", "Prepare the verified local Qwen assistant runtime.");
+    plan->setProperty("expectedImpact", "Opens AI Tools Setup. No project data is changed.");
+    plan->setProperty("requiresConfirmation", false);
+    plan->setProperty("actions", actions);
+
+    auto* response = new juce::DynamicObject();
+    response->setProperty("ok", true);
+    response->setProperty("reply", message);
+    response->setProperty("runtimeReady", false);
+    response->setProperty("modelUsed", false);
+    response->setProperty("fallbackUsed", true);
+    response->setProperty("plan", juce::var(plan));
+    return juce::var(response);
+}
+
+juce::var makeAssistantErrorResponse(const juce::String& message, const juce::String& detail = {})
+{
+    auto* response = new juce::DynamicObject();
+    response->setProperty("ok", false);
+    response->setProperty("reply", message);
+    if (detail.isNotEmpty())
+        response->setProperty("error", detail);
+    return juce::var(response);
+}
+
+juce::var parseAssistantServiceResponse(const juce::String& output)
+{
+    juce::StringArray lines;
+    lines.addLines(output);
+
+    for (int i = lines.size(); --i >= 0;)
+    {
+        const auto line = lines[i].trim();
+        if (line.startsWithChar('{') && line.endsWithChar('}'))
+        {
+            auto parsed = juce::JSON::parse(line);
+            if (! parsed.isVoid())
+                return parsed;
+        }
+    }
+
+    const auto start = output.indexOfChar('{');
+    const auto end = output.lastIndexOfChar('}');
+    if (start >= 0 && end >= start)
+    {
+        auto parsed = juce::JSON::parse(output.substring(start, end + 1));
+        if (! parsed.isVoid())
+            return parsed;
+    }
+
+    return {};
+}
+
 juce::Array<juce::File> getPackagedFrontendCandidates()
 {
     const auto exeDir = getExecutableDirectory();
@@ -897,7 +1006,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                    // Worker-backed startup calls may also legitimately take longer than the default bridge timeout.
                                    // Use a 5-minute timeout for file choosers and AI generation startup, 15 seconds for everything else.
                                    const DIALOG_FUNCTIONS = ['showRenderSaveDialog', 'showSaveDialog', 'showOpenDialog', 'showOpenFileDialog', 'showDirectoryDialog'];
-                                   const LONG_RUNNING_FUNCTIONS = ['startAIGeneration'];
+                                   const LONG_RUNNING_FUNCTIONS = ['startAIGeneration', 'runAssistantPrompt'];
                                    const timeoutMs = (DIALOG_FUNCTIONS.indexOf(name) >= 0 || LONG_RUNNING_FUNCTIONS.indexOf(name) >= 0) ? 300000 : 15000;
                                    const timeout = setTimeout(() => {
                                        window.__JUCE__.backend.removeEventListener(listener);
@@ -5427,6 +5536,155 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("cancelAiToolsInstall", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         audioEngine.cancelAiToolsInstall();
                         completion(juce::var());
+                    })
+                    .withNativeFunction ("runAssistantPrompt", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.isEmpty())
+                        {
+                            completion(makeAssistantErrorResponse("Assistant request is missing a prompt."));
+                            return;
+                        }
+
+                        const auto prompt = args[0].toString();
+                        const auto contextJson = args.size() >= 2 ? args[1].toString() : juce::String("{}");
+                        const auto aiToolsStatus = audioEngine.getAiToolsStatus();
+
+                        bool assistantRuntimeReady = false;
+                        juce::String assistantStatusPath;
+                        juce::String audioUnderstandingStatusPath;
+                        if (auto* obj = aiToolsStatus.getDynamicObject())
+                        {
+                            assistantRuntimeReady = static_cast<bool>(obj->getProperty("assistantRuntimeReady"));
+                            assistantStatusPath = obj->getProperty("assistantVerifiedStatusPath").toString();
+                            audioUnderstandingStatusPath = obj->getProperty("audioUnderstandingVerifiedStatusPath").toString();
+                        }
+
+                        if (! assistantRuntimeReady)
+                        {
+                            completion(makeAssistantSetupResponse(
+                                "The local Qwen assistant runtime is not verified yet. Open AI Tools Setup and run Download and Install first."));
+                            return;
+                        }
+
+                        const auto serviceScript = getAssistantServiceScript();
+                        if (! serviceScript.existsAsFile())
+                        {
+                            completion(makeAssistantErrorResponse(
+                                "Assistant service script is missing.",
+                                "Expected scripts/assistant_service.py in the runtime bundle or tools/assistant_service.py in the dev tree."));
+                            return;
+                        }
+
+                        const auto statusFile = assistantStatusPath.isNotEmpty()
+                            ? juce::File(assistantStatusPath)
+                            : getDefaultAssistantStatusFile();
+                        const auto audioUnderstandingStatusFile = audioUnderstandingStatusPath.isNotEmpty()
+                            ? juce::File(audioUnderstandingStatusPath)
+                            : getDefaultAudioUnderstandingStatusFile();
+                        if (! statusFile.existsAsFile())
+                        {
+                            completion(makeAssistantSetupResponse(
+                                "Assistant verification status was not found. Open AI Tools Setup and verify the runtime again."));
+                            return;
+                        }
+
+                        auto verifiedStatus = juce::JSON::parse(statusFile);
+                        auto runtimePath = juce::String();
+                        if (auto* obj = verifiedStatus.getDynamicObject())
+                        {
+                            runtimePath = obj->getProperty("runtimePath").toString();
+                            if (runtimePath.isEmpty())
+                            {
+                                auto verification = obj->getProperty("verification");
+                                if (auto* verificationObj = verification.getDynamicObject())
+                                    runtimePath = verificationObj->getProperty("runtimePath").toString();
+                            }
+                        }
+
+                        const auto runtimePython = juce::File(runtimePath);
+                        if (runtimePath.isEmpty() || ! runtimePython.existsAsFile())
+                        {
+                            completion(makeAssistantSetupResponse(
+                                "Assistant verification did not include a usable Python runtime. Open AI Tools Setup and verify the runtime again."));
+                            return;
+                        }
+
+                        std::thread([prompt, contextJson, statusFile, audioUnderstandingStatusFile, serviceScript, runtimePython, completion]() mutable {
+                            auto contextVar = juce::JSON::parse(contextJson);
+                            if (! contextVar.isObject())
+                                contextVar = juce::var(new juce::DynamicObject());
+
+                            auto* request = new juce::DynamicObject();
+                            request->setProperty("prompt", prompt);
+                            request->setProperty("context", contextVar);
+                            request->setProperty("assistantStatusPath", statusFile.getFullPathName());
+                            request->setProperty("audioUnderstandingStatusPath", audioUnderstandingStatusFile.getFullPathName());
+                            const juce::var requestVar(request);
+
+                            const auto tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
+                            const auto requestFile = tempDir.getChildFile(
+                                "openstudio-assistant-"
+                                + juce::String(juce::Time::currentTimeMillis())
+                                + "-"
+                                + juce::String(juce::Random::getSystemRandom().nextInt())
+                                + ".json");
+
+                            if (! requestFile.replaceWithText(juce::JSON::toString(requestVar, false), false, false, "\n"))
+                            {
+                                completion(makeAssistantErrorResponse(
+                                    "Assistant request failed.",
+                                    "Could not write assistant request file: " + requestFile.getFullPathName()));
+                                return;
+                            }
+
+                            const auto command = quoteProcessArg(runtimePython.getFullPathName())
+                                + " "
+                                + quoteProcessArg(serviceScript.getFullPathName())
+                                + " --request "
+                                + quoteProcessArg(requestFile.getFullPathName());
+
+                            juce::ChildProcess process;
+                            if (! process.start(command))
+                            {
+                                requestFile.deleteFile();
+                                completion(makeAssistantErrorResponse(
+                                    "Assistant request failed.",
+                                    "Could not start the assistant runtime process."));
+                                return;
+                            }
+
+                            const bool finished = process.waitForProcessToFinish(300000);
+                            if (! finished)
+                                process.kill();
+
+                            const auto output = process.readAllProcessOutput();
+                            const auto exitCode = process.getExitCode();
+                            requestFile.deleteFile();
+
+                            if (! finished)
+                            {
+                                completion(makeAssistantErrorResponse(
+                                    "Assistant request timed out.",
+                                    "The local assistant runtime did not respond within five minutes."));
+                                return;
+                            }
+
+                            auto parsed = parseAssistantServiceResponse(output);
+                            if (parsed.isObject())
+                            {
+                                completion(parsed);
+                                return;
+                            }
+
+                            completion(makeAssistantErrorResponse(
+                                "Assistant request failed.",
+                                "Process exit code " + juce::String(exitCode) + ": " + output.trim().substring(0, 1000)));
+                        }).detach();
+                    })
+                    .withNativeFunction ("prepareAIClipContext", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 2)
+                            completion(audioEngine.prepareAIClipContext(args[0].toString(), args[1].toString()));
+                        else
+                            completion(juce::var());
                     })
                     .withNativeFunction ("startAIGeneration", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 3)

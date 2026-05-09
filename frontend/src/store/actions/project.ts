@@ -157,6 +157,8 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
     get().closeTrackRouting();
   if (typeof get().closeStemSeparation === "function")
     get().closeStemSeparation();
+  if (typeof get().closeAIContextGeneration === "function")
+    get().closeAIContextGeneration();
   if (typeof get().closeDynamicSplit === "function")
     get().closeDynamicSplit();
   if (typeof get().closeCrossfadeEditor === "function")

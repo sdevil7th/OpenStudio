@@ -626,6 +626,37 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
         capabilities.musicGenerationUnavailableProfiles = obj->getProperty("musicGenerationUnavailableProfiles");
         capabilities.musicGenerationDefaultProfile = obj->getProperty("musicGenerationDefaultProfile").toString();
         capabilities.musicGenerationWarmSessionCapable = static_cast<bool>(obj->getProperty("musicGenerationWarmSessionCapable"));
+        capabilities.assistantManifestAvailable = static_cast<bool>(obj->getProperty("assistantManifestAvailable"));
+        capabilities.assistantRuntimeReady = static_cast<bool>(obj->getProperty("assistantRuntimeReady"));
+        capabilities.assistantVerificationRequired = ! obj->hasProperty("assistantVerificationRequired")
+            || static_cast<bool>(obj->getProperty("assistantVerificationRequired"));
+        capabilities.assistantDownloadPolicy = obj->getProperty("assistantDownloadPolicy").toString();
+        capabilities.assistantStatusMessage = obj->getProperty("assistantStatusMessage").toString();
+        capabilities.assistantFailureCode = obj->getProperty("assistantFailureCode").toString();
+        capabilities.assistantSelectedProfile = obj->getProperty("assistantSelectedProfile").toString();
+        capabilities.assistantAttemptedProfile = obj->getProperty("assistantAttemptedProfile").toString();
+        capabilities.assistantPrefilterProfile = obj->getProperty("assistantPrefilterProfile").toString();
+        capabilities.assistantRuntimeProfiles = obj->getProperty("assistantRuntimeProfiles");
+        capabilities.assistantAvailableProfiles = varToStringArray(obj->getProperty("assistantAvailableProfiles"));
+        capabilities.assistantPrefilterProfiles = varToStringArray(obj->getProperty("assistantPrefilterProfiles"));
+        capabilities.assistantUnavailableProfiles = obj->getProperty("assistantUnavailableProfiles");
+        capabilities.assistantVerifiedStatusPath = obj->getProperty("assistantVerifiedStatusPath").toString();
+        capabilities.assistantHardware = obj->getProperty("assistantHardware");
+        capabilities.audioUnderstandingManifestAvailable = static_cast<bool>(obj->getProperty("audioUnderstandingManifestAvailable"));
+        capabilities.audioUnderstandingRuntimeReady = static_cast<bool>(obj->getProperty("audioUnderstandingRuntimeReady"));
+        capabilities.audioUnderstandingVerificationRequired = static_cast<bool>(obj->getProperty("audioUnderstandingVerificationRequired"));
+        capabilities.audioUnderstandingDownloadPolicy = obj->getProperty("audioUnderstandingDownloadPolicy").toString();
+        capabilities.audioUnderstandingStatus = obj->getProperty("audioUnderstandingStatus").toString();
+        capabilities.audioUnderstandingStatusMessage = obj->getProperty("audioUnderstandingStatusMessage").toString();
+        capabilities.audioUnderstandingFailureCode = obj->getProperty("audioUnderstandingFailureCode").toString();
+        capabilities.audioUnderstandingSelectedProfile = obj->getProperty("audioUnderstandingSelectedProfile").toString();
+        capabilities.audioUnderstandingAttemptedProfile = obj->getProperty("audioUnderstandingAttemptedProfile").toString();
+        capabilities.audioUnderstandingPrefilterProfile = obj->getProperty("audioUnderstandingPrefilterProfile").toString();
+        capabilities.audioUnderstandingRuntimeProfiles = obj->getProperty("audioUnderstandingRuntimeProfiles");
+        capabilities.audioUnderstandingAvailableProfiles = varToStringArray(obj->getProperty("audioUnderstandingAvailableProfiles"));
+        capabilities.audioUnderstandingPrefilterProfiles = varToStringArray(obj->getProperty("audioUnderstandingPrefilterProfiles"));
+        capabilities.audioUnderstandingUnavailableProfiles = obj->getProperty("audioUnderstandingUnavailableProfiles");
+        capabilities.audioUnderstandingVerifiedStatusPath = obj->getProperty("audioUnderstandingVerifiedStatusPath").toString();
     }
 
     if (capabilities.supportedBackends.isEmpty())
@@ -634,6 +665,8 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
         capabilities.selectedBackend = "cpu";
     if (capabilities.modelVersion.isEmpty())
         capabilities.modelVersion = modelName;
+    if (capabilities.audioUnderstandingStatus.isEmpty())
+        capabilities.audioUnderstandingStatus = "not_installed";
 
     return capabilities;
 }
@@ -973,6 +1006,36 @@ void StemSeparator::scheduleStatusRefresh()
         refreshedStatus.musicGenerationUnavailableProfiles = runtimeCapabilities.musicGenerationUnavailableProfiles;
         refreshedStatus.musicGenerationDefaultProfile = runtimeCapabilities.musicGenerationDefaultProfile;
         refreshedStatus.musicGenerationWarmSessionCapable = runtimeCapabilities.musicGenerationWarmSessionCapable;
+        refreshedStatus.assistantManifestAvailable = runtimeCapabilities.assistantManifestAvailable;
+        refreshedStatus.assistantRuntimeReady = runtimeCapabilities.assistantRuntimeReady;
+        refreshedStatus.assistantVerificationRequired = runtimeCapabilities.assistantVerificationRequired;
+        refreshedStatus.assistantDownloadPolicy = runtimeCapabilities.assistantDownloadPolicy;
+        refreshedStatus.assistantStatusMessage = runtimeCapabilities.assistantStatusMessage;
+        refreshedStatus.assistantFailureCode = runtimeCapabilities.assistantFailureCode;
+        refreshedStatus.assistantSelectedProfile = runtimeCapabilities.assistantSelectedProfile;
+        refreshedStatus.assistantAttemptedProfile = runtimeCapabilities.assistantAttemptedProfile;
+        refreshedStatus.assistantPrefilterProfile = runtimeCapabilities.assistantPrefilterProfile;
+        refreshedStatus.assistantRuntimeProfiles = runtimeCapabilities.assistantRuntimeProfiles;
+        refreshedStatus.assistantAvailableProfiles = runtimeCapabilities.assistantAvailableProfiles;
+        refreshedStatus.assistantPrefilterProfiles = runtimeCapabilities.assistantPrefilterProfiles;
+        refreshedStatus.assistantUnavailableProfiles = runtimeCapabilities.assistantUnavailableProfiles;
+        refreshedStatus.assistantVerifiedStatusPath = runtimeCapabilities.assistantVerifiedStatusPath;
+        refreshedStatus.assistantHardware = runtimeCapabilities.assistantHardware;
+        refreshedStatus.audioUnderstandingManifestAvailable = runtimeCapabilities.audioUnderstandingManifestAvailable;
+        refreshedStatus.audioUnderstandingRuntimeReady = runtimeCapabilities.audioUnderstandingRuntimeReady;
+        refreshedStatus.audioUnderstandingVerificationRequired = runtimeCapabilities.audioUnderstandingVerificationRequired;
+        refreshedStatus.audioUnderstandingDownloadPolicy = runtimeCapabilities.audioUnderstandingDownloadPolicy;
+        refreshedStatus.audioUnderstandingStatus = runtimeCapabilities.audioUnderstandingStatus;
+        refreshedStatus.audioUnderstandingStatusMessage = runtimeCapabilities.audioUnderstandingStatusMessage;
+        refreshedStatus.audioUnderstandingFailureCode = runtimeCapabilities.audioUnderstandingFailureCode;
+        refreshedStatus.audioUnderstandingSelectedProfile = runtimeCapabilities.audioUnderstandingSelectedProfile;
+        refreshedStatus.audioUnderstandingAttemptedProfile = runtimeCapabilities.audioUnderstandingAttemptedProfile;
+        refreshedStatus.audioUnderstandingPrefilterProfile = runtimeCapabilities.audioUnderstandingPrefilterProfile;
+        refreshedStatus.audioUnderstandingRuntimeProfiles = runtimeCapabilities.audioUnderstandingRuntimeProfiles;
+        refreshedStatus.audioUnderstandingAvailableProfiles = runtimeCapabilities.audioUnderstandingAvailableProfiles;
+        refreshedStatus.audioUnderstandingPrefilterProfiles = runtimeCapabilities.audioUnderstandingPrefilterProfiles;
+        refreshedStatus.audioUnderstandingUnavailableProfiles = runtimeCapabilities.audioUnderstandingUnavailableProfiles;
+        refreshedStatus.audioUnderstandingVerifiedStatusPath = runtimeCapabilities.audioUnderstandingVerifiedStatusPath;
         const auto musicGenerationFullyReady = refreshedStatus.musicGenerationReady
                                             && refreshedStatus.musicGenerationLayoutValid
                                             && refreshedStatus.musicGenerationPerformanceReady
@@ -1325,6 +1388,18 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     juce::Array<juce::var> availableProfiles;
     for (const auto& profile : status.musicGenerationAvailableProfiles)
         availableProfiles.add(profile);
+    juce::Array<juce::var> assistantAvailableProfiles;
+    for (const auto& profile : status.assistantAvailableProfiles)
+        assistantAvailableProfiles.add(profile);
+    juce::Array<juce::var> assistantPrefilterProfiles;
+    for (const auto& profile : status.assistantPrefilterProfiles)
+        assistantPrefilterProfiles.add(profile);
+    juce::Array<juce::var> audioUnderstandingAvailableProfiles;
+    for (const auto& profile : status.audioUnderstandingAvailableProfiles)
+        audioUnderstandingAvailableProfiles.add(profile);
+    juce::Array<juce::var> audioUnderstandingPrefilterProfiles;
+    for (const auto& profile : status.audioUnderstandingPrefilterProfiles)
+        audioUnderstandingPrefilterProfiles.add(profile);
     obj->setProperty("state", status.state);
     obj->setProperty("progress", static_cast<double>(status.progress));
     obj->setProperty("stepIndex", status.stepIndex);
@@ -1370,6 +1445,36 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("musicGenerationUnavailableProfiles", status.musicGenerationUnavailableProfiles);
     obj->setProperty("musicGenerationDefaultProfile", status.musicGenerationDefaultProfile);
     obj->setProperty("musicGenerationWarmSessionCapable", status.musicGenerationWarmSessionCapable);
+    obj->setProperty("assistantManifestAvailable", status.assistantManifestAvailable);
+    obj->setProperty("assistantRuntimeReady", status.assistantRuntimeReady);
+    obj->setProperty("assistantVerificationRequired", status.assistantVerificationRequired);
+    obj->setProperty("assistantDownloadPolicy", status.assistantDownloadPolicy);
+    obj->setProperty("assistantStatusMessage", status.assistantStatusMessage);
+    obj->setProperty("assistantFailureCode", status.assistantFailureCode);
+    obj->setProperty("assistantSelectedProfile", status.assistantSelectedProfile);
+    obj->setProperty("assistantAttemptedProfile", status.assistantAttemptedProfile);
+    obj->setProperty("assistantPrefilterProfile", status.assistantPrefilterProfile);
+    obj->setProperty("assistantRuntimeProfiles", status.assistantRuntimeProfiles);
+    obj->setProperty("assistantAvailableProfiles", assistantAvailableProfiles);
+    obj->setProperty("assistantPrefilterProfiles", assistantPrefilterProfiles);
+    obj->setProperty("assistantUnavailableProfiles", status.assistantUnavailableProfiles);
+    obj->setProperty("assistantVerifiedStatusPath", status.assistantVerifiedStatusPath);
+    obj->setProperty("assistantHardware", status.assistantHardware);
+    obj->setProperty("audioUnderstandingManifestAvailable", status.audioUnderstandingManifestAvailable);
+    obj->setProperty("audioUnderstandingRuntimeReady", status.audioUnderstandingRuntimeReady);
+    obj->setProperty("audioUnderstandingVerificationRequired", status.audioUnderstandingVerificationRequired);
+    obj->setProperty("audioUnderstandingDownloadPolicy", status.audioUnderstandingDownloadPolicy);
+    obj->setProperty("audioUnderstandingStatus", status.audioUnderstandingStatus);
+    obj->setProperty("audioUnderstandingStatusMessage", status.audioUnderstandingStatusMessage);
+    obj->setProperty("audioUnderstandingFailureCode", status.audioUnderstandingFailureCode);
+    obj->setProperty("audioUnderstandingSelectedProfile", status.audioUnderstandingSelectedProfile);
+    obj->setProperty("audioUnderstandingAttemptedProfile", status.audioUnderstandingAttemptedProfile);
+    obj->setProperty("audioUnderstandingPrefilterProfile", status.audioUnderstandingPrefilterProfile);
+    obj->setProperty("audioUnderstandingRuntimeProfiles", status.audioUnderstandingRuntimeProfiles);
+    obj->setProperty("audioUnderstandingAvailableProfiles", audioUnderstandingAvailableProfiles);
+    obj->setProperty("audioUnderstandingPrefilterProfiles", audioUnderstandingPrefilterProfiles);
+    obj->setProperty("audioUnderstandingUnavailableProfiles", status.audioUnderstandingUnavailableProfiles);
+    obj->setProperty("audioUnderstandingVerifiedStatusPath", status.audioUnderstandingVerifiedStatusPath);
     obj->setProperty("verificationMode", status.verificationMode);
     obj->setProperty("runtimeCandidate", status.runtimeCandidate);
     obj->setProperty("backendRequested", status.backendRequested);
@@ -2697,6 +2802,66 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.musicGenerationDefaultProfile = json["musicGenerationDefaultProfile"].toString();
     if (json.hasProperty("musicGenerationWarmSessionCapable"))
         status.musicGenerationWarmSessionCapable = static_cast<bool>(json["musicGenerationWarmSessionCapable"]);
+    if (json.hasProperty("assistantManifestAvailable"))
+        status.assistantManifestAvailable = static_cast<bool>(json["assistantManifestAvailable"]);
+    if (json.hasProperty("assistantRuntimeReady"))
+        status.assistantRuntimeReady = static_cast<bool>(json["assistantRuntimeReady"]);
+    if (json.hasProperty("assistantVerificationRequired"))
+        status.assistantVerificationRequired = static_cast<bool>(json["assistantVerificationRequired"]);
+    if (json.hasProperty("assistantDownloadPolicy"))
+        status.assistantDownloadPolicy = json["assistantDownloadPolicy"].toString();
+    if (json.hasProperty("assistantStatusMessage"))
+        status.assistantStatusMessage = json["assistantStatusMessage"].toString();
+    if (json.hasProperty("assistantFailureCode"))
+        status.assistantFailureCode = json["assistantFailureCode"].toString();
+    if (json.hasProperty("assistantSelectedProfile"))
+        status.assistantSelectedProfile = json["assistantSelectedProfile"].toString();
+    if (json.hasProperty("assistantAttemptedProfile"))
+        status.assistantAttemptedProfile = json["assistantAttemptedProfile"].toString();
+    if (json.hasProperty("assistantPrefilterProfile"))
+        status.assistantPrefilterProfile = json["assistantPrefilterProfile"].toString();
+    if (json.hasProperty("assistantRuntimeProfiles"))
+        status.assistantRuntimeProfiles = json["assistantRuntimeProfiles"];
+    if (json.hasProperty("assistantAvailableProfiles"))
+        status.assistantAvailableProfiles = varToStringArray(json["assistantAvailableProfiles"]);
+    if (json.hasProperty("assistantPrefilterProfiles"))
+        status.assistantPrefilterProfiles = varToStringArray(json["assistantPrefilterProfiles"]);
+    if (json.hasProperty("assistantUnavailableProfiles"))
+        status.assistantUnavailableProfiles = json["assistantUnavailableProfiles"];
+    if (json.hasProperty("assistantVerifiedStatusPath"))
+        status.assistantVerifiedStatusPath = json["assistantVerifiedStatusPath"].toString();
+    if (json.hasProperty("assistantHardware"))
+        status.assistantHardware = json["assistantHardware"];
+    if (json.hasProperty("audioUnderstandingManifestAvailable"))
+        status.audioUnderstandingManifestAvailable = static_cast<bool>(json["audioUnderstandingManifestAvailable"]);
+    if (json.hasProperty("audioUnderstandingRuntimeReady"))
+        status.audioUnderstandingRuntimeReady = static_cast<bool>(json["audioUnderstandingRuntimeReady"]);
+    if (json.hasProperty("audioUnderstandingVerificationRequired"))
+        status.audioUnderstandingVerificationRequired = static_cast<bool>(json["audioUnderstandingVerificationRequired"]);
+    if (json.hasProperty("audioUnderstandingDownloadPolicy"))
+        status.audioUnderstandingDownloadPolicy = json["audioUnderstandingDownloadPolicy"].toString();
+    if (json.hasProperty("audioUnderstandingStatus"))
+        status.audioUnderstandingStatus = json["audioUnderstandingStatus"].toString();
+    if (json.hasProperty("audioUnderstandingStatusMessage"))
+        status.audioUnderstandingStatusMessage = json["audioUnderstandingStatusMessage"].toString();
+    if (json.hasProperty("audioUnderstandingFailureCode"))
+        status.audioUnderstandingFailureCode = json["audioUnderstandingFailureCode"].toString();
+    if (json.hasProperty("audioUnderstandingSelectedProfile"))
+        status.audioUnderstandingSelectedProfile = json["audioUnderstandingSelectedProfile"].toString();
+    if (json.hasProperty("audioUnderstandingAttemptedProfile"))
+        status.audioUnderstandingAttemptedProfile = json["audioUnderstandingAttemptedProfile"].toString();
+    if (json.hasProperty("audioUnderstandingPrefilterProfile"))
+        status.audioUnderstandingPrefilterProfile = json["audioUnderstandingPrefilterProfile"].toString();
+    if (json.hasProperty("audioUnderstandingRuntimeProfiles"))
+        status.audioUnderstandingRuntimeProfiles = json["audioUnderstandingRuntimeProfiles"];
+    if (json.hasProperty("audioUnderstandingAvailableProfiles"))
+        status.audioUnderstandingAvailableProfiles = varToStringArray(json["audioUnderstandingAvailableProfiles"]);
+    if (json.hasProperty("audioUnderstandingPrefilterProfiles"))
+        status.audioUnderstandingPrefilterProfiles = varToStringArray(json["audioUnderstandingPrefilterProfiles"]);
+    if (json.hasProperty("audioUnderstandingUnavailableProfiles"))
+        status.audioUnderstandingUnavailableProfiles = json["audioUnderstandingUnavailableProfiles"];
+    if (json.hasProperty("audioUnderstandingVerifiedStatusPath"))
+        status.audioUnderstandingVerifiedStatusPath = json["audioUnderstandingVerifiedStatusPath"].toString();
     if (json.hasProperty("verificationMode"))
         status.verificationMode = json["verificationMode"].toString();
     if (json.hasProperty("runtimeCandidate"))

@@ -13835,6 +13835,171 @@ void AudioEngine::cancelAiToolsInstall()
     stemSeparator.cancelAiToolsInstall();
 }
 
+static juce::var makeAIClipContextError(const juce::String& errorMessage)
+{
+    auto result = std::make_unique<juce::DynamicObject>();
+    result->setProperty("success", false);
+    result->setProperty("error", errorMessage);
+    return juce::var(result.release());
+}
+
+static float applyAIClipContextFadeCurve(float t, int curveType)
+{
+    const auto clamped = juce::jlimit(0.0f, 1.0f, t);
+    switch (curveType)
+    {
+        case 1: return std::sqrt(clamped);
+        case 2: return 3.0f * clamped * clamped - 2.0f * clamped * clamped * clamped;
+        case 3: return std::log10(1.0f + 9.0f * clamped);
+        case 4: return (std::exp(3.0f * clamped) - 1.0f) / (std::exp(3.0f) - 1.0f);
+        default: return clamped;
+    }
+}
+
+static void applyAIClipContextGainAndFades(juce::AudioBuffer<float>& buffer,
+                                           int numSamples,
+                                           double sampleRate,
+                                           const PlaybackEngine::ClipInfo& clip)
+{
+    const auto clipGain = juce::Decibels::decibelsToGain(static_cast<float>(clip.volumeDB));
+    const auto fadeInSamples = juce::jlimit(0, numSamples, juce::roundToInt(clip.fadeIn * sampleRate));
+    const auto fadeOutSamples = juce::jlimit(0, numSamples, juce::roundToInt(clip.fadeOut * sampleRate));
+    const auto fadeOutStart = numSamples - fadeOutSamples;
+
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+    {
+        auto gain = clipGain;
+
+        if (fadeInSamples > 0 && sampleIndex < fadeInSamples)
+        {
+            const auto denominator = juce::jmax(1, fadeInSamples - 1);
+            const auto t = static_cast<float>(sampleIndex) / static_cast<float>(denominator);
+            gain *= applyAIClipContextFadeCurve(t, clip.fadeInCurve);
+        }
+
+        if (fadeOutSamples > 0 && sampleIndex >= fadeOutStart)
+        {
+            const auto denominator = juce::jmax(1, fadeOutSamples - 1);
+            const auto remaining = numSamples - 1 - sampleIndex;
+            const auto t = static_cast<float>(remaining) / static_cast<float>(denominator);
+            gain *= applyAIClipContextFadeCurve(t, clip.fadeOutCurve);
+        }
+
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+            buffer.setSample(channel, sampleIndex, buffer.getSample(channel, sampleIndex) * gain);
+    }
+}
+
+juce::var AudioEngine::prepareAIClipContext(const juce::String& trackId, const juce::String& clipId)
+{
+    if (trackId.isEmpty() || clipId.isEmpty())
+        return makeAIClipContextError("Track ID and clip ID are required.");
+
+    const auto clips = playbackEngine.getClipSnapshot();
+    const auto clipIt = std::find_if(clips.begin(), clips.end(), [&trackId, &clipId](const auto& clip) {
+        return clip.trackId == trackId && clip.clipId == clipId;
+    });
+
+    if (clipIt == clips.end())
+        return makeAIClipContextError("Selected clip was not found in the playback engine.");
+
+    const auto& clip = *clipIt;
+    const auto sourceFile = clip.audioFile.existsAsFile() ? clip.audioFile : clip.originalAudioFile;
+    if (! sourceFile.existsAsFile())
+        return makeAIClipContextError("Selected clip audio file is missing.");
+
+    if (clip.duration <= 0.0)
+        return makeAIClipContextError("Selected clip has no audible duration.");
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(sourceFile));
+    if (reader == nullptr)
+        return makeAIClipContextError("Selected clip audio could not be opened.");
+
+    const auto sampleRate = reader->sampleRate;
+    if (sampleRate <= 0.0)
+        return makeAIClipContextError("Selected clip has an invalid sample rate.");
+
+    const auto requestedSamples64 = static_cast<juce::int64>(std::ceil(clip.duration * sampleRate));
+    if (requestedSamples64 <= 0)
+        return makeAIClipContextError("Selected clip has no samples to render.");
+
+    if (requestedSamples64 > static_cast<juce::int64>(std::numeric_limits<int>::max()))
+        return makeAIClipContextError("Selected clip is too long to prepare as AI context.");
+
+    const auto startSample = static_cast<juce::int64>(std::floor(juce::jmax(0.0, clip.offset) * sampleRate));
+    if (startSample >= reader->lengthInSamples)
+        return makeAIClipContextError("Selected clip trim offset is beyond the source file.");
+
+    const auto numSamples = static_cast<int>(requestedSamples64);
+    const auto availableSamples = juce::jmax<juce::int64>(0, reader->lengthInSamples - startSample);
+    const auto samplesToRead = static_cast<int>(juce::jmin<juce::int64>(requestedSamples64, availableSamples));
+    const auto numChannels = juce::jlimit(1, 2, static_cast<int>(reader->numChannels));
+
+    juce::AudioBuffer<float> contextBuffer(numChannels, numSamples);
+    contextBuffer.clear();
+
+    if (samplesToRead > 0)
+    {
+        if (! reader->read(&contextBuffer, 0, samplesToRead, startSample, true, true))
+            return makeAIClipContextError("Selected clip audio could not be rendered.");
+    }
+
+    applyAIClipContextGainAndFades(contextBuffer, numSamples, sampleRate, clip);
+
+    auto outputDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("OpenStudio")
+        .getChildFile("ai-context");
+    if (! outputDir.createDirectory())
+        return makeAIClipContextError("Could not create the AI context temp directory.");
+
+    auto safeClipId = clipId.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_");
+    if (safeClipId.isEmpty())
+        safeClipId = "clip";
+
+    const auto outputFile = outputDir.getNonexistentChildFile(
+        "ai-context-" + safeClipId + "-" + juce::String(juce::Time::currentTimeMillis()),
+        ".wav");
+
+    juce::WavAudioFormat wavFormat;
+    auto outputStream = outputFile.createOutputStream();
+    if (outputStream == nullptr)
+        return makeAIClipContextError("Could not open the AI context output file.");
+
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wavFormat.createWriterFor(outputStream.get(),
+                                  sampleRate,
+                                  static_cast<unsigned int>(numChannels),
+                                  32,
+                                  {},
+                                  0));
+    if (writer == nullptr)
+        return makeAIClipContextError("Could not create the AI context WAV writer.");
+
+    outputStream.release();
+    if (! writer->writeFromAudioSampleBuffer(contextBuffer, 0, numSamples))
+        return makeAIClipContextError("Could not write the AI context WAV file.");
+    writer.reset();
+
+    peakCache.generateAsync(outputFile, [outputFile]() {
+        juce::Logger::writeToLog("PeakCache: Generated peaks for AI context " + outputFile.getFileName());
+    });
+
+    auto result = std::make_unique<juce::DynamicObject>();
+    result->setProperty("success", true);
+    result->setProperty("filePath", outputFile.getFullPathName());
+    result->setProperty("duration", static_cast<double>(numSamples) / sampleRate);
+    result->setProperty("sampleRate", sampleRate);
+    result->setProperty("numChannels", numChannels);
+    result->setProperty("sourceFilePath", sourceFile.getFullPathName());
+    result->setProperty("clipOffset", clip.offset);
+    result->setProperty("clipStartTime", clip.startTime);
+    result->setProperty("trackId", trackId);
+    result->setProperty("clipId", clipId);
+    return juce::var(result.release());
+}
+
 juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
                                          const juce::String& workflowId,
                                          const juce::String& paramsJSON)

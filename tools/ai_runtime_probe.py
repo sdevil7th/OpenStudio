@@ -9,16 +9,20 @@ describes what the managed AI runtime can do on the current machine.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import importlib.util
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
 from importlib import metadata
 from pathlib import Path
 from typing import Any
+
+from openstudio_ace_backend.runtime_resolver import backend_status
 
 DEFAULT_MUSIC_GEN_MODEL = "acestep-v15-xl-turbo"
 DEFAULT_MUSIC_GEN_MODEL_REPO = "Comfy-Org/ace_step_1.5_ComfyUI_files"
@@ -64,7 +68,13 @@ MUSIC_RUNTIME_PROFILE_SPECS: dict[str, dict[str, Any]] = {
 WINDOWS_ACCELERATION_MANIFEST_PATH = Path(__file__).with_name(
     "windows-ai-acceleration-manifest.json"
 )
+ASSISTANT_RUNTIME_MANIFEST_PATH = Path(__file__).with_name(
+    "assistant-runtime-profiles.json"
+)
+ASSISTANT_VERIFIED_STATUS_ENV = "OPENSTUDIO_ASSISTANT_STATUS_FILE"
+AUDIO_UNDERSTANDING_STATUS_ENV = "OPENSTUDIO_AUDIO_UNDERSTANDING_STATUS_FILE"
 _WINDOWS_ACCELERATION_MANIFEST_CACHE: dict[str, Any] | None = None
+_ASSISTANT_RUNTIME_MANIFEST_CACHE: dict[str, Any] | None = None
 
 
 def load_windows_acceleration_manifest() -> dict[str, Any]:
@@ -74,6 +84,24 @@ def load_windows_acceleration_manifest() -> dict[str, Any]:
             WINDOWS_ACCELERATION_MANIFEST_PATH.read_text(encoding="utf-8")
         )
     return _WINDOWS_ACCELERATION_MANIFEST_CACHE
+
+
+def load_assistant_runtime_manifest() -> dict[str, Any]:
+    global _ASSISTANT_RUNTIME_MANIFEST_CACHE
+    if _ASSISTANT_RUNTIME_MANIFEST_CACHE is None:
+        if not ASSISTANT_RUNTIME_MANIFEST_PATH.exists():
+            _ASSISTANT_RUNTIME_MANIFEST_CACHE = {
+                "schemaVersion": 1,
+                "downloadPolicy": "single_verified_profile",
+                "verificationRequired": True,
+                "defaultOrder": [],
+                "profiles": {},
+            }
+        else:
+            _ASSISTANT_RUNTIME_MANIFEST_CACHE = json.loads(
+                ASSISTANT_RUNTIME_MANIFEST_PATH.read_text(encoding="utf-8")
+            )
+    return _ASSISTANT_RUNTIME_MANIFEST_CACHE
 
 
 def get_windows_acceleration_target() -> dict[str, Any]:
@@ -327,6 +355,535 @@ def _normalize_arch(machine: str) -> str:
     return value
 
 
+def _run_capture(command: list[str], timeout_sec: float = 5.0) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    output = (completed.stdout or completed.stderr or "").strip()
+    return completed.returncode == 0, output
+
+
+def _get_system_ram_gb() -> float:
+    if platform.system().lower() == "windows":
+        try:
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return round(status.ullTotalPhys / (1024 ** 3), 2)
+        except Exception:
+            pass
+
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        pages = os.sysconf("SC_PHYS_PAGES")
+        return round((page_size * pages) / (1024 ** 3), 2)
+    except Exception:
+        return 0.0
+
+
+def _get_free_disk_gb() -> float:
+    try:
+        return round(shutil.disk_usage(Path.home()).free / (1024 ** 3), 2)
+    except Exception:
+        return 0.0
+
+
+def _probe_nvidia_gpu() -> dict[str, Any]:
+    ok, output = _run_capture(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,memory.total,memory.free,compute_cap",
+            "--format=csv,noheader,nounits",
+        ],
+        timeout_sec=5.0,
+    )
+    gpus: list[dict[str, Any]] = []
+    if ok:
+        for line in output.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 4:
+                continue
+            total_mb = float(parts[1]) if parts[1].replace(".", "", 1).isdigit() else 0.0
+            free_mb = float(parts[2]) if parts[2].replace(".", "", 1).isdigit() else 0.0
+            gpus.append(
+                {
+                    "name": parts[0],
+                    "vramGb": round(total_mb / 1024, 2),
+                    "freeVramGb": round(free_mb / 1024, 2),
+                    "computeCapability": parts[3],
+                }
+            )
+    return {
+        "available": bool(gpus),
+        "gpus": gpus,
+        "bestVramGb": max((gpu["vramGb"] for gpu in gpus), default=0.0),
+        "bestFreeVramGb": max((gpu["freeVramGb"] for gpu in gpus), default=0.0),
+        "probeMessage": "" if gpus else output,
+    }
+
+
+def _probe_wsl_cuda() -> dict[str, Any]:
+    system = platform.system().lower()
+    if system == "linux":
+        ok, output = _run_capture(["nvidia-smi", "-L"], timeout_sec=5.0)
+        return {
+            "available": ok,
+            "message": output if not ok else "CUDA visible from Linux runtime.",
+        }
+    if system != "windows":
+        return {
+            "available": False,
+            "message": "WSL2 CUDA is only relevant on Windows hosts.",
+        }
+
+    ok, output = _run_capture(
+        [
+            "wsl.exe",
+            "-e",
+            "sh",
+            "-lc",
+            (
+                "if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi -L; "
+                "elif [ -x /usr/lib/wsl/lib/nvidia-smi ]; then /usr/lib/wsl/lib/nvidia-smi -L; "
+                "else echo 'nvidia-smi was not found in the default WSL distro.' >&2; exit 127; fi"
+            ),
+        ],
+        timeout_sec=8.0,
+    )
+    return {
+        "available": ok,
+        "message": output if output else ("WSL2 CUDA is visible." if ok else "WSL2 CUDA was not detected."),
+    }
+
+
+def _current_platform_key() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "darwin"
+    if system == "windows":
+        return "windows"
+    if system == "linux":
+        return "linux"
+    return system or "unknown"
+
+
+def _format_platforms(platforms: list[str]) -> str:
+    labels = {
+        "darwin": "macOS",
+        "linux": "Linux",
+        "windows": "Windows",
+    }
+    return ", ".join(labels.get(value, value) for value in platforms)
+
+
+def _get_assistant_verified_status_path() -> Path:
+    configured = os.environ.get(ASSISTANT_VERIFIED_STATUS_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".openstudio" / "assistant-runtime-status.json").resolve()
+
+
+def _get_audio_understanding_verified_status_path() -> Path:
+    configured = os.environ.get(AUDIO_UNDERSTANDING_STATUS_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".openstudio" / "audio-understanding-runtime-status.json").resolve()
+
+
+def _load_assistant_verified_status(manifest: dict[str, Any]) -> dict[str, Any]:
+    status_path = _get_assistant_verified_status_path()
+    if not status_path.exists():
+        return {
+            "verified": False,
+            "statusPath": str(status_path),
+            "profileId": "",
+        }
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "verified": False,
+            "statusPath": str(status_path),
+            "profileId": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    profile_id = str(status.get("profileId", "")).strip()
+    verified = bool(status.get("verified")) and profile_id in manifest.get("profiles", {})
+    attempted_profile_id = str(status.get("attemptedProfileId", "")).strip()
+    if attempted_profile_id not in manifest.get("profiles", {}):
+        attempted_profile_id = profile_id if profile_id in manifest.get("profiles", {}) else ""
+    return {
+        **status,
+        "verified": verified,
+        "statusPath": str(status_path),
+        "profileId": profile_id if verified else "",
+        "attemptedProfileId": attempted_profile_id,
+    }
+
+
+def _load_audio_understanding_verified_status(analyzer_manifest: dict[str, Any]) -> dict[str, Any]:
+    status_path = _get_audio_understanding_verified_status_path()
+    if not status_path.exists():
+        return {
+            "verified": False,
+            "statusPath": str(status_path),
+            "profileId": "",
+        }
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "verified": False,
+            "statusPath": str(status_path),
+            "profileId": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    profiles = analyzer_manifest.get("profiles", {})
+    profile_id = str(status.get("profileId", "")).strip()
+    verified = bool(status.get("verified")) and profile_id in profiles
+    attempted_profile_id = str(status.get("attemptedProfileId", "")).strip()
+    if attempted_profile_id not in profiles:
+        attempted_profile_id = profile_id if profile_id in profiles else ""
+    return {
+        **status,
+        "verified": verified,
+        "statusPath": str(status_path),
+        "profileId": profile_id if verified else "",
+        "attemptedProfileId": attempted_profile_id,
+    }
+
+
+def _profile_prefilter_reason(
+    profile: dict[str, Any],
+    *,
+    platform_key: str,
+    system_ram_gb: float,
+    free_disk_gb: float,
+    gpu_status: dict[str, Any],
+    wsl_cuda_status: dict[str, Any],
+) -> str:
+    ram_tolerance_gb = 0.5
+    vram_tolerance_gb = 0.25
+    supported_platforms = [
+        str(value).strip().lower()
+        for value in profile.get("supportedPlatforms", [])
+        if str(value).strip()
+    ]
+    if supported_platforms and platform_key not in supported_platforms:
+        return f"Profile supports {_format_platforms(supported_platforms)}."
+    if bool(profile.get("candidateOnly")):
+        return "Candidate profile requires an explicit verification implementation before installer selection."
+    if system_ram_gb + ram_tolerance_gb < float(profile.get("minRamGb", 0)):
+        return f"Requires at least {profile.get('minRamGb')}GB system RAM."
+    if free_disk_gb < float(profile.get("minFreeDiskGb", 0)):
+        return f"Requires at least {profile.get('minFreeDiskGb')}GB free disk."
+    min_vram = float(profile.get("minVramGb", 0))
+    if min_vram > 0 and float(gpu_status.get("bestVramGb", 0)) + vram_tolerance_gb < min_vram:
+        return f"Requires at least {profile.get('minVramGb')}GB VRAM."
+    runtime_family = str(profile.get("runtimeFamily", ""))
+    if "vllm" in runtime_family and "wsl" in runtime_family and not bool(wsl_cuda_status.get("available")):
+        return "Requires WSL2 CUDA visibility from a real Linux distro before download."
+    if "linux-cuda" in runtime_family and platform_key != "linux":
+        return "Linux CUDA profiles can only be installed on Linux."
+    if "cuda" in str(profile.get("gpuOffloadPolicy", "")) and not bool(gpu_status.get("available")):
+        return "Requires an NVIDIA GPU visible to the host."
+    return ""
+
+
+def _audio_understanding_profile_reason(
+    profile: dict[str, Any],
+    *,
+    platform_key: str,
+    system_ram_gb: float,
+    free_disk_gb: float,
+    gpu_status: dict[str, Any],
+    wsl_cuda_status: dict[str, Any],
+    license_accepted: bool,
+) -> str:
+    ram_tolerance_gb = 0.5
+    vram_tolerance_gb = 0.25
+    supported_platforms = [
+        str(value).strip().lower()
+        for value in profile.get("supportedPlatforms", [])
+        if str(value).strip()
+    ]
+    if supported_platforms and platform_key not in supported_platforms:
+        return f"Profile supports {_format_platforms(supported_platforms)}."
+    if system_ram_gb + ram_tolerance_gb < float(profile.get("minRamGb", 0)):
+        return f"Requires at least {profile.get('minRamGb')}GB system RAM."
+    if free_disk_gb < float(profile.get("minFreeDiskGb", 0)):
+        return f"Requires at least {profile.get('minFreeDiskGb')}GB free disk."
+    min_vram = float(profile.get("minVramGb", 0))
+    if min_vram > 0 and float(gpu_status.get("bestVramGb", 0)) + vram_tolerance_gb < min_vram:
+        return f"Requires at least {profile.get('minVramGb')}GB VRAM."
+    runtime_family = str(profile.get("runtimeFamily", ""))
+    if "wsl" in runtime_family and not bool(wsl_cuda_status.get("available")):
+        return "Requires WSL2 CUDA visibility from a real Linux distro before download."
+    if "linux-cuda" in runtime_family and platform_key != "linux":
+        return "Linux CUDA profiles can only be installed on Linux."
+    if "cuda" in str(profile.get("gpuOffloadPolicy", "")) and not bool(gpu_status.get("available")):
+        return "Requires an NVIDIA GPU visible to the host."
+    if bool(profile.get("requiresLicenseAcceptance")) and not license_accepted:
+        return "License acceptance is required before installing this core analyzer."
+    if bool(profile.get("candidateOnly")):
+        return "Candidate analyzer requires explicit implementation and smoke-test verification before installer selection."
+    return ""
+
+
+def _classify_audio_understanding_status(failure_code: str, status_error: str) -> str:
+    combined = f"{failure_code} {status_error}".lower()
+    if "license" in combined:
+        return "license_blocked"
+    if "out of memory" in combined or "cuda oom" in combined or "oom" in combined:
+        return "oom"
+    if "unsupported" in combined or "no_supported" in combined:
+        return "unsupported"
+    return "failed"
+
+
+def get_audio_understanding_runtime_status(
+    *,
+    manifest: dict[str, Any],
+    platform_key: str,
+    system_ram_gb: float,
+    free_disk_gb: float,
+    gpu_status: dict[str, Any],
+    wsl_cuda_status: dict[str, Any],
+) -> dict[str, Any]:
+    analyzer_manifest = manifest.get("audioUnderstanding", {})
+    if not isinstance(analyzer_manifest, dict):
+        analyzer_manifest = {}
+    profiles = analyzer_manifest.get("profiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+    order = list(analyzer_manifest.get("defaultOrder", [])) or list(profiles.keys())
+    verified_status = _load_audio_understanding_verified_status(analyzer_manifest)
+    license_accepted = bool(verified_status.get("licenseAccepted"))
+
+    prefilter_profiles: list[str] = []
+    unavailable_profiles: list[dict[str, Any]] = []
+    for profile_id in order:
+        profile = dict(profiles.get(profile_id, {}))
+        if not profile:
+            continue
+        reason = _audio_understanding_profile_reason(
+            profile,
+            platform_key=platform_key,
+            system_ram_gb=system_ram_gb,
+            free_disk_gb=free_disk_gb,
+            gpu_status=gpu_status,
+            wsl_cuda_status=wsl_cuda_status,
+            license_accepted=license_accepted,
+        )
+        if reason:
+            unavailable_profiles.append(
+                {
+                    "id": profile_id,
+                    "label": profile.get("label", profile_id),
+                    "reason": reason,
+                    "runtimeFamily": profile.get("runtimeFamily", ""),
+                }
+            )
+        else:
+            prefilter_profiles.append(profile_id)
+
+    selected_profile = str(verified_status.get("profileId", ""))
+    attempted_profile = str(verified_status.get("attemptedProfileId", "")).strip()
+    status_error = str(verified_status.get("error", "")).strip()
+    failure_code = str(verified_status.get("failureCode", "")).strip()
+    prefilter_profile = prefilter_profiles[0] if prefilter_profiles else ""
+    runtime_ready = bool(verified_status.get("verified")) and bool(selected_profile)
+
+    if runtime_ready:
+        status_value = "ready"
+        status_message = f"Core music analyzer verified with {selected_profile}."
+    elif status_error or failure_code:
+        status_value = _classify_audio_understanding_status(failure_code, status_error)
+        status_message = (
+            "Core music analyzer verification failed"
+            + (f" for {attempted_profile}" if attempted_profile else "")
+            + (f": {status_error}" if status_error else ".")
+        )
+    elif not profiles:
+        status_value = "unsupported"
+        status_message = "No core music analyzer profiles are listed in the runtime manifest."
+    elif prefilter_profile:
+        status_value = "not_installed"
+        status_message = (
+            f"Core music analyzer {prefilter_profile} can be smoke-tested, "
+            "but it is not installed. OpenStudio cannot hear selected audio until it is verified."
+        )
+    elif any("license" in str(item.get("reason", "")).lower() for item in unavailable_profiles):
+        status_value = "license_blocked"
+        status_message = (
+            "Core music analyzer candidates require license acceptance before installation. "
+            "OpenStudio should not use blocked analyzer models in distributed builds."
+        )
+    elif any("candidate analyzer" in str(item.get("reason", "")).lower() for item in unavailable_profiles):
+        status_value = "not_installed"
+        status_message = (
+            "Core music analyzer candidates require explicit implementation and smoke-test verification. "
+            "OpenStudio cannot use them as analyzer defaults yet."
+        )
+    else:
+        status_value = "unsupported"
+        status_message = "No core music analyzer profile passed the local hardware prefilter."
+
+    if not failure_code and status_value == "unsupported" and profiles:
+        failure_code = "audio_understanding_no_supported_profile"
+    elif not failure_code and status_value == "license_blocked":
+        failure_code = "audio_understanding_license_blocked"
+    elif not failure_code and status_value == "oom":
+        failure_code = "audio_understanding_oom"
+    elif not failure_code and status_value == "failed":
+        failure_code = "audio_understanding_failed"
+
+    return {
+        "audioUnderstandingManifestAvailable": bool(analyzer_manifest),
+        "audioUnderstandingRuntimeReady": runtime_ready,
+        "audioUnderstandingVerificationRequired": bool(analyzer_manifest.get("verificationRequired", False)),
+        "audioUnderstandingDownloadPolicy": str(analyzer_manifest.get("downloadPolicy", "single_verified_profile")),
+        "audioUnderstandingStatus": status_value,
+        "audioUnderstandingStatusMessage": status_message,
+        "audioUnderstandingFailureCode": failure_code,
+        "audioUnderstandingSelectedProfile": selected_profile,
+        "audioUnderstandingAttemptedProfile": attempted_profile,
+        "audioUnderstandingPrefilterProfile": prefilter_profile,
+        "audioUnderstandingRuntimeProfiles": profiles,
+        "audioUnderstandingAvailableProfiles": [selected_profile] if runtime_ready else [],
+        "audioUnderstandingPrefilterProfiles": prefilter_profiles,
+        "audioUnderstandingUnavailableProfiles": unavailable_profiles,
+        "audioUnderstandingVerifiedStatusPath": str(
+            verified_status.get("statusPath", _get_audio_understanding_verified_status_path())
+        ),
+    }
+
+
+def get_assistant_runtime_status() -> dict[str, Any]:
+    manifest = load_assistant_runtime_manifest()
+    profiles = manifest.get("profiles", {})
+    order = list(manifest.get("defaultOrder", [])) or list(profiles.keys())
+    platform_key = _current_platform_key()
+    system_ram_gb = _get_system_ram_gb()
+    free_disk_gb = _get_free_disk_gb()
+    gpu_status = _probe_nvidia_gpu()
+    wsl_cuda_status = _probe_wsl_cuda()
+    verified_status = _load_assistant_verified_status(manifest)
+
+    prefilter_profiles: list[str] = []
+    unavailable_profiles: list[dict[str, Any]] = []
+    for profile_id in order:
+        profile = dict(profiles.get(profile_id, {}))
+        if not profile:
+            continue
+        reason = _profile_prefilter_reason(
+            profile,
+            platform_key=platform_key,
+            system_ram_gb=system_ram_gb,
+            free_disk_gb=free_disk_gb,
+            gpu_status=gpu_status,
+            wsl_cuda_status=wsl_cuda_status,
+        )
+        if reason:
+            unavailable_profiles.append(
+                {
+                    "id": profile_id,
+                    "label": profile.get("label", profile_id),
+                    "reason": reason,
+                    "runtimeFamily": profile.get("runtimeFamily", ""),
+                }
+            )
+        else:
+            prefilter_profiles.append(profile_id)
+
+    selected_profile = str(verified_status.get("profileId", ""))
+    attempted_profile = str(verified_status.get("attemptedProfileId", "")).strip()
+    status_error = str(verified_status.get("error", "")).strip()
+    prefilter_profile = prefilter_profiles[0] if prefilter_profiles else ""
+    runtime_ready = bool(verified_status.get("verified")) and bool(selected_profile)
+    status_message = (
+        f"Assistant runtime verified with {selected_profile}."
+        if runtime_ready
+        else (
+            (
+                "Assistant runtime verification failed"
+                + (f" for {attempted_profile}" if attempted_profile else "")
+                + f": {status_error}"
+                + (
+                    f" Retry will try {prefilter_profile}."
+                    if prefilter_profile and prefilter_profile != attempted_profile
+                    else ""
+                )
+            )
+            if status_error
+            else (
+                f"Assistant installer can preselect {prefilter_profile}, but no assistant model has been downloaded or verified yet."
+                if prefilter_profile
+                else "No assistant runtime profile passed the local hardware prefilter."
+            )
+        )
+    )
+    failure_code = ""
+    if not runtime_ready and not prefilter_profile:
+        failure_code = "assistant_no_supported_profile" if profiles else "assistant_manifest_missing"
+    if status_error:
+        failure_code = str(verified_status.get("failureCode", "assistant_verification_failed")) or "assistant_verification_failed"
+
+    audio_understanding_status = get_audio_understanding_runtime_status(
+        manifest=manifest,
+        platform_key=platform_key,
+        system_ram_gb=system_ram_gb,
+        free_disk_gb=free_disk_gb,
+        gpu_status=gpu_status,
+        wsl_cuda_status=wsl_cuda_status,
+    )
+
+    return {
+        "assistantManifestAvailable": ASSISTANT_RUNTIME_MANIFEST_PATH.exists(),
+        "assistantRuntimeReady": runtime_ready,
+        "assistantVerificationRequired": bool(manifest.get("verificationRequired", True)),
+        "assistantDownloadPolicy": str(manifest.get("downloadPolicy", "single_verified_profile")),
+        "assistantStatusMessage": status_message,
+        "assistantFailureCode": failure_code,
+        "assistantSelectedProfile": selected_profile,
+        "assistantAttemptedProfile": attempted_profile,
+        "assistantPrefilterProfile": prefilter_profile,
+        "assistantRuntimeProfiles": profiles,
+        "assistantAvailableProfiles": [selected_profile] if runtime_ready else [],
+        "assistantPrefilterProfiles": prefilter_profiles,
+        "assistantUnavailableProfiles": unavailable_profiles,
+        "assistantVerifiedStatusPath": str(verified_status.get("statusPath", _get_assistant_verified_status_path())),
+        "assistantHardware": {
+            "platform": platform_key,
+            "systemRamGb": system_ram_gb,
+            "freeDiskGb": free_disk_gb,
+            "nvidia": gpu_status,
+            "wslCuda": wsl_cuda_status,
+        },
+        **audio_understanding_status,
+    }
+
+
 def resolve_music_gen_checkpoint_root(checkpoint_root: str = "") -> Path:
     if checkpoint_root.strip():
         return Path(checkpoint_root).expanduser().resolve()
@@ -334,19 +891,11 @@ def resolve_music_gen_checkpoint_root(checkpoint_root: str = "") -> Path:
 
 
 def get_openstudio_native_backend_root() -> Path:
-    return Path(__file__).resolve().parent / "openstudio_ace_backend" / "vendor_runtime"
+    return Path(backend_status(Path(__file__))[1])
 
 
 def get_openstudio_native_backend_status() -> tuple[bool, str, list[str]]:
-    backend_root = get_openstudio_native_backend_root()
-    required_paths = (
-        backend_root / "nodes.py",
-        backend_root / "folder_paths.py",
-        backend_root / "comfy" / "sd.py",
-        backend_root / "comfy_extras" / "nodes_ace.py",
-    )
-    missing = [str(path) for path in required_paths if not path.exists()]
-    return not missing, str(backend_root), missing
+    return backend_status(Path(__file__))
 
 
 def get_candidate_comfy_model_roots() -> list[Path]:
@@ -491,6 +1040,7 @@ def probe_runtime_capabilities(
         checkpoint_root=music_checkpoint_root,
         model_name=music_model_id,
     )
+    assistant_status = get_assistant_runtime_status()
     report: dict[str, Any] = {
         "schemaVersion": 1,
         "baseRuntimeReady": False,
@@ -539,6 +1089,7 @@ def probe_runtime_capabilities(
         "errorCode": "",
         "backendDecisionTrace": [],
         "probeDurationMs": 0,
+        **assistant_status,
     }
 
     if models_dir and model_name:

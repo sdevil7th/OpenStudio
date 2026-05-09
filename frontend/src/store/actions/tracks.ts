@@ -89,6 +89,12 @@ async function clearTrackBoundUiBeforeRemoval(state: any, trackId: string, track
     state.closeStemSeparation();
   }
 
+  if (state.showAIContextGeneration
+      && (state.aiContextTrackId === trackId
+          || (state.aiContextClipId && clipIds.has(state.aiContextClipId)))) {
+    state.closeAIContextGeneration();
+  }
+
   if (state.showDynamicSplit && state.dynamicSplitClipId && clipIds.has(state.dynamicSplitClipId))
     state.closeDynamicSplit();
 

@@ -18,15 +18,18 @@ from collections import deque
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 import platform
 import re
+import shlex
 import socket
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import wave
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -38,7 +41,10 @@ from ai_runtime_probe import (
     DEFAULT_MUSIC_GEN_MODEL_REPO,
     DEFAULT_MUSIC_GEN_SHARED_REPO,
     REQUIRED_MUSIC_GEN_NATIVE_FILES,
+    ASSISTANT_VERIFIED_STATUS_ENV,
+    AUDIO_UNDERSTANDING_STATUS_ENV,
     find_local_comfy_native_assets,
+    get_assistant_runtime_status,
     get_windows_cuda_pytorch_index_url,
     get_windows_cuda_pytorch_packages,
     get_windows_flash_attn_asset,
@@ -67,6 +73,54 @@ DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_HEARTBEAT_SECONDS = 5.0
 MODEL_DOWNLOAD_PROGRESS_START = 0.82
 MODEL_DOWNLOAD_PROGRESS_END = 0.95
+ASSISTANT_MODELS_DIRNAME = "assistant"
+ANALYZER_MODELS_DIRNAME = "audio-understanding"
+ASSISTANT_LOCAL_RUNTIME_PACKAGES: tuple[str, ...] = (
+    "huggingface_hub>=0.34,<1.0",
+    "accelerate>=1.12,<2",
+    "transformers==4.57.6",
+    "soundfile>=0.12",
+    "qwen-omni-utils>=0.0.4",
+)
+ANALYZER_LOCAL_RUNTIME_PACKAGES: tuple[str, ...] = (
+    "huggingface_hub>=0.34,<1.0",
+    "accelerate>=1.12,<2",
+    "transformers==4.57.6",
+    "soundfile>=0.12",
+    "librosa>=0.10,<1",
+)
+ASSISTANT_AUTOAWQ_DEPENDENCY_PACKAGES: tuple[str, ...] = (
+    "datasets>=2.20,<4",
+    "zstandard>=0.22",
+)
+ASSISTANT_AUTOAWQ_PACKAGE = "autoawq==0.2.9"
+ASSISTANT_WINDOWS_FLASH_ATTN_ENV = "OPENSTUDIO_ASSISTANT_SKIP_FLASH_ATTN"
+ASSISTANT_TORCH_PACKAGES_BY_PLATFORM: dict[str, tuple[str, ...]] = {
+    "windows": (
+        "torch==2.8.0",
+        "torchvision==0.23.0",
+        "torchaudio==2.8.0",
+    ),
+    "linux": (
+        "torch==2.5.1",
+        "torchvision==0.20.1",
+        "torchaudio==2.5.1",
+    ),
+    "darwin": (
+        "torch",
+        "torchvision",
+        "torchaudio",
+    ),
+}
+ASSISTANT_TORCH_INDEX_BY_PLATFORM: dict[str, str] = {
+    "windows": "windows-acceleration-manifest",
+    "linux": "https://download.pytorch.org/whl/cu121",
+    "darwin": "",
+}
+ASSISTANT_LINUX_ACCELERATION_PACKAGES: tuple[str, ...] = (
+    "triton",
+    "flash-attn",
+)
 ACE15_COMFY_TEXT_ENCODER_FILENAMES: dict[str, str] = {
     "acestep-5Hz-lm-0.6B": "qwen_0.6b_ace15.safetensors",
     "acestep-5Hz-lm-1.7B": "qwen_1.7b_ace15.safetensors",
@@ -720,9 +774,9 @@ def get_music_generation_runtime_requirements(
         return []
 
     return [
-        "transformers==4.50.0",
+        "transformers==4.57.6",
         "diffusers==0.35.2",
-        "accelerate==1.6.0",
+        "accelerate>=1.12,<2",
         "vector-quantize-pytorch>=1.27.15",
         "torchsde>=0.2.6",
         "av>=12.0.0",
@@ -3671,6 +3725,1430 @@ def download_music_gen_model(
     )
 
 
+def _assistant_status_payload(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "assistantManifestAvailable": status.get("assistantManifestAvailable", False),
+        "assistantRuntimeReady": status.get("assistantRuntimeReady", False),
+        "assistantVerificationRequired": status.get("assistantVerificationRequired", True),
+        "assistantDownloadPolicy": status.get("assistantDownloadPolicy", "single_verified_profile"),
+        "assistantStatusMessage": status.get("assistantStatusMessage", ""),
+        "assistantFailureCode": status.get("assistantFailureCode", ""),
+        "assistantSelectedProfile": status.get("assistantSelectedProfile", ""),
+        "assistantAttemptedProfile": status.get("assistantAttemptedProfile", ""),
+        "assistantPrefilterProfile": status.get("assistantPrefilterProfile", ""),
+        "assistantRuntimeProfiles": status.get("assistantRuntimeProfiles", {}),
+        "assistantAvailableProfiles": status.get("assistantAvailableProfiles", []),
+        "assistantPrefilterProfiles": status.get("assistantPrefilterProfiles", []),
+        "assistantUnavailableProfiles": status.get("assistantUnavailableProfiles", []),
+        "assistantVerifiedStatusPath": status.get("assistantVerifiedStatusPath", ""),
+        "assistantHardware": status.get("assistantHardware", {}),
+        "audioUnderstandingManifestAvailable": status.get("audioUnderstandingManifestAvailable", False),
+        "audioUnderstandingRuntimeReady": status.get("audioUnderstandingRuntimeReady", False),
+        "audioUnderstandingVerificationRequired": status.get("audioUnderstandingVerificationRequired", False),
+        "audioUnderstandingDownloadPolicy": status.get("audioUnderstandingDownloadPolicy", "single_verified_profile"),
+        "audioUnderstandingStatus": status.get("audioUnderstandingStatus", "not_installed"),
+        "audioUnderstandingStatusMessage": status.get("audioUnderstandingStatusMessage", ""),
+        "audioUnderstandingFailureCode": status.get("audioUnderstandingFailureCode", ""),
+        "audioUnderstandingSelectedProfile": status.get("audioUnderstandingSelectedProfile", ""),
+        "audioUnderstandingAttemptedProfile": status.get("audioUnderstandingAttemptedProfile", ""),
+        "audioUnderstandingPrefilterProfile": status.get("audioUnderstandingPrefilterProfile", ""),
+        "audioUnderstandingRuntimeProfiles": status.get("audioUnderstandingRuntimeProfiles", {}),
+        "audioUnderstandingAvailableProfiles": status.get("audioUnderstandingAvailableProfiles", []),
+        "audioUnderstandingPrefilterProfiles": status.get("audioUnderstandingPrefilterProfiles", []),
+        "audioUnderstandingUnavailableProfiles": status.get("audioUnderstandingUnavailableProfiles", []),
+        "audioUnderstandingVerifiedStatusPath": status.get("audioUnderstandingVerifiedStatusPath", ""),
+    }
+
+
+def _emit_assistant_status(
+    status: dict[str, Any],
+    *,
+    progress: float,
+    message: str,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> None:
+    emit(
+        "downloading_model",
+        progress,
+        message=message,
+        stepLabel=message,
+        stepIndex=1,
+        stepCount=1,
+        installSource=install_source,
+        requiresExternalPython=requires_external_python,
+        pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
+        **_assistant_status_payload(status),
+    )
+
+
+def _assistant_verified_status_path(status: dict[str, Any]) -> Path:
+    configured = os.environ.get(ASSISTANT_VERIFIED_STATUS_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    status_path = str(status.get("assistantVerifiedStatusPath", "")).strip()
+    if status_path:
+        return Path(status_path).expanduser().resolve()
+    return (Path.home() / ".openstudio" / "assistant-runtime-status.json").resolve()
+
+
+def _write_assistant_verified_status(
+    status_path: Path,
+    *,
+    verified: bool,
+    profile_id: str,
+    profile: dict[str, Any],
+    model_path: str,
+    runtime_path: str,
+    verification: dict[str, Any],
+    error: str = "",
+    failure_code: str = "",
+) -> None:
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "schemaVersion": 1,
+        "verified": verified,
+        "profileId": profile_id if verified else "",
+        "attemptedProfileId": profile_id,
+        "modelRepo": profile.get("modelRepo", ""),
+        "modelRevision": profile.get("modelRevision", "main"),
+        "runtimeFamily": profile.get("runtimeFamily", ""),
+        "installScope": profile.get("installScope", "local"),
+        "modelPath": model_path,
+        "runtimePath": runtime_path,
+        "verification": verification,
+        "verifiedAt": utc_now_iso(),
+    }
+    if error:
+        payload["error"] = error
+    if failure_code:
+        payload["failureCode"] = failure_code
+    status_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+
+def _assistant_model_asset_report(model_root: Path) -> dict[str, Any]:
+    required_files = ("config.json", "tokenizer_config.json")
+    missing = [name for name in required_files if not (model_root / name).exists()]
+    weight_files = [
+        str(path.relative_to(model_root))
+        for pattern in ("*.safetensors", "*.bin", "*.gguf")
+        for path in model_root.rglob(pattern)
+    ]
+    return {
+        "modelRoot": str(model_root),
+        "missingFiles": missing,
+        "weightFileCount": len(weight_files),
+        "sampleWeightFiles": weight_files[:8],
+        "assetsPresent": not missing and bool(weight_files),
+    }
+
+
+def _write_assistant_smoke_wav(path: Path, *, duration_seconds: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sample_rate = 16000
+    amplitude = 0.2
+    frequency = 440.0
+    frame_count = sample_rate * max(1, duration_seconds)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        frames = bytearray()
+        for frame_index in range(frame_count):
+            sample = int(32767 * amplitude * math.sin(2.0 * math.pi * frequency * frame_index / sample_rate))
+            frames.extend(sample.to_bytes(2, byteorder="little", signed=True))
+        handle.writeframes(bytes(frames))
+
+
+def _assistant_verification_script(
+    *,
+    profile_id: str,
+    profile: dict[str, Any],
+    model_path: str,
+    smoke_wav_path: str,
+) -> str:
+    prompt = (
+        "Listen to the audio and return only strict JSON with this exact shape: "
+        "{\"version\":1,\"summary\":\"runtime ok\",\"actions\":[{\"kind\":\"ai.getRuntimeStatus\",\"params\":{}}]}. "
+        "Do not wrap it in markdown."
+    )
+    return f"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+profile_id = {profile_id!r}
+model_path = Path({model_path!r}).expanduser()
+smoke_wav_path = Path({smoke_wav_path!r}).expanduser()
+attention_backend = {str(profile.get("attentionBackend", "")).strip()!r}
+flash_attention_required = {bool(profile.get("flashAttentionRequired", False))!r}
+triton_required = {bool(profile.get("tritonRequired", False))!r}
+required_files = ("config.json", "tokenizer_config.json")
+missing = [name for name in required_files if not (model_path / name).exists()]
+weight_files = [
+    path for pattern in ("*.safetensors", "*.bin", "*.gguf")
+    for path in model_path.rglob(pattern)
+]
+if missing or not weight_files:
+    raise RuntimeError(
+        "Assistant model assets are incomplete: "
+        + json.dumps({{"missingFiles": missing, "weightFileCount": len(weight_files)}})
+    )
+
+sample_plan = {{
+    "version": 1,
+    "summary": "runtime ok",
+    "actions": [
+        {{"kind": "ai.getRuntimeStatus", "params": {{}}}},
+    ],
+}}
+if sample_plan.get("version") != 1 or not isinstance(sample_plan.get("actions"), list):
+    raise RuntimeError("Assistant action schema smoke test failed.")
+
+if os.environ.get("OPENSTUDIO_ASSISTANT_ASSET_ONLY_VERIFY", "").strip().lower() in {{"1", "true", "yes", "on"}}:
+    print(json.dumps({{
+        "profileId": profile_id,
+        "modelLoadVerified": False,
+        "assetOnly": True,
+        "schemaSmokeVerified": True,
+        "modelPath": str(model_path),
+    }}))
+    raise SystemExit(0)
+
+import torch
+if flash_attention_required:
+    import flash_attn  # noqa: F401
+if triton_required:
+    import triton  # noqa: F401
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+
+load_kwargs = {{
+    "device_map": "auto",
+    "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else "auto",
+    "enable_audio_output": False,
+}}
+if attention_backend:
+    load_kwargs["attn_implementation"] = attention_backend
+model = Qwen2_5OmniForConditionalGeneration.from_pretrained(str(model_path), **load_kwargs)
+processor = Qwen2_5OmniProcessor.from_pretrained(str(model_path))
+conversation = [
+    {{
+        "role": "system",
+        "content": [
+            {{
+                "type": "text",
+                "text": "You are OpenStudio's local DAW assistant. Return strict JSON action plans only.",
+            }},
+        ],
+    }},
+    {{
+        "role": "user",
+        "content": [
+            {{"type": "audio", "path": str(smoke_wav_path)}},
+            {{"type": "text", "text": {prompt!r}}},
+        ],
+    }},
+]
+inputs = processor.apply_chat_template(
+    conversation,
+    add_generation_prompt=True,
+    tokenize=True,
+    return_dict=True,
+    return_tensors="pt",
+    padding=True,
+    use_audio_in_video=False,
+)
+target_device = getattr(getattr(model, "thinker", model), "device", getattr(model, "device", None))
+if target_device is not None:
+    inputs = inputs.to(target_device)
+generated = model.generate(
+    **inputs,
+    use_audio_in_video=False,
+    return_audio=False,
+    thinker_max_new_tokens=96,
+)
+if isinstance(generated, tuple):
+    generated = generated[0]
+input_ids = inputs.get("input_ids") if hasattr(inputs, "get") else None
+if input_ids is not None and hasattr(generated, "ndim") and generated.ndim == 2:
+    prompt_token_count = int(input_ids.shape[-1])
+    if generated.shape[-1] > prompt_token_count:
+        generated = generated[:, prompt_token_count:]
+decoded = processor.batch_decode(generated, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+raw_text = "\\n".join(decoded).strip()
+def extract_first_json_object(text):
+    stripped = text.strip()
+    candidates = [stripped]
+    if "```" in stripped:
+        parts = stripped.replace("```json", "```").split("```")
+        if len(parts) >= 3:
+            candidates.insert(0, parts[1].strip())
+    decoder = json.JSONDecoder()
+    last_error = None
+    for candidate in candidates:
+        start = candidate.find("{{")
+        while start >= 0:
+            try:
+                value, _ = decoder.raw_decode(candidate[start:])
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                start = candidate.find("{{", start + 1)
+                continue
+            if not isinstance(value, dict):
+                raise RuntimeError("Model returned JSON, but the root was not an object.")
+            return value
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Model did not return a JSON object.")
+plan = extract_first_json_object(raw_text)
+actions = plan.get("actions")
+if plan.get("version") != 1 or not isinstance(actions, list) or not actions:
+    raise RuntimeError("Model did not return a valid OpenStudio assistant action plan.")
+if actions[0].get("kind") != "ai.getRuntimeStatus":
+    raise RuntimeError("Model action-plan smoke test returned an unexpected action.")
+print(json.dumps({{
+    "profileId": profile_id,
+    "modelLoadVerified": True,
+    "assetOnly": False,
+    "schemaSmokeVerified": True,
+    "modelPath": str(model_path),
+    "responsePreview": raw_text[:500],
+}}))
+"""
+
+
+def _run_assistant_local_step(
+    command: list[str],
+    *,
+    description: str,
+    progress: float,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+    cwd: Path | None = None,
+) -> None:
+    stream_step(
+        command,
+        state="downloading_model",
+        progress=progress,
+        description=description,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        error_code="assistant_runtime_prepare_failed",
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+        cwd=cwd,
+        raise_on_error=True,
+        step_label=description,
+        step_index=1,
+        step_count=1,
+        download_hint="OpenStudio is preparing the selected local Qwen assistant profile.",
+        is_large_download=True,
+    )
+
+
+def _current_platform_key() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "darwin"
+    if system == "windows":
+        return "windows"
+    if system == "linux":
+        return "linux"
+    return system or "unknown"
+
+
+def _assistant_torch_install_command(runtime_python: Path, profile: dict[str, Any]) -> list[str]:
+    platform_key = _current_platform_key()
+    packages = list(ASSISTANT_TORCH_PACKAGES_BY_PLATFORM.get(platform_key, ("torch", "torchvision", "torchaudio")))
+    index_url = str(profile.get("torchIndexUrl", "")).strip()
+    if index_url == "windows-acceleration-manifest":
+        index_url = get_windows_cuda_pytorch_index_url()
+    if not index_url:
+        index_url = ASSISTANT_TORCH_INDEX_BY_PLATFORM.get(platform_key, "")
+        if index_url == "windows-acceleration-manifest":
+            index_url = get_windows_cuda_pytorch_index_url()
+
+    command = [str(runtime_python), "-m", "pip", "install", "--upgrade", *packages]
+    if index_url:
+        command.extend(["--index-url", index_url])
+    return command
+
+
+def _assistant_runtime_packages(profile: dict[str, Any]) -> list[str]:
+    packages = list(ASSISTANT_LOCAL_RUNTIME_PACKAGES)
+    if _assistant_requires_autoawq(profile):
+        packages.extend(ASSISTANT_AUTOAWQ_DEPENDENCY_PACKAGES)
+    return packages
+
+
+def _assistant_requires_autoawq(profile: dict[str, Any]) -> bool:
+    return str(profile.get("quantization", "")).upper() == "AWQ"
+
+
+def _prepare_local_assistant_quantization_runtime(
+    runtime_python: Path,
+    profile: dict[str, Any],
+    *,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> None:
+    if not _assistant_requires_autoawq(profile):
+        return
+
+    _run_assistant_local_step(
+        [
+            str(runtime_python),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--no-deps",
+            ASSISTANT_AUTOAWQ_PACKAGE,
+        ],
+        description="Installing AutoAWQ for the Qwen assistant runtime",
+        progress=0.981,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+
+def _prepare_local_assistant_acceleration(
+    runtime_python: Path,
+    runtime_root: Path,
+    profile: dict[str, Any],
+    *,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> None:
+    platform_key = _current_platform_key()
+    runtime_family = str(profile.get("runtimeFamily", ""))
+    triton_enabled = bool(profile.get("tritonEnabled", profile.get("tritonRequired", False)))
+    flash_enabled = bool(profile.get("flashAttentionEnabled", False))
+
+    if platform_key == "windows" and "cuda" in runtime_family:
+        if triton_enabled:
+            _run_assistant_local_step(
+                [str(runtime_python), "-m", "pip", "install", "--upgrade", get_windows_triton_package_spec()],
+                description="Installing Triton for the Qwen assistant runtime",
+                progress=0.979,
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+            )
+        if flash_enabled and os.environ.get(ASSISTANT_WINDOWS_FLASH_ATTN_ENV, "").strip().lower() not in {"1", "true", "yes", "on"}:
+            flash_attn_asset = get_windows_flash_attn_asset()
+            install_pinned_wheel(
+                runtime_python,
+                runtime_root,
+                wheel_url=str(flash_attn_asset.get("url", "")).strip(),
+                wheel_sha256=str(flash_attn_asset.get("sha256", "")).strip(),
+                wheel_filename=str(
+                    flash_attn_asset.get("fileName")
+                    or flash_attn_asset.get("filename")
+                    or "flash_attn.whl"
+                ),
+                description="Installing Flash Attention for the Qwen assistant runtime",
+                state="downloading_model",
+                progress=0.98,
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+                step_label="Installing Flash Attention for the Qwen assistant",
+                step_index=1,
+                step_count=1,
+                download_hint="OpenStudio is installing the pinned Windows Flash Attention wheel used by Qwen Omni.",
+                is_large_download=True,
+                raise_on_error=True,
+                error_code="assistant_acceleration_setup_failed",
+            )
+        return
+
+    if platform_key == "linux" and "cuda" in runtime_family:
+        packages: list[str] = []
+        if triton_enabled:
+            packages.append("triton")
+        if flash_enabled:
+            packages.append("flash-attn")
+        if packages:
+            _run_assistant_local_step(
+                [
+                    str(runtime_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "--no-build-isolation",
+                    *packages,
+                ],
+                description="Installing Qwen assistant attention acceleration packages",
+                progress=0.98,
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+            )
+
+
+def _prepare_local_assistant_profile(
+    runtime_python: Path,
+    runtime_root: Path,
+    models_dir: Path,
+    *,
+    profile_id: str,
+    profile: dict[str, Any],
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> dict[str, Any]:
+    profile_root = models_dir / ASSISTANT_MODELS_DIRNAME / profile_id
+    model_root = profile_root / "model"
+    smoke_wav = profile_root / str(profile.get("audioSmokeTestFile", "assistant_smoke_10s.wav"))
+    profile_root.mkdir(parents=True, exist_ok=True)
+    _write_assistant_smoke_wav(
+        smoke_wav,
+        duration_seconds=int(profile.get("defaultAudioWindowSeconds", 10) or 10),
+    )
+
+    _run_assistant_local_step(
+        _assistant_torch_install_command(runtime_python, profile),
+        description="Installing the Qwen assistant CUDA tensor runtime",
+        progress=0.978,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    _prepare_local_assistant_acceleration(
+        runtime_python,
+        runtime_root,
+        profile,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    _run_assistant_local_step(
+        [str(runtime_python), "-m", "pip", "install", "--upgrade", *_assistant_runtime_packages(profile)],
+        description="Installing the Qwen assistant Python packages",
+        progress=0.98,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    _prepare_local_assistant_quantization_runtime(
+        runtime_python,
+        profile,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    download_script = (
+        "from pathlib import Path\n"
+        "from huggingface_hub import snapshot_download\n"
+        f"model_root = Path(r'{model_root}')\n"
+        "model_root.mkdir(parents=True, exist_ok=True)\n"
+        "snapshot_download(\n"
+        f"    repo_id={str(profile.get('modelRepo', '')).strip()!r},\n"
+        f"    revision={str(profile.get('modelRevision', 'main')).strip() or 'main'!r},\n"
+        "    local_dir=str(model_root),\n"
+        "    local_dir_use_symlinks=False,\n"
+        ")\n"
+        "print('downloaded:' + str(model_root))\n"
+    )
+    _run_assistant_local_step(
+        [str(runtime_python), "-c", download_script],
+        description=f"Downloading {profile.get('label', profile_id)}",
+        progress=0.982,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    asset_report = _assistant_model_asset_report(model_root)
+    verify_script = _assistant_verification_script(
+        profile_id=profile_id,
+        profile=profile,
+        model_path=str(model_root),
+        smoke_wav_path=str(smoke_wav),
+    )
+    _run_assistant_local_step(
+        [str(runtime_python), "-c", verify_script],
+        description=f"Verifying {profile.get('label', profile_id)}",
+        progress=0.984,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+        cwd=profile_root,
+    )
+    return {
+        **asset_report,
+        "runtimePath": str(runtime_python),
+        "modelPath": str(model_root),
+        "smokeWavPath": str(smoke_wav),
+        "modelLoadVerified": os.environ.get("OPENSTUDIO_ASSISTANT_ASSET_ONLY_VERIFY", "").strip().lower() not in {"1", "true", "yes", "on"},
+        "schemaSmokeVerified": True,
+    }
+
+
+def _audio_understanding_verified_status_path(status: dict[str, Any]) -> Path:
+    configured = os.environ.get(AUDIO_UNDERSTANDING_STATUS_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    status_path = str(status.get("audioUnderstandingVerifiedStatusPath", "")).strip()
+    if status_path:
+        return Path(status_path).expanduser().resolve()
+    return (Path.home() / ".openstudio" / "audio-understanding-runtime-status.json").resolve()
+
+
+def _write_audio_understanding_verified_status(
+    status_path: Path,
+    *,
+    verified: bool,
+    profile_id: str,
+    profile: dict[str, Any],
+    model_path: str,
+    runtime_path: str,
+    verification: dict[str, Any],
+    error: str = "",
+    failure_code: str = "",
+) -> None:
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "schemaVersion": 1,
+        "verified": verified,
+        "profileId": profile_id if verified else "",
+        "attemptedProfileId": profile_id,
+        "modelRepo": profile.get("modelRepo", ""),
+        "modelRevision": profile.get("modelRevision", "main"),
+        "runtimeFamily": profile.get("runtimeFamily", ""),
+        "installScope": profile.get("installScope", "local"),
+        "modelPath": model_path,
+        "runtimePath": runtime_path,
+        "serviceScript": profile.get("serviceScript", ""),
+        "license": profile.get("license", ""),
+        "requiresLicenseAcceptance": bool(profile.get("requiresLicenseAcceptance", False)),
+        "verification": verification,
+        "verifiedAt": utc_now_iso(),
+    }
+    if error:
+        payload["error"] = error
+    if failure_code:
+        payload["failureCode"] = failure_code
+    status_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+
+def _audio_understanding_verification_script(
+    *,
+    profile_id: str,
+    profile: dict[str, Any],
+    model_path: str,
+    smoke_wav_path: str,
+    service_script_path: str,
+) -> str:
+    prompt = str(
+        profile.get("startupTestPrompt")
+        or "Return strict JSON describing genre, tempo feel, instruments, vocals, production notes, and suggested DAW actions."
+    )
+    return f"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+profile_id = {profile_id!r}
+model_path = Path({model_path!r}).expanduser()
+smoke_wav_path = Path({smoke_wav_path!r}).expanduser()
+service_script_path = Path({service_script_path!r}).expanduser()
+required_files = ("config.json", "tokenizer_config.json")
+missing = [name for name in required_files if not (model_path / name).exists()]
+weight_files = [
+    path for pattern in ("*.safetensors", "*.bin", "*.gguf")
+    for path in model_path.rglob(pattern)
+]
+if missing or not weight_files:
+    raise RuntimeError(
+        "Audio analyzer model assets are incomplete: "
+        + json.dumps({{"missingFiles": missing, "weightFileCount": len(weight_files)}})
+    )
+if not service_script_path.exists():
+    raise RuntimeError("Audio analyzer service script is missing: " + str(service_script_path))
+if not smoke_wav_path.exists():
+    raise RuntimeError("Audio analyzer smoke WAV is missing: " + str(smoke_wav_path))
+
+if os.environ.get("OPENSTUDIO_ASSISTANT_ASSET_ONLY_VERIFY", "").strip().lower() in {{"1", "true", "yes", "on"}}:
+    print(json.dumps({{
+        "profileId": profile_id,
+        "modelLoadVerified": False,
+        "assetOnly": True,
+        "schemaSmokeVerified": True,
+        "modelPath": str(model_path),
+        "serviceScript": str(service_script_path),
+    }}))
+    raise SystemExit(0)
+
+request = {{
+    "schemaVersion": 1,
+    "prompt": {prompt!r},
+    "modelPath": str(model_path),
+    "clip": {{
+        "clipId": "assistant-smoke",
+        "clipName": "Analyzer smoke test",
+        "filePath": str(smoke_wav_path),
+    }},
+}}
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
+    json.dump(request, handle, ensure_ascii=True)
+    request_path = handle.name
+try:
+    result = subprocess.run(
+        [sys.executable, str(service_script_path), "--request", request_path],
+        text=True,
+        capture_output=True,
+        timeout=240,
+        check=False,
+    )
+finally:
+    try:
+        Path(request_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+output = (result.stdout or "") + "\\n" + (result.stderr or "")
+if result.returncode != 0:
+    raise RuntimeError("Audio analyzer service failed: " + output.strip()[:1200])
+decoder = json.JSONDecoder()
+parsed = None
+start = output.find("{{")
+while start >= 0:
+    try:
+        value, _ = decoder.raw_decode(output[start:])
+    except json.JSONDecodeError:
+        start = output.find("{{", start + 1)
+        continue
+    if isinstance(value, dict):
+        parsed = value
+        break
+    start = output.find("{{", start + 1)
+if not isinstance(parsed, dict) or not parsed.get("ok"):
+    raise RuntimeError("Audio analyzer did not return an ok JSON object: " + output.strip()[:1200])
+summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else parsed
+if not isinstance(summary, dict) or not str(summary.get("promptReadySummary") or "").strip():
+    raise RuntimeError("Audio analyzer smoke test did not return a prompt-ready summary.")
+print(json.dumps({{
+    "profileId": profile_id,
+    "modelLoadVerified": True,
+    "assetOnly": False,
+    "schemaSmokeVerified": True,
+    "modelPath": str(model_path),
+    "serviceScript": str(service_script_path),
+    "responsePreview": output.strip()[:500],
+}}))
+"""
+
+
+def _prepare_local_audio_understanding_profile(
+    runtime_python: Path,
+    runtime_root: Path,
+    models_dir: Path,
+    *,
+    profile_id: str,
+    profile: dict[str, Any],
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> dict[str, Any]:
+    profile_root = models_dir / ANALYZER_MODELS_DIRNAME / profile_id
+    model_root = profile_root / "model"
+    smoke_wav = profile_root / str(profile.get("audioSmokeTestFile", "assistant_smoke_10s.wav"))
+    profile_root.mkdir(parents=True, exist_ok=True)
+    _write_assistant_smoke_wav(
+        smoke_wav,
+        duration_seconds=int(profile.get("defaultAudioWindowSeconds", 10) or 10),
+    )
+
+    _run_assistant_local_step(
+        _assistant_torch_install_command(runtime_python, profile),
+        description="Installing the core music analyzer CUDA tensor runtime",
+        progress=0.987,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    _prepare_local_assistant_acceleration(
+        runtime_python,
+        runtime_root,
+        profile,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    _run_assistant_local_step(
+        [str(runtime_python), "-m", "pip", "install", "--upgrade", *ANALYZER_LOCAL_RUNTIME_PACKAGES],
+        description="Installing the core music analyzer Python packages",
+        progress=0.988,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    download_script = (
+        "from pathlib import Path\n"
+        "from huggingface_hub import snapshot_download\n"
+        f"model_root = Path(r'{model_root}')\n"
+        "model_root.mkdir(parents=True, exist_ok=True)\n"
+        "snapshot_download(\n"
+        f"    repo_id={str(profile.get('modelRepo', '')).strip()!r},\n"
+        f"    revision={str(profile.get('modelRevision', 'main')).strip() or 'main'!r},\n"
+        "    local_dir=str(model_root),\n"
+        "    local_dir_use_symlinks=False,\n"
+        ")\n"
+        "print('downloaded:' + str(model_root))\n"
+    )
+    _run_assistant_local_step(
+        [str(runtime_python), "-c", download_script],
+        description=f"Downloading {profile.get('label', profile_id)}",
+        progress=0.989,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    service_script = str(profile.get("serviceScript", "")).strip()
+    service_path = Path(__file__).resolve().with_name(service_script)
+    asset_report = _assistant_model_asset_report(model_root)
+    verify_script = _audio_understanding_verification_script(
+        profile_id=profile_id,
+        profile=profile,
+        model_path=str(model_root),
+        smoke_wav_path=str(smoke_wav),
+        service_script_path=str(service_path),
+    )
+    _run_assistant_local_step(
+        [str(runtime_python), "-c", verify_script],
+        description=f"Verifying {profile.get('label', profile_id)}",
+        progress=0.99,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+        cwd=profile_root,
+    )
+    return {
+        **asset_report,
+        "runtimePath": str(runtime_python),
+        "modelPath": str(model_root),
+        "smokeWavPath": str(smoke_wav),
+        "serviceScript": str(service_path),
+        "modelLoadVerified": os.environ.get("OPENSTUDIO_ASSISTANT_ASSET_ONLY_VERIFY", "").strip().lower() not in {"1", "true", "yes", "on"},
+        "schemaSmokeVerified": True,
+    }
+
+
+def prepare_audio_understanding_runtime(
+    runtime_python: Path,
+    runtime_root: Path,
+    models_dir: Path,
+    *,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> dict[str, Any]:
+    status = get_assistant_runtime_status()
+    if bool(status.get("audioUnderstandingRuntimeReady")):
+        _emit_assistant_status(
+            status,
+            progress=0.99,
+            message=str(status.get("audioUnderstandingStatusMessage", "Core music analyzer is already verified.")),
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        return status
+
+    profiles = status.get("audioUnderstandingRuntimeProfiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+
+    profile_ids: list[str] = []
+    preferred_profile = str(status.get("audioUnderstandingPrefilterProfile", "")).strip()
+    if preferred_profile:
+        profile_ids.append(preferred_profile)
+    prefilter_profiles = status.get("audioUnderstandingPrefilterProfiles", [])
+    if isinstance(prefilter_profiles, list):
+        for candidate in prefilter_profiles:
+            candidate_id = str(candidate).strip()
+            if candidate_id and candidate_id not in profile_ids:
+                profile_ids.append(candidate_id)
+
+    if not profile_ids:
+        _emit_assistant_status(
+            status,
+            progress=0.99,
+            message=str(status.get("audioUnderstandingStatusMessage", "No core music analyzer profile passed the local hardware prefilter.")),
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        return status
+
+    download_policy = str(status.get("audioUnderstandingDownloadPolicy", "single_verified_profile"))
+    status_path = _audio_understanding_verified_status_path(status)
+    if download_policy != "single_verified_profile":
+        message = f"Unsupported core music analyzer download policy: {download_policy}."
+        profile_id = profile_ids[0]
+        profile = dict(profiles.get(profile_id, {}))
+        _write_audio_understanding_verified_status(
+            status_path,
+            verified=False,
+            profile_id=profile_id,
+            profile=profile,
+            model_path="",
+            runtime_path="",
+            verification={},
+            error=message,
+            failure_code="audio_understanding_download_policy_unsupported",
+        )
+        refreshed = get_assistant_runtime_status()
+        _emit_assistant_status(
+            refreshed,
+            progress=0.99,
+            message=message,
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        return refreshed
+
+    last_refreshed = status
+    last_message = str(status.get("audioUnderstandingStatusMessage", "No core music analyzer profile could be verified."))
+    last_failure_code = "audio_understanding_runtime_prepare_failed"
+
+    for profile_index, profile_id in enumerate(profile_ids):
+        profile = dict(profiles.get(profile_id, {}))
+        if not profile:
+            last_message = f"Core music analyzer profile {profile_id} is not present in the manifest."
+            last_failure_code = "audio_understanding_profile_missing"
+            continue
+
+        log_event(
+            "installer",
+            "downloading_model",
+            "audio_understanding_prepare_start",
+            profileId=profile_id,
+            profileIndex=profile_index,
+            profileCount=len(profile_ids),
+            modelRepo=profile.get("modelRepo", ""),
+            runtimeFamily=profile.get("runtimeFamily", ""),
+        )
+        try:
+            if str(profile.get("installScope", "local")) != "local":
+                raise RuntimeError("Only local core music analyzer profiles are implemented in this release.")
+            verification = _prepare_local_audio_understanding_profile(
+                runtime_python,
+                runtime_root,
+                models_dir,
+                profile_id=profile_id,
+                profile=profile,
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+            )
+            _write_audio_understanding_verified_status(
+                status_path,
+                verified=True,
+                profile_id=profile_id,
+                profile=profile,
+                model_path=str(verification.get("modelPath", "")),
+                runtime_path=str(verification.get("runtimePath", "")),
+                verification=verification,
+            )
+            refreshed = get_assistant_runtime_status()
+            _emit_assistant_status(
+                refreshed,
+                progress=0.991,
+                message=str(refreshed.get("audioUnderstandingStatusMessage", "Core music analyzer verified.")),
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+            )
+            log_event(
+                "installer",
+                "downloading_model",
+                "audio_understanding_prepare_succeeded",
+                profileId=profile_id,
+                statusPath=str(status_path),
+                modelPath=verification.get("modelPath", ""),
+            )
+            return refreshed
+        except InstallerStepError as exc:
+            last_message = exc.message
+            last_failure_code = exc.error_code
+        except Exception as exc:
+            last_message = f"{type(exc).__name__}: {exc}"
+            last_failure_code = "audio_understanding_runtime_prepare_failed"
+
+        _write_audio_understanding_verified_status(
+            status_path,
+            verified=False,
+            profile_id=profile_id,
+            profile=profile,
+            model_path="",
+            runtime_path="",
+            verification={},
+            error=last_message,
+            failure_code=last_failure_code,
+        )
+        last_refreshed = get_assistant_runtime_status()
+        remaining_profiles = len(profile_ids) - profile_index - 1
+        retry_suffix = f" Trying the next core analyzer profile ({remaining_profiles} remaining)." if remaining_profiles > 0 else ""
+        _emit_assistant_status(
+            last_refreshed,
+            progress=0.991,
+            message=str(last_refreshed.get("audioUnderstandingStatusMessage", last_message)) + retry_suffix,
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        log_event(
+            "installer",
+            "downloading_model",
+            "audio_understanding_prepare_failed",
+            profileId=profile_id,
+            profileIndex=profile_index,
+            profileCount=len(profile_ids),
+            willTryNext=remaining_profiles > 0,
+            errorCode=last_failure_code,
+            errorMessage=last_message,
+        )
+
+    _emit_assistant_status(
+        last_refreshed,
+        progress=0.991,
+        message=str(last_refreshed.get("audioUnderstandingStatusMessage", last_message)),
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    return last_refreshed
+
+
+def _run_wsl_script(
+    script: str,
+    *,
+    description: str,
+    progress: float,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> None:
+    stream_step(
+        ["wsl.exe", "-e", "sh", "-lc", script],
+        state="downloading_model",
+        progress=progress,
+        description=description,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        error_code="assistant_runtime_prepare_failed",
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+        raise_on_error=True,
+        step_label=description,
+        step_index=1,
+        step_count=1,
+        download_hint="OpenStudio is preparing the selected Qwen assistant profile inside WSL.",
+        is_large_download=True,
+    )
+
+
+def _prepare_wsl_assistant_profile(
+    *,
+    profile_id: str,
+    profile: dict[str, Any],
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> dict[str, Any]:
+    runtime_root_shell = f"$HOME/.openstudio/assistant-runtimes/{profile_id}"
+    model_root_shell = f"$HOME/.openstudio/assistant-models/{profile_id}/model"
+    smoke_wav_shell = f"$HOME/.openstudio/assistant-models/{profile_id}/{profile.get('audioSmokeTestFile', 'assistant_smoke_10s.wav')}"
+    runtime_root_py = f"~/.openstudio/assistant-runtimes/{profile_id}"
+    model_root_py = f"~/.openstudio/assistant-models/{profile_id}/model"
+    smoke_wav_py = f"~/.openstudio/assistant-models/{profile_id}/{profile.get('audioSmokeTestFile', 'assistant_smoke_10s.wav')}"
+    torch_packages = " ".join(shlex.quote(package) for package in ASSISTANT_TORCH_PACKAGES_BY_PLATFORM["linux"])
+    local_packages = " ".join(shlex.quote(package) for package in _assistant_runtime_packages(profile))
+    autoawq_install = (
+        f'"$runtime_root/venv/bin/python" -m pip install --upgrade --no-deps {shlex.quote(ASSISTANT_AUTOAWQ_PACKAGE)}'
+        if _assistant_requires_autoawq(profile)
+        else ":"
+    )
+    torch_index_url = shlex.quote(get_windows_cuda_pytorch_index_url())
+
+    setup_script = f"""
+set -e
+runtime_root="{runtime_root_shell}"
+python3 -m venv "$runtime_root/venv"
+"$runtime_root/venv/bin/python" -m pip install --upgrade pip wheel setuptools
+"$runtime_root/venv/bin/python" -m pip install --upgrade {torch_packages} --index-url {torch_index_url}
+"$runtime_root/venv/bin/python" -m pip install --upgrade {local_packages}
+{autoawq_install}
+"""
+    _run_wsl_script(
+        setup_script,
+        description="Preparing the Qwen assistant WSL runtime",
+        progress=0.978,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    download_script = f"""
+set -e
+runtime_root="{runtime_root_shell}"
+model_root="{model_root_shell}"
+"$runtime_root/venv/bin/python" - <<'PY'
+from pathlib import Path
+from huggingface_hub import snapshot_download
+model_root = Path({model_root_py!r}).expanduser()
+model_root.mkdir(parents=True, exist_ok=True)
+snapshot_download(
+    repo_id={str(profile.get('modelRepo', '')).strip()!r},
+    revision={str(profile.get('modelRevision', 'main')).strip() or 'main'!r},
+    local_dir=str(model_root),
+    local_dir_use_symlinks=False,
+)
+print("downloaded:" + str(model_root))
+PY
+"""
+    _run_wsl_script(
+        download_script,
+        description=f"Downloading {profile.get('label', profile_id)} inside WSL",
+        progress=0.982,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    verify_body = _assistant_verification_script(
+        profile_id=profile_id,
+        profile=profile,
+        model_path=model_root_py,
+        smoke_wav_path=smoke_wav_py,
+    )
+    verify_script = f"""
+set -e
+runtime_root="{runtime_root_shell}"
+smoke_wav="{smoke_wav_shell}"
+mkdir -p "$(dirname "$smoke_wav")"
+"$runtime_root/venv/bin/python" - <<'PY'
+from pathlib import Path
+import math
+import wave
+path = Path({smoke_wav_py!r}).expanduser()
+path.parent.mkdir(parents=True, exist_ok=True)
+sample_rate = 16000
+frame_count = sample_rate * {int(profile.get('defaultAudioWindowSeconds', 10) or 10)}
+frames = bytearray()
+for frame_index in range(frame_count):
+    sample = int(32767 * 0.2 * math.sin(2.0 * math.pi * 440.0 * frame_index / sample_rate))
+    frames.extend(sample.to_bytes(2, byteorder="little", signed=True))
+with wave.open(str(path), "wb") as handle:
+    handle.setnchannels(1)
+    handle.setsampwidth(2)
+    handle.setframerate(sample_rate)
+    handle.writeframes(bytes(frames))
+PY
+"$runtime_root/venv/bin/python" - <<'PY'
+{verify_body}
+PY
+"""
+    _run_wsl_script(
+        verify_script,
+        description=f"Verifying {profile.get('label', profile_id)} inside WSL",
+        progress=0.984,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    return {
+        "runtimePath": f"{runtime_root_py}/venv/bin/python",
+        "modelPath": model_root_py,
+        "smokeWavPath": smoke_wav_py,
+        "assetsPresent": True,
+        "modelLoadVerified": os.environ.get("OPENSTUDIO_ASSISTANT_ASSET_ONLY_VERIFY", "").strip().lower() not in {"1", "true", "yes", "on"},
+        "schemaSmokeVerified": True,
+    }
+
+
+def prepare_assistant_runtime(
+    runtime_python: Path,
+    runtime_root: Path,
+    models_dir: Path,
+    *,
+    install_source: str,
+    requires_external_python: bool,
+    python_detected: bool,
+    build_runtime_mode: str,
+) -> dict[str, Any]:
+    status = get_assistant_runtime_status()
+    if bool(status.get("assistantRuntimeReady")):
+        _emit_assistant_status(
+            status,
+            progress=0.984,
+            message=str(status.get("assistantStatusMessage", "Assistant runtime is already verified.")),
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        return status
+
+    profiles = status.get("assistantRuntimeProfiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+
+    profile_ids: list[str] = []
+    preferred_profile = str(status.get("assistantPrefilterProfile", "")).strip()
+    if preferred_profile:
+        profile_ids.append(preferred_profile)
+    prefilter_profiles = status.get("assistantPrefilterProfiles", [])
+    if isinstance(prefilter_profiles, list):
+        for candidate in prefilter_profiles:
+            candidate_id = str(candidate).strip()
+            if candidate_id and candidate_id not in profile_ids:
+                profile_ids.append(candidate_id)
+
+    if not profile_ids:
+        _emit_assistant_status(
+            status,
+            progress=0.984,
+            message=str(status.get("assistantStatusMessage", "No assistant runtime profile passed the local hardware prefilter.")),
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        return status
+
+    download_policy = str(status.get("assistantDownloadPolicy", "single_verified_profile"))
+    if download_policy != "single_verified_profile":
+        message = f"Unsupported assistant download policy: {download_policy}."
+        status_path = _assistant_verified_status_path(status)
+        profile_id = profile_ids[0]
+        profile = dict(profiles.get(profile_id, {}))
+        _write_assistant_verified_status(
+            status_path,
+            verified=False,
+            profile_id=profile_id,
+            profile=profile,
+            model_path="",
+            runtime_path="",
+            verification={},
+            error=message,
+            failure_code="assistant_download_policy_unsupported",
+        )
+        refreshed = get_assistant_runtime_status()
+        _emit_assistant_status(
+            refreshed,
+            progress=0.984,
+            message=message,
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        return refreshed
+
+    status_path = _assistant_verified_status_path(status)
+    last_refreshed = status
+    last_message = str(status.get("assistantStatusMessage", "No assistant runtime profile could be verified."))
+    last_failure_code = "assistant_runtime_prepare_failed"
+
+    for profile_index, profile_id in enumerate(profile_ids):
+        profile = dict(profiles.get(profile_id, {}))
+        if not profile:
+            last_message = f"Assistant runtime profile {profile_id} is not present in the manifest."
+            last_failure_code = "assistant_profile_missing"
+            log_event(
+                "installer",
+                "downloading_model",
+                "assistant_prepare_skipped",
+                profileId=profile_id,
+                reason=last_message,
+            )
+            continue
+
+        log_event(
+            "installer",
+            "downloading_model",
+            "assistant_prepare_start",
+            profileId=profile_id,
+            profileIndex=profile_index,
+            profileCount=len(profile_ids),
+            modelRepo=profile.get("modelRepo", ""),
+            runtimeFamily=profile.get("runtimeFamily", ""),
+            installScope=profile.get("installScope", "local"),
+        )
+        try:
+            install_scope = str(profile.get("installScope", "local"))
+            if install_scope == "wsl":
+                verification = _prepare_wsl_assistant_profile(
+                    profile_id=profile_id,
+                    profile=profile,
+                    install_source=install_source,
+                    requires_external_python=requires_external_python,
+                    python_detected=python_detected,
+                    build_runtime_mode=build_runtime_mode,
+                )
+            else:
+                verification = _prepare_local_assistant_profile(
+                    runtime_python,
+                    runtime_root,
+                    models_dir,
+                    profile_id=profile_id,
+                    profile=profile,
+                    install_source=install_source,
+                    requires_external_python=requires_external_python,
+                    python_detected=python_detected,
+                    build_runtime_mode=build_runtime_mode,
+                )
+            _write_assistant_verified_status(
+                status_path,
+                verified=True,
+                profile_id=profile_id,
+                profile=profile,
+                model_path=str(verification.get("modelPath", "")),
+                runtime_path=str(verification.get("runtimePath", "")),
+                verification=verification,
+            )
+            refreshed = get_assistant_runtime_status()
+            _emit_assistant_status(
+                refreshed,
+                progress=0.986,
+                message=str(refreshed.get("assistantStatusMessage", "Assistant runtime verified.")),
+                install_source=install_source,
+                requires_external_python=requires_external_python,
+                python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+            )
+            log_event(
+                "installer",
+                "downloading_model",
+                "assistant_prepare_succeeded",
+                profileId=profile_id,
+                statusPath=str(status_path),
+                modelPath=verification.get("modelPath", ""),
+            )
+            return refreshed
+        except InstallerStepError as exc:
+            last_message = exc.message
+            last_failure_code = exc.error_code
+        except Exception as exc:
+            last_message = f"{type(exc).__name__}: {exc}"
+            last_failure_code = "assistant_runtime_prepare_failed"
+
+        _write_assistant_verified_status(
+            status_path,
+            verified=False,
+            profile_id=profile_id,
+            profile=profile,
+            model_path="",
+            runtime_path="",
+            verification={},
+            error=last_message,
+            failure_code=last_failure_code,
+        )
+        last_refreshed = get_assistant_runtime_status()
+        remaining_profiles = len(profile_ids) - profile_index - 1
+        retry_suffix = f" Trying the next hardware-passing profile ({remaining_profiles} remaining)." if remaining_profiles > 0 else ""
+        _emit_assistant_status(
+            last_refreshed,
+            progress=0.986,
+            message=str(last_refreshed.get("assistantStatusMessage", last_message)) + retry_suffix,
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+        log_event(
+            "installer",
+            "downloading_model",
+            "assistant_prepare_failed",
+            profileId=profile_id,
+            profileIndex=profile_index,
+            profileCount=len(profile_ids),
+            willTryNext=remaining_profiles > 0,
+            errorCode=last_failure_code,
+            errorMessage=last_message,
+        )
+
+    if last_refreshed is status and last_message:
+        _write_assistant_verified_status(
+            status_path,
+            verified=False,
+            profile_id=profile_ids[-1],
+            profile={},
+            model_path="",
+            runtime_path="",
+            verification={},
+            error=last_message,
+            failure_code=last_failure_code,
+        )
+        last_refreshed = get_assistant_runtime_status()
+
+    _emit_assistant_status(
+        last_refreshed,
+        progress=0.986,
+        message=str(last_refreshed.get("assistantStatusMessage", last_message)),
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+    return last_refreshed
+
+
 def main() -> None:
     global LOG_PATH, SESSION_ID, RUNTIME_CANDIDATE, FALLBACK_ATTEMPTED
     global START_TIME_MONOTONIC
@@ -3990,6 +5468,26 @@ def main() -> None:
         build_runtime_mode=build_runtime_mode,
     )
 
+    prepare_assistant_runtime(
+        runtime_python,
+        runtime_root,
+        models_dir,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
+    prepare_audio_understanding_runtime(
+        runtime_python,
+        runtime_root,
+        models_dir,
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+    )
+
     verify_runtime(
         runtime_python,
         runtime_root,
@@ -4021,8 +5519,28 @@ def main() -> None:
     music_generation_status_message = runtime_probe.get("musicGenerationStatusMessage", "")
     music_generation_performance_ready = bool(runtime_probe.get("musicGenerationPerformanceReady", True))
     music_generation_performance_message = runtime_probe.get("musicGenerationPerformanceStatusMessage", "")
+    assistant_status_message = runtime_probe.get("assistantStatusMessage", "")
+    if assistant_status_message:
+        write_log(f"assistantRuntimeStatus={assistant_status_message}")
+    assistant_manifest_available = bool(runtime_probe.get("assistantManifestAvailable", False))
+    assistant_runtime_ready = bool(runtime_probe.get("assistantRuntimeReady", False))
+    audio_understanding_manifest_available = bool(runtime_probe.get("audioUnderstandingManifestAvailable", False))
+    audio_understanding_runtime_ready = bool(runtime_probe.get("audioUnderstandingRuntimeReady", False))
     ready_message = (
-        "AI tools are ready."
+        (
+            (
+                "AI tools are ready."
+                if (
+                    (not assistant_manifest_available or assistant_runtime_ready)
+                    and (not audio_understanding_manifest_available or audio_understanding_runtime_ready)
+                )
+                else (
+                    "Stem separation and music generation are ready, but the local assistant still needs verification."
+                    if assistant_manifest_available and not assistant_runtime_ready
+                    else "AI tools are installed, but the core music analyzer still needs verification."
+                )
+            )
+        )
         if music_generation_ready and music_generation_layout_valid and music_generation_performance_ready
         else (
             "AI tools are installed, but music generation acceleration is incomplete."
@@ -4051,6 +5569,36 @@ def main() -> None:
         musicGenerationModelRepoId=runtime_probe.get("musicGenerationModelRepoId", DEFAULT_MUSIC_GEN_MODEL_REPO),
         musicGenerationSharedRepoId=runtime_probe.get("musicGenerationSharedRepoId", DEFAULT_MUSIC_GEN_SHARED_REPO),
         musicGenerationCheckpointRoot=runtime_probe.get("musicGenerationCheckpointRoot", str(music_gen_checkpoint_root)),
+        assistantManifestAvailable=runtime_probe.get("assistantManifestAvailable", False),
+        assistantRuntimeReady=runtime_probe.get("assistantRuntimeReady", False),
+        assistantVerificationRequired=runtime_probe.get("assistantVerificationRequired", True),
+        assistantDownloadPolicy=runtime_probe.get("assistantDownloadPolicy", "single_verified_profile"),
+        assistantStatusMessage=assistant_status_message,
+        assistantFailureCode=runtime_probe.get("assistantFailureCode", ""),
+        assistantSelectedProfile=runtime_probe.get("assistantSelectedProfile", ""),
+        assistantAttemptedProfile=runtime_probe.get("assistantAttemptedProfile", ""),
+        assistantPrefilterProfile=runtime_probe.get("assistantPrefilterProfile", ""),
+        assistantRuntimeProfiles=runtime_probe.get("assistantRuntimeProfiles", {}),
+        assistantAvailableProfiles=runtime_probe.get("assistantAvailableProfiles", []),
+        assistantPrefilterProfiles=runtime_probe.get("assistantPrefilterProfiles", []),
+        assistantUnavailableProfiles=runtime_probe.get("assistantUnavailableProfiles", []),
+        assistantVerifiedStatusPath=runtime_probe.get("assistantVerifiedStatusPath", ""),
+        assistantHardware=runtime_probe.get("assistantHardware", {}),
+        audioUnderstandingManifestAvailable=runtime_probe.get("audioUnderstandingManifestAvailable", False),
+        audioUnderstandingRuntimeReady=runtime_probe.get("audioUnderstandingRuntimeReady", False),
+        audioUnderstandingVerificationRequired=runtime_probe.get("audioUnderstandingVerificationRequired", True),
+        audioUnderstandingDownloadPolicy=runtime_probe.get("audioUnderstandingDownloadPolicy", "single_verified_profile"),
+        audioUnderstandingStatus=runtime_probe.get("audioUnderstandingStatus", "not_installed"),
+        audioUnderstandingStatusMessage=runtime_probe.get("audioUnderstandingStatusMessage", ""),
+        audioUnderstandingFailureCode=runtime_probe.get("audioUnderstandingFailureCode", ""),
+        audioUnderstandingSelectedProfile=runtime_probe.get("audioUnderstandingSelectedProfile", ""),
+        audioUnderstandingAttemptedProfile=runtime_probe.get("audioUnderstandingAttemptedProfile", ""),
+        audioUnderstandingPrefilterProfile=runtime_probe.get("audioUnderstandingPrefilterProfile", ""),
+        audioUnderstandingRuntimeProfiles=runtime_probe.get("audioUnderstandingRuntimeProfiles", {}),
+        audioUnderstandingAvailableProfiles=runtime_probe.get("audioUnderstandingAvailableProfiles", []),
+        audioUnderstandingPrefilterProfiles=runtime_probe.get("audioUnderstandingPrefilterProfiles", []),
+        audioUnderstandingUnavailableProfiles=runtime_probe.get("audioUnderstandingUnavailableProfiles", []),
+        audioUnderstandingVerifiedStatusPath=runtime_probe.get("audioUnderstandingVerifiedStatusPath", ""),
         aceStepVersion=runtime_probe.get("aceStepVersion"),
         installSource=install_source,
         requiresExternalPython=requires_external_python,

@@ -13,6 +13,7 @@ import {
   Scissors,
   VolumeX,
   Wand2,
+  Sparkles,
 } from "lucide-react";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
 import { getDisplayShortcut, getActionShortcutScopeLabel } from "../store/actionRegistry";
@@ -67,6 +68,8 @@ export function MainToolbar({
     installAiTools,
     reopenStemSeparation,
     openAiToolsSetup,
+    showAssistantPanel,
+    toggleAssistantPanel,
   } = useDAWStore(
     useShallow((s) => ({
       isPlaying: s.transport.isPlaying,
@@ -94,6 +97,8 @@ export function MainToolbar({
       installAiTools: s.installAiTools,
       reopenStemSeparation: s.reopenStemSeparation,
       openAiToolsSetup: s.openAiToolsSetup,
+      showAssistantPanel: s.showAssistantPanel,
+      toggleAssistantPanel: s.toggleAssistantPanel,
     })),
   );
 
@@ -342,6 +347,16 @@ export function MainToolbar({
 
       {/* Settings */}
       <div className="flex items-center gap-1">
+        <Button
+          variant={showAssistantPanel ? "primary" : "default"}
+          size="icon-lg"
+          active={showAssistantPanel}
+          onClick={toggleAssistantPanel}
+          title={showAssistantPanel ? "Hide Assistant" : "Show Assistant"}
+          aria-label={showAssistantPanel ? "Hide Assistant" : "Show Assistant"}
+        >
+          <Sparkles size={16} />
+        </Button>
         <Button
           variant={aiToolsStatus.available ? "success" : aiToolsStatus.installInProgress ? "primary" : "default"}
           size="icon-lg"

@@ -386,6 +386,7 @@ export function Timeline({
     addClipGainPoint,
     moveClipGainPoint,
     removeClipGainPoint,
+    openAIContextGeneration,
   } = useDAWStore(
     useShallow((state) => ({
       recordingClips: state.recordingClips,
@@ -442,6 +443,7 @@ export function Timeline({
       addClipGainPoint: state.addClipGainPoint,
       moveClipGainPoint: state.moveClipGainPoint,
       removeClipGainPoint: state.removeClipGainPoint,
+      openAIContextGeneration: state.openAIContextGeneration,
     }))
   );
 
@@ -4925,6 +4927,24 @@ export function Timeline({
               onClick: () => {
                 const state = useDAWStore.getState();
                 state.openPitchEditor(clipContextMenu.trackId, clipContextMenu.clipId, -1);
+              },
+            },
+            {
+              label: "Generate with AI from Clip...",
+              onClick: () => {
+                const state = useDAWStore.getState();
+                const sourceTrack = state.tracks.find((t: any) => t.id === clipContextMenu.trackId);
+                const sourceClip = sourceTrack?.clips.find((c: any) => c.id === clipContextMenu.clipId);
+                if (!sourceTrack || !sourceClip) return;
+                openAIContextGeneration(
+                  sourceTrack.id,
+                  sourceClip.id,
+                  sourceClip.name || "Audio",
+                  sourceClip.duration,
+                  sourceClip.startTime,
+                  sourceClip.filePath || "",
+                  sourceTrack.name || "Source Track",
+                );
               },
             },
             {

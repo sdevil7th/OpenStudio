@@ -192,6 +192,33 @@ export default function AiToolsSetupModal() {
     aiToolsStatus.musicGenerationRuntimeProfiles as Record<string, unknown> | undefined,
     unavailableProfiles,
   );
+  const isAssistantReady = Boolean(aiToolsStatus.assistantRuntimeReady);
+  const assistantPrefilterProfiles = aiToolsStatus.assistantPrefilterProfiles ?? [];
+  const assistantUnavailableProfiles = aiToolsStatus.assistantUnavailableProfiles ?? [];
+  const assistantMessage =
+    aiToolsStatus.assistantStatusMessage
+    || "Assistant runtime has not been checked yet.";
+  const isAudioUnderstandingReady = Boolean(aiToolsStatus.audioUnderstandingRuntimeReady);
+  const audioUnderstandingStatus = aiToolsStatus.audioUnderstandingStatus ?? "not_installed";
+  const audioUnderstandingMessage =
+    aiToolsStatus.audioUnderstandingStatusMessage
+    || "Core music analyzer has not been checked yet.";
+  const audioUnderstandingPrefilterProfiles = aiToolsStatus.audioUnderstandingPrefilterProfiles ?? [];
+  const audioUnderstandingUnavailableProfiles = aiToolsStatus.audioUnderstandingUnavailableProfiles ?? [];
+  const audioUnderstandingStatusClass =
+    isAudioUnderstandingReady
+      ? "text-green-400"
+      : audioUnderstandingStatus === "oom" || audioUnderstandingStatus === "failed"
+        ? "text-red-300"
+        : audioUnderstandingStatus === "unsupported"
+          ? "text-daw-text-muted"
+          : "text-yellow-300";
+  const audioUnderstandingProfiles = aiToolsStatus.audioUnderstandingRuntimeProfiles ?? {};
+  const audioUnderstandingRequiresLicenseAcceptance = Object.values(audioUnderstandingProfiles).some((profile) => (
+    Boolean(profile && typeof profile === "object" && (profile as Record<string, unknown>).requiresLicenseAcceptance)
+  ));
+  const showAudioUnderstandingLicenseInfo =
+    audioUnderstandingStatus === "license_blocked" || audioUnderstandingRequiresLicenseAcceptance;
 
   const errorTitle = isModelFailure
     ? "Model download needs attention"
@@ -280,12 +307,149 @@ export default function AiToolsSetupModal() {
             </div>
           ) : null}
 
+          <div className="rounded border border-neutral-800 bg-neutral-950/60 p-3 space-y-2">
+            <p className="text-sm font-medium text-daw-text">Qwen planner runtime</p>
+            <p className="text-xs text-daw-text-secondary leading-relaxed">
+              {assistantMessage}
+            </p>
+            <div className="grid gap-2 text-xs text-daw-text-secondary sm:grid-cols-2">
+              <p>
+                Status:{" "}
+                <span className={isAssistantReady ? "text-green-400" : "text-yellow-300"}>
+                  {isAssistantReady ? "Verified" : "Not verified"}
+                </span>
+              </p>
+              <p>
+                Download policy:{" "}
+                <span className="text-daw-text">
+                  {aiToolsStatus.assistantDownloadPolicy || "single_verified_profile"}
+                </span>
+              </p>
+              {aiToolsStatus.assistantSelectedProfile ? (
+                <p>
+                  Selected profile:{" "}
+                  <span className="text-daw-text">{aiToolsStatus.assistantSelectedProfile}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.assistantAttemptedProfile && !aiToolsStatus.assistantSelectedProfile ? (
+                <p>
+                  Last attempted profile:{" "}
+                  <span className="text-daw-text">{aiToolsStatus.assistantAttemptedProfile}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.assistantPrefilterProfile ? (
+                <p>
+                  Prefilter profile:{" "}
+                  <span className="text-daw-text">{aiToolsStatus.assistantPrefilterProfile}</span>
+                </p>
+              ) : null}
+            </div>
+            {assistantPrefilterProfiles.length > 0 ? (
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Hardware-passing profiles:{" "}
+                <span className="text-daw-text">{assistantPrefilterProfiles.join(", ")}</span>
+              </p>
+            ) : null}
+            {assistantUnavailableProfiles.length > 0 ? (
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Assistant blockers:{" "}
+                <span className="text-daw-text">
+                  {assistantUnavailableProfiles
+                    .map((entry) => `${String(entry.id ?? "profile")}: ${String(entry.reason ?? "unavailable")}`)
+                    .join("; ")}
+                </span>
+              </p>
+            ) : null}
+            {aiToolsStatus.assistantVerifiedStatusPath ? (
+              <p className="break-all text-xs text-daw-text-secondary leading-relaxed">
+                Verified status file:{" "}
+                <span className="text-daw-text">{aiToolsStatus.assistantVerifiedStatusPath}</span>
+              </p>
+            ) : null}
+          </div>
+
+          <div className="rounded border border-neutral-800 bg-neutral-950/60 p-3 space-y-2">
+            <p className="text-sm font-medium text-daw-text">Core music analyzer runtime</p>
+            <p className="text-xs text-daw-text-secondary leading-relaxed">
+              {audioUnderstandingMessage}
+            </p>
+            {showAudioUnderstandingLicenseInfo ? (
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                License: the configured analyzer requires separate model-term acceptance before
+                OpenStudio can install it. Distributed builds should use the Apache-2.0 MiDashengLM
+                profile instead.
+              </p>
+            ) : (
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                License: MiDashengLM is configured as the core analyzer under Apache-2.0 and does
+                not require separate model-license acceptance.
+              </p>
+            )}
+            <div className="grid gap-2 text-xs text-daw-text-secondary sm:grid-cols-2">
+              <p>
+                Status:{" "}
+                <span className={audioUnderstandingStatusClass}>
+                  {isAudioUnderstandingReady ? "Verified" : audioUnderstandingStatus.replace(/_/g, " ")}
+                </span>
+              </p>
+              <p>
+                Download policy:{" "}
+                <span className="text-daw-text">
+                  {aiToolsStatus.audioUnderstandingDownloadPolicy || "single_verified_profile"}
+                </span>
+              </p>
+              {aiToolsStatus.audioUnderstandingSelectedProfile ? (
+                <p>
+                  Selected profile:{" "}
+                  <span className="text-daw-text">{aiToolsStatus.audioUnderstandingSelectedProfile}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.audioUnderstandingAttemptedProfile && !aiToolsStatus.audioUnderstandingSelectedProfile ? (
+                <p>
+                  Last attempted profile:{" "}
+                  <span className="text-daw-text">{aiToolsStatus.audioUnderstandingAttemptedProfile}</span>
+                </p>
+              ) : null}
+              {aiToolsStatus.audioUnderstandingPrefilterProfile ? (
+                <p>
+                  Prefilter profile:{" "}
+                  <span className="text-daw-text">{aiToolsStatus.audioUnderstandingPrefilterProfile}</span>
+                </p>
+              ) : null}
+            </div>
+            {audioUnderstandingPrefilterProfiles.length > 0 ? (
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Smoke-test candidates:{" "}
+                <span className="text-daw-text">{audioUnderstandingPrefilterProfiles.join(", ")}</span>
+              </p>
+            ) : null}
+            {audioUnderstandingUnavailableProfiles.length > 0 ? (
+              <p className="text-xs text-daw-text-secondary leading-relaxed">
+                Analyzer blockers:{" "}
+                <span className="text-daw-text">
+                  {audioUnderstandingUnavailableProfiles
+                    .map((entry) => `${String(entry.id ?? "profile")}: ${String(entry.reason ?? "unavailable")}`)
+                    .join("; ")}
+                </span>
+              </p>
+            ) : null}
+            {aiToolsStatus.audioUnderstandingVerifiedStatusPath ? (
+              <p className="break-all text-xs text-daw-text-secondary leading-relaxed">
+                Verified status file:{" "}
+                <span className="text-daw-text">{aiToolsStatus.audioUnderstandingVerifiedStatusPath}</span>
+              </p>
+            ) : null}
+          </div>
+
           {isInstallComplete ? (
             <div className="rounded border border-green-600/40 bg-green-950/30 p-3 space-y-2">
-              <p className="text-sm font-semibold text-green-400">AI Tools are ready</p>
+              <p className="text-sm font-semibold text-green-400">
+                {isAssistantReady || !aiToolsStatus.assistantManifestAvailable ? "AI Tools are ready" : "Core AI tools are ready"}
+              </p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
-                The runtime, stem-separation model, and pinned ACE-Step files are installed for this OpenStudio session.
-                You can continue straight into stem separation or music generation now.
+                {isAssistantReady || !aiToolsStatus.assistantManifestAvailable
+                  ? "The runtime, stem-separation model, and pinned ACE-Step files are installed for this OpenStudio session. You can continue straight into stem separation or music generation now."
+                  : "Stem separation and music generation are ready. The local assistant still needs verification before chat can run."}
               </p>
               {aiToolsStatus.selectedBackend ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Studio13 Stem Separator — Python subprocess for BS-RoFormer source separation.
+OpenStudio Stem Separator - Python subprocess for BS-RoFormer source separation.
 
 Called by C++ AudioEngine via juce::ChildProcess. Communicates progress via
 JSON lines on stdout. Writes individual stem WAV files to the output directory.
@@ -141,7 +141,7 @@ def apply_cpu_fallback_limits() -> int:
     return thread_cap
 
 def main():
-    parser = argparse.ArgumentParser(description="Studio13 Stem Separator")
+    parser = argparse.ArgumentParser(description="OpenStudio Stem Separator")
     parser.add_argument("--input", required=True, help="Input audio file path")
     parser.add_argument("--output-dir", required=True, help="Output directory for stem WAV files")
     parser.add_argument("--model", default="BS-Roformer-SW.ckpt",

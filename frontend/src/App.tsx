@@ -75,6 +75,8 @@ const HelpOverlay = React.lazy(() => import("./components/HelpOverlay").then(m =
 const GettingStartedGuide = React.lazy(() => import("./components/GettingStartedGuide").then(m => ({ default: m.GettingStartedGuide })));
 const StemSeparationModal = React.lazy(() => import("./components/StemSeparationModal"));
 const AiToolsSetupModal = React.lazy(() => import("./components/AiToolsSetupModal"));
+const AIContextGenerationModal = React.lazy(() => import("./components/AIContextGenerationModal"));
+const AssistantPanel = React.lazy(() => import("./components/AssistantPanel"));
 import {
   DndContext,
   DragOverlay,
@@ -87,6 +89,18 @@ import {
   SortableContext,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
+
+const ASSISTANT_DOCK_STORAGE_KEY = "studio13.assistantDockWidth";
+const ASSISTANT_DOCK_DEFAULT_WIDTH = 420;
+const ASSISTANT_DOCK_MIN_WIDTH = 320;
+const ASSISTANT_DOCK_MAX_WIDTH = 640;
+
+function clampAssistantDockWidth(width: number) {
+  const viewportCap = typeof window === "undefined"
+    ? ASSISTANT_DOCK_MAX_WIDTH
+    : Math.max(ASSISTANT_DOCK_MIN_WIDTH, Math.floor(window.innerWidth * 0.45));
+  return Math.min(Math.max(width, ASSISTANT_DOCK_MIN_WIDTH), Math.min(ASSISTANT_DOCK_MAX_WIDTH, viewportCap));
+}
 
 function App() {
   // Use useShallow to prevent re-renders when unrelated state changes (like currentTime)
@@ -156,7 +170,9 @@ function App() {
     masterAutomationLanes,
     showMasterAutomation,
     showStemSeparation,
+    showAIContextGeneration,
     showAiToolsSetup,
+    showAssistantPanel,
     closeAiToolsSetup,
   } = useDAWStore(
     useShallow((state) => ({
@@ -225,7 +241,9 @@ function App() {
       masterAutomationLanes: state.masterAutomationLanes,
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
+      showAIContextGeneration: state.showAIContextGeneration,
       showAiToolsSetup: state.showAiToolsSetup,
+      showAssistantPanel: state.showAssistantPanel,
       closeAiToolsSetup: state.closeAiToolsSetup,
     }))
   );
@@ -251,6 +269,11 @@ function App() {
 
   // Ref for workspace wheel handling
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const [assistantDockWidth, setAssistantDockWidth] = useState(() => {
+    if (typeof window === "undefined") return ASSISTANT_DOCK_DEFAULT_WIDTH;
+    const stored = Number(window.localStorage.getItem(ASSISTANT_DOCK_STORAGE_KEY));
+    return clampAssistantDockWidth(Number.isFinite(stored) && stored > 0 ? stored : ASSISTANT_DOCK_DEFAULT_WIDTH);
+  });
 
   // OS file drag-drop visual indicator
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -1040,6 +1063,25 @@ function App() {
     }
   };
 
+  const handleAssistantResizeStart = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = assistantDockWidth;
+    document.body.style.cursor = "col-resize";
+    const onMove = (moveEvent: MouseEvent) => {
+      const nextWidth = clampAssistantDockWidth(startWidth - (moveEvent.clientX - startX));
+      setAssistantDockWidth(nextWidth);
+      window.localStorage.setItem(ASSISTANT_DOCK_STORAGE_KEY, String(nextWidth));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [assistantDockWidth]);
+
   return (
     <div className="app-container">
       {/* Project Tab Bar (Phase 15C) */}
@@ -1058,6 +1100,8 @@ function App() {
       {/* Custom Toolbars (Phase 15D) */}
       <CustomToolbarStrip />
 
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
       {/* Media Explorer (left panel) + Main Workspace */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
       {showMediaExplorer && (
@@ -1434,6 +1478,14 @@ function App() {
         onClose={() => { void handleToggleMixerVisibility(); }}
       />
       </div>
+      </div>
+
+      {showAssistantPanel ? (
+        <Suspense fallback={null}>
+          <AssistantPanel width={assistantDockWidth} onResizeStart={handleAssistantResizeStart} />
+        </Suspense>
+      ) : null}
+      </div>
 
       <AddMultipleTracksModal
         isOpen={showAddMultipleTracksModal}
@@ -1608,6 +1660,13 @@ function App() {
         </Suspense>
       )}
 
+      {/* AI Context Generation Modal */}
+      {showAIContextGeneration && (
+        <Suspense fallback={null}>
+          <AIContextGenerationModal />
+        </Suspense>
+      )}
+
       {/* Channel Strip EQ Modal */}
       {showChannelStripEQ && (
         <Suspense fallback={null}>
@@ -1720,7 +1779,7 @@ function App() {
                     ? aiToolsStatus.downloadHint
                     : aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
                       ? "OpenStudio is downloading and preparing its AI runtime in the background. This is a one-time setup and the app will stay usable while it runs."
-                      : "OpenStudio is preparing optional AI tooling in the background. You can keep working while this finishes."}
+                      : "OpenStudio is preparing AI tooling in the background. You can keep working while this finishes."}
                 </p>
               </div>
               <div className="h-3 w-3 rounded-full bg-daw-accent shadow-[0_0_16px_rgba(59,130,246,0.9)] animate-pulse" />

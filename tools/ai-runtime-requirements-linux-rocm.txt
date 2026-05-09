@@ -2,12 +2,12 @@ audio-separator[cpu]==0.41.1
 torchsde
 numpy>=1.25.0
 einops
-transformers==4.50.0
+transformers==4.57.6
 tokenizers>=0.13.3
 sentencepiece
 safetensors>=0.4.2
 diffusers==0.35.2
-accelerate==1.6.0
+accelerate>=1.12,<2
 vector-quantize-pytorch>=1.27.15
 huggingface_hub>=0.34,<1.0
 loguru>=0.7.3

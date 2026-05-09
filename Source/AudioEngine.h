@@ -503,6 +503,7 @@ public:
     juce::var getStemSeparationProgress();
     void cancelStemSeparation();
     void cancelAiToolsInstall();
+    juce::var prepareAIClipContext(const juce::String& trackId, const juce::String& clipId);
     juce::var startAIGeneration(const juce::String& trackId,
                                 const juce::String& workflowId,
                                 const juce::String& paramsJSON);

@@ -144,6 +144,36 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   selectedBackend: "cpu",
   musicGenerationPerformanceReady: true,
   musicGenerationPerformanceStatusMessage: "",
+  assistantManifestAvailable: false,
+  assistantRuntimeReady: false,
+  assistantVerificationRequired: true,
+  assistantDownloadPolicy: "single_verified_profile",
+  assistantStatusMessage: "Assistant runtime has not been checked yet.",
+  assistantFailureCode: "",
+  assistantSelectedProfile: "",
+  assistantAttemptedProfile: "",
+  assistantPrefilterProfile: "",
+  assistantRuntimeProfiles: {},
+  assistantAvailableProfiles: [],
+  assistantPrefilterProfiles: [],
+  assistantUnavailableProfiles: [],
+  assistantVerifiedStatusPath: "",
+  assistantHardware: {},
+  audioUnderstandingManifestAvailable: false,
+  audioUnderstandingRuntimeReady: false,
+  audioUnderstandingVerificationRequired: false,
+  audioUnderstandingDownloadPolicy: "single_verified_profile",
+  audioUnderstandingStatus: "not_installed",
+  audioUnderstandingStatusMessage: "Core music analyzer has not been checked yet.",
+  audioUnderstandingFailureCode: "",
+  audioUnderstandingSelectedProfile: "",
+  audioUnderstandingAttemptedProfile: "",
+  audioUnderstandingPrefilterProfile: "",
+  audioUnderstandingRuntimeProfiles: {},
+  audioUnderstandingAvailableProfiles: [],
+  audioUnderstandingPrefilterProfiles: [],
+  audioUnderstandingUnavailableProfiles: [],
+  audioUnderstandingVerifiedStatusPath: "",
   lastPhase: "checking",
   fallbackAttempted: false,
   restartRequired: false,
@@ -779,6 +809,7 @@ interface DAWState {
 
   // AI Tools Setup Modal
   showAiToolsSetup: boolean;
+  showAssistantPanel: boolean;
 
   // Stem Separation Modal
   showStemSeparation: boolean;
@@ -786,6 +817,17 @@ interface DAWState {
   stemSepClipId: string | null;
   stemSepClipName: string;
   stemSepClipDuration: number;
+
+  // AI Context Generation Modal
+  showAIContextGeneration: boolean;
+  aiContextTrackId: string | null;
+  aiContextClipId: string | null;
+  aiContextClipName: string;
+  aiContextClipDuration: number;
+  aiContextClipStartTime: number;
+  aiContextClipFilePath: string;
+  aiContextSourceTrackName: string;
+
   aiToolsStatus: AiToolsStatus;
   aiToolsStatusLoading: boolean;
   aiToolsStatusLastUpdatedAt: number;
@@ -1110,7 +1152,7 @@ interface DAWActions {
   removeVCAGroup: (vcaGroupId: string) => void;
 
   // Track Management
-  addTrack: (track: Partial<Track> & { id: string; name: string }) => void;
+  addTrack: (track: Partial<Track> & { id: string; name: string; insertAfterTrackId?: string }) => void;
   duplicateTrack: (trackId: string) => Promise<void>;
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
@@ -1414,9 +1456,22 @@ interface DAWActions {
   toggleScriptConsole: () => void;
   openAiToolsSetup: () => void;
   closeAiToolsSetup: () => void;
+  openAssistantPanel: () => void;
+  closeAssistantPanel: () => void;
+  toggleAssistantPanel: () => void;
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
   reopenStemSeparation: () => void;
+  openAIContextGeneration: (
+    trackId: string,
+    clipId: string,
+    name: string,
+    duration: number,
+    startTime: number,
+    filePath: string,
+    sourceTrackName: string,
+  ) => void;
+  closeAIContextGeneration: () => void;
   refreshAiToolsStatus: (force?: boolean) => Promise<AiToolsStatus>;
   applyAiToolsStatusUpdate: (status: AiToolsStatus) => void;
   installAiTools: (options?: InstallAiToolsOptions) => Promise<void>;
@@ -2256,11 +2311,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showRegionMarkerManager: false,
     showScriptConsole: false,
     showAiToolsSetup: false,
+    showAssistantPanel: false,
     showStemSeparation: false,
     stemSepTrackId: null,
     stemSepClipId: null,
     stemSepClipName: "",
     stemSepClipDuration: 0,
+    showAIContextGeneration: false,
+    aiContextTrackId: null,
+    aiContextClipId: null,
+    aiContextClipName: "",
+    aiContextClipDuration: 0,
+    aiContextClipStartTime: 0,
+    aiContextClipFilePath: "",
+    aiContextSourceTrackName: "",
     aiToolsStatus: DEFAULT_AI_TOOLS_STATUS,
     aiToolsStatusLoading: true,
     aiToolsStatusLastUpdatedAt: Date.now(),

@@ -67,9 +67,9 @@
       "description": "Installing ACE-Step 1.5 runtime dependencies",
       "stepLabel": "Installing ACE-Step 1.5 runtime dependencies",
       "packages": [
-        "transformers==4.50.0",
+        "transformers==4.57.6",
         "diffusers==0.35.2",
-        "accelerate==1.6.0",
+        "accelerate>=1.12,<2",
         "vector-quantize-pytorch>=1.27.15",
         "huggingface_hub>=0.34,<1.0",
         "loguru>=0.7.3",

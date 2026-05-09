@@ -697,6 +697,36 @@ export interface AiToolsStatus {
   musicGenerationUnavailableProfiles?: Array<Record<string, unknown>>;
   musicGenerationDefaultProfile?: string;
   musicGenerationWarmSessionCapable?: boolean;
+  assistantManifestAvailable?: boolean;
+  assistantRuntimeReady?: boolean;
+  assistantVerificationRequired?: boolean;
+  assistantDownloadPolicy?: "single_verified_profile" | string;
+  assistantStatusMessage?: string;
+  assistantFailureCode?: string;
+  assistantSelectedProfile?: string;
+  assistantAttemptedProfile?: string;
+  assistantPrefilterProfile?: string;
+  assistantRuntimeProfiles?: Record<string, unknown>;
+  assistantAvailableProfiles?: string[];
+  assistantPrefilterProfiles?: string[];
+  assistantUnavailableProfiles?: Array<Record<string, unknown>>;
+  assistantVerifiedStatusPath?: string;
+  assistantHardware?: Record<string, unknown>;
+  audioUnderstandingManifestAvailable?: boolean;
+  audioUnderstandingRuntimeReady?: boolean;
+  audioUnderstandingVerificationRequired?: boolean;
+  audioUnderstandingDownloadPolicy?: "single_verified_profile" | string;
+  audioUnderstandingStatus?: "ready" | "unsupported" | "oom" | "license_blocked" | "not_installed" | string;
+  audioUnderstandingStatusMessage?: string;
+  audioUnderstandingFailureCode?: string;
+  audioUnderstandingSelectedProfile?: string;
+  audioUnderstandingAttemptedProfile?: string;
+  audioUnderstandingPrefilterProfile?: string;
+  audioUnderstandingRuntimeProfiles?: Record<string, unknown>;
+  audioUnderstandingAvailableProfiles?: string[];
+  audioUnderstandingPrefilterProfiles?: string[];
+  audioUnderstandingUnavailableProfiles?: Array<Record<string, unknown>>;
+  audioUnderstandingVerifiedStatusPath?: string;
   }
 
 export interface AIGenerationProgress {
@@ -738,6 +768,39 @@ export interface AIGenerationProgress {
   failureDetail?: string;
   lmBackend?: string;
   lmStage?: string;
+}
+
+export interface AIClipContextResult {
+  success: boolean;
+  error?: string;
+  filePath?: string;
+  duration?: number;
+  sampleRate?: number;
+  numChannels?: number;
+  sourceFilePath?: string;
+  clipOffset?: number;
+  clipStartTime?: number;
+  trackId?: string;
+  clipId?: string;
+}
+
+export interface AssistantChatResponse {
+  ok: boolean;
+  mode?: "answer" | "clarification" | "plan" | "execution_result";
+  reply?: string;
+  plan?: unknown;
+  executionSummary?: string;
+  missingContext?: string[];
+  runtimeStatus?: Record<string, unknown>;
+  runtimeReady?: boolean;
+  modelUsed?: boolean;
+  fallbackUsed?: boolean;
+  informational?: boolean;
+  error?: string;
+  rawText?: string;
+  audioUnderstandingUsed?: boolean;
+  audioUnderstandingStatus?: string;
+  audioUnderstandingError?: string;
 }
 
 export interface InstallAiToolsResponse {
@@ -1581,6 +1644,8 @@ declare global {
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
         cancelAiToolsInstall?: () => Promise<void>;
+        prepareAIClipContext?: (trackId: string, clipId: string) => Promise<AIClipContextResult>;
+        runAssistantPrompt?: (prompt: string, contextJSON: string) => Promise<AssistantChatResponse>;
         startAIGeneration?: (trackId: string, workflowId: string, paramsJSON: string) => Promise<{ started: boolean; error?: string }>;
         getAIGenerationProgress?: () => Promise<AIGenerationProgress>;
         cancelAIGeneration?: () => Promise<void>;
@@ -4833,6 +4898,25 @@ class NativeBridge {
         musicGenerationSharedRepoId: "ACE-Step/Ace-Step1.5",
         musicGenerationCheckpointRoot: null,
         musicGenerationPerformanceStatusMessage: "",
+        assistantManifestAvailable: false,
+        assistantRuntimeReady: false,
+        assistantVerificationRequired: true,
+        assistantDownloadPolicy: "single_verified_profile",
+        assistantStatusMessage: "Assistant runtime is unavailable in the web preview.",
+        assistantRuntimeProfiles: {},
+        assistantAvailableProfiles: [],
+        assistantPrefilterProfiles: [],
+        assistantUnavailableProfiles: [],
+        audioUnderstandingManifestAvailable: false,
+        audioUnderstandingRuntimeReady: false,
+        audioUnderstandingVerificationRequired: false,
+        audioUnderstandingDownloadPolicy: "single_verified_profile",
+        audioUnderstandingStatus: "not_installed",
+        audioUnderstandingStatusMessage: "Core music analyzer is unavailable in the web preview.",
+        audioUnderstandingRuntimeProfiles: {},
+        audioUnderstandingAvailableProfiles: [],
+        audioUnderstandingPrefilterProfiles: [],
+        audioUnderstandingUnavailableProfiles: [],
       };
   }
 
@@ -4891,6 +4975,177 @@ class NativeBridge {
   async cancelAiToolsInstall(): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.cancelAiToolsInstall)
       return await window.__JUCE__.backend.cancelAiToolsInstall();
+  }
+
+  async runAssistantPrompt(
+    prompt: string,
+    context: Record<string, unknown>,
+  ): Promise<AssistantChatResponse> {
+    if (this.isNative && window.__JUCE__?.backend.runAssistantPrompt) {
+      return await window.__JUCE__.backend.runAssistantPrompt(prompt, JSON.stringify(context));
+    }
+
+    const tracks = Array.isArray(context.tracks) ? context.tracks : [];
+    const selectedClipIds = Array.isArray(context.selectedClipIds)
+      ? context.selectedClipIds.map((value) => String(value))
+      : [];
+    const selectedClipId = selectedClipIds[0] ?? "";
+    const lowered = prompt.toLowerCase();
+    const aiToolsStatus =
+      context.aiToolsStatus && typeof context.aiToolsStatus === "object"
+        ? context.aiToolsStatus as Record<string, unknown>
+        : {};
+    const mockPlannerReady = Boolean(aiToolsStatus.assistantRuntimeReady);
+    const mockAnalyzerReady = Boolean(aiToolsStatus.audioUnderstandingRuntimeReady);
+    const mockAnalyzerStatusRaw = String(aiToolsStatus.audioUnderstandingStatus || "not_installed");
+    const mockAnalyzerStatus = mockAnalyzerStatusRaw.replace(/_/g, " ");
+    const mockAnalyzerProfile = String(
+      aiToolsStatus.audioUnderstandingSelectedProfile || aiToolsStatus.audioUnderstandingPrefilterProfile || "",
+    );
+
+    let selectedClip: { trackId: string; clipId: string; clipName?: string } | null = null;
+    for (const track of tracks) {
+      if (!track || typeof track !== "object") continue;
+      const record = track as Record<string, unknown>;
+      const clips = Array.isArray(record.clips) ? record.clips : [];
+      const clip = clips.find((entry) => (
+        entry
+        && typeof entry === "object"
+        && String((entry as Record<string, unknown>).id) === selectedClipId
+      ));
+      if (clip) {
+        selectedClip = {
+          trackId: String(record.id ?? ""),
+          clipId: selectedClipId,
+          clipName: String((clip as Record<string, unknown>).name ?? "selected clip"),
+        };
+        break;
+      }
+    }
+
+    const actionId = `act_${Date.now()}`;
+    const wantsContext = Boolean(
+      selectedClip
+      && /\b(context|reference|remix|cover|repaint)\b|use .*clip/i.test(lowered),
+    );
+    const wantsAudioAnalysis = (
+      /\b(analyze|analyse|listen|hear|describe|mix feedback|production feedback)\b/i.test(lowered)
+      || /sound better|what .*should be done|what can i do/i.test(lowered)
+    ) && /\b(track|clip|audio|song|mix|vocal|instrumental|project)\b/i.test(lowered);
+    const wantsSetup = (
+      /open setup|open ai tools|ai tools setup|download and install|install ai tools|setup ai tools|verify runtime|verify qwen/i.test(lowered)
+      || (
+        /\b(install|download|setup|set up|verify|configure)\b/i.test(lowered)
+        && /\b(qwen|assistant runtime|local runtime|ai runtime|ai tools|music analyzer|core analyzer|core music analyzer|audio analyzer)\b/i.test(lowered)
+      )
+    );
+
+    if (wantsAudioAnalysis && !selectedClip) {
+      return {
+        ok: true,
+        mode: "clarification",
+        reply: "Select an audio clip first so OpenStudio knows which file to analyze.",
+        missingContext: ["Select an audio clip."],
+        runtimeReady: mockPlannerReady,
+        modelUsed: false,
+        fallbackUsed: false,
+        informational: false,
+        audioUnderstandingUsed: false,
+        audioUnderstandingStatus: mockAnalyzerStatusRaw,
+      };
+    }
+
+    if (wantsAudioAnalysis) {
+      const profileLine = mockAnalyzerProfile ? ` Profile: ${mockAnalyzerProfile}.` : "";
+      return {
+        ok: true,
+        mode: "answer",
+        reply: `OpenStudio cannot hear or analyze the selected audio yet because the core music analyzer is ${mockAnalyzerReady ? "verified but unavailable in this preview bridge" : mockAnalyzerStatus}. Qwen planner: ${mockPlannerReady ? "verified" : "pending"}.${profileLine} Open AI Tools Setup when you want to install or verify the local runtimes.`,
+        runtimeReady: mockPlannerReady,
+        modelUsed: false,
+        fallbackUsed: false,
+        informational: false,
+        audioUnderstandingUsed: false,
+        audioUnderstandingStatus: mockAnalyzerStatusRaw,
+      };
+    }
+
+    if (wantsContext && selectedClip) {
+      const action = {
+        id: actionId,
+        kind: "ai.openContextGeneration",
+        risk: "ui",
+        params: { trackId: selectedClip.trackId, clipId: selectedClip.clipId },
+        summary: `Open ACE context generation for ${selectedClip.clipName}.`,
+      };
+      return {
+        ok: true,
+        mode: "plan",
+        reply: "I can open ACE context generation for the selected clip.",
+        runtimeReady: mockPlannerReady,
+        modelUsed: false,
+        fallbackUsed: true,
+        informational: false,
+        plan: {
+          id: `plan_${Date.now()}`,
+          title: "Open ACE context generation",
+          intent: "Use the selected clip as context for ACE-Step generation.",
+          expectedImpact: "Opens a modal. No audio is generated until you press Generate.",
+          requiresConfirmation: true,
+          actions: [action],
+        },
+      };
+    }
+
+    if (!wantsSetup) {
+      return {
+        ok: true,
+        mode: "answer",
+        reply: `The local Qwen planner is ${mockPlannerReady ? "verified, but the native assistant bridge is unavailable in this preview" : "not verified yet"}. Ask to open AI Tools Setup when you want to install or verify the native local runtimes.`,
+        runtimeReady: mockPlannerReady,
+        modelUsed: false,
+        fallbackUsed: false,
+        informational: false,
+        audioUnderstandingUsed: false,
+        audioUnderstandingStatus: mockAnalyzerStatusRaw,
+      };
+    }
+
+    return {
+      ok: true,
+      mode: "plan",
+      reply: "I can open AI Tools Setup so you can install or verify the local planner and core music analyzer.",
+      runtimeReady: mockPlannerReady,
+      modelUsed: false,
+      fallbackUsed: true,
+      informational: false,
+      plan: {
+        id: `plan_${Date.now()}`,
+        title: "Open AI Tools Setup",
+        intent: "Prepare the local Qwen planner and core music analyzer runtimes.",
+        expectedImpact: "Opens AI Tools Setup. No project data is changed.",
+        requiresConfirmation: true,
+        actions: [{
+          id: actionId,
+          kind: "ai.openSetup",
+          risk: "ui",
+          params: {},
+          summary: "Open AI Tools Setup.",
+        }],
+      },
+    };
+  }
+
+  async prepareAIClipContext(trackId: string, clipId: string): Promise<AIClipContextResult> {
+    if (this.isNative && window.__JUCE__?.backend.prepareAIClipContext) {
+      return await window.__JUCE__.backend.prepareAIClipContext(trackId, clipId);
+    }
+    return {
+      success: false,
+      error: "AI clip context preparation is only available in the native app.",
+      trackId,
+      clipId,
+    };
   }
 
   async startAIGeneration(

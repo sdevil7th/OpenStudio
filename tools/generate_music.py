@@ -29,6 +29,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from openstudio_ace_backend.runtime_resolver import backend_status
+
 from ai_runtime_probe import (
     DEFAULT_MUSIC_GEN_MODEL,
     REQUIRED_MUSIC_GEN_NATIVE_FILES,
@@ -56,6 +58,19 @@ GENERATION_MODE_DIT_MANUAL = "dit_manual"
 GENERATION_MODE_OPTIONS = {
     GENERATION_MODE_LM_FIRST,
     GENERATION_MODE_DIT_MANUAL,
+}
+ACE_TASK_TEXT2MUSIC = "text2music"
+ACE_TASK_COVER = "cover"
+ACE_TASK_REPAINT = "repaint"
+ACE_TASK_TYPES = {
+    ACE_TASK_TEXT2MUSIC,
+    ACE_TASK_COVER,
+    ACE_TASK_REPAINT,
+}
+ACE_CONTEXT_WORKFLOWS = {
+    "reference-generate",
+    "cover-remix",
+    "repaint-edit",
 }
 LM_SHAPE_MISMATCH_MARKERS = (
     "error generating from formatted prompt",
@@ -154,16 +169,14 @@ def get_ai_trace_root() -> Path:
 def resolve_openstudio_native_backend() -> dict[str, str]:
     runner_path = (SCRIPT_PATH.parent / "openstudio_ace_runner.py").resolve()
     backend_root = (SCRIPT_PATH.parent / "openstudio_ace_backend").resolve()
-    vendor_root = backend_root / "vendor_runtime"
+    backend_ready, resolved_vendor_root, backend_missing = backend_status(SCRIPT_PATH)
     required_paths = (
         runner_path,
         backend_root / "__init__.py",
-        vendor_root / "nodes.py",
-        vendor_root / "folder_paths.py",
-        vendor_root / "comfy" / "sd.py",
-        vendor_root / "comfy_extras" / "nodes_ace.py",
     )
     missing = [str(path) for path in required_paths if not path.exists()]
+    if not backend_ready:
+        missing.extend(backend_missing)
     if missing:
         raise GenerationFailure(
             "The packaged OpenStudio ACE split backend is incomplete: " + ", ".join(missing),
@@ -174,6 +187,7 @@ def resolve_openstudio_native_backend() -> dict[str, str]:
         "pythonExe": sys.executable,
         "runnerPath": str(runner_path),
         "backendRoot": str(backend_root),
+        "vendorRoot": resolved_vendor_root,
         "runtimeKind": "openstudio_ace_executor",
     }
 
@@ -575,6 +589,37 @@ def normalize_time_signature_for_generation(value: str) -> str:
     return normalized
 
 
+def infer_ace_task_type(workflow: str, raw_params: dict[str, Any]) -> str:
+    raw_task_type = normalize_text(raw_params.get("task_type")).lower().replace("_", "")
+    if raw_task_type in {"text2music", "texttomusic", "text"}:
+        return ACE_TASK_TEXT2MUSIC
+    if raw_task_type == ACE_TASK_COVER:
+        return ACE_TASK_COVER
+    if raw_task_type == ACE_TASK_REPAINT:
+        return ACE_TASK_REPAINT
+
+    normalized_workflow = normalize_text(workflow)
+    if normalized_workflow == "cover-remix":
+        return ACE_TASK_COVER
+    if normalized_workflow == "repaint-edit":
+        return ACE_TASK_REPAINT
+    return ACE_TASK_TEXT2MUSIC
+
+
+def is_context_generation_request(workflow: str, raw_params: dict[str, Any]) -> bool:
+    task_type = infer_ace_task_type(workflow, raw_params)
+    if normalize_text(workflow) in ACE_CONTEXT_WORKFLOWS:
+        return True
+    if task_type in {ACE_TASK_COVER, ACE_TASK_REPAINT}:
+        return True
+    return bool(
+        normalize_text(raw_params.get("referenceAudioPath"))
+        or normalize_text(raw_params.get("reference_audio"))
+        or normalize_text(raw_params.get("srcAudioPath"))
+        or normalize_text(raw_params.get("src_audio"))
+    )
+
+
 def has_explicit_musical_metadata(params: dict[str, Any]) -> bool:
     return (
         normalize_int(params.get("bpm"), DEFAULT_MUSICAL_METADATA["bpm"])
@@ -593,18 +638,27 @@ def has_explicit_musical_metadata(params: dict[str, Any]) -> bool:
     )
 
 
-def normalize_generation_params(raw_params: dict[str, Any]) -> dict[str, Any]:
+def normalize_generation_params(raw_params: dict[str, Any], *, workflow: str = "") -> dict[str, Any]:
     generation_mode = normalize_generation_mode(raw_params)
     generate_audio_codes = generation_mode == GENERATION_MODE_LM_FIRST
+    duration = normalize_float(
+        raw_params.get("duration"),
+        DEFAULT_MUSICAL_METADATA["duration"],
+    )
+    repainting_start = max(
+        0.0,
+        normalize_float(raw_params.get("repainting_start"), 0.0),
+    )
+    repainting_end = normalize_float(raw_params.get("repainting_end"), duration)
+    if repainting_end <= repainting_start:
+        repainting_end = max(repainting_start, duration)
     normalized = {
+        "task_type": infer_ace_task_type(workflow, raw_params),
         "prompt": normalize_text(raw_params.get("prompt")),
         "lyrics": normalize_text(raw_params.get("lyrics")),
         "seed": normalize_int(raw_params.get("seed"), -1),
         "bpm": normalize_int(raw_params.get("bpm"), DEFAULT_MUSICAL_METADATA["bpm"]),
-        "duration": normalize_float(
-            raw_params.get("duration"),
-            DEFAULT_MUSICAL_METADATA["duration"],
-        ),
+        "duration": duration,
         "timesignature": normalize_timesignature(raw_params.get("timesignature")),
         "language": normalize_text(raw_params.get("language")) or "en",
         "keyscale": normalize_text(raw_params.get("keyscale"))
@@ -630,6 +684,24 @@ def normalize_generation_params(raw_params: dict[str, Any]) -> dict[str, Any]:
         "lmModel": DEFAULT_LM_MODEL,
         "inferenceSteps": normalize_int(
             raw_params.get("inferenceSteps"), DEFAULT_INFER_STEP
+        ),
+        "sourceTrackId": normalize_text(raw_params.get("sourceTrackId")),
+        "sourceClipId": normalize_text(raw_params.get("sourceClipId")),
+        "sourceAudioPath": normalize_text(raw_params.get("sourceAudioPath")),
+        "referenceAudioPath": normalize_text(
+            raw_params.get("referenceAudioPath") or raw_params.get("reference_audio")
+        ),
+        "srcAudioPath": normalize_text(raw_params.get("srcAudioPath") or raw_params.get("src_audio")),
+        "audio_cover_strength": max(
+            0.0,
+            min(1.0, normalize_float(raw_params.get("audio_cover_strength"), 0.55)),
+        ),
+        "repainting_start": repainting_start,
+        "repainting_end": repainting_end,
+        "outputPlacement": normalize_text(raw_params.get("outputPlacement")) or "align-source",
+        "customStartTime": max(
+            0.0,
+            normalize_float(raw_params.get("customStartTime"), 0.0),
         ),
     }
     return normalized
@@ -1380,9 +1452,12 @@ def build_generation_param_payload(
     use_lm_audio_codes = bool(params.get("generate_audio_codes", True))
     lyrics = normalize_text(params.get("lyrics"))
     instrumental = not lyrics
+    task_type = normalize_text(params.get("task_type")) or ACE_TASK_TEXT2MUSIC
+    if task_type not in ACE_TASK_TYPES:
+        task_type = ACE_TASK_TEXT2MUSIC
 
-    return {
-        "task_type": "text2music",
+    payload = {
+        "task_type": task_type,
         "caption": normalize_text(params.get("prompt")),
         "lyrics": lyrics,
         "instrumental": instrumental,
@@ -1406,6 +1481,39 @@ def build_generation_param_payload(
         "use_cot_language": use_lm_audio_codes,
         "use_constrained_decoding": use_lm_audio_codes,
     }
+
+    reference_audio = normalize_text(params.get("referenceAudioPath"))
+    src_audio = normalize_text(params.get("srcAudioPath")) or normalize_text(
+        params.get("sourceAudioPath")
+    )
+
+    if reference_audio:
+        if not Path(reference_audio).exists():
+            raise GenerationFailure(
+                f"Reference audio does not exist: {reference_audio}",
+                progress=0.1,
+            )
+        payload["reference_audio"] = reference_audio
+
+    if task_type in {ACE_TASK_COVER, ACE_TASK_REPAINT}:
+        if not src_audio:
+            raise GenerationFailure(
+                "Cover and repaint workflows require src_audio.",
+                progress=0.1,
+            )
+        if not Path(src_audio).exists():
+            raise GenerationFailure(
+                f"Source audio does not exist: {src_audio}",
+                progress=0.1,
+            )
+        payload["src_audio"] = src_audio
+        payload["audio_cover_strength"] = params["audio_cover_strength"]
+
+    if task_type == ACE_TASK_REPAINT:
+        payload["repainting_start"] = params["repainting_start"]
+        payload["repainting_end"] = params["repainting_end"]
+
+    return payload
 
 
 def build_generation_params(params: dict[str, Any], *, generation_mode: str):
@@ -2119,6 +2227,7 @@ class WorkerSession:
         except json.JSONDecodeError as exc:
             raise GenerationFailure(f"Invalid params JSON: {exc}") from exc
 
+        is_context_request = is_context_generation_request(workflow, raw_params)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         layout = validate_checkpoint_layout(self.checkpoint_root, self.model_id)
         selection = resolve_runtime_selection(
@@ -2131,7 +2240,7 @@ class WorkerSession:
         use_legacy_wrapper = normalize_bool(
             os.environ.get("OPENSTUDIO_USE_LEGACY_ACE_WRAPPER"),
             False,
-        )
+        ) or is_context_request
         run_mode = (
             "warm"
             if use_legacy_wrapper
@@ -2185,7 +2294,7 @@ class WorkerSession:
                 lmModel=selection["selectedLmModel"],
                 statusNote=" ".join(selection["statusNotes"]).strip() or None,
             )
-            params = normalize_generation_params(raw_params)
+            params = normalize_generation_params(raw_params, workflow=workflow)
             reporter.set_runtime_context(
                 run_mode=run_mode,
                 session_mode=session_mode,
@@ -2203,11 +2312,16 @@ class WorkerSession:
             )
             use_lm_audio_codes = generation_mode == GENERATION_MODE_LM_FIRST
             status_notes = list(selection["statusNotes"])
+            if is_context_request:
+                status_notes.append(
+                    "ACE context generation is routed through the ACE-Step 1.5 inference API because this request uses source or reference audio."
+                )
+            else:
+                status_notes.append(
+                    "OpenStudio's native split graph is using TextEncodeAceStepAudio1.5 -> AuraFlow -> KSampler -> VAEDecodeAudio."
+                )
             status_notes.append(
-                "OpenStudio's native split graph is using TextEncodeAceStepAudio1.5 -> AuraFlow -> KSampler -> VAEDecodeAudio."
-            )
-            status_notes.append(
-                "Manual workflow mode is active; explicit BPM, duration, time signature, language, and key are passed directly to the split graph encoder."
+                "Manual workflow mode is active; explicit BPM, duration, time signature, language, and key are passed directly to ACE-Step."
             )
             if use_lm_audio_codes:
                 status_notes.append(
@@ -2241,8 +2355,12 @@ class WorkerSession:
                 0.08,
                 phase="loading_text_encoders",
                 message=(
-                    "Launching the OpenStudio ACE split runner "
-                    f"({selection['selectedProfileLabel']} / {selection['selectedLmModel']})..."
+                    (
+                        "Launching ACE-Step context inference "
+                        if is_context_request
+                        else "Launching the OpenStudio ACE split runner "
+                    )
+                    + f"({selection['selectedProfileLabel']} / {selection['selectedLmModel']})..."
                 ),
                 lmBackend=("legacy-ace-wrapper" if use_legacy_wrapper else "openstudio-ace-split"),
                 phaseProgress=0.0,
@@ -2287,8 +2405,13 @@ class WorkerSession:
             trace_session.log_event(
                 "legacy_wrapper_requested",
                 mirror=True,
-                note="OPENSTUDIO_USE_LEGACY_ACE_WRAPPER is enabled; routing to the old ACE-Step wrapper path.",
+                note=(
+                    "Context workflow requires ACE-Step inference API routing."
+                    if is_context_request
+                    else "OPENSTUDIO_USE_LEGACY_ACE_WRAPPER is enabled; routing to the old ACE-Step wrapper path."
+                ),
             )
+            ensure_hidden_legacy_lm_bridge(self.checkpoint_root)
             runtime_handlers = self._ensure_runtime_handlers(
                 reporter,
                 lm_model=selection["selectedLmModel"],

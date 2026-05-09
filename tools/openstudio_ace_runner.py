@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from openstudio_ace_backend.runtime_resolver import backend_status
+
 
 PHASE_RANGES: dict[str, tuple[float, float]] = {
     "loading_text_encoders": (0.08, 0.24),
@@ -270,20 +272,15 @@ async def init_openstudio_ace_nodes(nodes_module: Any, backend_root: Path) -> No
 
 
 def get_backend_root() -> Path:
-    backend_root = Path(__file__).with_name("openstudio_ace_backend") / "vendor_runtime"
-    required = (
-        backend_root / "nodes.py",
-        backend_root / "folder_paths.py",
-        backend_root / "comfy" / "sd.py",
-        backend_root / "comfy_extras" / "nodes_ace.py",
-    )
-    missing = [str(path) for path in required if not path.exists()]
+    ready, backend_root, missing = backend_status(Path(__file__))
     if missing:
         raise FileNotFoundError(
             "OpenStudio ACE split backend is missing packaged runtime files: "
             + ", ".join(missing)
         )
-    return backend_root
+    if not ready:
+        raise FileNotFoundError("OpenStudio ACE split backend is not available.")
+    return Path(backend_root)
 
 
 def get_runtime_workspace(output_path: Path) -> Path:

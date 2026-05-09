@@ -643,6 +643,24 @@ if(EXISTS "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}")
     )
 endif()
 
+set(AI_ASSISTANT_SERVICE_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/assistant_service.py")
+if(EXISTS "${AI_ASSISTANT_SERVICE_SCRIPT}")
+    openstudio_copy_runtime_file(
+        "${AI_ASSISTANT_SERVICE_SCRIPT}"
+        "scripts/assistant_service.py"
+        "Copying assistant service script to output directory"
+    )
+endif()
+
+set(AI_MIDASHENG_ANALYZER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/midasheng_analyzer_service.py")
+if(EXISTS "${AI_MIDASHENG_ANALYZER_SCRIPT}")
+    openstudio_copy_runtime_file(
+        "${AI_MIDASHENG_ANALYZER_SCRIPT}"
+        "scripts/midasheng_analyzer_service.py"
+        "Copying MiDashengLM analyzer service script to output directory"
+    )
+endif()
+
 set(AI_OPENSTUDIO_ACE_BACKEND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_backend")
 if(EXISTS "${AI_OPENSTUDIO_ACE_BACKEND_DIR}")
     openstudio_copy_runtime_directory(
@@ -652,12 +670,35 @@ if(EXISTS "${AI_OPENSTUDIO_ACE_BACKEND_DIR}")
     )
 endif()
 
+set(AI_OPENSTUDIO_ACE_VENDOR_RUNTIME_DIR "${AI_OPENSTUDIO_ACE_BACKEND_DIR}/vendor_runtime")
+if(NOT EXISTS "${AI_OPENSTUDIO_ACE_VENDOR_RUNTIME_DIR}")
+    set(AI_OPENSTUDIO_ACE_VENDOR_RUNTIME_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/build-check/OpenStudio_artefacts/Release/scripts/openstudio_ace_backend/vendor_runtime"
+    )
+endif()
+if(EXISTS "${AI_OPENSTUDIO_ACE_VENDOR_RUNTIME_DIR}")
+    openstudio_copy_runtime_directory(
+        "${AI_OPENSTUDIO_ACE_VENDOR_RUNTIME_DIR}"
+        "scripts/openstudio_ace_backend/vendor_runtime"
+        "Copying OpenStudio ACE vendor runtime to output directory"
+    )
+endif()
+
 set(WINDOWS_AI_ACCELERATION_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/tools/windows-ai-acceleration-manifest.json")
 if(EXISTS "${WINDOWS_AI_ACCELERATION_MANIFEST}")
     openstudio_copy_runtime_file(
         "${WINDOWS_AI_ACCELERATION_MANIFEST}"
         "scripts/windows-ai-acceleration-manifest.json"
         "Copying Windows AI acceleration manifest to output directory"
+    )
+endif()
+
+set(ASSISTANT_RUNTIME_PROFILES_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/tools/assistant-runtime-profiles.json")
+if(EXISTS "${ASSISTANT_RUNTIME_PROFILES_MANIFEST}")
+    openstudio_copy_runtime_file(
+        "${ASSISTANT_RUNTIME_PROFILES_MANIFEST}"
+        "scripts/assistant-runtime-profiles.json"
+        "Copying assistant runtime profile manifest to output directory"
     )
 endif()
 
@@ -707,6 +748,12 @@ openstudio_remove_runtime_file(
 openstudio_remove_runtime_file(
     "scripts/openstudio_ace_backend/parity_debug.py"
     "Removing ACE-Step parity backend helper from output directory"
+)
+set(LEGACY_RESTRICTED_ANALYZER_SCRIPT_PATH "scripts/music")
+string(APPEND LEGACY_RESTRICTED_ANALYZER_SCRIPT_PATH "_flamingo_analyzer_service.py")
+openstudio_remove_runtime_file(
+    "${LEGACY_RESTRICTED_ANALYZER_SCRIPT_PATH}"
+    "Removing legacy restricted analyzer service from output directory"
 )
 set(LEGACY_EXTERNAL_ACE_RUNNER_PATH "scripts/co")
 string(APPEND LEGACY_EXTERNAL_ACE_RUNNER_PATH "mfy_ace_runner.py")

@@ -70,6 +70,7 @@ export async function createTrackOfType(
     aiGenerationPriorFailure: isAiType ? "" : undefined,
     aiGenerationLastProgressAgeMs: isAiType ? 0 : undefined,
     icon: isAiType ? "ai" : undefined,
+    insertAfterTrackId: options?.insertAfterTrackId,
   });
 
   state.selectTrack(trackId);

@@ -59,6 +59,10 @@ export const uiStateActions = (set: SetFn) => ({
     set((state: any) => ({ showScriptConsole: !state.showScriptConsole })),
   openAiToolsSetup: () => set({ showAiToolsSetup: true }),
   closeAiToolsSetup: () => set({ showAiToolsSetup: false }),
+  openAssistantPanel: () => set({ showAssistantPanel: true }),
+  closeAssistantPanel: () => set({ showAssistantPanel: false }),
+  toggleAssistantPanel: () =>
+    set((state: any) => ({ showAssistantPanel: !state.showAssistantPanel })),
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) =>
     set({ showStemSeparation: true, stemSepTrackId: trackId, stemSepClipId: clipId, stemSepClipName: name, stemSepClipDuration: duration }),
   closeStemSeparation: () =>
@@ -69,6 +73,36 @@ export const uiStateActions = (set: SetFn) => ({
         ? { showStemSeparation: true }
         : {}
     ),
+  openAIContextGeneration: (
+    trackId: string,
+    clipId: string,
+    name: string,
+    duration: number,
+    startTime: number,
+    filePath: string,
+    sourceTrackName: string,
+  ) =>
+    set({
+      showAIContextGeneration: true,
+      aiContextTrackId: trackId,
+      aiContextClipId: clipId,
+      aiContextClipName: name,
+      aiContextClipDuration: duration,
+      aiContextClipStartTime: startTime,
+      aiContextClipFilePath: filePath,
+      aiContextSourceTrackName: sourceTrackName,
+    }),
+  closeAIContextGeneration: () =>
+    set({
+      showAIContextGeneration: false,
+      aiContextTrackId: null,
+      aiContextClipId: null,
+      aiContextClipName: "",
+      aiContextClipDuration: 0,
+      aiContextClipStartTime: 0,
+      aiContextClipFilePath: "",
+      aiContextSourceTrackName: "",
+    }),
   toggleMediaExplorer: () =>
     set((state: any) => ({ showMediaExplorer: !state.showMediaExplorer })),
   toggleCleanProject: () =>
