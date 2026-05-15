@@ -1,11 +1,26 @@
+import { useEffect, useState } from "react";
 import { useShallow } from "zustand/shallow";
-import { nativeBridge } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiFeatureStatus, type AiToolsStatus } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Modal, ModalContent, ModalFooter, ModalHeader } from "./ui";
 
 const IS_WINDOWS = navigator.platform.startsWith("Win") || navigator.userAgent.includes("Windows");
 
 const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
+const AI_FEATURES: AiFeatureId[] = ["stemSeparation", "audioGeneration"];
+
+const FEATURE_COPY: Record<AiFeatureId, { label: string; requirements: string; description: string }> = {
+  stemSeparation: {
+    label: "Stem Separation",
+    requirements: "8 GB system RAM minimum. CPU-only machines are supported.",
+    description: "Split audio clips into vocals, drums, bass, and other stems.",
+  },
+  audioGeneration: {
+    label: "Audio Generation",
+    requirements: "16 GB system RAM plus CUDA or ROCm GPU with 8 GB memory minimum.",
+    description: "Generate audio with the ACE-Step model runtime.",
+  },
+};
 
 function Step({ number, children }: { number: number; children: React.ReactNode }) {
   return (
@@ -68,6 +83,73 @@ function formatRuntimeProfileLabel(profile?: string): string {
   }
 }
 
+function isAudioGenerationReady(status: AiToolsStatus): boolean {
+  const availableProfiles = status.musicGenerationAvailableProfiles ?? [];
+  const nativeProfileReady = availableProfiles.length === 0 || availableProfiles.includes("native-xl-turbo");
+  return Boolean(
+    status.musicGenerationReady
+      && status.musicGenerationLayoutValid
+      && (status.musicGenerationPerformanceReady ?? true)
+      && nativeProfileReady,
+  );
+}
+
+function getFeatureStatus(status: AiToolsStatus, featureId: AiFeatureId): AiFeatureStatus {
+  const existing = status.features?.[featureId];
+  if (existing) {
+    return existing as AiFeatureStatus;
+  }
+
+  if (featureId === "stemSeparation") {
+    const systemRamMb = status.hardware?.systemRamMb ?? 0;
+    const compatible = systemRamMb <= 0 || systemRamMb >= 8192;
+    return {
+      id: "stemSeparation",
+      label: FEATURE_COPY.stemSeparation.label,
+      ready: status.available,
+      installed: status.available,
+      compatible,
+      blocked: !compatible,
+      blockReason: compatible ? "" : "at least 8 GB system RAM is required",
+      requiresGpu: false,
+      minSystemRamMb: 8192,
+    };
+  }
+
+  const ready = isAudioGenerationReady(status);
+  return {
+    id: "audioGeneration",
+    label: FEATURE_COPY.audioGeneration.label,
+    ready,
+    installed: ready,
+    compatible: false,
+    blocked: !ready,
+    blockReason: "supported GPU with at least 8 GB memory was not detected",
+    message: ready
+      ? "Audio Generation is ready."
+      : "This machine does not meet Audio Generation requirements: supported GPU with at least 8 GB memory was not detected.",
+    requiresGpu: true,
+    minSystemRamMb: 16384,
+    minGpuMemoryMb: 8192,
+    supportedGpuBackends: ["cuda", "rocm"],
+  };
+}
+
+function defaultSelectedFeatures(status: AiToolsStatus, requestedFeature: AiFeatureId | null): AiFeatureId[] {
+  if (requestedFeature) {
+    const feature = getFeatureStatus(status, requestedFeature);
+    return feature.compatible && !feature.ready ? [requestedFeature] : [];
+  }
+
+  const stem = getFeatureStatus(status, "stemSeparation");
+  return stem.compatible && !stem.ready ? ["stemSeparation"] : [];
+}
+
+function formatRequirementMemory(memoryMb?: number): string {
+  if (!memoryMb || memoryMb <= 0) return "";
+  return `${Math.round(memoryMb / 1024)} GB`;
+}
+
 function getUnavailableProfileDetails(
   runtimeProfiles: Record<string, unknown> | undefined,
   unavailableProfiles: Array<Record<string, unknown>>,
@@ -112,38 +194,61 @@ function getUnavailableProfileDetails(
 }
 
 export default function AiToolsSetupModal() {
-  const { showAiToolsSetup, closeAiToolsSetup, installAiTools, resetAiTools, aiToolsStatus } = useDAWStore(
+  const { showAiToolsSetup, aiToolsSetupRequestedFeature, closeAiToolsSetup, installAiTools, resetAiTools, aiToolsStatus } = useDAWStore(
     useShallow((s) => ({
       showAiToolsSetup: s.showAiToolsSetup,
+      aiToolsSetupRequestedFeature: s.aiToolsSetupRequestedFeature,
       closeAiToolsSetup: s.closeAiToolsSetup,
       installAiTools: s.installAiTools,
       resetAiTools: s.resetAiTools,
       aiToolsStatus: s.aiToolsStatus,
     })),
   );
+  const [selectedFeatures, setSelectedFeatures] = useState<AiFeatureId[]>([]);
+
+  useEffect(() => {
+    if (!showAiToolsSetup || aiToolsStatus.installInProgress) return;
+    setSelectedFeatures(defaultSelectedFeatures(aiToolsStatus, aiToolsSetupRequestedFeature));
+  }, [
+    showAiToolsSetup,
+    aiToolsSetupRequestedFeature,
+    aiToolsStatus.installInProgress,
+    aiToolsStatus.available,
+    aiToolsStatus.musicGenerationReady,
+    aiToolsStatus.musicGenerationLayoutValid,
+    aiToolsStatus.musicGenerationPerformanceReady,
+    aiToolsStatus.features,
+  ]);
 
   if (!showAiToolsSetup) return null;
 
+  const stemFeature = getFeatureStatus(aiToolsStatus, "stemSeparation");
+  const audioFeature = getFeatureStatus(aiToolsStatus, "audioGeneration");
+  const featureStatuses = {
+    stemSeparation: stemFeature,
+    audioGeneration: audioFeature,
+  } satisfies Record<AiFeatureId, AiFeatureStatus>;
   const isPythonMissing = aiToolsStatus.state === "pythonMissing";
   const hasInstallError = aiToolsStatus.state === "error" || aiToolsStatus.state === "cancelled";
-  const isStemSeparationReady = aiToolsStatus.available || aiToolsStatus.state === "ready";
+  const isStemSeparationReady = Boolean(stemFeature.ready || aiToolsStatus.available);
   const isMusicGenerationInstalled = Boolean(aiToolsStatus.musicGenerationReady && aiToolsStatus.musicGenerationLayoutValid);
   const isMusicGenerationPerformanceReady = aiToolsStatus.musicGenerationPerformanceReady ?? true;
-  const isMusicGenerationFullyReady =
-    isMusicGenerationInstalled
-    && isMusicGenerationPerformanceReady;
+  const isMusicGenerationFullyReady = Boolean(audioFeature.ready || (isMusicGenerationInstalled && isMusicGenerationPerformanceReady));
   const isPartiallyReady = isStemSeparationReady && !isMusicGenerationFullyReady;
-  const isInstallComplete = isStemSeparationReady && isMusicGenerationFullyReady;
+  const isInstallComplete =
+    selectedFeatures.length > 0
+      ? selectedFeatures.every((featureId) => Boolean(featureStatuses[featureId].ready))
+      : isStemSeparationReady && isMusicGenerationFullyReady;
   const showSetupModeCard = !isInstallComplete;
   const showSetupSteps = !isInstallComplete;
   const musicGenerationBlockedMessage =
     aiToolsStatus.musicGenerationPerformanceStatusMessage
     || (isMusicGenerationInstalled
-      ? "Music generation is installed, but acceleration is incomplete in this managed runtime."
+      ? "Audio Generation is installed, but acceleration is incomplete in this managed runtime."
       : aiToolsStatus.musicGenerationStatusMessage
         || (!aiToolsStatus.musicGenerationLayoutValid
           ? "Pinned ACE-Step native split-model files are still missing."
-          : "Music generation still needs the OpenStudio ACE split backend."));
+          : "Audio Generation still needs the OpenStudio ACE split backend."));
   const isReconcilingInstallResult = aiToolsStatus.statusWarningCode === "reconciling_install_state";
   const requiresExternalPython = aiToolsStatus.requiresExternalPython;
   const buildRuntimeMode = aiToolsStatus.buildRuntimeMode ?? "downloaded-runtime";
@@ -185,6 +290,12 @@ export default function AiToolsSetupModal() {
   const transferText = hasByteProgress
     ? `${formatBytes(aiToolsStatus.bytesDownloaded)} / ${formatBytes(aiToolsStatus.bytesTotal)}`
     : "";
+  const selectedReadyLabels = selectedFeatures.length > 0
+    ? selectedFeatures.map((featureId) => FEATURE_COPY[featureId].label)
+    : [];
+  const completeTitle = selectedReadyLabels.length === 1
+    ? `${selectedReadyLabels[0]} is ready`
+    : "Selected AI features are ready";
   const availableProfiles = aiToolsStatus.musicGenerationAvailableProfiles ?? [];
   const unavailableProfiles = aiToolsStatus.musicGenerationUnavailableProfiles ?? [];
   const defaultProfile = aiToolsStatus.musicGenerationDefaultProfile ?? "";
@@ -210,7 +321,7 @@ export default function AiToolsSetupModal() {
           : "AI tools setup needs attention";
 
   const recommendationText = isDownloadedRuntimeFlow
-    ? "This release downloads the OpenStudio AI runtime the first time you use AI Tools, verifies it, and then downloads the stem model. You can keep using the app while that setup runs."
+    ? "This release downloads the OpenStudio AI runtime the first time you use a selected AI feature, verifies it, and then downloads only the compatible selected model files. You can keep using the app while setup runs."
     : IS_WINDOWS
       ? "This dev build needs Python 3.11 on your machine first for the Windows ACE-Step runtime. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically."
       : "This dev build needs Python 3.10 through 3.12 on your machine first. Once Python is installed, OpenStudio will continue the rest of the AI setup automatically.";
@@ -220,7 +331,7 @@ export default function AiToolsSetupModal() {
     : isUnsupportedPlatform
       ? "This release currently supports AI Tools on Apple Silicon Macs only. The base app can still be used normally on Intel Macs."
     : isWindowsRuntimeLockFailure
-      ? "OpenStudio already attempted a runtime-only rebuild of stem-runtime after Windows denied access to a managed runtime file. Close any remaining helper processes, Python workers, or antivirus scanners that may still be touching the runtime, then retry. Normal retry preserves downloaded models and music-generation checkpoints. Use Reset AI Tools only for a full cleanup, which also removes the downloaded models and checkpoints."
+      ? "OpenStudio already attempted a runtime-only rebuild of stem-runtime after Windows denied access to a managed runtime file. Close any remaining helper processes, Python workers, or antivirus scanners that may still be touching the runtime, then retry. Retry keeps the downloaded stem models and ACE-Step checkpoints in place. Use Reset AI Tools only for a full cleanup, which also removes the downloaded models and checkpoints."
     : isRuntimeManifestFailure
       ? "Retry once in case the release metadata service was temporarily unavailable. If the same message appears again, OpenStudio may not be able to reach the published AI runtime metadata from this machine."
     : isDownloadedRuntimeFlow
@@ -238,8 +349,22 @@ export default function AiToolsSetupModal() {
     await nativeBridge.openExternalURL(toFileUrl(parentPath(installLogPath)));
   };
 
+  const toggleFeature = (featureId: AiFeatureId) => {
+    const feature = featureStatuses[featureId];
+    if (!feature.compatible || feature.ready || aiToolsStatus.installInProgress) return;
+    setSelectedFeatures((current) =>
+      current.includes(featureId)
+        ? current.filter((id) => id !== featureId)
+        : [...current, featureId],
+    );
+  };
+
   const handleRetry = async () => {
-    await installAiTools({ userConfirmedDownload: true });
+    await installAiTools({
+      userConfirmedDownload: true,
+      selectedFeatures,
+      requestedFeature: aiToolsSetupRequestedFeature ?? selectedFeatures[0],
+    });
   };
 
   const handleReset = async () => {
@@ -262,7 +387,7 @@ export default function AiToolsSetupModal() {
             <p className="text-xs text-daw-text-secondary leading-relaxed">
               AI Tools enables <span className="text-daw-text">Stem Separation</span> - splitting a
               clip into individual tracks like Vocals, Drums, Bass, Guitar, and more. It also powers
-              <span className="text-daw-text"> AI Track music generation</span> when ACE-Step is installed.
+              <span className="text-daw-text"> Audio Generation</span> when ACE-Step is installed.
             </p>
           </div>
 
@@ -280,12 +405,87 @@ export default function AiToolsSetupModal() {
             </div>
           ) : null}
 
+          <div className="grid gap-3 md:grid-cols-2">
+            {AI_FEATURES.map((featureId) => {
+              const feature = featureStatuses[featureId];
+              const copy = FEATURE_COPY[featureId];
+              const selected = selectedFeatures.includes(featureId);
+              const disabled = Boolean(aiToolsStatus.installInProgress || feature.ready || !feature.compatible);
+              const statusLabel = feature.ready
+                ? "Ready"
+                : !feature.compatible
+                  ? "Blocked"
+                  : selected
+                    ? "Selected"
+                    : "Available";
+              const statusClass = feature.ready
+                ? "text-green-400"
+                : !feature.compatible
+                  ? "text-red-300"
+                  : selected
+                    ? "text-daw-accent"
+                    : "text-daw-text-secondary";
+
+              return (
+                <label
+                  key={featureId}
+                  className={`block rounded border p-3 ${
+                    feature.ready
+                      ? "border-green-600/40 bg-green-950/20"
+                      : !feature.compatible
+                        ? "border-red-900/50 bg-red-950/10"
+                        : selected
+                          ? "border-daw-accent/60 bg-daw-accent/10"
+                          : "border-neutral-800 bg-neutral-950/60"
+                  } ${disabled ? "cursor-default" : "cursor-pointer"}`}
+                >
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-4 w-4 accent-daw-accent"
+                      checked={selected || Boolean(feature.ready)}
+                      disabled={disabled}
+                      onChange={() => toggleFeature(featureId)}
+                    />
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-semibold text-daw-text">{copy.label}</p>
+                        <span className={`text-xs font-medium ${statusClass}`}>{statusLabel}</span>
+                      </div>
+                      <p className="text-xs text-daw-text-secondary leading-relaxed">{copy.description}</p>
+                      <p className="text-xs text-daw-text-secondary leading-relaxed">{copy.requirements}</p>
+                      {feature.blockReason ? (
+                        <p className="text-xs text-red-300 leading-relaxed">
+                          This machine does not meet {copy.label} requirements: {feature.blockReason}.
+                        </p>
+                      ) : null}
+                      {feature.minSystemRamMb ? (
+                        <p className="text-[11px] text-daw-text-secondary leading-relaxed">
+                          Required RAM: {formatRequirementMemory(feature.minSystemRamMb)}
+                          {feature.minGpuMemoryMb ? `, GPU memory: ${formatRequirementMemory(feature.minGpuMemoryMb)}` : ""}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+
+          {selectedFeatures.length === 0 && !aiToolsStatus.installInProgress && !isInstallComplete ? (
+            <div className="rounded border border-yellow-700/40 bg-yellow-950/20 p-3">
+              <p className="text-xs text-yellow-200 leading-relaxed">
+                Select a compatible feature to download. Incompatible features are disabled and will not be installed.
+              </p>
+            </div>
+          ) : null}
+
           {isInstallComplete ? (
             <div className="rounded border border-green-600/40 bg-green-950/30 p-3 space-y-2">
-              <p className="text-sm font-semibold text-green-400">AI Tools are ready</p>
+              <p className="text-sm font-semibold text-green-400">{completeTitle}</p>
               <p className="text-xs text-daw-text-secondary leading-relaxed">
-                The runtime, stem-separation model, and pinned ACE-Step files are installed for this OpenStudio session.
-                You can continue straight into stem separation or music generation now.
+                The selected AI feature modules are installed for this OpenStudio session.
+                You can continue straight into the compatible AI workflow now.
               </p>
               {aiToolsStatus.selectedBackend ? (
                 <p className="text-xs text-daw-text-secondary leading-relaxed">
@@ -293,7 +493,7 @@ export default function AiToolsSetupModal() {
                 </p>
               ) : null}
               <p className="text-xs text-daw-text-secondary leading-relaxed">
-                Music generation:{" "}
+                Audio Generation:{" "}
                 <span className={isMusicGenerationFullyReady ? "text-green-400" : "text-yellow-300"}>
                   {isMusicGenerationFullyReady ? "Ready" : "Installed, but degraded"}
                 </span>
@@ -334,7 +534,7 @@ export default function AiToolsSetupModal() {
                 </p>
               ) : null}
               <p className="text-xs text-daw-text-secondary leading-relaxed">
-                Music generation: <span className="text-yellow-300">{isMusicGenerationInstalled ? "Installed, but degraded" : "Not ready yet"}</span>
+                Audio Generation: <span className="text-yellow-300">{isMusicGenerationInstalled ? "Installed, but degraded" : "Not ready yet"}</span>
                 {aiToolsStatus.aceStepVersion ? ` (ACE-Step ${aiToolsStatus.aceStepVersion})` : ""}
               </p>
               {aiToolsStatus.musicGenerationModelId ? (
@@ -669,7 +869,7 @@ export default function AiToolsSetupModal() {
               {isInstallComplete
                 ? "AI Tools finished installing in this session. You can close this window and continue working."
                 : isPartiallyReady
-                  ? `Stem separation is ready in this session. ${musicGenerationBlockedMessage} Retry install to finish music generation, or close this window if you only need stem separation right now.`
+                  ? `Stem separation is ready in this session. ${musicGenerationBlockedMessage} Select Audio Generation to finish that setup, or close this window if you only need stem separation right now.`
                   : "OpenStudio keeps the app responsive while setup runs. This window now shows the live install activity, current phase, and long-download hints."}
             </p>
           </div>
@@ -705,20 +905,20 @@ export default function AiToolsSetupModal() {
         <Button
           variant="primary"
           onClick={() => void (isInstallComplete ? closeAiToolsSetup() : handleRetry())}
-          disabled={aiToolsStatus.installInProgress || isReconcilingInstallResult}
+          disabled={aiToolsStatus.installInProgress || isReconcilingInstallResult || (!isInstallComplete && selectedFeatures.length === 0)}
           className="whitespace-nowrap"
         >
           {isInstallComplete
-            ? "Continue"
+              ? "Continue"
             : isPartiallyReady
-              ? "Retry Install"
+              ? selectedFeatures.length === 0 ? "Select Feature" : "Install Selected"
               : aiToolsStatus.installInProgress
               ? "Installing..."
               : isReconcilingInstallResult
                 ? "Checking Result..."
               : requiresExternalPython && isPythonMissing
                 ? "Retry After Python Install"
-                : "Download and Install"}
+                : selectedFeatures.length === 0 ? "Select Feature" : "Download and Install"}
         </Button>
       </ModalFooter>
     </Modal>

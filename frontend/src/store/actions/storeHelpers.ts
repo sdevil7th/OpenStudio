@@ -9,7 +9,14 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 export const _linkingInProgress = new Set<string>();
 export const _editSnapshots = new Map<string, number>();
 export const _autoRecordTimers = new Map<string, number>();
+export const _automationTouchedParams = new Set<string>();
+export const _automationLatchedParams = new Set<string>();
+export const _automationWriteValues = new Map<string, number>();
 export const AUTO_RECORD_INTERVAL_MS = 50;
+
+export function automationTouchKey(trackId: string, param: string): string {
+  return `${trackId}::${param}`;
+}
 
 export function getLinkedTrackIds(
   trackId: string,

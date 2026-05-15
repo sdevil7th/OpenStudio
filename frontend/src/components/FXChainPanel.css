@@ -128,6 +128,26 @@
   padding: 8px;
 }
 
+.fx-midi-section {
+  margin: 0 8px 8px;
+  padding: 10px;
+  border: 1px solid #404040;
+  border-radius: 6px;
+  background: #121212;
+}
+
+.fx-midi-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #a3a3a3;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
 .fx-browser-container {
   flex: 1;
   overflow: hidden;

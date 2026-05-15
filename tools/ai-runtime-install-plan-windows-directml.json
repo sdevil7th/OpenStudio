@@ -11,6 +11,7 @@
       "type": "pip_install",
       "description": "Installing DirectML stem separation packages",
       "stepLabel": "Installing DirectML stem separation packages",
+      "features": ["stemSeparation"],
       "downloadHint": "OpenStudio is downloading the DirectML backend packages for Windows.",
       "isLargeDownload": true,
       "packages": [
@@ -21,6 +22,7 @@
       "type": "pip_install",
       "description": "Installing ACE-Step 1.5 runtime dependencies",
       "stepLabel": "Installing ACE-Step 1.5 runtime dependencies",
+      "features": ["audioGeneration"],
       "packages": [
         "transformers==4.50.0",
         "diffusers==0.35.2",
@@ -37,6 +39,7 @@
       "type": "hf_snapshot_pip_install",
       "description": "Preparing the ACE-Step 1.5 runtime source",
       "stepLabel": "Installing the ACE-Step 1.5 runtime bridge",
+      "features": ["audioGeneration"],
       "downloadHint": "OpenStudio is downloading the pinned ACE-Step 1.5 runtime bridge from Hugging Face.",
       "isLargeDownload": true,
       "repoId": "ACE-Step/Ace-Step-v1.5",

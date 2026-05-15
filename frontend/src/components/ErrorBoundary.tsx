@@ -29,6 +29,9 @@ export class ErrorBoundary extends React.Component<
       error,
       info.componentStack,
     );
+    void nativeBridge.setTransportRecording(false);
+    void nativeBridge.setTransportPlaying(false);
+    void nativeBridge.closeAllPluginWindows();
     this.props.onError?.(error, info);
   }
 
@@ -119,7 +122,12 @@ export class ErrorBoundary extends React.Component<
               {this.state.error?.stack && "\n\n" + this.state.error.stack}
             </pre>
             <button
-              onClick={() => window.location.reload()}
+              onClick={() => {
+                void nativeBridge.setTransportRecording(false);
+                void nativeBridge.setTransportPlaying(false);
+                void nativeBridge.closeAllPluginWindows();
+                window.location.reload();
+              }}
               className="px-6 py-2 bg-daw-accent hover:bg-blue-600 text-white rounded text-sm font-medium transition-colors"
             >
               Reload App

@@ -15,6 +15,19 @@ python build.py dev --run
 
 **No more juggling terminals!**
 
+## Manual Testing Handoff
+
+When Codex asks for manual testing, the handoff must be ready for this exact command:
+
+```bash
+python build.py dev --run
+```
+
+Before that handoff:
+- `cmake --build build --config Debug` must have completed after the latest changes.
+- The current frontend must be built/copied so packaged assets are not stale if fallback is ever used.
+- No pre-running Vite/npm/dev server should be required from the user.
+- Any Codex-started Vite/npm/browser harness processes should be stopped first, and port `5173` should not be left occupied by a Codex-started process.
 
 **Run this to rebuild the backend:**
 

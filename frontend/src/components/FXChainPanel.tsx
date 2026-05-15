@@ -29,8 +29,11 @@ import {
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
+import { MIDIFXControls } from "./MIDIFXControls";
 import { useDAWStore } from "../store/useDAWStore";
+import { pluginAutomationParamId } from "../store/automationParams";
 import { useShallow } from "zustand/react/shallow";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 import { Button, Input, Select } from "./ui";
 import {
   EQGraph,
@@ -127,9 +130,14 @@ function getCategoryIcon(category: string) {
   return { match: "Other", Icon: Box, color: "#6b7280" };
 }
 
-function getPluginDisplayName(pluginPath: string | undefined, plugins: Plugin[]) {
+function getPluginDisplayName(
+  pluginPath: string | undefined,
+  plugins: Plugin[],
+) {
   if (!pluginPath) return "Instrument";
-  const knownPlugin = plugins.find((plugin) => plugin.fileOrIdentifier === pluginPath);
+  const knownPlugin = plugins.find(
+    (plugin) => plugin.fileOrIdentifier === pluginPath,
+  );
   if (knownPlugin) return knownPlugin.name;
 
   const fileName = pluginPath.split(/[\\/]/).pop() || pluginPath;
@@ -143,10 +151,22 @@ export function FXChainPanel({
   onClose,
 }: FXChainPanelProps) {
   const {
-    updateTrack, addTrackFXWithUndo, removeTrackFXWithUndo,
-    pluginABStates, togglePluginAB,
-    fxChainPresets, saveFXChainPreset, loadFXChainPreset, deleteFXChainPreset,
+    updateTrack,
+    addTrackFXWithUndo,
+    removeTrackFXWithUndo,
+    loadInstrumentWithUndo,
+    removeInstrumentWithUndo,
+    clearTrackSamplerSampleWithUndo,
+    pluginABStates,
+    togglePluginAB,
+    fxChainPresets,
+    saveFXChainPreset,
+    loadFXChainPreset,
+    deleteFXChainPreset,
     addAutomationLane,
+    setAutomationWriteValue,
+    beginAutomationParamTouch,
+    endAutomationParamTouch,
     tracks,
     openPitchEditor,
   } = useDAWStore(
@@ -154,6 +174,9 @@ export function FXChainPanel({
       updateTrack: s.updateTrack,
       addTrackFXWithUndo: s.addTrackFXWithUndo,
       removeTrackFXWithUndo: s.removeTrackFXWithUndo,
+      loadInstrumentWithUndo: s.loadInstrumentWithUndo,
+      removeInstrumentWithUndo: s.removeInstrumentWithUndo,
+      clearTrackSamplerSampleWithUndo: s.clearTrackSamplerSampleWithUndo,
       pluginABStates: s.pluginABStates,
       togglePluginAB: s.togglePluginAB,
       fxChainPresets: s.fxChainPresets,
@@ -161,9 +184,12 @@ export function FXChainPanel({
       loadFXChainPreset: s.loadFXChainPreset,
       deleteFXChainPreset: s.deleteFXChainPreset,
       addAutomationLane: s.addAutomationLane,
+      setAutomationWriteValue: s.setAutomationWriteValue,
+      beginAutomationParamTouch: s.beginAutomationParamTouch,
+      endAutomationParamTouch: s.endAutomationParamTouch,
       tracks: s.tracks,
       openPitchEditor: s.openPitchEditor,
-    }))
+    })),
   );
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
   const [loading, setLoading] = useState(false);
@@ -173,10 +199,14 @@ export function FXChainPanel({
   const [expandedS13FX, setExpandedS13FX] = useState<number | null>(null);
   const [s13fxSliders, setS13fxSliders] = useState<S13FXSlider[]>([]);
   const [showRawSliders, setShowRawSliders] = useState(false);
-  const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<number | null>(null);
+  const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<
+    number | null
+  >(null);
   const [showPresetMenu, setShowPresetMenu] = useState(false);
   const [presetName, setPresetName] = useState("");
-  const [precisionUpdatingFx, setPrecisionUpdatingFx] = useState<number | null>(null);
+  const [precisionUpdatingFx, setPrecisionUpdatingFx] = useState<number | null>(
+    null,
+  );
 
   // Plugin parameter list state (per-slot)
   const [expandedParamsFx, setExpandedParamsFx] = useState<number | null>(null);
@@ -184,30 +214,38 @@ export function FXChainPanel({
   const [paramsLoading, setParamsLoading] = useState(false);
 
   // Plugin presets state (per-slot)
-  const [expandedPresetsFx, setExpandedPresetsFx] = useState<number | null>(null);
+  const [expandedPresetsFx, setExpandedPresetsFx] = useState<number | null>(
+    null,
+  );
   const [pluginPresetsList, setPluginPresetsList] = useState<string[]>([]);
   const [presetsLoading, setPresetsLoading] = useState(false);
   const [savePresetName, setSavePresetName] = useState("");
 
   // MIDI Learn state
-  const [midiLearnActive, setMidiLearnActive] = useState<{ fxIndex: number; paramIndex: number } | null>(null);
+  const [midiLearnActive, setMidiLearnActive] = useState<{
+    fxIndex: number;
+    paramIndex: number;
+  } | null>(null);
   const midiLearnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleStartMIDILearn = useCallback(async (fxIndex: number, paramIndex: number) => {
-    // Cancel any existing learn session
-    if (midiLearnActive) {
-      await nativeBridge.cancelPluginMIDILearn();
-      if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
-    }
-    setMidiLearnActive({ fxIndex, paramIndex });
-    await nativeBridge.startPluginMIDILearn(trackId, fxIndex, paramIndex);
-    // Auto-cancel after 10 seconds
-    midiLearnTimerRef.current = setTimeout(async () => {
-      await nativeBridge.cancelPluginMIDILearn();
-      setMidiLearnActive(null);
-      midiLearnTimerRef.current = null;
-    }, 10000);
-  }, [midiLearnActive, trackId]);
+  const handleStartMIDILearn = useCallback(
+    async (fxIndex: number, paramIndex: number) => {
+      // Cancel any existing learn session
+      if (midiLearnActive) {
+        await nativeBridge.cancelPluginMIDILearn();
+        if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
+      }
+      setMidiLearnActive({ fxIndex, paramIndex });
+      await nativeBridge.startPluginMIDILearn(trackId, fxIndex, paramIndex);
+      // Auto-cancel after 10 seconds
+      midiLearnTimerRef.current = setTimeout(async () => {
+        await nativeBridge.cancelPluginMIDILearn();
+        setMidiLearnActive(null);
+        midiLearnTimerRef.current = null;
+      }, 10000);
+    },
+    [midiLearnActive, trackId],
+  );
 
   const handleCancelMIDILearn = useCallback(async () => {
     if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
@@ -227,7 +265,9 @@ export function FXChainPanel({
   }, []);
 
   // Sidechain routing state: maps fxIndex -> sourceTrackId (empty string = none)
-  const [sidechainSources, setSidechainSources] = useState<Record<number, string>>({});
+  const [sidechainSources, setSidechainSources] = useState<
+    Record<number, string>
+  >({});
 
   // Fetch current sidechain sources when fxSlots change
   useEffect(() => {
@@ -246,24 +286,33 @@ export function FXChainPanel({
       if (!cancelled) setSidechainSources(sources);
     };
     fetchSidechainSources();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [fxSlots, trackId, chainType]);
 
   // Other tracks available as sidechain sources (exclude current track)
   const sidechainTrackOptions = tracks.filter((t) => t.id !== trackId);
 
-  const handleSetSidechainSource = useCallback(async (fxIndex: number, sourceTrackId: string) => {
-    try {
-      if (sourceTrackId === "") {
-        await nativeBridge.clearSidechainSource(trackId, fxIndex);
-      } else {
-        await nativeBridge.setSidechainSource(trackId, fxIndex, sourceTrackId);
+  const handleSetSidechainSource = useCallback(
+    async (fxIndex: number, sourceTrackId: string) => {
+      try {
+        if (sourceTrackId === "") {
+          await nativeBridge.clearSidechainSource(trackId, fxIndex);
+        } else {
+          await nativeBridge.setSidechainSource(
+            trackId,
+            fxIndex,
+            sourceTrackId,
+          );
+        }
+        setSidechainSources((prev) => ({ ...prev, [fxIndex]: sourceTrackId }));
+      } catch (e) {
+        console.error("[FXChain] Failed to set sidechain source:", e);
       }
-      setSidechainSources((prev) => ({ ...prev, [fxIndex]: sourceTrackId }));
-    } catch (e) {
-      console.error("[FXChain] Failed to set sidechain source:", e);
-    }
-  }, [trackId]);
+    },
+    [trackId],
+  );
 
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -274,25 +323,48 @@ export function FXChainPanel({
   const instrumentPluginPath =
     chainType === "track" ? currentTrack?.instrumentPlugin : undefined;
   const hasLoadedInstrument = Boolean(instrumentPluginPath);
-  const loadedPluginCount = fxSlots.length + (hasLoadedInstrument ? 1 : 0);
-  const instrumentDisplayName = getPluginDisplayName(instrumentPluginPath, plugins);
-
-  const applyLoadedPlugins = useCallback((loadedPlugins: FXSlot[]) => {
-    setFxSlots(loadedPlugins);
-    setBypassedFx(
-      new Set(
-        loadedPlugins
-          .filter((fx: FXSlot) => Boolean(fx.bypassed))
-          .map((fx: FXSlot) => fx.index),
-      ),
+  const hasFallbackInstrument =
+    chainType === "track" &&
+    currentTrack?.type === "instrument" &&
+    !instrumentPluginPath;
+  const showMidiFxControls =
+    chainType === "track" &&
+    Boolean(
+      currentTrack &&
+      (currentTrack.type === "midi" || currentTrack.type === "instrument"),
     );
+  const loadedPluginCount =
+    fxSlots.length + (hasLoadedInstrument || hasFallbackInstrument ? 1 : 0);
+  const instrumentDisplayName = getPluginDisplayName(
+    instrumentPluginPath,
+    plugins,
+  );
+  const fallbackInstrumentDisplayName = currentTrack?.samplerSamplePath
+    ? "Studio13 Basic Sampler"
+    : "Studio13 Basic Synth";
+  const fallbackInstrumentTitle = currentTrack?.samplerSamplePath
+    ? currentTrack.samplerSamplePath
+    : "Built-in fallback synth used until an instrument plugin is loaded";
 
-    if (chainType === "master") {
-      useDAWStore.setState({ masterFxCount: loadedPlugins.length });
-    } else {
-      void updateFxCounts();
-    }
-  }, [chainType, trackId, updateTrack]);
+  const applyLoadedPlugins = useCallback(
+    (loadedPlugins: FXSlot[]) => {
+      setFxSlots(loadedPlugins);
+      setBypassedFx(
+        new Set(
+          loadedPlugins
+            .filter((fx: FXSlot) => Boolean(fx.bypassed))
+            .map((fx: FXSlot) => fx.index),
+        ),
+      );
+
+      if (chainType === "master") {
+        useDAWStore.setState({ masterFxCount: loadedPlugins.length });
+      } else {
+        void updateFxCounts();
+      }
+    },
+    [chainType, trackId, updateTrack],
+  );
 
   // Sync FX counts to the store so track headers/channel strips can show indicators
   async function updateFxCounts() {
@@ -412,26 +484,33 @@ export function FXChainPanel({
           success = await nativeBridge.addMasterBuiltInFX(plugin.name);
         } else {
           const isInputFX = chainType === "input";
-          success = await nativeBridge.addTrackBuiltInFX(trackId, plugin.name, isInputFX);
+          success = await nativeBridge.addTrackBuiltInFX(
+            trackId,
+            plugin.name,
+            isInputFX,
+          );
         }
       } else if (plugin.pluginType === "s13fx") {
         if (chainType === "master") {
           success = await nativeBridge.addMasterS13FX(plugin.fileOrIdentifier);
         } else {
           const isInputFX = chainType === "input";
-          success = await nativeBridge.addTrackS13FX(trackId, plugin.fileOrIdentifier, isInputFX);
+          success = await nativeBridge.addTrackS13FX(
+            trackId,
+            plugin.fileOrIdentifier,
+            isInputFX,
+          );
         }
       } else if (chainType === "master") {
         success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
       } else if (plugin.isInstrument && chainType === "track" && trackId) {
         // Instrument plugins (VSTi) must be loaded via loadInstrument so the
         // track is set to Instrument type and receives MIDI for synthesis.
-        success = await nativeBridge.loadInstrument(trackId, plugin.fileOrIdentifier);
+        success = await loadInstrumentWithUndo(
+          trackId,
+          plugin.fileOrIdentifier,
+        );
         if (success) {
-          updateTrack(trackId, {
-            type: "instrument",
-            instrumentPlugin: plugin.fileOrIdentifier,
-          });
           notifyInstrumentChanged({
             trackId,
             instrumentPlugin: plugin.fileOrIdentifier,
@@ -439,7 +518,11 @@ export function FXChainPanel({
           await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (chainType === "input" || chainType === "track") {
-        success = await addTrackFXWithUndo(trackId, plugin.fileOrIdentifier, chainType);
+        success = await addTrackFXWithUndo(
+          trackId,
+          plugin.fileOrIdentifier,
+          chainType,
+        );
       }
 
       if (success) {
@@ -454,7 +537,11 @@ export function FXChainPanel({
         if (chainType === "master") {
           await loadPlugins();
         } else if (expectedLength !== null) {
-          updatedFx = await waitForFXChainLength(trackId, chainType, expectedLength);
+          updatedFx = await waitForFXChainLength(
+            trackId,
+            chainType,
+            expectedLength,
+          );
           applyLoadedPlugins(updatedFx);
         }
 
@@ -472,36 +559,54 @@ export function FXChainPanel({
         // For non-ARA plugins, C++ opens the editor in its async callback.
         if (chainType === "track" && trackId && updatedFx.length > 0) {
           const lastFx = updatedFx[updatedFx.length - 1];
-          const lastIdx = lastFx?.index ?? (updatedFx.length - 1);
+          const lastIdx = lastFx?.index ?? updatedFx.length - 1;
 
           try {
             let araStatus = await nativeBridge.getARAStatus(trackId);
             for (let attempt = 0; attempt < 25; attempt++) {
-              if (araStatus.lastAttemptFxIndex === lastIdx && araStatus.lastAttemptComplete) {
+              if (
+                araStatus.lastAttemptFxIndex === lastIdx &&
+                araStatus.lastAttemptComplete
+              ) {
                 break;
               }
 
-              await new Promise(resolve => setTimeout(resolve, 200));
+              await new Promise((resolve) => setTimeout(resolve, 200));
               araStatus = await nativeBridge.getARAStatus(trackId);
             }
 
-            if (araStatus.lastAttemptFxIndex === lastIdx
-              && araStatus.lastAttemptComplete
-              && araStatus.lastAttemptWasARAPlugin) {
-              if (!araStatus.lastAttemptSucceeded || araStatus.activeFxIndex !== lastIdx) {
-                alert(araStatus.error || `Failed to initialize ${plugin.name} as an ARA plugin.`);
+            if (
+              araStatus.lastAttemptFxIndex === lastIdx &&
+              araStatus.lastAttemptComplete &&
+              araStatus.lastAttemptWasARAPlugin
+            ) {
+              if (
+                !araStatus.lastAttemptSucceeded ||
+                araStatus.activeFxIndex !== lastIdx
+              ) {
+                alert(
+                  araStatus.error ||
+                    `Failed to initialize ${plugin.name} as an ARA plugin.`,
+                );
               } else {
                 await useDAWStore.getState().syncClipsWithBackend();
 
-                const track = useDAWStore.getState().tracks.find((t: { id: string }) => t.id === trackId);
+                const track = useDAWStore
+                  .getState()
+                  .tracks.find((t: { id: string }) => t.id === trackId);
                 if (!track || track.clips.length === 0) {
-                  alert(`${plugin.name} is ready, but this track has no audio clips to attach yet.`);
+                  alert(
+                    `${plugin.name} is ready, but this track has no audio clips to attach yet.`,
+                  );
                 } else {
                   let clipsAttached = 0;
                   let firstClipError = "";
 
                   for (const clip of track.clips) {
-                    const clipResult = await nativeBridge.addARAClip(trackId, clip.id);
+                    const clipResult = await nativeBridge.addARAClip(
+                      trackId,
+                      clip.id,
+                    );
                     if (clipResult.success) {
                       console.log(`[FXChain] Added clip ${clip.id} to ARA`);
                       clipsAttached += 1;
@@ -511,11 +616,18 @@ export function FXChainPanel({
                   }
 
                   if (clipsAttached > 0) {
-                    const readyStatus = await nativeBridge.getARAStatus(trackId);
-                    console.log("[FXChain] Opening ARA plugin editor after clips are fed", readyStatus);
+                    const readyStatus =
+                      await nativeBridge.getARAStatus(trackId);
+                    console.log(
+                      "[FXChain] Opening ARA plugin editor after clips are fed",
+                      readyStatus,
+                    );
                     handleOpenEditor(lastIdx);
                   } else {
-                    alert(firstClipError || `Failed to attach clips to ${plugin.name}.`);
+                    alert(
+                      firstClipError ||
+                        `Failed to attach clips to ${plugin.name}.`,
+                    );
                   }
                 }
               }
@@ -526,7 +638,11 @@ export function FXChainPanel({
         }
 
         // Auto-open native editor for built-in plugins after add
-        if (plugin.pluginType === "builtin" && chainType !== "master" && updatedFx.length > 0) {
+        if (
+          plugin.pluginType === "builtin" &&
+          chainType !== "master" &&
+          updatedFx.length > 0
+        ) {
           const lastFx = updatedFx[updatedFx.length - 1];
           if (lastFx) {
             handleOpenEditor(lastFx.index);
@@ -545,7 +661,11 @@ export function FXChainPanel({
       if (chainType === "master") {
         await nativeBridge.openMasterFXEditor(fxIndex);
       } else {
-        await nativeBridge.openPluginEditor(trackId, fxIndex, chainType === "input");
+        await nativeBridge.openPluginEditor(
+          trackId,
+          fxIndex,
+          chainType === "input",
+        );
       }
       console.log(
         `[FXChain] Opened editor for ${chainType} FX ${fxIndex} on track ${trackId}`,
@@ -561,6 +681,19 @@ export function FXChainPanel({
       console.log(`[FXChain] Opened instrument editor on track ${trackId}`);
     } catch (e) {
       console.error("[FXChain] Failed to open instrument editor:", e);
+    }
+  };
+
+  const handleRemoveInstrument = async () => {
+    try {
+      if (currentTrack?.samplerSamplePath && !currentTrack.instrumentPlugin) {
+        await clearTrackSamplerSampleWithUndo(trackId);
+      } else {
+        await removeInstrumentWithUndo(trackId);
+      }
+      await loadPlugins();
+    } catch (e) {
+      console.error("[FXChain] Failed to remove instrument:", e);
     }
   };
 
@@ -594,9 +727,17 @@ export function FXChainPanel({
       if (chainType === "master") {
         success = await nativeBridge.bypassMasterFX(fxIndex, newBypassed);
       } else if (chainType === "input") {
-        success = await nativeBridge.bypassTrackInputFX(trackId, fxIndex, newBypassed);
+        success = await nativeBridge.bypassTrackInputFX(
+          trackId,
+          fxIndex,
+          newBypassed,
+        );
       } else {
-        success = await nativeBridge.bypassTrackFX(trackId, fxIndex, newBypassed);
+        success = await nativeBridge.bypassTrackFX(
+          trackId,
+          fxIndex,
+          newBypassed,
+        );
       }
       if (success) {
         setBypassedFx((prev) => {
@@ -618,9 +759,19 @@ export function FXChainPanel({
         if (chainType === "master") {
           await nativeBridge.setMasterFXPrecisionOverride(fxIndex, mode);
         } else if (chainType === "input") {
-          await nativeBridge.setTrackPluginPrecisionOverride(trackId, fxIndex, true, mode);
+          await nativeBridge.setTrackPluginPrecisionOverride(
+            trackId,
+            fxIndex,
+            true,
+            mode,
+          );
         } else {
-          await nativeBridge.setTrackPluginPrecisionOverride(trackId, fxIndex, false, mode);
+          await nativeBridge.setTrackPluginPrecisionOverride(
+            trackId,
+            fxIndex,
+            false,
+            mode,
+          );
         }
 
         setFxSlots((prev) =>
@@ -658,9 +809,17 @@ export function FXChainPanel({
         // Master FX reorder not yet supported
         success = false;
       } else if (chainType === "input") {
-        success = await nativeBridge.reorderTrackInputFX(trackId, draggedIndex, dropIndex);
+        success = await nativeBridge.reorderTrackInputFX(
+          trackId,
+          draggedIndex,
+          dropIndex,
+        );
       } else {
-        success = await nativeBridge.reorderTrackFX(trackId, draggedIndex, dropIndex);
+        success = await nativeBridge.reorderTrackFX(
+          trackId,
+          draggedIndex,
+          dropIndex,
+        );
       }
 
       if (success) {
@@ -685,7 +844,11 @@ export function FXChainPanel({
     }
     try {
       const isInputFX = chainType === "input";
-      const sliders = await nativeBridge.getS13FXSliders(trackId, fxIndex, isInputFX);
+      const sliders = await nativeBridge.getS13FXSliders(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
       setS13fxSliders(sliders);
       setExpandedS13FX(fxIndex);
     } catch (e) {
@@ -693,10 +856,19 @@ export function FXChainPanel({
     }
   };
 
-  const handleS13FXSliderChange = async (sliderIndex: number, value: number) => {
+  const handleS13FXSliderChange = async (
+    sliderIndex: number,
+    value: number,
+  ) => {
     if (expandedS13FX === null) return;
     const isInputFX = chainType === "input";
-    await nativeBridge.setS13FXSlider(trackId, expandedS13FX, isInputFX, sliderIndex, value);
+    await nativeBridge.setS13FXSlider(
+      trackId,
+      expandedS13FX,
+      isInputFX,
+      sliderIndex,
+      value,
+    );
     setS13fxSliders((prev) =>
       prev.map((s) => (s.index === sliderIndex ? { ...s, value } : s)),
     );
@@ -705,13 +877,21 @@ export function FXChainPanel({
   const handleReloadS13FX = async (fxIndex: number) => {
     try {
       const isInputFX = chainType === "input";
-      const success = await nativeBridge.reloadS13FX(trackId, fxIndex, isInputFX);
+      const success = await nativeBridge.reloadS13FX(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
       if (success) {
         console.log("[FXChain] Reloaded S13FX at index", fxIndex);
         await loadPlugins();
         notifyFXChainChanged({ trackId, chainType });
         if (expandedS13FX === fxIndex) {
-          const sliders = await nativeBridge.getS13FXSliders(trackId, fxIndex, isInputFX);
+          const sliders = await nativeBridge.getS13FXSliders(
+            trackId,
+            fxIndex,
+            isInputFX,
+          );
           setS13fxSliders(sliders);
         }
       }
@@ -730,7 +910,11 @@ export function FXChainPanel({
     setParamsLoading(true);
     try {
       const isInputFX = chainType === "input";
-      const params = await nativeBridge.getPluginParameters(trackId, fxIndex, isInputFX);
+      const params = await nativeBridge.getPluginParameters(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
       setPluginParams(params);
       setExpandedParamsFx(fxIndex);
       // Close presets panel if open on another slot
@@ -744,8 +928,44 @@ export function FXChainPanel({
 
   const handleAutomateParam = (fxIndex: number, param: PluginParam) => {
     if (chainType === "master") return; // Master automation not supported
-    const automationParam = `plugin_${fxIndex}_${param.index}`;
-    addAutomationLane(trackId, automationParam, `${fxSlots.find((f) => f.index === fxIndex)?.name || "Plugin"}: ${param.name}`);
+    const automationParam = pluginAutomationParamId(
+      chainType === "input",
+      fxIndex,
+      param.index,
+    );
+    addAutomationLane(
+      trackId,
+      automationParam,
+      `${fxSlots.find((f) => f.index === fxIndex)?.name || "Plugin"}: ${param.name}`,
+    );
+  };
+
+  const handlePluginParamChange = async (
+    fxIndex: number,
+    paramIndex: number,
+    value: number,
+  ) => {
+    const isInputFX = chainType === "input";
+    const automationParam = pluginAutomationParamId(
+      isInputFX,
+      fxIndex,
+      paramIndex,
+    );
+    setAutomationWriteValue(trackId, automationParam, value);
+    setPluginParams((params) =>
+      params.map((param) =>
+        param.index === paramIndex
+          ? { ...param, value, text: `${Math.round(value * 100)}%` }
+          : param,
+      ),
+    );
+    await nativeBridge.setPluginParameter(
+      trackId,
+      fxIndex,
+      isInputFX,
+      paramIndex,
+      value,
+    );
   };
 
   // ---- Plugin Presets handlers ----
@@ -758,7 +978,11 @@ export function FXChainPanel({
     setPresetsLoading(true);
     try {
       const isInputFX = chainType === "input";
-      const presets = await nativeBridge.getPluginPresets(trackId, fxIndex, isInputFX);
+      const presets = await nativeBridge.getPluginPresets(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
       setPluginPresetsList(presets);
       setExpandedPresetsFx(fxIndex);
       // Close params panel if open on another slot
@@ -770,11 +994,21 @@ export function FXChainPanel({
     }
   };
 
-  const handleLoadPluginPreset = async (fxIndex: number, presetNameStr: string) => {
+  const handleLoadPluginPreset = async (
+    fxIndex: number,
+    presetNameStr: string,
+  ) => {
     try {
       const isInputFX = chainType === "input";
-      await nativeBridge.loadPluginPreset(trackId, fxIndex, isInputFX, presetNameStr);
-      console.log(`[FXChain] Loaded preset "${presetNameStr}" on FX ${fxIndex}`);
+      await nativeBridge.loadPluginPreset(
+        trackId,
+        fxIndex,
+        isInputFX,
+        presetNameStr,
+      );
+      console.log(
+        `[FXChain] Loaded preset "${presetNameStr}" on FX ${fxIndex}`,
+      );
       notifyFXChainChanged({ trackId, chainType });
     } catch (e) {
       console.error("[FXChain] Failed to load plugin preset:", e);
@@ -790,7 +1024,11 @@ export function FXChainPanel({
       console.log(`[FXChain] Saved preset "${name}" on FX ${fxIndex}`);
       setSavePresetName("");
       // Refresh the presets list
-      const presets = await nativeBridge.getPluginPresets(trackId, fxIndex, isInputFX);
+      const presets = await nativeBridge.getPluginPresets(
+        trackId,
+        fxIndex,
+        isInputFX,
+      );
       setPluginPresetsList(presets);
     } catch (e) {
       console.error("[FXChain] Failed to save plugin preset:", e);
@@ -813,17 +1051,34 @@ export function FXChainPanel({
   });
 
   return createPortal(
-    <div className="fx-chain-overlay" onClick={onClose} role="dialog" aria-label={`FX chain for ${trackName}`}>
+    <div
+      className="fx-chain-overlay"
+      data-modal-root="true"
+      onClick={onClose}
+      onContextMenu={guardModalContextMenu}
+      role="dialog"
+      aria-label={`FX chain for ${trackName}`}
+    >
       <div
         className="fx-chain-panel-two-column"
         onClick={(e) => e.stopPropagation()}
+        onContextMenu={guardModalContextMenu}
       >
         <div className="fx-chain-header">
           <h3>
-            {chainType === "master" ? "Master FX Chain" : chainType === "input" ? "Input FX Chain" : "Track FX Chain"} -{" "}
-            {trackName}
+            {chainType === "master"
+              ? "Master FX Chain"
+              : chainType === "input"
+                ? "Input FX Chain"
+                : "Track FX Chain"}{" "}
+            - {trackName}
           </h3>
-          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close FX chain panel">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onClose}
+            aria-label="Close FX chain panel"
+          >
             <X size={16} />
           </Button>
         </div>
@@ -869,7 +1124,11 @@ export function FXChainPanel({
                     size="sm"
                     disabled={!presetName.trim() || fxSlots.length === 0}
                     onClick={async () => {
-                      await saveFXChainPreset(trackId, presetName.trim(), chainType);
+                      await saveFXChainPreset(
+                        trackId,
+                        presetName.trim(),
+                        chainType,
+                      );
                       setPresetName("");
                     }}
                     title="Save current FX chain as preset"
@@ -926,6 +1185,16 @@ export function FXChainPanel({
               </div>
             )}
 
+            {showMidiFxControls && currentTrack && (
+              <div className="fx-midi-section">
+                <div className="fx-midi-section-header">
+                  <Music size={12} />
+                  MIDI FX
+                </div>
+                <MIDIFXControls track={currentTrack} />
+              </div>
+            )}
+
             <div className="fx-slots-list overflow-y-auto">
               {loading ? (
                 <div className="fx-empty-state">
@@ -933,11 +1202,58 @@ export function FXChainPanel({
                 </div>
               ) : loadedPluginCount === 0 ? (
                 <div className="fx-empty-state">
-                  <p>No plugins loaded</p>
-                  <p className="hint">Add plugins from the browser →</p>
+                  <p>
+                    {chainType === "track" && currentTrack?.type === "midi"
+                      ? "No instrument loaded"
+                      : "No plugins loaded"}
+                  </p>
+                  <p className="hint">
+                    {chainType === "track" && currentTrack?.type === "midi"
+                      ? "Load an instrument to hear MIDI clips."
+                      : "Add plugins from the browser →"}
+                  </p>
                 </div>
               ) : (
                 <>
+                  {hasFallbackInstrument && (
+                    <div>
+                      <div className="fx-slot-item border-l-2 border-l-purple-500/70">
+                        <div
+                          className="fx-drag-handle"
+                          title="Built-in fallback instrument"
+                        >
+                          <Music size={14} className="text-purple-300" />
+                        </div>
+                        <div className="fx-slot-info">
+                          <div className="fx-slot-number">
+                            <Music size={12} className="text-purple-300" />
+                          </div>
+                          <div
+                            className="fx-slot-name"
+                            title={fallbackInstrumentTitle}
+                          >
+                            {fallbackInstrumentDisplayName}
+                          </div>
+                        </div>
+                        <span className="text-[10px] text-purple-200 border border-purple-500/30 rounded px-1.5 py-0.5">
+                          Built-in
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleRemoveInstrument();
+                          }}
+                          title={`Remove ${fallbackInstrumentDisplayName}`}
+                          aria-label={`Remove ${fallbackInstrumentDisplayName}`}
+                          className="fx-remove-btn"
+                        >
+                          <X size={14} />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                   {hasLoadedInstrument && (
                     <div>
                       <div
@@ -961,7 +1277,10 @@ export function FXChainPanel({
                           </div>
                           <div
                             className="fx-slot-name"
-                            title={instrumentPluginPath || "Click to open instrument editor"}
+                            title={
+                              instrumentPluginPath ||
+                              "Click to open instrument editor"
+                            }
                           >
                             {instrumentDisplayName}
                           </div>
@@ -982,379 +1301,627 @@ export function FXChainPanel({
                         >
                           <ExternalLink size={12} />
                         </Button>
-                      </div>
-                    </div>
-                  )}
-                  {fxSlots.map((fx, index) => {
-                  const isS13FX = fx.type === "s13fx";
-                  const isBuiltIn = fx.type === "builtin";
-                  return (
-                    <div key={fx.index}>
-                      <div
-                        className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
-                        draggable
-                        onDragStart={() => handleDragStart(index)}
-                        onDragOver={handleDragOver}
-                        onDrop={(e) => handleDrop(e, index)}
-                        onClick={() => {
-                          if (isS13FX) handleToggleS13FXSliders(fx.index);
-                          else if (isBuiltIn && fx.name.includes("Pitch Correct")) setExpandedPitchCorrector(expandedPitchCorrector === fx.index ? null : fx.index);
-                          else handleOpenEditor(fx.index);
-                        }}
-                      >
-                        <div className="fx-drag-handle" title="Drag to reorder">
-                          <GripVertical size={14} />
-                        </div>
-                        <input
-                          type="checkbox"
-                          checked={!bypassedFx.has(fx.index)}
-                          onChange={(e) => { e.stopPropagation(); handleToggleBypass(fx.index); }}
-                          onClick={(e) => e.stopPropagation()}
-                          title={bypassedFx.has(fx.index) ? "Enable plugin" : "Bypass plugin"}
-                          aria-label={bypassedFx.has(fx.index) ? `Enable ${fx.name}` : `Bypass ${fx.name}`}
-                          className="fx-bypass-checkbox"
-                          style={{ accentColor: "#22c55e", width: 14, height: 14, cursor: "pointer", flexShrink: 0 }}
-                        />
-                        <div className="fx-slot-info" style={{ opacity: bypassedFx.has(fx.index) ? 0.4 : 1 }}>
-                          <div className="fx-slot-number">
-                            {isS13FX ? <Code size={12} className="text-lime-400" /> : index + 1}
-                          </div>
-                          <div
-                            className="fx-slot-name"
-                            title={isS13FX ? "Click to show sliders" : "Click to open editor"}
-                          >
-                            {fx.name}
-                          </div>
-                        </div>
-                        {isS13FX && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={(e) => { e.stopPropagation(); handleOpenEditor(fx.index); }}
-                              title="Open GFX editor window"
-                              aria-label={`Open GFX editor for ${fx.name}`}
-                              className="fx-remove-btn"
-                            >
-                              <ExternalLink size={12} />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={(e) => { e.stopPropagation(); handleReloadS13FX(fx.index); }}
-                              title="Reload script"
-                              aria-label={`Reload script for ${fx.name}`}
-                              className="fx-remove-btn"
-                            >
-                              <RefreshCw size={12} />
-                            </Button>
-                          </>
-                        )}
-                        {/* A/B Comparison Toggle */}
-                        {!isS13FX && (() => {
-                          const abKey = `${trackId}-${fx.index}`;
-                          const abState = pluginABStates[abKey];
-                          const activeSlot = abState?.active || "a";
-                          return (
-                            <button
-                              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors shrink-0 ${
-                                activeSlot === "a"
-                                  ? "bg-blue-600/30 text-blue-400 border border-blue-500/50"
-                                  : "bg-orange-600/30 text-orange-400 border border-orange-500/50"
-                              }`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                togglePluginAB(trackId, fx.index, chainType === "input");
-                              }}
-                              title={`A/B Compare - Active: ${activeSlot.toUpperCase()}. Click to toggle.`}
-                              aria-label={`A/B compare for ${fx.name}, active slot ${activeSlot.toUpperCase()}`}
-                            >
-                              <ArrowLeftRight size={10} />
-                              {activeSlot.toUpperCase()}
-                            </button>
-                          );
-                        })()}
-                        {!isS13FX && (
-                          <select
-                            value={fx.precisionOverride || "auto"}
-                            disabled={precisionUpdatingFx === fx.index}
-                            onChange={(e) => {
-                              e.stopPropagation();
-                              void handleSetPrecisionOverride(
-                                fx.index,
-                                e.target.value as "auto" | "float32",
-                              );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            className="shrink-0 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-[10px] text-neutral-300 outline-none focus:border-sky-500"
-                            title="Processing precision override"
-                            aria-label={`Precision override for ${fx.name}`}
-                          >
-                            <option value="auto">Auto</option>
-                            <option value="float32">Float32</option>
-                          </select>
-                        )}
-                        {/* Parameters button */}
-                        {!isS13FX && (
-                          <button
-                            className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
-                              expandedParamsFx === fx.index
-                                ? "bg-cyan-600/30 text-cyan-400 border border-cyan-500/50"
-                                : "text-neutral-400 hover:text-white hover:bg-neutral-700"
-                            }`}
-                            onClick={(e) => { e.stopPropagation(); handleToggleParams(fx.index); }}
-                            title="Browse automatable parameters"
-                            aria-label={`Browse parameters for ${fx.name}`}
-                          >
-                            <List size={10} />
-                          </button>
-                        )}
-                        {/* Presets button */}
-                        {!isS13FX && (
-                          <button
-                            className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
-                              expandedPresetsFx === fx.index
-                                ? "bg-purple-600/30 text-purple-400 border border-purple-500/50"
-                                : "text-neutral-400 hover:text-white hover:bg-neutral-700"
-                            }`}
-                            onClick={(e) => { e.stopPropagation(); handleTogglePluginPresets(fx.index); }}
-                            title="Plugin presets"
-                            aria-label={`Presets for ${fx.name}`}
-                          >
-                            <Disc3 size={10} />
-                          </button>
-                        )}
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          onClick={(e) => { e.stopPropagation(); handleRemove(fx.index); }}
-                          title="Remove plugin"
-                          aria-label={`Remove ${fx.name} from FX chain`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleRemoveInstrument();
+                          }}
+                          title="Remove instrument"
+                          aria-label={`Remove instrument ${instrumentDisplayName}`}
                           className="fx-remove-btn"
                         >
                           <X size={14} />
                         </Button>
                       </div>
-
-                      {/* Sidechain Source Selector */}
-                      {chainType !== "master" && sidechainTrackOptions.length > 0 && (
-                        <div className="flex items-center gap-1.5 px-2 py-1 bg-neutral-900/60 border-x border-neutral-700">
-                          <Link2
-                            size={11}
-                            className={`shrink-0 ${sidechainSources[fx.index] ? "text-amber-400" : "text-neutral-500"}`}
-                          />
-                          <span className="text-[10px] text-neutral-400 shrink-0">SC</span>
-                          <select
-                            value={sidechainSources[fx.index] || ""}
+                    </div>
+                  )}
+                  {fxSlots.map((fx, index) => {
+                    const isS13FX = fx.type === "s13fx";
+                    const isBuiltIn = fx.type === "builtin";
+                    return (
+                      <div key={fx.index}>
+                        <div
+                          className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
+                          draggable
+                          onDragStart={() => handleDragStart(index)}
+                          onDragOver={handleDragOver}
+                          onDrop={(e) => handleDrop(e, index)}
+                          onClick={() => {
+                            if (isS13FX) handleToggleS13FXSliders(fx.index);
+                            else if (
+                              isBuiltIn &&
+                              fx.name.includes("Pitch Correct")
+                            )
+                              setExpandedPitchCorrector(
+                                expandedPitchCorrector === fx.index
+                                  ? null
+                                  : fx.index,
+                              );
+                            else handleOpenEditor(fx.index);
+                          }}
+                        >
+                          <div
+                            className="fx-drag-handle"
+                            title="Drag to reorder"
+                          >
+                            <GripVertical size={14} />
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={!bypassedFx.has(fx.index)}
                             onChange={(e) => {
                               e.stopPropagation();
-                              handleSetSidechainSource(fx.index, e.target.value);
+                              handleToggleBypass(fx.index);
                             }}
                             onClick={(e) => e.stopPropagation()}
-                            className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-[10px] text-neutral-300 outline-none focus:border-amber-500 cursor-pointer min-w-0 truncate"
-                            title="Sidechain source track"
-                          >
-                            <option value="">None</option>
-                            {sidechainTrackOptions.map((t) => (
-                              <option key={t.id} value={t.id}>{t.name}</option>
-                            ))}
-                          </select>
-                          {sidechainSources[fx.index] && (
-                            <span className="text-[9px] font-bold text-amber-400 bg-amber-900/30 px-1 py-0.5 rounded shrink-0">
-                              SC
-                            </span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Plugin Parameter Automation List */}
-                      {!isS13FX && expandedParamsFx === fx.index && (
-                        <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
-                          <div className="text-[10px] text-neutral-400 mb-1.5 font-medium">Automatable Parameters</div>
-                          {paramsLoading ? (
-                            <div className="text-[10px] text-neutral-500 text-center py-2">Loading parameters...</div>
-                          ) : pluginParams.length === 0 ? (
-                            <div className="text-[10px] text-neutral-500 text-center py-2">No parameters available</div>
-                          ) : (
-                            <div className="max-h-[200px] overflow-y-auto space-y-0.5">
-                              {pluginParams.map((param) => {
-                                const isLearning = midiLearnActive?.fxIndex === fx.index && midiLearnActive?.paramIndex === param.index;
-                                return (
-                                  <div
-                                    key={param.index}
-                                    className={`flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-800/50 hover:bg-neutral-800 transition-colors group ${isLearning ? "ring-1 ring-amber-500/60" : ""}`}
-                                  >
-                                    <span className="flex-1 text-[11px] text-neutral-300 truncate" title={param.name}>
-                                      {param.name}
-                                    </span>
-                                    <span className="text-[9px] text-neutral-500 shrink-0 w-14 text-right truncate" title={param.text}>
-                                      {param.text}
-                                    </span>
-                                    {/* MIDI Learn button */}
-                                    {isLearning ? (
-                                      <button
-                                        className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-300 hover:bg-amber-700/70 transition-colors shrink-0 animate-pulse"
-                                        onClick={() => handleCancelMIDILearn()}
-                                        title="Cancel MIDI Learn"
-                                      >
-                                        Listening...
-                                      </button>
-                                    ) : (
-                                      <button
-                                        className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/20 text-amber-400 hover:bg-amber-700/50 transition-colors opacity-0 group-hover:opacity-100 shrink-0"
-                                        onClick={() => handleStartMIDILearn(fx.index, param.index)}
-                                        title={`MIDI Learn: assign a CC to "${param.name}"`}
-                                      >
-                                        <Radio size={9} className="inline mr-0.5" />
-                                        Learn
-                                      </button>
-                                    )}
-                                    {chainType !== "master" && (
-                                      <button
-                                        className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/30 text-cyan-400 hover:bg-cyan-700/60 transition-colors opacity-60 group-hover:opacity-100 shrink-0"
-                                        onClick={() => handleAutomateParam(fx.index, param)}
-                                        title={`Create automation lane for "${param.name}"`}
-                                      >
-                                        Automate
-                                      </button>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Plugin Presets Browser */}
-                      {!isS13FX && expandedPresetsFx === fx.index && (
-                        <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
-                          <div className="text-[10px] text-neutral-400 mb-1.5 font-medium">Plugin Presets</div>
-                          {/* Save Preset */}
-                          <div className="flex gap-1.5 mb-2">
-                            <input
-                              type="text"
-                              placeholder="Save as..."
-                              value={savePresetName}
-                              onChange={(e) => setSavePresetName(e.target.value)}
-                              onClick={(e) => e.stopPropagation()}
-                              className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1.5 py-0.5 text-[11px] text-white placeholder-neutral-500 outline-none focus:border-purple-500"
-                            />
-                            <button
-                              className="text-[9px] px-2 py-0.5 rounded bg-purple-700/40 text-purple-300 hover:bg-purple-700/70 transition-colors disabled:opacity-30"
-                              onClick={() => handleSavePluginPreset(fx.index)}
-                              disabled={!savePresetName.trim()}
-                              title="Save current settings as a preset"
-                            >
-                              <Save size={10} />
-                            </button>
-                          </div>
-                          {/* Preset List */}
-                          {presetsLoading ? (
-                            <div className="text-[10px] text-neutral-500 text-center py-2">Loading presets...</div>
-                          ) : pluginPresetsList.length === 0 ? (
-                            <div className="text-[10px] text-neutral-500 text-center py-2">No presets available</div>
-                          ) : (
-                            <div className="max-h-[200px] overflow-y-auto space-y-0.5">
-                              {pluginPresetsList.map((preset, idx) => (
-                                <button
-                                  key={idx}
-                                  className="w-full text-left flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-800/50 hover:bg-neutral-800 transition-colors text-[11px] text-neutral-300"
-                                  onClick={() => handleLoadPluginPreset(fx.index, preset)}
-                                  title={`Load preset "${preset}"`}
-                                >
-                                  <Disc3 size={10} className="text-purple-400 shrink-0" />
-                                  <span className="truncate">{preset}</span>
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* S13FX inline sliders + advanced graph */}
-                      {isS13FX && expandedS13FX === fx.index && s13fxSliders.length > 0 && (() => {
-                        const advancedType = fx.pluginPath?.match(/(\w+)_advanced\.jsfx/)?.[1];
-                        const hasGraph = !!advancedType && ["eq", "compressor", "gate", "delay", "reverb", "saturation", "chorus"].includes(advancedType);
-                        const graphProps = { sliders: s13fxSliders, onSliderChange: handleS13FXSliderChange, width: 340, height: 180 };
-                        return (
-                          <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2 space-y-1.5">
-                            {/* Advanced parametric graph */}
-                            {advancedType === "eq" && <EQGraph {...graphProps} />}
-                            {advancedType === "compressor" && <CompressorGraph {...graphProps} />}
-                            {advancedType === "gate" && <GateGraph {...graphProps} />}
-                            {advancedType === "delay" && <DelayGraph {...graphProps} />}
-                            {advancedType === "reverb" && <ReverbGraph {...graphProps} />}
-                            {advancedType === "saturation" && <SaturationGraph {...graphProps} />}
-                            {advancedType === "chorus" && <ChorusGraph {...graphProps} />}
-
-                            {/* Raw sliders toggle when graph is present */}
-                            {hasGraph && (
-                              <button
-                                onClick={() => setShowRawSliders((v) => !v)}
-                                className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors"
-                              >
-                                {showRawSliders ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                                {showRawSliders ? "Hide" : "Show"} raw sliders
-                              </button>
-                            )}
-
-                            {/* Raw sliders (always shown if no graph, toggleable if graph present) */}
-                            {(!hasGraph || showRawSliders) && s13fxSliders.map((slider) => (
-                              <div key={slider.index} className="flex items-center gap-2 text-xs">
-                                <span className="text-neutral-400 w-24 truncate shrink-0" title={slider.name}>
-                                  {slider.name}
-                                </span>
-                                {slider.isEnum && slider.enumNames ? (
-                                  <select
-                                    value={slider.value}
-                                    onChange={(e) => handleS13FXSliderChange(slider.index, Number(e.target.value))}
-                                    className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-white text-xs"
-                                  >
-                                    {slider.enumNames.map((name, i) => (
-                                      <option key={i} value={i}>{name}</option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <input
-                                    type="range"
-                                    min={slider.min}
-                                    max={slider.max}
-                                    step={slider.inc || 0.001}
-                                    value={slider.value}
-                                    onChange={(e) => handleS13FXSliderChange(slider.index, Number(e.target.value))}
-                                    className="flex-1 accent-lime-500"
-                                  />
-                                )}
-                                <span className="text-neutral-500 w-12 text-right shrink-0">
-                                  {slider.value.toFixed(slider.inc >= 1 ? 0 : 2)}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })()}
-
-                      {/* Pitch Corrector inline panel */}
-                      {isBuiltIn && fx.name.includes("Pitch Correct") && expandedPitchCorrector === fx.index && (
-                        <div className="p-2">
-                          <PitchCorrectorPanel
-                            trackId={trackId}
-                            fxIndex={fx.index}
-                            onClose={() => setExpandedPitchCorrector(null)}
-                            onOpenGraphicalEditor={() => {
-                              // Find the first selected audio clip on this track to analyze
-                              const track = tracks.find(t => t.id === trackId);
-                              const clip = track?.clips?.[0];
-                              if (clip) {
-                                openPitchEditor(trackId, clip.id, fx.index);
-                              }
+                            title={
+                              bypassedFx.has(fx.index)
+                                ? "Enable plugin"
+                                : "Bypass plugin"
+                            }
+                            aria-label={
+                              bypassedFx.has(fx.index)
+                                ? `Enable ${fx.name}`
+                                : `Bypass ${fx.name}`
+                            }
+                            className="fx-bypass-checkbox"
+                            style={{
+                              accentColor: "#22c55e",
+                              width: 14,
+                              height: 14,
+                              cursor: "pointer",
+                              flexShrink: 0,
                             }}
                           />
+                          <div
+                            className="fx-slot-info"
+                            style={{
+                              opacity: bypassedFx.has(fx.index) ? 0.4 : 1,
+                            }}
+                          >
+                            <div className="fx-slot-number">
+                              {isS13FX ? (
+                                <Code size={12} className="text-lime-400" />
+                              ) : (
+                                index + 1
+                              )}
+                            </div>
+                            <div
+                              className="fx-slot-name"
+                              title={
+                                isS13FX
+                                  ? "Click to show sliders"
+                                  : "Click to open editor"
+                              }
+                            >
+                              {fx.name}
+                            </div>
+                          </div>
+                          {isS13FX && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenEditor(fx.index);
+                                }}
+                                title="Open GFX editor window"
+                                aria-label={`Open GFX editor for ${fx.name}`}
+                                className="fx-remove-btn"
+                              >
+                                <ExternalLink size={12} />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleReloadS13FX(fx.index);
+                                }}
+                                title="Reload script"
+                                aria-label={`Reload script for ${fx.name}`}
+                                className="fx-remove-btn"
+                              >
+                                <RefreshCw size={12} />
+                              </Button>
+                            </>
+                          )}
+                          {/* A/B Comparison Toggle */}
+                          {!isS13FX &&
+                            (() => {
+                              const abKey = `${trackId}-${fx.index}`;
+                              const abState = pluginABStates[abKey];
+                              const activeSlot = abState?.active || "a";
+                              return (
+                                <button
+                                  className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors shrink-0 ${
+                                    activeSlot === "a"
+                                      ? "bg-blue-600/30 text-blue-400 border border-blue-500/50"
+                                      : "bg-orange-600/30 text-orange-400 border border-orange-500/50"
+                                  }`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    togglePluginAB(
+                                      trackId,
+                                      fx.index,
+                                      chainType === "input",
+                                    );
+                                  }}
+                                  title={`A/B Compare - Active: ${activeSlot.toUpperCase()}. Click to toggle.`}
+                                  aria-label={`A/B compare for ${fx.name}, active slot ${activeSlot.toUpperCase()}`}
+                                >
+                                  <ArrowLeftRight size={10} />
+                                  {activeSlot.toUpperCase()}
+                                </button>
+                              );
+                            })()}
+                          {!isS13FX && (
+                            <select
+                              value={fx.precisionOverride || "auto"}
+                              disabled={precisionUpdatingFx === fx.index}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                void handleSetPrecisionOverride(
+                                  fx.index,
+                                  e.target.value as "auto" | "float32",
+                                );
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              className="shrink-0 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-[10px] text-neutral-300 outline-none focus:border-sky-500"
+                              title="Processing precision override"
+                              aria-label={`Precision override for ${fx.name}`}
+                            >
+                              <option value="auto">Auto</option>
+                              <option value="float32">Float32</option>
+                            </select>
+                          )}
+                          {/* Parameters button */}
+                          {!isS13FX && (
+                            <button
+                              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
+                                expandedParamsFx === fx.index
+                                  ? "bg-cyan-600/30 text-cyan-400 border border-cyan-500/50"
+                                  : "text-neutral-400 hover:text-white hover:bg-neutral-700"
+                              }`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleParams(fx.index);
+                              }}
+                              title="Browse automatable parameters"
+                              aria-label={`Browse parameters for ${fx.name}`}
+                            >
+                              <List size={10} />
+                            </button>
+                          )}
+                          {/* Presets button */}
+                          {!isS13FX && (
+                            <button
+                              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
+                                expandedPresetsFx === fx.index
+                                  ? "bg-purple-600/30 text-purple-400 border border-purple-500/50"
+                                  : "text-neutral-400 hover:text-white hover:bg-neutral-700"
+                              }`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleTogglePluginPresets(fx.index);
+                              }}
+                              title="Plugin presets"
+                              aria-label={`Presets for ${fx.name}`}
+                            >
+                              <Disc3 size={10} />
+                            </button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemove(fx.index);
+                            }}
+                            title="Remove plugin"
+                            aria-label={`Remove ${fx.name} from FX chain`}
+                            className="fx-remove-btn"
+                          >
+                            <X size={14} />
+                          </Button>
                         </div>
-                      )}
-                    </div>
-                  );
+
+                        {/* Sidechain Source Selector */}
+                        {chainType !== "master" &&
+                          sidechainTrackOptions.length > 0 && (
+                            <div className="flex items-center gap-1.5 px-2 py-1 bg-neutral-900/60 border-x border-neutral-700">
+                              <Link2
+                                size={11}
+                                className={`shrink-0 ${sidechainSources[fx.index] ? "text-amber-400" : "text-neutral-500"}`}
+                              />
+                              <span className="text-[10px] text-neutral-400 shrink-0">
+                                SC
+                              </span>
+                              <select
+                                value={sidechainSources[fx.index] || ""}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  handleSetSidechainSource(
+                                    fx.index,
+                                    e.target.value,
+                                  );
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-[10px] text-neutral-300 outline-none focus:border-amber-500 cursor-pointer min-w-0 truncate"
+                                title="Sidechain source track"
+                              >
+                                <option value="">None</option>
+                                {sidechainTrackOptions.map((t) => (
+                                  <option key={t.id} value={t.id}>
+                                    {t.name}
+                                  </option>
+                                ))}
+                              </select>
+                              {sidechainSources[fx.index] && (
+                                <span className="text-[9px] font-bold text-amber-400 bg-amber-900/30 px-1 py-0.5 rounded shrink-0">
+                                  SC
+                                </span>
+                              )}
+                            </div>
+                          )}
+
+                        {/* Plugin Parameter Automation List */}
+                        {!isS13FX && expandedParamsFx === fx.index && (
+                          <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
+                            <div className="text-[10px] text-neutral-400 mb-1.5 font-medium">
+                              Automatable Parameters
+                            </div>
+                            {paramsLoading ? (
+                              <div className="text-[10px] text-neutral-500 text-center py-2">
+                                Loading parameters...
+                              </div>
+                            ) : pluginParams.length === 0 ? (
+                              <div className="text-[10px] text-neutral-500 text-center py-2">
+                                No parameters available
+                              </div>
+                            ) : (
+                              <div className="max-h-[200px] overflow-y-auto space-y-0.5">
+                                {pluginParams.map((param) => {
+                                  const isLearning =
+                                    midiLearnActive?.fxIndex === fx.index &&
+                                    midiLearnActive?.paramIndex === param.index;
+                                  return (
+                                    <div
+                                      key={param.index}
+                                      className={`flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-800/50 hover:bg-neutral-800 transition-colors group ${isLearning ? "ring-1 ring-amber-500/60" : ""}`}
+                                    >
+                                      <span
+                                        className="flex-1 text-[11px] text-neutral-300 truncate"
+                                        title={param.name}
+                                      >
+                                        {param.name}
+                                      </span>
+                                      <span
+                                        className="text-[9px] text-neutral-500 shrink-0 w-14 text-right truncate"
+                                        title={param.text}
+                                      >
+                                        {param.text}
+                                      </span>
+                                      <input
+                                        type="range"
+                                        min={0}
+                                        max={1}
+                                        step={0.001}
+                                        value={param.value}
+                                        className="w-20 h-1 accent-cyan-500"
+                                        onPointerDown={() => {
+                                          if (chainType !== "master") {
+                                            beginAutomationParamTouch(
+                                              trackId,
+                                              pluginAutomationParamId(
+                                                chainType === "input",
+                                                fx.index,
+                                                param.index,
+                                              ),
+                                            );
+                                          }
+                                        }}
+                                        onPointerUp={() => {
+                                          if (chainType !== "master") {
+                                            endAutomationParamTouch(
+                                              trackId,
+                                              pluginAutomationParamId(
+                                                chainType === "input",
+                                                fx.index,
+                                                param.index,
+                                              ),
+                                            );
+                                          }
+                                        }}
+                                        onPointerCancel={() => {
+                                          if (chainType !== "master") {
+                                            endAutomationParamTouch(
+                                              trackId,
+                                              pluginAutomationParamId(
+                                                chainType === "input",
+                                                fx.index,
+                                                param.index,
+                                              ),
+                                            );
+                                          }
+                                        }}
+                                        onBlur={() => {
+                                          if (chainType !== "master") {
+                                            endAutomationParamTouch(
+                                              trackId,
+                                              pluginAutomationParamId(
+                                                chainType === "input",
+                                                fx.index,
+                                                param.index,
+                                              ),
+                                            );
+                                          }
+                                        }}
+                                        onChange={(event) => {
+                                          void handlePluginParamChange(
+                                            fx.index,
+                                            param.index,
+                                            Number(event.currentTarget.value),
+                                          );
+                                        }}
+                                        title={`Set ${param.name}`}
+                                      />
+                                      {/* MIDI Learn button */}
+                                      {isLearning ? (
+                                        <button
+                                          className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-300 hover:bg-amber-700/70 transition-colors shrink-0 animate-pulse"
+                                          onClick={() =>
+                                            handleCancelMIDILearn()
+                                          }
+                                          title="Cancel MIDI Learn"
+                                        >
+                                          Listening...
+                                        </button>
+                                      ) : (
+                                        <button
+                                          className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/20 text-amber-400 hover:bg-amber-700/50 transition-colors opacity-0 group-hover:opacity-100 shrink-0"
+                                          onClick={() =>
+                                            handleStartMIDILearn(
+                                              fx.index,
+                                              param.index,
+                                            )
+                                          }
+                                          title={`MIDI Learn: assign a CC to "${param.name}"`}
+                                        >
+                                          <Radio
+                                            size={9}
+                                            className="inline mr-0.5"
+                                          />
+                                          Learn
+                                        </button>
+                                      )}
+                                      {chainType !== "master" && (
+                                        <button
+                                          className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/30 text-cyan-400 hover:bg-cyan-700/60 transition-colors opacity-60 group-hover:opacity-100 shrink-0"
+                                          onClick={() =>
+                                            handleAutomateParam(fx.index, param)
+                                          }
+                                          title={`Create automation lane for "${param.name}"`}
+                                        >
+                                          Automate
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Plugin Presets Browser */}
+                        {!isS13FX && expandedPresetsFx === fx.index && (
+                          <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
+                            <div className="text-[10px] text-neutral-400 mb-1.5 font-medium">
+                              Plugin Presets
+                            </div>
+                            {/* Save Preset */}
+                            <div className="flex gap-1.5 mb-2">
+                              <input
+                                type="text"
+                                placeholder="Save as..."
+                                value={savePresetName}
+                                onChange={(e) =>
+                                  setSavePresetName(e.target.value)
+                                }
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1.5 py-0.5 text-[11px] text-white placeholder-neutral-500 outline-none focus:border-purple-500"
+                              />
+                              <button
+                                className="text-[9px] px-2 py-0.5 rounded bg-purple-700/40 text-purple-300 hover:bg-purple-700/70 transition-colors disabled:opacity-30"
+                                onClick={() => handleSavePluginPreset(fx.index)}
+                                disabled={!savePresetName.trim()}
+                                title="Save current settings as a preset"
+                              >
+                                <Save size={10} />
+                              </button>
+                            </div>
+                            {/* Preset List */}
+                            {presetsLoading ? (
+                              <div className="text-[10px] text-neutral-500 text-center py-2">
+                                Loading presets...
+                              </div>
+                            ) : pluginPresetsList.length === 0 ? (
+                              <div className="text-[10px] text-neutral-500 text-center py-2">
+                                No presets available
+                              </div>
+                            ) : (
+                              <div className="max-h-[200px] overflow-y-auto space-y-0.5">
+                                {pluginPresetsList.map((preset, idx) => (
+                                  <button
+                                    key={idx}
+                                    className="w-full text-left flex items-center gap-1.5 px-1.5 py-1 rounded bg-neutral-800/50 hover:bg-neutral-800 transition-colors text-[11px] text-neutral-300"
+                                    onClick={() =>
+                                      handleLoadPluginPreset(fx.index, preset)
+                                    }
+                                    title={`Load preset "${preset}"`}
+                                  >
+                                    <Disc3
+                                      size={10}
+                                      className="text-purple-400 shrink-0"
+                                    />
+                                    <span className="truncate">{preset}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* S13FX inline sliders + advanced graph */}
+                        {isS13FX &&
+                          expandedS13FX === fx.index &&
+                          s13fxSliders.length > 0 &&
+                          (() => {
+                            const advancedType =
+                              fx.pluginPath?.match(/(\w+)_advanced\.jsfx/)?.[1];
+                            const hasGraph =
+                              !!advancedType &&
+                              [
+                                "eq",
+                                "compressor",
+                                "gate",
+                                "delay",
+                                "reverb",
+                                "saturation",
+                                "chorus",
+                              ].includes(advancedType);
+                            const graphProps = {
+                              sliders: s13fxSliders,
+                              onSliderChange: handleS13FXSliderChange,
+                              width: 340,
+                              height: 180,
+                            };
+                            return (
+                              <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2 space-y-1.5">
+                                {/* Advanced parametric graph */}
+                                {advancedType === "eq" && (
+                                  <EQGraph {...graphProps} />
+                                )}
+                                {advancedType === "compressor" && (
+                                  <CompressorGraph {...graphProps} />
+                                )}
+                                {advancedType === "gate" && (
+                                  <GateGraph {...graphProps} />
+                                )}
+                                {advancedType === "delay" && (
+                                  <DelayGraph {...graphProps} />
+                                )}
+                                {advancedType === "reverb" && (
+                                  <ReverbGraph {...graphProps} />
+                                )}
+                                {advancedType === "saturation" && (
+                                  <SaturationGraph {...graphProps} />
+                                )}
+                                {advancedType === "chorus" && (
+                                  <ChorusGraph {...graphProps} />
+                                )}
+
+                                {/* Raw sliders toggle when graph is present */}
+                                {hasGraph && (
+                                  <button
+                                    onClick={() => setShowRawSliders((v) => !v)}
+                                    className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors"
+                                  >
+                                    {showRawSliders ? (
+                                      <ChevronDown size={12} />
+                                    ) : (
+                                      <ChevronRight size={12} />
+                                    )}
+                                    {showRawSliders ? "Hide" : "Show"} raw
+                                    sliders
+                                  </button>
+                                )}
+
+                                {/* Raw sliders (always shown if no graph, toggleable if graph present) */}
+                                {(!hasGraph || showRawSliders) &&
+                                  s13fxSliders.map((slider) => (
+                                    <div
+                                      key={slider.index}
+                                      className="flex items-center gap-2 text-xs"
+                                    >
+                                      <span
+                                        className="text-neutral-400 w-24 truncate shrink-0"
+                                        title={slider.name}
+                                      >
+                                        {slider.name}
+                                      </span>
+                                      {slider.isEnum && slider.enumNames ? (
+                                        <select
+                                          value={slider.value}
+                                          onChange={(e) =>
+                                            handleS13FXSliderChange(
+                                              slider.index,
+                                              Number(e.target.value),
+                                            )
+                                          }
+                                          className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1 py-0.5 text-white text-xs"
+                                        >
+                                          {slider.enumNames.map((name, i) => (
+                                            <option key={i} value={i}>
+                                              {name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      ) : (
+                                        <input
+                                          type="range"
+                                          min={slider.min}
+                                          max={slider.max}
+                                          step={slider.inc || 0.001}
+                                          value={slider.value}
+                                          onChange={(e) =>
+                                            handleS13FXSliderChange(
+                                              slider.index,
+                                              Number(e.target.value),
+                                            )
+                                          }
+                                          className="flex-1 accent-lime-500"
+                                        />
+                                      )}
+                                      <span className="text-neutral-500 w-12 text-right shrink-0">
+                                        {slider.value.toFixed(
+                                          slider.inc >= 1 ? 0 : 2,
+                                        )}
+                                      </span>
+                                    </div>
+                                  ))}
+                              </div>
+                            );
+                          })()}
+
+                        {/* Pitch Corrector inline panel */}
+                        {isBuiltIn &&
+                          fx.name.includes("Pitch Correct") &&
+                          expandedPitchCorrector === fx.index && (
+                            <div className="p-2">
+                              <PitchCorrectorPanel
+                                trackId={trackId}
+                                fxIndex={fx.index}
+                                onClose={() => setExpandedPitchCorrector(null)}
+                                onOpenGraphicalEditor={() => {
+                                  // Find the first selected audio clip on this track to analyze
+                                  const track = tracks.find(
+                                    (t) => t.id === trackId,
+                                  );
+                                  const clip = track?.clips?.[0];
+                                  if (clip) {
+                                    openPitchEditor(trackId, clip.id, fx.index);
+                                  }
+                                }}
+                              />
+                            </div>
+                          )}
+                      </div>
+                    );
                   })}
                 </>
               )}
@@ -1372,11 +1939,12 @@ export function FXChainPanel({
               <Input
                 type="text"
                 variant="default"
-                size="md"
+                size="lg"
                 placeholder="Search by name, manufacturer, or category..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="flex-1"
+                fullWidth={true}
                 aria-label="Search available plugins"
               />
               <Select
@@ -1422,7 +1990,11 @@ export function FXChainPanel({
                     <div
                       key={idx}
                       className={`flex items-center gap-2 p-2 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
-                        isScript ? "border-lime-700/40" : isBuiltInPlugin ? "border-blue-700/40" : "border-neutral-700"
+                        isScript
+                          ? "border-lime-700/40"
+                          : isBuiltInPlugin
+                            ? "border-blue-700/40"
+                            : "border-neutral-700"
                       }`}
                     >
                       {plugin.snapshot ? (
@@ -1434,7 +2006,10 @@ export function FXChainPanel({
                       ) : (
                         <div
                           className="w-8 h-8 rounded flex items-center justify-center shrink-0"
-                          style={{ backgroundColor: color + "20", border: `1px solid ${color}40` }}
+                          style={{
+                            backgroundColor: color + "20",
+                            border: `1px solid ${color}40`,
+                          }}
                         >
                           <Icon size={16} />
                         </div>
@@ -1457,7 +2032,11 @@ export function FXChainPanel({
                           {plugin.manufacturer}
                         </div>
                         <div className="text-[9px] text-neutral-500">
-                          {isScript ? "JSFX Script" : isBuiltInPlugin ? "OpenStudio Built-in" : plugin.category}
+                          {isScript
+                            ? "JSFX Script"
+                            : isBuiltInPlugin
+                              ? "OpenStudio Built-in"
+                              : plugin.category}
                         </div>
                       </div>
                       <Button
@@ -1466,7 +2045,9 @@ export function FXChainPanel({
                         onClick={() => handleAddPlugin(plugin)}
                         disabled={addingPlugin !== null}
                       >
-                        {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
+                        {addingPlugin === plugin.fileOrIdentifier
+                          ? "Adding..."
+                          : "Add"}
                       </Button>
                     </div>
                   );
@@ -1477,6 +2058,6 @@ export function FXChainPanel({
         </div>
       </div>
     </div>,
-    document.body
+    document.body,
   );
 }

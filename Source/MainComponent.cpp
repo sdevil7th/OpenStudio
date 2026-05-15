@@ -109,6 +109,51 @@ juce::File getStartupLogFile()
     return getExecutableDirectory().getChildFile("OpenStudio_Debug.log");
 }
 
+juce::File getRecentProjectsFile()
+{
+    auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                        .getChildFile("OpenStudio");
+    appDataDir.createDirectory();
+    return appDataDir.getChildFile("recent_projects.json");
+}
+
+juce::var readRecentProjectsFile()
+{
+    juce::Array<juce::var> empty;
+    const auto file = getRecentProjectsFile();
+    if (! file.existsAsFile())
+        return juce::var(empty);
+
+    const auto parsed = juce::JSON::parse(file.loadFileAsString());
+    if (parsed.isArray())
+        return parsed;
+
+    return juce::var(empty);
+}
+
+bool writeRecentProjectsFile(const juce::var& rawProjects)
+{
+    auto* projects = rawProjects.getArray();
+    if (projects == nullptr)
+        return false;
+
+    juce::StringArray seen;
+    juce::Array<juce::var> sanitized;
+    for (const auto& item : *projects)
+    {
+        const auto path = item.toString().trim();
+        if (path.isEmpty() || seen.contains(path))
+            continue;
+
+        seen.add(path);
+        sanitized.add(path);
+        if (sanitized.size() >= 10)
+            break;
+    }
+
+    return getRecentProjectsFile().replaceWithText(juce::JSON::toString(juce::var(sanitized), false));
+}
+
 juce::String describeBrowserBackend(juce::WebBrowserComponent::Options::Backend backend)
 {
     switch (backend)
@@ -507,7 +552,11 @@ juce::Rectangle<int> getWindowRestoreBoundsFromPlacement(HWND hwnd)
 
 juce::String getWindowRoleQueryValue(MainComponent::WindowRole role)
 {
-    return role == MainComponent::WindowRole::mixer ? "mixer" : "main";
+    if (role == MainComponent::WindowRole::mixer)
+        return "mixer";
+    if (role == MainComponent::WindowRole::midiEditor)
+        return "midiEditor";
+    return "main";
 }
 
 juce::String getStartupModeQueryValue(MainComponent::StartupMode startupMode)
@@ -530,7 +579,7 @@ juce::String getHostPlatformQueryValue()
 
 juce::String getWindowChromeQueryValue(MainComponent::WindowRole role)
 {
-    if (role == MainComponent::WindowRole::mixer)
+    if (role == MainComponent::WindowRole::mixer || role == MainComponent::WindowRole::midiEditor)
         return "native";
 
 #if JUCE_MAC
@@ -583,7 +632,8 @@ bool isLocalFrontendDevServerReachable()
 
 juce::String appendFrontendStartupQuery(const juce::String& baseUrl,
                                         MainComponent::WindowRole role,
-                                        MainComponent::StartupMode startupMode)
+                                        MainComponent::StartupMode startupMode,
+                                        const juce::String& windowInstanceId = {})
 {
     juce::String url = baseUrl;
     const auto appendParameter = [&url](const juce::String& key, const juce::String& value)
@@ -596,6 +646,8 @@ juce::String appendFrontendStartupQuery(const juce::String& baseUrl,
     appendParameter("startup", getStartupModeQueryValue(startupMode));
     appendParameter("platform", getHostPlatformQueryValue());
     appendParameter("windowChrome", getWindowChromeQueryValue(role));
+    if (windowInstanceId.isNotEmpty())
+        appendParameter("sessionId", windowInstanceId);
     appendParameter("cacheBust", juce::String(juce::Time::getCurrentTime().toMilliseconds()));
     return url;
 }
@@ -747,11 +799,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                              StartupMode startupModeIn,
                              WindowRole roleIn,
                              WindowCallbacks callbacksIn,
-                             const juce::String& pitchRegressionJobPathIn)
+                             const juce::String& pitchRegressionJobPathIn,
+                             const juce::String& windowInstanceIdIn)
     : audioEngine(audioEngineIn),
       appUpdater(appUpdaterIn),
       startupMode(startupModeIn),
       windowRole(roleIn),
+      windowInstanceId(windowInstanceIdIn),
       windowCallbacks(std::move(callbacksIn)),
       webView (juce::WebBrowserComponent::Options()
                    .withBackend (getPreferredBrowserBackend())
@@ -993,7 +1047,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        if (args.size() > 0 && args[0].isString()) {
                            explicitId = args[0].toString();
                        }
-                       juce::String trackId = audioEngine.addTrack(explicitId);
+                       juce::String initialType = "";
+                       if (args.size() > 1 && args[1].isString()) {
+                           initialType = args[1].toString();
+                       }
+                       juce::String trackId = audioEngine.addTrack(explicitId, initialType);
                        completion(trackId);
                    })
                    .withNativeFunction ("removeTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -1382,6 +1440,18 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(audioEngine.getPluginParameters(trackId, fxIndex, isInputFX));
                         } else {
                             completion(juce::Array<juce::var>());
+                        }
+                    })
+                    .withNativeFunction ("setPluginParameter", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 5 && args[0].isString()) {
+                            juce::String trackId = args[0].toString();
+                            int fxIndex = static_cast<int>(args[1]);
+                            bool isInputFX = static_cast<bool>(args[2]);
+                            int paramIndex = static_cast<int>(args[3]);
+                            float value = static_cast<float>(static_cast<double>(args[4]));
+                            completion(audioEngine.setPluginParameter(trackId, fxIndex, isInputFX, paramIndex, value));
+                        } else {
+                            completion(false);
                         }
                     })
                     .withNativeFunction ("removeTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -1872,6 +1942,43 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
+                    .withNativeFunction ("removeInstrument", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 1 && args[0].isString()) {
+                            completion(audioEngine.removeInstrument(args[0].toString()));
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("setTrackSamplerSample", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 3 && args[0].isString() && args[1].isString()) {
+                            completion(audioEngine.setTrackSamplerSample(args[0].toString(),
+                                                                         args[1].toString(),
+                                                                         static_cast<int>(args[2])));
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("clearTrackSamplerSample", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 1 && args[0].isString()) {
+                            completion(audioEngine.clearTrackSamplerSample(args[0].toString()));
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("getInstrumentState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 1 && args[0].isString()) {
+                            completion(audioEngine.getInstrumentState(args[0].toString()));
+                        } else {
+                            completion(juce::String());
+                        }
+                    })
+                    .withNativeFunction ("setInstrumentState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 2 && args[0].isString() && args[1].isString()) {
+                            completion(audioEngine.setInstrumentState(args[0].toString(), args[1].toString()));
+                        } else {
+                            completion(false);
+                        }
+                    })
                     .withNativeFunction ("sendMidiNote", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 4 && args[0].isString()) {
                             completion(audioEngine.sendMidiNote(args[0].toString(),
@@ -1881,6 +1988,18 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
+                    })
+                    .withNativeFunction ("getTrackMIDINoteActivity", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 1 && args[0].isString()) {
+                            const int maxAgeMs = args.size() >= 2 ? static_cast<int>(args[1]) : 1200;
+                            completion(audioEngine.getTrackMIDINoteActivity(args[0].toString(), maxAgeMs));
+                        } else {
+                            completion(juce::Array<juce::var>());
+                        }
+                    })
+                    .withNativeFunction ("panicMIDI", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        completion(audioEngine.panicMIDI());
                     })
                     .withNativeFunction ("getActiveRecordingMIDIPreviews", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 1) {
@@ -2112,6 +2231,19 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion("");
                         }
+                    })
+                    .withNativeFunction ("getRecentProjects", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        completion(readRecentProjectsFile());
+                    })
+                    .withNativeFunction ("setRecentProjects", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 1)
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        completion(writeRecentProjectsFile(args[0]));
                     })
                     .withNativeFunction ("consumePendingLaunchProjectPath", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
@@ -2961,71 +3093,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     .withNativeFunction ("exportProjectMIDI", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
-                        // Args: [filePath, midiTracksJson]
-                        // midiTracksJson is an array of { name, clips: [{ startTime, duration, events: [{ type, timestamp, note, velocity }] }] }
+                        // Args: [filePath, midiTracks]
+                        // midiTracks is an array of { name, clips: [{ startTime, duration, events }] }.
                         if (args.size() >= 2 && args[0].isString() && args[1].isArray()) {
-                            juce::String filePath = args[0].toString();
-                            auto* tracksArray = args[1].getArray();
-
-                            juce::MidiFile midiFile;
-                            midiFile.setTicksPerQuarterNote(480);
-
-                            double bpm = 120.0; // Default BPM
-
-                            if (tracksArray) {
-                                for (const auto& trackVar : *tracksArray) {
-                                    if (auto* trackObj = trackVar.getDynamicObject()) {
-                                        juce::MidiMessageSequence sequence;
-
-                                        auto* clips = trackObj->getProperty("clips").getArray();
-                                        if (clips) {
-                                            for (const auto& clipVar : *clips) {
-                                                if (auto* clipObj = clipVar.getDynamicObject()) {
-                                                    double clipStart = (double)clipObj->getProperty("startTime");
-                                                    auto* events = clipObj->getProperty("events").getArray();
-                                                    if (events) {
-                                                        for (const auto& eventVar : *events) {
-                                                            if (auto* eventObj = eventVar.getDynamicObject()) {
-                                                                juce::String eventType = eventObj->getProperty("type").toString();
-                                                                double timestamp = (double)eventObj->getProperty("timestamp");
-                                                                double absoluteTime = clipStart + timestamp;
-                                                                double ticks = absoluteTime * bpm / 60.0 * 480.0;
-
-                                                                if (eventType == "noteOn") {
-                                                                    int note = (int)eventObj->getProperty("note");
-                                                                    int velocity = (int)eventObj->getProperty("velocity");
-                                                                    sequence.addEvent(juce::MidiMessage::noteOn(1, note, (juce::uint8)velocity), ticks);
-                                                                } else if (eventType == "noteOff") {
-                                                                    int note = (int)eventObj->getProperty("note");
-                                                                    sequence.addEvent(juce::MidiMessage::noteOff(1, note), ticks);
-                                                                } else if (eventType == "cc") {
-                                                                    int controller = (int)eventObj->getProperty("controller");
-                                                                    int value = (int)eventObj->getProperty("value");
-                                                                    sequence.addEvent(juce::MidiMessage::controllerEvent(1, controller, value), ticks);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        sequence.updateMatchedPairs();
-                                        midiFile.addTrack(sequence);
-                                    }
-                                }
-                            }
-
-                            juce::File outFile(filePath);
-                            outFile.deleteFile();
-                            std::unique_ptr<juce::FileOutputStream> stream(outFile.createOutputStream());
-                            if (stream) {
-                                bool success = midiFile.writeTo(*stream);
-                                completion(success);
-                            } else {
-                                completion(false);
-                            }
+                            completion(audioEngine.exportProjectMIDI(args[0].toString(), args[1], 120.0));
                         } else {
                             completion(false);
                         }
@@ -3967,16 +4038,29 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         const bool isNowMaximized = toggleDesktopPseudoMaximize();
                         completion(juce::var(isNowMaximized));
                     })
-                   .withNativeFunction ("closeWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("closeWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(juce::var());
                         if (isMainWindow())
                         {
                             requestFrontendAppClose();
                         }
+                        else if (windowRole == WindowRole::midiEditor && windowCallbacks.closeMidiEditorWindow)
+                        {
+                            auto closeMidiEditorWindow = windowCallbacks.closeMidiEditorWindow;
+                            const auto sessionId = windowInstanceId.isNotEmpty() ? windowInstanceId : juce::String("default-midi-editor");
+                            juce::MessageManager::callAsync([closeMidiEditorWindow, sessionId]()
+                            {
+                                closeMidiEditorWindow(sessionId, "close");
+                            });
+                        }
                         else if (windowCallbacks.closeMixerWindow)
                         {
-                            windowCallbacks.closeMixerWindow();
+                            auto closeMixerWindow = windowCallbacks.closeMixerWindow;
+                            juce::MessageManager::callAsync([closeMixerWindow]()
+                            {
+                                closeMixerWindow();
+                            });
                         }
                     })
                     .withNativeFunction ("quitApplication", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -4010,8 +4094,15 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("closeMixerWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
-                        const bool closed = windowCallbacks.closeMixerWindow ? windowCallbacks.closeMixerWindow() : false;
-                        completion(juce::var(closed));
+                        auto closeMixerWindow = windowCallbacks.closeMixerWindow;
+                        completion(juce::var(static_cast<bool>(closeMixerWindow)));
+                        if (closeMixerWindow)
+                        {
+                            juce::MessageManager::callAsync([closeMixerWindow]()
+                            {
+                                closeMixerWindow();
+                            });
+                        }
                     })
                     .withNativeFunction ("getMixerWindowState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
@@ -4032,10 +4123,107 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         else
                             completion(juce::var());
                     })
+                    .withNativeFunction ("openMidiEditorWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::String sessionId = windowInstanceId;
+                        juce::var bounds;
+                        if (args.size() > 0 && args[0].isString())
+                            sessionId = args[0].toString();
+                        if (args.size() > 1)
+                            bounds = args[1];
+                        else if (args.size() > 0 && ! args[0].isString())
+                            bounds = args[0];
+                        if (sessionId.isEmpty())
+                            sessionId = "default-midi-editor";
+
+                        const bool opened = windowCallbacks.openMidiEditorWindow ? windowCallbacks.openMidiEditorWindow(sessionId, bounds) : false;
+                        completion(juce::var(opened));
+                    })
+                    .withNativeFunction ("prewarmMidiEditorWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::String sessionId = windowInstanceId;
+                        juce::var bounds;
+                        if (args.size() > 0 && args[0].isString())
+                            sessionId = args[0].toString();
+                        if (args.size() > 1)
+                            bounds = args[1];
+                        else if (args.size() > 0 && ! args[0].isString())
+                            bounds = args[0];
+                        if (sessionId.isEmpty())
+                            sessionId = "default-midi-editor";
+
+                        const bool warmed = windowCallbacks.prewarmMidiEditorWindow ? windowCallbacks.prewarmMidiEditorWindow(sessionId, bounds) : false;
+                        completion(juce::var(warmed));
+                    })
+                    .withNativeFunction ("focusMidiEditorWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::String sessionId = args.size() > 0 && args[0].isString() ? args[0].toString() : windowInstanceId;
+                        if (sessionId.isEmpty())
+                            sessionId = "default-midi-editor";
+
+                        const bool focused = windowCallbacks.focusMidiEditorWindow ? windowCallbacks.focusMidiEditorWindow(sessionId) : false;
+                        completion(juce::var(focused));
+                    })
+                    .withNativeFunction ("closeMidiEditorWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::String sessionId = args.size() > 0 && args[0].isString() ? args[0].toString() : windowInstanceId;
+                        juce::String reason = args.size() > 1 && args[1].isString() ? args[1].toString() : "close";
+                        if (sessionId.isEmpty())
+                            sessionId = "default-midi-editor";
+
+                        const bool canClose = static_cast<bool>(windowCallbacks.closeMidiEditorWindow);
+                        completion(juce::var(canClose));
+                        if (canClose)
+                        {
+                            auto callback = windowCallbacks.closeMidiEditorWindow;
+                            juce::MessageManager::callAsync([callback, sessionId, reason]()
+                            {
+                                callback(sessionId, reason);
+                            });
+                        }
+                    })
+                    .withNativeFunction ("getMidiEditorWindowState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::String sessionId = args.size() > 0 && args[0].isString() ? args[0].toString() : windowInstanceId;
+                        if (sessionId.isEmpty())
+                            sessionId = "default-midi-editor";
+                        if (windowCallbacks.getMidiEditorWindowState)
+                            completion(windowCallbacks.getMidiEditorWindowState(sessionId));
+                        else
+                            completion(juce::var());
+                    })
+                    .withNativeFunction ("publishMidiEditorUISnapshot", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() > 1 && args[0].isString() && windowCallbacks.publishMidiEditorUISnapshot)
+                            windowCallbacks.publishMidiEditorUISnapshot(args[0].toString(), args[1]);
+                        else if (args.size() > 0 && windowCallbacks.publishMidiEditorUISnapshot)
+                            windowCallbacks.publishMidiEditorUISnapshot(windowInstanceId.isNotEmpty() ? windowInstanceId : "default-midi-editor", args[0]);
+                        completion(juce::var(true));
+                    })
+                    .withNativeFunction ("getMidiEditorUISnapshot", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::String sessionId = args.size() > 0 && args[0].isString() ? args[0].toString() : windowInstanceId;
+                        if (sessionId.isEmpty())
+                            sessionId = "default-midi-editor";
+                        if (windowCallbacks.getMidiEditorUISnapshot)
+                            completion(windowCallbacks.getMidiEditorUISnapshot(sessionId));
+                        else
+                            completion(juce::var());
+                    })
+                    .withNativeFunction ("publishAppCommand", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const juce::var payload = args.size() > 0 ? args[0] : juce::var();
+                        MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "appCommand", payload);
+                        completion(juce::var(true));
+                    })
                     // ========== Automation (Phase 1.1) ==========
                     .withNativeFunction ("setAutomationPoints", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 3) {
                             audioEngine.setAutomationPoints(args[0].toString(), args[1].toString(), args[2].toString());
+                            completion(true);
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("replaceAutomationPointsInRange", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 5) {
+                            audioEngine.replaceAutomationPointsInRange(args[0].toString(),
+                                                                       args[1].toString(),
+                                                                       static_cast<double>(args[2]),
+                                                                       static_cast<double>(args[3]),
+                                                                       args[4].toString());
                             completion(true);
                         } else {
                             completion(false);
@@ -4159,7 +4347,14 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     .withNativeFunction ("exportMIDIFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        if (args.size() >= 5) {
+                        if (args.size() == 2 && args[0].isString()) {
+                            auto tracks = args[1];
+                            if (args[1].isString())
+                                tracks = juce::JSON::parse(args[1].toString());
+
+                            completion(tracks.isArray()
+                                && audioEngine.exportProjectMIDI(args[0].toString(), tracks, 120.0));
+                        } else if (args.size() >= 5) {
                             bool ok = audioEngine.exportMIDIFile(
                                 args[0].toString(),  // trackId
                                 args[1].toString(),  // clipId
@@ -5405,6 +5600,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(audioEngine.refreshAiToolsStatus());
                     })
                     .withNativeFunction ("installAiTools", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() > 0 && args[0].isString())
+                        {
+                            completion(audioEngine.installAiTools(args[0].toString()));
+                            return;
+                        }
+
                         const bool userConfirmedDownload = args.size() > 0 && static_cast<bool>(args[0]);
                         completion(audioEngine.installAiTools(userConfirmedDownload));
                     })
@@ -5603,7 +5804,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
        #if JUCE_DEBUG
         if (isLocalFrontendDevServerReachable())
         {
-            const auto frontendUrl = appendFrontendStartupQuery("http://localhost:5173", windowRole, startupMode);
+            const auto frontendUrl = appendFrontendStartupQuery("http://localhost:5173", windowRole, startupMode, windowInstanceId);
             juce::Logger::writeToLog("Loading frontend from localhost:5173");
             beginFrontendStartupWatchdog(frontendUrl);
             webView.goToURL(frontendUrl);
@@ -5962,7 +6163,13 @@ void MainComponent::requestFrontendAppClose()
     if (! isMainWindow())
     {
         if (windowCallbacks.closeMixerWindow)
-            windowCallbacks.closeMixerWindow();
+        {
+            auto closeMixerWindow = windowCallbacks.closeMixerWindow;
+            juce::MessageManager::callAsync([closeMixerWindow]()
+            {
+                closeMixerWindow();
+            });
+        }
         return;
     }
 
@@ -6031,7 +6238,8 @@ bool MainComponent::loadPackagedFrontend()
     const auto frontendUrl = appendFrontendStartupQuery(
         juce::WebBrowserComponent::getResourceProviderRoot() + "index.html",
         windowRole,
-        startupMode);
+        startupMode,
+        windowInstanceId);
     beginFrontendStartupWatchdog(frontendUrl);
     webView.goToURL(frontendUrl);
     return true;

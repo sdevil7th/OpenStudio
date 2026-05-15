@@ -22,7 +22,8 @@ public:
     enum class WindowRole
     {
         main,
-        mixer
+        mixer,
+        midiEditor
     };
 
     enum class FrontendStartupState
@@ -50,6 +51,13 @@ public:
         std::function<juce::var()> getMixerWindowState;
         std::function<void(const juce::var&)> publishMixerUISnapshot;
         std::function<juce::var()> getMixerUISnapshot;
+        std::function<bool(const juce::String&, const juce::var&)> openMidiEditorWindow;
+        std::function<bool(const juce::String&, const juce::var&)> prewarmMidiEditorWindow;
+        std::function<bool(const juce::String&)> focusMidiEditorWindow;
+        std::function<bool(const juce::String&, const juce::String&)> closeMidiEditorWindow;
+        std::function<juce::var(const juce::String&)> getMidiEditorWindowState;
+        std::function<void(const juce::String&, const juce::var&)> publishMidiEditorUISnapshot;
+        std::function<juce::var(const juce::String&)> getMidiEditorUISnapshot;
     };
 
     //==============================================================================
@@ -58,7 +66,8 @@ public:
                   StartupMode startupModeIn,
                   WindowRole roleIn,
                   WindowCallbacks callbacksIn = {},
-                  const juce::String& pitchRegressionJobPathIn = {});
+                  const juce::String& pitchRegressionJobPathIn = {},
+                  const juce::String& windowInstanceIdIn = {});
     ~MainComponent() override;
 
     //==============================================================================
@@ -105,6 +114,7 @@ private:
     AppUpdater& appUpdater;
     StartupMode startupMode = StartupMode::normal;
     WindowRole windowRole = WindowRole::main;
+    juce::String windowInstanceId;
     WindowCallbacks windowCallbacks;
     juce::File webuiDir;
     juce::WebBrowserComponent webView;

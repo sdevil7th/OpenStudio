@@ -21,6 +21,82 @@ const stringifyForDebug = (value: unknown) => {
   }
 };
 
+function quantizeRecordedMIDIEvents(events: any[], gridSeconds: number, strength: number) {
+  const grid = Math.max(0.001, gridSeconds || 0.125);
+  const amount = Math.max(0, Math.min(1, strength ?? 1));
+  if (!events.length || amount <= 0) {
+    return events.map((event) => ({ ...event })).sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  const nextEvents = events.map((event) => ({ ...event })).sort((a, b) => a.timestamp - b.timestamp);
+  const noteOnStacks = new Map<string, number[]>();
+  const moveRanges: Array<{ start: number; end: number; delta: number }> = [];
+
+  const noteKey = (event: any) => `${event.note ?? -1}`;
+  nextEvents.forEach((event, index) => {
+    if (event.note === undefined) return;
+    const key = noteKey(event);
+    if (event.type === "noteOn" && (event.velocity ?? 0) > 0) {
+      const stack = noteOnStacks.get(key) || [];
+      stack.push(index);
+      noteOnStacks.set(key, stack);
+      return;
+    }
+
+    if (event.type !== "noteOff") return;
+    const stack = noteOnStacks.get(key);
+    const noteOnIndex = stack?.shift();
+    if (noteOnIndex === undefined) return;
+
+    const noteOn = nextEvents[noteOnIndex];
+    const originalStart = Math.max(0, noteOn.timestamp || 0);
+    const originalEnd = Math.max(originalStart + 0.001, event.timestamp || originalStart + 0.001);
+    const targetStart = Math.max(0, Math.round(originalStart / grid) * grid);
+    const nextStart = Math.max(0, originalStart + (targetStart - originalStart) * amount);
+    const delta = nextStart - originalStart;
+    noteOn.timestamp = nextStart;
+    event.timestamp = Math.max(nextStart + 0.001, originalEnd + delta);
+    moveRanges.push({ start: originalStart, end: originalEnd, delta });
+  });
+
+  const controllerDeltaAt = (time: number) => {
+    const candidates = moveRanges.filter((range) =>
+      Math.abs(range.delta) > 0.000001 && time >= range.start && time <= range.end,
+    );
+    if (candidates.length === 0) return 0;
+    candidates.sort((a, b) => Math.abs(time - a.start) - Math.abs(time - b.start));
+    return candidates[0].delta;
+  };
+
+  return nextEvents.map((event) => {
+    if (event.type === "noteOn" || event.type === "noteOff") return event;
+    const delta = controllerDeltaAt(event.timestamp || 0);
+    return delta === 0 ? event : { ...event, timestamp: Math.max(0, (event.timestamp || 0) + delta) };
+  }).sort((a, b) => a.timestamp - b.timestamp);
+}
+
+async function syncArmedTracksBeforeRecording(armedTracks: Array<{ track: any }>) {
+  for (const { track } of armedTracks) {
+    await nativeBridge.addTrack(track.id, track.type).catch(logBridgeError("sync"));
+    await nativeBridge.setTrackType(track.id, track.type).catch(logBridgeError("sync"));
+    await nativeBridge.setTrackRecordArm(track.id, track.armed).catch(logBridgeError("sync"));
+    await nativeBridge.setTrackInputMonitoring(track.id, track.monitorEnabled).catch(logBridgeError("sync"));
+    await nativeBridge.setTrackInputChannels(
+      track.id,
+      track.inputStartChannel ?? 0,
+      track.inputChannelCount ?? 2,
+    ).catch(logBridgeError("sync"));
+
+    if (track.type === "midi" || track.type === "instrument" || track.inputType === "midi") {
+      await nativeBridge.setTrackMIDIInput(
+        track.id,
+        track.midiInputDevice || "",
+        track.midiChannel ?? 0,
+      ).catch(logBridgeError("sync"));
+    }
+  }
+}
+
 async function clearPitchRoutesForCorrectedSourcesBeforePlayback(reason: string) {
   try {
     const cleared = await nativeBridge.clearPitchPreviewRoutesForCorrectedSources();
@@ -156,8 +232,18 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         .map(({ track }) => track)
         .filter((track) => track.type === "midi" || track.type === "instrument");
 
+      await syncArmedTracksBeforeRecording(armedTracks);
+
       if (armedMidiTracks.length > 0) {
+        let availableDevices: string[] = [];
         let openDevices: string[] = [];
+        try {
+          const devices = await nativeBridge.getMIDIInputDevices();
+          availableDevices = Array.isArray(devices) ? devices : [];
+        } catch (error) {
+          console.warn(`${AUDIO_RECORD_LOG_PREFIX} record:getMIDIInputDevices failed`, error);
+        }
+
         try {
           const devices = await nativeBridge.getOpenMIDIDevices();
           openDevices = Array.isArray(devices) ? devices : [];
@@ -171,7 +257,23 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         for (const track of armedMidiTracks) {
           const deviceName = track.midiInputDevice?.trim();
           if (!deviceName) {
-            missingInputTracks.push(track.name);
+            if (availableDevices.length === 0) {
+              missingInputTracks.push(track.name);
+              continue;
+            }
+
+            for (const availableDevice of availableDevices) {
+              if (openDevices.includes(availableDevice)) {
+                continue;
+              }
+
+              const opened = await nativeBridge.openMIDIDevice(availableDevice).catch(() => false);
+              if (opened) {
+                openDevices.push(availableDevice);
+              } else {
+                failedDeviceTracks.push(`${track.name} (${availableDevice})`);
+              }
+            }
             continue;
           }
 
@@ -189,7 +291,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
         if (missingInputTracks.length > 0) {
           get().showToast(
-            `Armed MIDI tracks have no MIDI input selected: ${missingInputTracks.join(", ")}. Hardware MIDI recording will be empty until you choose one. Virtual keyboard still works.`,
+            `Armed MIDI tracks have no available MIDI input device: ${missingInputTracks.join(", ")}. Hardware MIDI recording will be empty until a MIDI device is connected or selected. Virtual keyboard still works.`,
             "info",
           );
         }
@@ -292,6 +394,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       set((state) => ({
         transport: { ...state.transport, isPlaying: false, isPaused: true },
       }));
+      get().endAutomationWriteSession?.();
       nativeBridge.setTransportPlaying(false).then((result) => {
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} pause:setTransportPlaying`, { result });
       });
@@ -352,6 +455,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       const recordingResult = await nativeBridge.setTransportRecording(false);
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} stop:native`, { playingResult, recordingResult });
       console.log("[useDAWStore] STOP Native transport stopped.");
+      get().endAutomationWriteSession?.();
 
       // If we were recording, fetch the new clips and add them to the tracks
       if (wasRecording) {
@@ -480,9 +584,13 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         for (const midiClipInfo of completedMIDIClips) {
           const track = get().tracks.find((t) => t.id === midiClipInfo.trackId);
           const clipColor = track?.color || "#4361ee";
+          const inputQuantizeEnabled = Boolean(get().midiInputQuantizeEnabled);
+          const inputQuantizeGridBeats = Math.max(0.03125, get().midiInputQuantizeGridBeats || 0.25);
+          const inputQuantizeStrength = Math.max(0, Math.min(1, get().midiInputQuantizeStrength ?? 1));
+          const inputQuantizeGridSeconds = inputQuantizeGridBeats / Math.max(0.001, get().transport.tempo / 60);
 
           // Convert backend events to frontend MIDIEvent format
-          const events: MIDIEvent[] = midiClipInfo.events.map((e) => ({
+          const recordedEvents: MIDIEvent[] = midiClipInfo.events.map((e) => ({
             timestamp: e.timestamp,
             type: e.type as MIDIEvent["type"],
             note: e.note,
@@ -490,13 +598,25 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
             controller: e.controller,
             value: e.value,
           }));
+          const events = inputQuantizeEnabled
+            ? quantizeRecordedMIDIEvents(recordedEvents, inputQuantizeGridSeconds, inputQuantizeStrength)
+            : recordedEvents;
+          const recordedContentEnd = events.reduce((max, event) => Math.max(max, event.timestamp || 0), 0);
+          const midiClipDuration = Math.max(midiClipInfo.duration, recordedContentEnd);
 
           const newMIDIClip: MIDIClip = {
             id: crypto.randomUUID(),
             name: "MIDI Recording",
             startTime: midiClipInfo.startTime,
-            duration: midiClipInfo.duration,
+            duration: midiClipDuration,
+            offset: 0,
+            sourceStart: 0,
+            sourceLength: midiClipDuration,
+            loopEnabled: true,
+            loopOffset: 0,
+            loopLength: midiClipDuration,
             events,
+            ccEvents: [],
             color: clipColor,
           };
 
@@ -510,7 +630,8 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           }));
 
           console.log("[useDAWStore] Added MIDI clip to track", midiClipInfo.trackId,
-            "with", events.length, "events, duration:", midiClipInfo.duration.toFixed(3));
+            "with", events.length, "events, duration:", midiClipDuration.toFixed(3),
+            "inputQuantize:", inputQuantizeEnabled ? `${inputQuantizeGridBeats} beats @ ${inputQuantizeStrength}` : "off");
         }
       }
 

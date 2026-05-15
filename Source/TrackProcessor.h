@@ -78,7 +78,11 @@ public:
             PreFXWidth,
             TrimVolume,
             Mute,
-            PluginParameter
+            PluginParameter,
+            MIDIVelocityScale,
+            MIDIPitchBend,
+            MIDIChannelPressure,
+            MIDICC
         };
 
         Kind kind = Kind::Volume;
@@ -86,6 +90,7 @@ public:
         bool isInputFX = false;
         int fxIndex = -1;
         int paramIndex = -1;
+        int midiCC = -1;
     };
 
     TrackProcessor();
@@ -214,7 +219,11 @@ public:
     bool getSolo() const { return isSoloed.load(); }  // Alias for compatibility
     
     // Track Type (Phase 2 - MIDI)
-    void setTrackType(TrackType newType) { trackType.store(newType, std::memory_order_release); }
+    void setTrackType(TrackType newType)
+    {
+        trackType.store(newType, std::memory_order_release);
+        fallbackInstrumentResetRequested.store(true, std::memory_order_release);
+    }
     TrackType getTrackType() const { return trackType.load(std::memory_order_acquire); }
     
     // MIDI Configuration (Phase 2)
@@ -226,8 +235,27 @@ public:
     
     // Instrument plugin (Phase 2)
     void setInstrument(std::unique_ptr<juce::AudioPluginInstance> plugin, double callerSampleRate = 0.0, int callerBlockSize = 0);
+    void clearInstrument();
     juce::AudioPluginInstance* getInstrument() const { return instrumentPlugin.get(); }
     std::shared_ptr<juce::AudioPluginInstance> getInstrumentShared() const { return instrumentPlugin; }
+    bool isUsingFallbackInstrument() const
+    {
+        return trackType.load(std::memory_order_acquire) == TrackType::Instrument
+            && std::atomic_load_explicit(&realtimeInstrumentSnapshot, std::memory_order_acquire) == nullptr;
+    }
+    bool loadFallbackSamplerSample(const juce::String& filePath, int rootNote);
+    void clearFallbackSamplerSample();
+    bool hasFallbackSamplerSample() const;
+    juce::String getFallbackSamplerSamplePath() const;
+    struct MIDINoteActivity
+    {
+        int note = 0;
+        int channel = 1;
+        int velocity = 0;
+        bool active = false;
+        juce::uint32 ageMs = 0;
+    };
+    std::vector<MIDINoteActivity> getRecentMIDINoteActivity(juce::uint32 maxAgeMs) const;
 
     // MIDI intake / scheduling
     bool enqueueMidiMessage(const juce::MidiMessage& message, int sampleOffset = 0);
@@ -235,12 +263,16 @@ public:
     void buildMidiBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
                          int numSamples, double sampleRate, bool playing);
     bool needsProcessing(double blockTimeSeconds, int numSamples, double sampleRate, bool playing) const;
-    void queueAllNotesOff();
+    void queueAllNotesOff(bool requestChase = true);
+    void requestMIDIChase() { scheduledMIDIChaseRequested.store(true, std::memory_order_release); }
     std::vector<juce::String> getSidechainSourceSnapshot() const;
     std::vector<RealtimeSendInfo> getRealtimeSendSnapshot() const;
     int getMidiOverflowCount() const { return midiQueueOverflowCount.load(std::memory_order_relaxed); }
     int getLastBuiltMidiEventCount() const { return lastBuiltMidiEventCount.load(std::memory_order_relaxed); }
     int getMaxBuiltMidiEventCount() const { return maxBuiltMidiEventCount.load(std::memory_order_relaxed); }
+    std::vector<ScheduledMIDIClip> getScheduledMIDIClipSnapshot() const;
+    int getScheduledMIDIClipCount() const;
+    int getScheduledMIDIEventCount() const;
     int getRealtimeFallbackReuseCount() const { return realtimeFallbackReuseCount.load(std::memory_order_relaxed); }
     int getPluginBusySkipCount() const { return pluginBusySkipCount.load(std::memory_order_relaxed); }
 
@@ -299,7 +331,7 @@ public:
     // Per-track MIDI Output
     void setMIDIOutputDevice(const juce::String& deviceName);
     juce::String getMIDIOutputDeviceName() const { return midiOutputDeviceName; }
-    void sendMIDIToOutput(const juce::MidiBuffer& buffer);
+    void sendMIDIToOutput(const juce::MidiBuffer& buffer, double sampleRate, bool resetMessagesOnly = false);
 
     // Automation
     AutomationList& getVolumeAutomation() { return volumeAutomation; }
@@ -310,6 +342,9 @@ public:
     AutomationList& getPreFXWidthAutomation() { return preFXWidthAutomation; }
     AutomationList& getTrimVolumeAutomation() { return trimVolumeAutomation; }
     AutomationList& getMuteAutomation() { return muteAutomation; }
+    AutomationList& getMIDIVelocityScaleAutomation() { return midiVelocityScaleAutomation; }
+    AutomationList& getMIDIPitchBendAutomation() { return midiPitchBendAutomation; }
+    AutomationList& getMIDIChannelPressureAutomation() { return midiChannelPressureAutomation; }
     const AutomationList& getVolumeAutomation() const { return volumeAutomation; }
     const AutomationList& getPanAutomation() const { return panAutomation; }
     const AutomationList& getWidthAutomation() const { return widthAutomation; }
@@ -318,8 +353,14 @@ public:
     const AutomationList& getPreFXWidthAutomation() const { return preFXWidthAutomation; }
     const AutomationList& getTrimVolumeAutomation() const { return trimVolumeAutomation; }
     const AutomationList& getMuteAutomation() const { return muteAutomation; }
+    const AutomationList& getMIDIVelocityScaleAutomation() const { return midiVelocityScaleAutomation; }
+    const AutomationList& getMIDIPitchBendAutomation() const { return midiPitchBendAutomation; }
+    const AutomationList& getMIDIChannelPressureAutomation() const { return midiChannelPressureAutomation; }
+    bool hasPluginAutomation() const;
+    bool hasMIDIAutomation() const;
     std::optional<AutomationTarget> resolveAutomationTarget(const juce::String& parameterId, bool createIfNeeded);
     float getAutomationDefaultValue(const AutomationTarget& target) const;
+    void resetAutomationTouchState();
 
     // Set the current timeline position for this block (called by AudioEngine
     // before processBlock so automation knows where it is on the timeline).
@@ -328,6 +369,7 @@ public:
         blockStartTimeSeconds = timeSeconds;
     }
     void setIgnoreStaticMuteForProcessing(bool ignore) { ignoreStaticMuteDuringProcessing.store(ignore, std::memory_order_relaxed); }
+    void setForceAutomationReadForProcessing(bool forceRead) { forceAutomationReadDuringProcessing.store(forceRead, std::memory_order_relaxed); }
 
     bool tryProcessBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&);
 
@@ -368,12 +410,34 @@ private:
 
     using PluginAutomationRouteSnapshot = std::vector<std::shared_ptr<PluginAutomationRoute>>;
 
+    struct MIDICCAutomationRoute
+    {
+        juce::String parameterId;
+        int controller = -1;
+        std::shared_ptr<AutomationList> automation = std::make_shared<AutomationList>();
+    };
+
+    using MIDICCAutomationRouteSnapshot = std::vector<std::shared_ptr<MIDICCAutomationRoute>>;
+
+    struct PluginAutomationParameterRef
+    {
+        bool isInputFX = false;
+        int fxIndex = -1;
+        int paramIndex = -1;
+    };
+
     void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&);
     void publishRealtimeStateSnapshots();
     std::shared_ptr<PluginAutomationRoute> getOrCreatePluginAutomationRoute(const juce::String& parameterId);
     std::shared_ptr<PluginAutomationRoute> findPluginAutomationRoute(const juce::String& parameterId) const;
-    static std::optional<std::pair<int, int>> parsePluginAutomationParameterId(const juce::String& parameterId);
+    std::optional<PluginAutomationParameterRef> parsePluginAutomationParameterId(const juce::String& parameterId) const;
     void applyPluginAutomationForProcessor(juce::AudioProcessor* proc, bool isInputFX, int fxIndex, double blockTimeSeconds);
+    std::shared_ptr<MIDICCAutomationRoute> getOrCreateMIDICCAutomationRoute(const juce::String& parameterId);
+    std::shared_ptr<MIDICCAutomationRoute> findMIDICCAutomationRoute(const juce::String& parameterId) const;
+    static std::optional<int> parseMIDICCAutomationParameterId(const juce::String& parameterId);
+    void applyMIDIAutomationToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
+                                     int numSamples, double sampleRate);
+    bool shouldApplyAutomation(const AutomationList& automation) const;
 
     // Current peak level (was named currentRMS but now holds peak — kept as-is
     // to avoid changing the public getRMSLevel() / resetRMS() API used by AudioEngine).
@@ -471,13 +535,19 @@ private:
     AutomationList preFXWidthAutomation;
     AutomationList trimVolumeAutomation;
     AutomationList muteAutomation;
+    AutomationList midiVelocityScaleAutomation;
+    AutomationList midiPitchBendAutomation;
+    AutomationList midiChannelPressureAutomation;
     double blockStartTimeSeconds { 0.0 };
     std::atomic<bool> ignoreStaticMuteDuringProcessing { false };
+    std::atomic<bool> forceAutomationReadDuringProcessing { false };
 
     // Pre-allocated buffer for per-sample automation gain (avoids alloc on audio thread)
     juce::AudioBuffer<float> automationGainBuffer;
     juce::CriticalSection pluginAutomationRouteLock;
     std::shared_ptr<const PluginAutomationRouteSnapshot> pluginAutomationSnapshot;
+    juce::CriticalSection midiAutomationRouteLock;
+    std::shared_ptr<const MIDICCAutomationRouteSnapshot> midiCCAutomationSnapshot;
 
     // Plugin Delay Compensation (PDC)
     juce::dsp::DelayLine<float> pdcDelayLine { 96000 };  // max 2 seconds at 48kHz
@@ -520,6 +590,7 @@ private:
     // Per-track MIDI Output
     juce::String midiOutputDeviceName;
     std::unique_ptr<juce::MidiOutput> midiOutputDevice;
+    juce::MidiBuffer midiOutputResetBuffer;
     juce::AudioBuffer<float> realtimeFallbackBuffer;
     std::atomic<int> realtimeFallbackReuseCount { 0 };
     std::atomic<int> pluginBusySkipCount { 0 };
@@ -537,6 +608,7 @@ private:
     std::atomic<int> midiQueueOverflowCount { 0 };
     std::atomic<int> lastBuiltMidiEventCount { 0 };
     std::atomic<int> maxBuiltMidiEventCount { 0 };
+    std::atomic<bool> scheduledMIDIChaseRequested { true };
 
     std::shared_ptr<const std::vector<ScheduledMIDIClip>> scheduledMIDIClips {
         std::make_shared<const std::vector<ScheduledMIDIClip>>()
@@ -567,13 +639,46 @@ private:
         std::make_shared<const SendSnapshot>()
     };
     std::array<std::array<bool, 128>, 16> activeMIDINotes {};
+    std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteActive {};
+    std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteReleasing {};
+    std::array<std::array<float, 128>, 16> fallbackInstrumentPhase {};
+    std::array<std::array<float, 128>, 16> fallbackInstrumentVelocity {};
+    std::array<std::array<float, 128>, 16> fallbackInstrumentEnvelope {};
+    std::array<std::array<double, 128>, 16> fallbackSamplerPosition {};
+    std::array<std::array<double, 128>, 16> fallbackSamplerIncrement {};
+    std::array<float, 16> fallbackInstrumentPitchBend {};
+    std::array<float, 16> fallbackInstrumentModulation {};
+    std::array<float, 16> fallbackInstrumentModPhase {};
+    std::array<std::array<std::atomic<bool>, 128>, 16> midiNoteCurrentlyActive {};
+    std::array<std::array<std::atomic<juce::uint32>, 128>, 16> midiNoteLastOnMs {};
+    std::array<std::array<std::atomic<juce::uint32>, 128>, 16> midiNoteLastOffMs {};
+    std::array<std::array<std::atomic<int>, 128>, 16> midiNoteLastVelocity {};
+    std::atomic<bool> fallbackInstrumentResetRequested { true };
+    struct FallbackSamplerSample
+    {
+        juce::AudioBuffer<float> samples;
+        double sourceSampleRate = 44100.0;
+        int rootNote = 60;
+        juce::String filePath;
+    };
+    std::shared_ptr<const FallbackSamplerSample> fallbackSamplerSample;
     ProcessingPrecisionMode processingPrecisionMode { ProcessingPrecisionMode::Float32 };
 
     void markActiveMIDINoteState(const juce::MidiMessage& message);
+    void clearFallbackInstrumentState();
+    bool hasActiveFallbackInstrumentVoices() const;
+    void handleFallbackInstrumentMidi(const juce::MidiMessage& message, double sampleRate);
+    void renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
+                                  const juce::MidiBuffer& midiMessages,
+                                  int numSamples,
+                                  double sampleRate);
+    void appendScheduledMIDIChaseToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
+                                          double sampleRate) const;
     void appendScheduledMIDIToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
                                      int numSamples, double sampleRate) const;
     void appendQueuedMIDIToBuffer(juce::MidiBuffer& destination, int numSamples);
     bool hasQueuedMIDI() const;
+    bool hasScheduledMIDIClips() const;
     bool hasScheduledMIDIInBlock(double blockTimeSeconds, int numSamples, double sampleRate) const;
 
     // ARA Plugin Hosting (Phase 9)

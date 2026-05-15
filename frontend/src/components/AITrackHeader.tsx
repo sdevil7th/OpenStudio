@@ -262,7 +262,7 @@ function getStatusMeta(track: Track) {
 
   return track.aiGenerationBackend
     ? `Last backend: ${track.aiGenerationBackend.toUpperCase()}`
-    : "Music generation idle";
+    : "Audio Generation idle";
 }
 
 export const AITrackHeader = React.memo(function AITrackHeader({
@@ -305,11 +305,17 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     || track.aiGenerationState === "generating";
   const canStartMusicGeneration =
     workflow.available !== false
-    && aiToolsStatus.musicGenerationReady
-    && aiToolsStatus.musicGenerationLayoutValid
-    && (aiToolsStatus.musicGenerationPerformanceReady ?? true);
+    && Boolean(
+      aiToolsStatus.features?.audioGeneration?.ready
+      ?? (
+        aiToolsStatus.musicGenerationReady
+        && aiToolsStatus.musicGenerationLayoutValid
+        && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
+      ),
+    );
   const musicGenerationBlockedMessage =
-    aiToolsStatus.musicGenerationPerformanceStatusMessage
+    aiToolsStatus.features?.audioGeneration?.message
+    || aiToolsStatus.musicGenerationPerformanceStatusMessage
     || aiToolsStatus.musicGenerationStatusMessage
     || (!aiToolsStatus.musicGenerationLayoutValid
       && aiToolsStatus.musicGenerationModelId
@@ -317,7 +323,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
         ? `Pinned ACE-Step native asset layout is not ready in ${aiToolsStatus.musicGenerationCheckpointRoot}.`
         : aiToolsStatus.error
           || aiToolsStatus.message
-          || "AI music generation is not ready yet.");
+          || "Audio Generation is not ready yet.");
 
   const stopPolling = () => {
     if (pollTimeoutRef.current !== null) {
@@ -568,11 +574,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       return;
     }
 
-    if (
-      !aiToolsStatus.musicGenerationReady
-      || !aiToolsStatus.musicGenerationLayoutValid
-      || !(aiToolsStatus.musicGenerationPerformanceReady ?? true)
-    ) {
+    if (!canStartMusicGeneration) {
       setAITrackGenerationState(track.id, "error", {
         progress: 0,
         error: musicGenerationBlockedMessage,
@@ -583,7 +585,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
         lmBackend: "",
         lmStage: "",
       });
-      openAiToolsSetup();
+      openAiToolsSetup("audioGeneration");
       return;
     }
 

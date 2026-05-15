@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronRight } from "lucide-react";
+import { guardModalContextMenu, shouldSuppressWorkspaceContextMenu } from "../utils/modalEventGuards";
 
 export interface MenuItem {
   label: string;
   icon?: React.ReactNode;
+  swatchColor?: string;
   shortcut?: string;
   disabled?: boolean;
   divider?: boolean;
@@ -77,11 +79,13 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   return createPortal(
     <div
       ref={menuRef}
+      data-context-menu="true"
       className="fixed z-[9999] min-w-[180px] py-1 bg-neutral-800 border border-neutral-600 rounded-md shadow-xl"
       style={{
         left: adjustedPos.x,
         top: adjustedPos.y,
       }}
+      onContextMenu={guardModalContextMenu}
     >
       {items.map((item, index) => {
         if (item.divider) {
@@ -103,6 +107,12 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
           >
             <div className="flex items-center gap-2">
               {item.icon && <span className="w-4 h-4">{item.icon}</span>}
+              {item.swatchColor && (
+                <span
+                  className="w-3.5 h-3.5 rounded-sm border border-white/40 shadow-sm"
+                  style={{ backgroundColor: item.swatchColor }}
+                />
+              )}
               <span className="text-sm">{item.label}</span>
             </div>
             <div className="flex items-center gap-2">
@@ -121,7 +131,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                   <div
                     key={subIndex}
                     className={`
-                      px-3 py-1.5 text-sm cursor-pointer
+                      px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2
                       ${subItem.disabled ? "text-neutral-500 cursor-not-allowed" : "text-neutral-200 hover:bg-neutral-700"}
                     `}
                     onClick={(e) => {
@@ -132,7 +142,13 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                       }
                     }}
                   >
-                    {subItem.label}
+                    {subItem.swatchColor && (
+                      <span
+                        className="w-3.5 h-3.5 rounded-sm border border-white/40 shadow-sm"
+                        style={{ backgroundColor: subItem.swatchColor }}
+                      />
+                    )}
+                    <span>{subItem.label}</span>
                   </div>
                 ))}
               </div>
@@ -156,6 +172,9 @@ export function useContextMenu() {
   const showContextMenu = (e: React.MouseEvent, items: MenuItem[]) => {
     e.preventDefault();
     e.stopPropagation();
+    if (shouldSuppressWorkspaceContextMenu(e.target)) {
+      return;
+    }
     setContextMenu({ x: e.clientX, y: e.clientY, items });
   };
 

@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import { useDAWStore, AutomationModeType } from "../store/useDAWStore";
 import { nativeBridge } from "../services/NativeBridge";
 import { Modal } from "./ui";
-import { getTrackAutomationParams, getMasterAutomationParams } from "../store/automationParams";
+import { getTrackAutomationParams, getMasterAutomationParams, pluginAutomationParamId } from "../store/automationParams";
 
 interface PluginParam {
   index: number;
@@ -104,7 +104,7 @@ export function EnvelopeManagerModal() {
   const [filter, setFilter] = useState("");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [fxSlots, setFxSlots] = useState<FXSlotInfo[]>([]);
-  const [pluginParams, setPluginParams] = useState<Map<number, PluginParam[]>>(new Map());
+  const [pluginParams, setPluginParams] = useState<Map<string, PluginParam[]>>(new Map());
   const [loading, setLoading] = useState(false);
 
   // Fetch FX chain + plugin params on open
@@ -137,7 +137,7 @@ export function EnvelopeManagerModal() {
         setFxSlots(allSlots);
 
         // Fetch all plugin parameters in parallel
-        const paramMap = new Map<number, PluginParam[]>();
+        const paramMap = new Map<string, PluginParam[]>();
         await Promise.all(
           allSlots.map(async (fx) => {
             try {
@@ -146,9 +146,9 @@ export function EnvelopeManagerModal() {
                 fx.index,
                 fx.isInputFX,
               );
-              paramMap.set(fx.index, params);
+              paramMap.set(pluginAutomationParamId(fx.isInputFX, fx.index, -1), params);
             } catch {
-              paramMap.set(fx.index, []);
+              paramMap.set(pluginAutomationParamId(fx.isInputFX, fx.index, -1), []);
             }
           }),
         );
@@ -189,11 +189,11 @@ export function EnvelopeManagerModal() {
 
     // Per-plugin sections
     for (const fx of fxSlots) {
-      const params = pluginParams.get(fx.index) || [];
+      const params = pluginParams.get(pluginAutomationParamId(fx.isInputFX, fx.index, -1)) || [];
       const fxCategory = fx.isInputFX ? `Input FX: ${fx.name}` : `FX: ${fx.name}`;
 
       for (const param of params) {
-        const paramId = `plugin_${fx.index}_${param.index}`;
+        const paramId = pluginAutomationParamId(fx.isInputFX, fx.index, param.index);
         const lane = automationLanes.find((l) => l.param === paramId);
         rows.push({
           paramId,

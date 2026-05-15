@@ -569,8 +569,11 @@ export function renderPlayheadOverlay(
   currentTime: number,
   viewport: PitchEditorViewport,
 ) {
-  const dpr = globalThis.window?.devicePixelRatio || 1;
+  const dpr = Math.max(1, globalThis.window?.devicePixelRatio || 1);
   ctx.clearRect(0, 0, width * dpr, height * dpr);
+  if (staticCanvas.width <= 0 || staticCanvas.height <= 0) {
+    return;
+  }
   ctx.drawImage(staticCanvas as CanvasImageSource, 0, 0);
 
   if (currentTime >= 0) {

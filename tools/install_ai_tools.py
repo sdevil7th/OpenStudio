@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import ctypes
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -50,6 +51,17 @@ from ai_runtime_probe import (
 )
 
 DEFAULT_MODEL_NAME = "BS-Roformer-SW.ckpt"
+FEATURE_STEM_SEPARATION = "stemSeparation"
+FEATURE_AUDIO_GENERATION = "audioGeneration"
+DEFAULT_INSTALL_FEATURES = (FEATURE_STEM_SEPARATION,)
+ALL_INSTALL_FEATURES = (FEATURE_STEM_SEPARATION, FEATURE_AUDIO_GENERATION)
+FEATURE_LABELS = {
+    FEATURE_STEM_SEPARATION: "Stem Separation",
+    FEATURE_AUDIO_GENERATION: "Audio Generation",
+}
+MIN_STEM_SYSTEM_RAM_MB = 8 * 1024
+MIN_AUDIO_SYSTEM_RAM_MB = 16 * 1024
+MIN_AUDIO_GPU_MEMORY_MB = 8 * 1024
 FALLBACK_MIN_PYTHON = (3, 10)
 FALLBACK_MAX_PYTHON_EXCLUSIVE = (3, 13)
 MUSIC_GEN_REQUIRED_PYTHON = (3, 11)
@@ -148,6 +160,295 @@ class ModelDownloadError(Exception):
         super().__init__(message)
         self.message = message
         self.error_code = error_code
+
+
+def normalize_feature_id(value: str) -> str:
+    normalized = str(value or "").strip()
+    aliases = {
+        "stem": FEATURE_STEM_SEPARATION,
+        "stems": FEATURE_STEM_SEPARATION,
+        "stem-separation": FEATURE_STEM_SEPARATION,
+        "stem_separation": FEATURE_STEM_SEPARATION,
+        "stemSeparation": FEATURE_STEM_SEPARATION,
+        "audio": FEATURE_AUDIO_GENERATION,
+        "audio-generation": FEATURE_AUDIO_GENERATION,
+        "audio_generation": FEATURE_AUDIO_GENERATION,
+        "audioGeneration": FEATURE_AUDIO_GENERATION,
+        "music": FEATURE_AUDIO_GENERATION,
+        "music-generation": FEATURE_AUDIO_GENERATION,
+        "musicGeneration": FEATURE_AUDIO_GENERATION,
+    }
+    return aliases.get(normalized, "")
+
+
+def normalize_feature_selection(value: Any, *, default: tuple[str, ...] = DEFAULT_INSTALL_FEATURES) -> list[str]:
+    if value is None:
+        raw_items: list[Any] = []
+    elif isinstance(value, str):
+        raw_items = [item for item in re.split(r"[,;\s]+", value) if item.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+
+    features: list[str] = []
+    for item in raw_items:
+        feature_id = normalize_feature_id(str(item))
+        if feature_id and feature_id not in features:
+            features.append(feature_id)
+
+    if not features:
+        features = list(default)
+    return features
+
+
+def _get_system_memory_mb() -> int:
+    if platform.system() == "Windows":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys // (1024 * 1024))
+        except Exception:
+            return 0
+
+    try:
+        if hasattr(os, "sysconf"):
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            page_count = int(os.sysconf("SC_PHYS_PAGES"))
+            return int((page_size * page_count) // (1024 * 1024))
+    except (ValueError, OSError, AttributeError):
+        pass
+
+    return 0
+
+
+def _probe_nvidia_gpu() -> dict[str, Any] | None:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    best_name = ""
+    best_memory_mb = 0
+    for line in (result.stdout or "").splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            memory_mb = int(float(parts[-1]))
+        except ValueError:
+            continue
+        if memory_mb > best_memory_mb:
+            best_name = ", ".join(parts[:-1]).strip()
+            best_memory_mb = memory_mb
+
+    if best_memory_mb <= 0:
+        return None
+
+    return {
+        "gpuBackend": "cuda",
+        "gpuName": best_name or "NVIDIA GPU",
+        "gpuMemoryMb": best_memory_mb,
+        "gpuMemoryDetected": True,
+    }
+
+
+def _probe_rocm_gpu() -> dict[str, Any] | None:
+    if platform.system() != "Linux":
+        return None
+
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    best_memory_mb = 0
+    for raw_value in re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*(?:MiB|MB|GiB|GB|B)?", result.stdout or ""):
+        try:
+            numeric = float(raw_value)
+        except ValueError:
+            continue
+        # rocm-smi commonly prints bytes; large values are converted to MiB.
+        memory_mb = int(numeric / (1024 * 1024)) if numeric > 1024 * 1024 else int(numeric)
+        best_memory_mb = max(best_memory_mb, memory_mb)
+
+    if best_memory_mb <= 0:
+        return None
+
+    return {
+        "gpuBackend": "rocm",
+        "gpuName": "AMD ROCm GPU",
+        "gpuMemoryMb": best_memory_mb,
+        "gpuMemoryDetected": True,
+    }
+
+
+def probe_hardware_requirements() -> dict[str, Any]:
+    gpu = _probe_nvidia_gpu() or _probe_rocm_gpu() or {}
+    system_ram_mb = _get_system_memory_mb()
+    return {
+        "schemaVersion": 1,
+        "platform": platform.system().lower(),
+        "architecture": platform.machine(),
+        "systemRamMb": system_ram_mb,
+        "systemRamGb": round(system_ram_mb / 1024, 2) if system_ram_mb > 0 else 0,
+        "gpuBackend": gpu.get("gpuBackend", "none"),
+        "gpuName": gpu.get("gpuName", ""),
+        "gpuMemoryMb": int(gpu.get("gpuMemoryMb", 0) or 0),
+        "gpuMemoryGb": round(int(gpu.get("gpuMemoryMb", 0) or 0) / 1024, 2),
+        "gpuMemoryDetected": bool(gpu.get("gpuMemoryDetected", False)),
+        "audioGenerationGpuSupported": gpu.get("gpuBackend") in {"cuda", "rocm"},
+        "requirements": {
+            FEATURE_STEM_SEPARATION: {
+                "minSystemRamMb": MIN_STEM_SYSTEM_RAM_MB,
+            },
+            FEATURE_AUDIO_GENERATION: {
+                "minSystemRamMb": MIN_AUDIO_SYSTEM_RAM_MB,
+                "minGpuMemoryMb": MIN_AUDIO_GPU_MEMORY_MB,
+                "supportedGpuBackends": ["cuda", "rocm"],
+            },
+        },
+    }
+
+
+def evaluate_feature_compatibility(hardware: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    system_ram_mb = int(hardware.get("systemRamMb", 0) or 0)
+    gpu_memory_mb = int(hardware.get("gpuMemoryMb", 0) or 0)
+    gpu_backend = str(hardware.get("gpuBackend", "none") or "none")
+    gpu_supported = bool(hardware.get("audioGenerationGpuSupported", False))
+
+    stem_reason = ""
+    if system_ram_mb <= 0:
+        stem_reason = "system memory could not be detected"
+    elif system_ram_mb < MIN_STEM_SYSTEM_RAM_MB:
+        stem_reason = "at least 8 GB system RAM is required"
+
+    audio_reason = ""
+    if system_ram_mb <= 0:
+        audio_reason = "system memory could not be detected"
+    elif system_ram_mb < MIN_AUDIO_SYSTEM_RAM_MB:
+        audio_reason = "at least 16 GB system RAM is required"
+    elif not gpu_supported:
+        audio_reason = "supported GPU with at least 8 GB memory was not detected"
+    elif gpu_memory_mb < MIN_AUDIO_GPU_MEMORY_MB:
+        audio_reason = "supported GPU with at least 8 GB memory was not detected"
+
+    return {
+        FEATURE_STEM_SEPARATION: {
+            "id": FEATURE_STEM_SEPARATION,
+            "label": FEATURE_LABELS[FEATURE_STEM_SEPARATION],
+            "compatible": stem_reason == "",
+            "blocked": stem_reason != "",
+            "blockReason": stem_reason,
+            "message": (
+                "Stem Separation is compatible with this machine."
+                if stem_reason == ""
+                else f"This machine does not meet Stem Separation requirements: {stem_reason}."
+            ),
+            "requiresGpu": False,
+            "minSystemRamMb": MIN_STEM_SYSTEM_RAM_MB,
+        },
+        FEATURE_AUDIO_GENERATION: {
+            "id": FEATURE_AUDIO_GENERATION,
+            "label": FEATURE_LABELS[FEATURE_AUDIO_GENERATION],
+            "compatible": audio_reason == "",
+            "blocked": audio_reason != "",
+            "blockReason": audio_reason,
+            "message": (
+                "Audio Generation is compatible with this machine."
+                if audio_reason == ""
+                else f"This machine does not meet Audio Generation requirements: {audio_reason}."
+            ),
+            "requiresGpu": True,
+            "minSystemRamMb": MIN_AUDIO_SYSTEM_RAM_MB,
+            "minGpuMemoryMb": MIN_AUDIO_GPU_MEMORY_MB,
+            "supportedGpuBackends": ["cuda", "rocm"],
+            "detectedGpuBackend": gpu_backend,
+        },
+    }
+
+
+def build_feature_payload(
+    selected_features: list[str],
+    hardware: dict[str, Any],
+    *,
+    installed_features: list[str] | None = None,
+) -> dict[str, Any]:
+    installed_features = installed_features or []
+    compatibility = evaluate_feature_compatibility(hardware)
+    payload: dict[str, Any] = {}
+    for feature_id in ALL_INSTALL_FEATURES:
+        feature = dict(compatibility[feature_id])
+        feature["selected"] = feature_id in selected_features
+        feature["installed"] = feature_id in installed_features
+        feature["ready"] = feature_id in installed_features
+        payload[feature_id] = feature
+    return payload
+
+
+def hardware_block_message(feature_ids: list[str], feature_payload: dict[str, Any]) -> str:
+    for feature_id in feature_ids:
+        feature = feature_payload.get(feature_id, {})
+        if feature.get("blocked"):
+            return str(feature.get("message", "This machine does not meet the hardware requirements for the selected AI feature."))
+    return "This machine does not meet the hardware requirements for the selected AI features."
+
+
+def filter_compatible_features(selected_features: list[str], hardware: dict[str, Any]) -> list[str]:
+    compatibility = evaluate_feature_compatibility(hardware)
+    return [
+        feature_id
+        for feature_id in selected_features
+        if compatibility.get(feature_id, {}).get("compatible") is True
+    ]
+
+
+def classify_backend_step_features(step: dict[str, Any]) -> tuple[str, ...]:
+    text = " ".join(
+        str(step.get(key, ""))
+        for key in ("description", "stepLabel", "errorCode", "type")
+    ).lower()
+    if any(marker in text for marker in ("ace-step", "music", "triton", "flash", "torch")):
+        return (FEATURE_AUDIO_GENERATION,)
+    return (FEATURE_STEM_SEPARATION,)
 
 
 def utc_now_iso() -> str:
@@ -2254,6 +2555,7 @@ def apply_backend_install_plan(
     install_plan: dict[str, Any],
     *,
     backend_requested: str,
+    selected_features: list[str],
     install_source: str,
     requires_external_python: bool,
     python_detected: bool,
@@ -2294,6 +2596,24 @@ def apply_backend_install_plan(
 
     for index, step in enumerate(steps, start=1):
         step_type = str(step.get("type", "")).strip()
+        step_features = normalize_feature_selection(
+            step.get("features", []),
+            default=classify_backend_step_features(step),
+        )
+        if selected_features and not any(feature_id in selected_features for feature_id in step_features):
+            log_event(
+                "installer",
+                "installing_backend",
+                "backend_install_step_skipped",
+                backendRequested=backend_requested,
+                installPlanId=plan_id,
+                stepIndex=index,
+                stepType=step_type,
+                stepFeatures=step_features,
+                selectedFeatures=selected_features,
+            )
+            continue
+
         description = str(step.get("description", f"Applying backend install step {index}")).strip()
         step_label = str(step.get("stepLabel", description)).strip() or description
         download_hint = str(step.get("downloadHint", "")).strip()
@@ -2752,7 +3072,7 @@ def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested:
     return None
 
 
-def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
+def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_features: list[str]) -> Path:
     install_source = "externalPython"
     requires_external_python = True
     python_detected = True
@@ -3123,7 +3443,8 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
     )
 
     if (
-        platform.system() == "Windows"
+        FEATURE_AUDIO_GENERATION in selected_features
+        and platform.system() == "Windows"
         and is_music_generation_python_compatible(runtime_python_version)
         and is_windows_nvidia_machine()
     ):
@@ -3150,8 +3471,10 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path) -> Path:
             buildRuntimeMode=build_runtime_mode,
         )
     music_generation_setup_error: InstallerStepError | None = None
-    music_generation_requirements = get_music_generation_runtime_requirements(
-        python_version=runtime_python_version
+    music_generation_requirements = (
+        get_music_generation_runtime_requirements(python_version=runtime_python_version)
+        if FEATURE_AUDIO_GENERATION in selected_features
+        else []
     )
     if music_generation_requirements:
         try:
@@ -3689,6 +4012,7 @@ def main() -> None:
     parser.add_argument("--fallback-attempted", action="store_true", help="True when this install is using a fallback runtime candidate")
     parser.add_argument("--backend-requested", default="", help="Requested backend overlay identity for Windows base runtimes")
     parser.add_argument("--backend-install-plan", default="", help="Path to a JSON backend install plan")
+    parser.add_argument("--features", default=",".join(DEFAULT_INSTALL_FEATURES), help="Comma-separated AI feature ids to install")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).expanduser().resolve()
@@ -3729,6 +4053,7 @@ def main() -> None:
         modelsDir=str(models_dir),
         musicGenCheckpointRoot=str(music_gen_checkpoint_root),
         musicGenModel=args.music_gen_model,
+        requestedFeatures=normalize_feature_selection(args.features),
         verifyExistingRuntime=bool(args.verify_existing_runtime),
         backendRequested=args.backend_requested,
         backendInstallPlan=args.backend_install_plan,
@@ -3737,6 +4062,47 @@ def main() -> None:
     runtime_root.parent.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
     effective_backend_requested = args.backend_requested.strip()
+    requested_features = normalize_feature_selection(args.features)
+    hardware_report = probe_hardware_requirements()
+    requested_feature_payload = build_feature_payload(requested_features, hardware_report)
+    install_features = filter_compatible_features(requested_features, hardware_report)
+
+    write_log("requestedFeatures=" + ",".join(requested_features))
+    write_log("installFeatures=" + ",".join(install_features))
+    write_log("hardware=" + json.dumps(hardware_report, ensure_ascii=True))
+    log_event(
+        "installer",
+        "checking",
+        "hardware_probe_finished",
+        requestedFeatures=requested_features,
+        installFeatures=install_features,
+        hardware=hardware_report,
+        features=requested_feature_payload,
+    )
+
+    if not install_features:
+        fail(
+            hardware_block_message(requested_features, requested_feature_payload),
+            state="error",
+            progress=0.02,
+            error_code="hardware_requirement_unmet",
+            selectedFeatures=requested_features,
+            installedFeatures=[],
+            hardware=hardware_report,
+            features=requested_feature_payload,
+        )
+
+    if install_features != requested_features:
+        emit(
+            "checking",
+            0.03,
+            message="Only compatible AI features will be installed on this machine.",
+            stepLabel="Checking AI feature compatibility",
+            selectedFeatures=install_features,
+            requestedFeatures=requested_features,
+            hardware=hardware_report,
+            features=build_feature_payload(install_features, hardware_report),
+        )
 
     if args.verify_existing_runtime:
         install_source = "downloadedRuntime"
@@ -3767,6 +4133,7 @@ def main() -> None:
                     runtime_root,
                     backend_install_plan,
                     backend_requested=effective_backend_requested,
+                    selected_features=install_features,
                     install_source=install_source,
                     requires_external_python=requires_external_python,
                     python_detected=python_detected,
@@ -3844,6 +4211,7 @@ def main() -> None:
                         runtime_root,
                         fallback_backend_install_plan,
                         backend_requested=fallback_backend_requested,
+                        selected_features=install_features,
                         install_source=install_source,
                         requires_external_python=requires_external_python,
                         python_detected=python_detected,
@@ -3956,7 +4324,7 @@ def main() -> None:
             pythonDetected=True,
             buildRuntimeMode=build_runtime_mode,
         )
-        runtime_python = bootstrap_runtime(runtime_root, bootstrap_python)
+        runtime_python = bootstrap_runtime(runtime_root, bootstrap_python, install_features)
         verify_runtime(
             runtime_python,
             runtime_root,
@@ -3968,27 +4336,56 @@ def main() -> None:
             build_runtime_mode=build_runtime_mode,
         )
 
-    model_path = download_model(
-        runtime_python,
-        runtime_root,
-        models_dir,
-        args.model,
-        backend_requested=effective_backend_requested,
-        install_source=install_source,
-        requires_external_python=requires_external_python,
-        python_detected=python_detected,
-        build_runtime_mode=build_runtime_mode,
-    )
+    model_path: Path | None = None
+    if FEATURE_STEM_SEPARATION in install_features:
+        model_path = download_model(
+            runtime_python,
+            runtime_root,
+            models_dir,
+            args.model,
+            backend_requested=effective_backend_requested,
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+    else:
+        emit(
+            "downloading_model",
+            0.94,
+            message="Stem Separation was not selected; skipping the stem model download.",
+            stepLabel="Skipping the stem model download",
+            selectedFeatures=install_features,
+            requestedFeatures=requested_features,
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
 
-    download_music_gen_model(
-        runtime_python,
-        args.music_gen_model,
-        music_gen_checkpoint_root,
-        install_source=install_source,
-        requires_external_python=requires_external_python,
-        python_detected=python_detected,
-        build_runtime_mode=build_runtime_mode,
-    )
+    if FEATURE_AUDIO_GENERATION in install_features:
+        download_music_gen_model(
+            runtime_python,
+            args.music_gen_model,
+            music_gen_checkpoint_root,
+            install_source=install_source,
+            requires_external_python=requires_external_python,
+            python_detected=python_detected,
+            build_runtime_mode=build_runtime_mode,
+        )
+    else:
+        emit(
+            "downloading_model",
+            0.95,
+            message="Audio Generation was not selected or is incompatible; skipping ACE-Step model downloads.",
+            stepLabel="Skipping Audio Generation model downloads",
+            selectedFeatures=install_features,
+            requestedFeatures=requested_features,
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
 
     verify_runtime(
         runtime_python,
@@ -4021,13 +4418,25 @@ def main() -> None:
     music_generation_status_message = runtime_probe.get("musicGenerationStatusMessage", "")
     music_generation_performance_ready = bool(runtime_probe.get("musicGenerationPerformanceReady", True))
     music_generation_performance_message = runtime_probe.get("musicGenerationPerformanceStatusMessage", "")
+    installed_features: list[str] = []
+    stem_separation_ready = bool(runtime_probe.get("runtimeReady", False)) and bool(runtime_probe.get("modelInstalled", False))
+    if stem_separation_ready:
+        installed_features.append(FEATURE_STEM_SEPARATION)
+    if (
+        FEATURE_AUDIO_GENERATION in install_features
+        and music_generation_ready
+        and music_generation_layout_valid
+        and music_generation_performance_ready
+    ):
+        installed_features.append(FEATURE_AUDIO_GENERATION)
+    final_features = build_feature_payload(install_features, hardware_report, installed_features=installed_features)
     ready_message = (
-        "AI tools are ready."
-        if music_generation_ready and music_generation_layout_valid and music_generation_performance_ready
+        "Selected AI features are ready."
+        if all(feature_id in installed_features for feature_id in install_features)
         else (
-            "AI tools are installed, but music generation acceleration is incomplete."
-            if music_generation_ready and music_generation_layout_valid
-            else "Stem separation is ready, but music generation still needs the OpenStudio ACE split backend."
+            "Stem separation is ready, but Audio Generation is not installed on this machine."
+            if FEATURE_STEM_SEPARATION in installed_features and FEATURE_AUDIO_GENERATION not in install_features
+            else "AI feature setup finished, but one or more selected features are not ready."
         )
     )
 
@@ -4037,13 +4446,22 @@ def main() -> None:
         message=ready_message,
         runtimeRoot=str(runtime_root),
         modelsDir=str(models_dir),
-        modelPath=str(model_path),
+        modelPath=str(model_path or (models_dir / args.model)),
         runtimeInstalled=True,
-        modelInstalled=True,
-        available=True,
-        musicGenerationReady=music_generation_ready,
-        musicGenerationLayoutValid=music_generation_layout_valid,
-        musicGenerationStatusMessage=music_generation_status_message,
+        modelInstalled=stem_separation_ready,
+        available=stem_separation_ready,
+        selectedFeatures=install_features,
+        requestedFeatures=requested_features,
+        installedFeatures=installed_features,
+        hardware=hardware_report,
+        features=final_features,
+        musicGenerationReady=FEATURE_AUDIO_GENERATION in install_features and music_generation_ready,
+        musicGenerationLayoutValid=FEATURE_AUDIO_GENERATION in install_features and music_generation_layout_valid,
+        musicGenerationStatusMessage=(
+            music_generation_status_message
+            if FEATURE_AUDIO_GENERATION in install_features
+            else "Audio Generation was not selected for this install."
+        ),
         musicGenerationFailureCode=runtime_probe.get("musicGenerationFailureCode", ""),
         musicGenerationPerformanceReady=music_generation_performance_ready,
         musicGenerationPerformanceStatusMessage=music_generation_performance_message,
@@ -4063,8 +4481,8 @@ def main() -> None:
         modelVersion=runtime_probe.get("modelVersion", args.model),
         verificationMode="in-process" if safe_resolve(runtime_python) == safe_resolve(Path(sys.executable)) else "subprocess",
         restartRequired=bool(runtime_probe.get("restartRequired", False)),
-        statusWarning=music_generation_performance_message if music_generation_ready and music_generation_layout_valid and not music_generation_performance_ready else "",
-        statusWarningCode="music_generation_acceleration_incomplete" if music_generation_ready and music_generation_layout_valid and not music_generation_performance_ready else "",
+        statusWarning=music_generation_performance_message if FEATURE_AUDIO_GENERATION in install_features and music_generation_ready and music_generation_layout_valid and not music_generation_performance_ready else "",
+        statusWarningCode="music_generation_acceleration_incomplete" if FEATURE_AUDIO_GENERATION in install_features and music_generation_ready and music_generation_layout_valid and not music_generation_performance_ready else "",
     )
     log_event(
         "installer",

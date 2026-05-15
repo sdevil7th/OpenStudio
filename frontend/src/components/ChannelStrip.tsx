@@ -129,7 +129,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
 
   const [showFXChain, setShowFXChain] = useState(false);
   const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
-  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin);
+  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin) || (track.type === "instrument" && !track.instrumentPlugin);
 
   // Find the clip under the playhead for gain staging display.
   // Reads currentTime from a snapshot (not a selector) to avoid 60fps re-renders.

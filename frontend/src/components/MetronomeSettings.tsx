@@ -4,6 +4,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import classNames from "classnames";
 import { Button, TimeSignatureInput, Slider } from "./ui";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 interface MetronomeSettingsProps {
   isOpen: boolean;
@@ -64,12 +65,16 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-2000 flex items-center justify-center">
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center"
+      data-modal-root="true"
+      onContextMenu={guardModalContextMenu}
+    >
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} onContextMenu={guardModalContextMenu} />
 
       {/* Modal */}
-      <div className="relative bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl p-4 min-w-[320px]">
+      <div className="relative bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl p-4 min-w-[320px]" onContextMenu={guardModalContextMenu}>
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-white">

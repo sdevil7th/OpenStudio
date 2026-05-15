@@ -164,7 +164,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       for (const track of tracks) {
         if (track.type !== "midi" && track.type !== "instrument") continue;
 
-        const midiClipsPayload = serializeMIDIClipsForBackend(track.midiClips);
+        const midiClipsPayload = serializeMIDIClipsForBackend(track.midiClips, track.midiEffects || []);
 
         syncPromises.push(
           nativeBridge.setTrackMIDIClips(track.id, midiClipsPayload).catch(logBridgeError("sync")),

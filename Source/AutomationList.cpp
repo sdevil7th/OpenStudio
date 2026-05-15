@@ -3,91 +3,153 @@
 
 AutomationList::AutomationList() = default;
 
-// ============================================================================
-// Message-thread write API
-// ============================================================================
+void AutomationList::publishPoints(std::shared_ptr<const PointList> newSnapshot)
+{
+    if (newSnapshot == nullptr)
+        newSnapshot = std::make_shared<const PointList>();
+
+    pointCount.store(static_cast<int>(newSnapshot->size()), std::memory_order_release);
+    std::atomic_store_explicit(&pointsSnapshot, std::move(newSnapshot), std::memory_order_release);
+}
 
 void AutomationList::setPoints(std::vector<AutomationPoint> newPoints)
 {
-    // Sort by time before storing
     std::sort(newPoints.begin(), newPoints.end(),
-              [](const AutomationPoint& a, const AutomationPoint& b) {
+              [] (const AutomationPoint& a, const AutomationPoint& b)
+              {
                   return a.timeSeconds < b.timeSeconds;
               });
 
-    const juce::ScopedLock sl(lock);
-    points = std::move(newPoints);
+    const juce::ScopedLock sl(writerLock);
+    publishPoints(std::make_shared<const PointList>(std::move(newPoints)));
+}
+
+void AutomationList::replacePointsInRange(double startTimeSeconds, double endTimeSeconds,
+                                          std::vector<AutomationPoint> replacementPoints)
+{
+    if (endTimeSeconds < startTimeSeconds)
+        std::swap(startTimeSeconds, endTimeSeconds);
+
+    const juce::ScopedLock sl(writerLock);
+
+    auto current = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    auto next = std::make_shared<PointList>();
+    if (current)
+    {
+        next->reserve(current->size() + replacementPoints.size());
+        for (const auto& point : *current)
+            if (point.timeSeconds < startTimeSeconds || point.timeSeconds > endTimeSeconds)
+                next->push_back(point);
+    }
+
+    for (const auto& point : replacementPoints)
+        next->push_back(point);
+
+    std::sort(next->begin(), next->end(),
+              [] (const AutomationPoint& a, const AutomationPoint& b)
+              {
+                  return a.timeSeconds < b.timeSeconds;
+              });
+    publishPoints(std::static_pointer_cast<const PointList>(next));
 }
 
 void AutomationList::addPoint(double timeSeconds, float value)
 {
-    const juce::ScopedLock sl(lock);
+    const juce::ScopedLock sl(writerLock);
 
-    AutomationPoint pt { timeSeconds, value };
-
-    // Insert in sorted order
-    auto it = std::lower_bound(points.begin(), points.end(), pt,
-                                [](const AutomationPoint& a, const AutomationPoint& b) {
-                                    return a.timeSeconds < b.timeSeconds;
-                                });
-    points.insert(it, pt);
+    auto current = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    auto next = std::make_shared<PointList>(current ? *current : PointList());
+    AutomationPoint point { timeSeconds, value };
+    auto insertPos = std::lower_bound(next->begin(), next->end(), point,
+                                      [] (const AutomationPoint& a, const AutomationPoint& b)
+                                      {
+                                          return a.timeSeconds < b.timeSeconds;
+                                      });
+    next->insert(insertPos, point);
+    publishPoints(std::static_pointer_cast<const PointList>(next));
 }
 
 void AutomationList::removePointsInRange(double startTimeSeconds, double endTimeSeconds)
 {
-    const juce::ScopedLock sl(lock);
-    points.erase(
-        std::remove_if(points.begin(), points.end(),
-                       [startTimeSeconds, endTimeSeconds](const AutomationPoint& p) {
-                           return p.timeSeconds >= startTimeSeconds && p.timeSeconds <= endTimeSeconds;
-                       }),
-        points.end());
+    const juce::ScopedLock sl(writerLock);
+
+    auto current = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    auto next = std::make_shared<PointList>(current ? *current : PointList());
+    next->erase(std::remove_if(next->begin(), next->end(),
+                               [startTimeSeconds, endTimeSeconds] (const AutomationPoint& point)
+                               {
+                                   return point.timeSeconds >= startTimeSeconds
+                                       && point.timeSeconds <= endTimeSeconds;
+                               }),
+                next->end());
+    publishPoints(std::static_pointer_cast<const PointList>(next));
 }
 
 void AutomationList::clear()
 {
-    const juce::ScopedLock sl(lock);
-    points.clear();
+    const juce::ScopedLock sl(writerLock);
+    publishPoints(std::make_shared<const PointList>());
 }
 
-int AutomationList::getNumPoints() const
+void AutomationList::setMode(AutomationMode newMode)
 {
-    const juce::ScopedLock sl(lock);
-    return static_cast<int>(points.size());
+    mode.store(newMode, std::memory_order_release);
+    if (newMode != AutomationMode::Touch && newMode != AutomationMode::Latch)
+        resetTouchAndLatch();
+    else if (newMode == AutomationMode::Touch)
+        latchActive.store(false, std::memory_order_release);
 }
 
-// ============================================================================
-// Audio-thread read API
-// ============================================================================
+void AutomationList::beginTouch()
+{
+    isTouching.store(true, std::memory_order_release);
+    if (mode.load(std::memory_order_acquire) == AutomationMode::Latch)
+        latchActive.store(true, std::memory_order_release);
+}
+
+void AutomationList::endTouch()
+{
+    isTouching.store(false, std::memory_order_release);
+}
+
+void AutomationList::resetTouchAndLatch()
+{
+    isTouching.store(false, std::memory_order_release);
+    latchActive.store(false, std::memory_order_release);
+}
 
 bool AutomationList::shouldPlayback() const
 {
-    auto m = mode.load(std::memory_order_relaxed);
-    switch (m)
+    switch (mode.load(std::memory_order_acquire))
     {
         case AutomationMode::Read:
             return true;
         case AutomationMode::Touch:
+            return !isTouching.load(std::memory_order_acquire);
         case AutomationMode::Latch:
-            return !isTouching.load(std::memory_order_relaxed);
+            return !latchActive.load(std::memory_order_acquire);
         case AutomationMode::Write:
         case AutomationMode::Off:
         default:
             return false;
     }
+}
+
+bool AutomationList::shouldPlaybackForRead() const
+{
+    return mode.load(std::memory_order_acquire) != AutomationMode::Off;
 }
 
 bool AutomationList::shouldRecord() const
 {
-    auto m = mode.load(std::memory_order_relaxed);
-    switch (m)
+    switch (mode.load(std::memory_order_acquire))
     {
         case AutomationMode::Write:
             return true;
         case AutomationMode::Touch:
-            return isTouching.load(std::memory_order_relaxed);
+            return isTouching.load(std::memory_order_acquire);
         case AutomationMode::Latch:
-            return true;  // Latch always records once activated
+            return latchActive.load(std::memory_order_acquire);
         case AutomationMode::Read:
         case AutomationMode::Off:
         default:
@@ -95,10 +157,8 @@ bool AutomationList::shouldRecord() const
     }
 }
 
-int AutomationList::findPointBefore(double timeSeconds) const
+int AutomationList::findPointBefore(const PointList& points, double timeSeconds)
 {
-    // Binary search: find last point at or before timeSeconds
-    // points must be sorted by timeSeconds (guaranteed by setPoints/addPoint)
     if (points.empty())
         return -1;
 
@@ -108,7 +168,7 @@ int AutomationList::findPointBefore(double timeSeconds) const
 
     while (lo <= hi)
     {
-        int mid = lo + (hi - lo) / 2;
+        const int mid = lo + (hi - lo) / 2;
         if (points[static_cast<size_t>(mid)].timeSeconds <= timeSeconds)
         {
             result = mid;
@@ -125,81 +185,71 @@ int AutomationList::findPointBefore(double timeSeconds) const
 
 float AutomationList::eval(double timeSeconds) const
 {
-    const juce::ScopedTryLock sl(lock);
-    if (!sl.isLocked() || points.empty())
+    auto snapshot = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    if (!snapshot || snapshot->empty())
         return defaultValue.load(std::memory_order_relaxed);
 
-    int idx = findPointBefore(timeSeconds);
-
-    // Before first point — hold first point's value
+    const auto& points = *snapshot;
+    const int idx = findPointBefore(points, timeSeconds);
     if (idx < 0)
         return points.front().value;
 
-    auto sz = static_cast<int>(points.size());
-
-    // At or after last point — hold last point's value
-    if (idx >= sz - 1)
+    const auto size = static_cast<int>(points.size());
+    if (idx >= size - 1)
         return points.back().value;
 
-    // Between two points — interpolate
     const auto& p0 = points[static_cast<size_t>(idx)];
     const auto& p1 = points[static_cast<size_t>(idx + 1)];
+    const auto interp = interpolation.load(std::memory_order_acquire);
 
-    if (interpolation == AutomationInterpolation::Discrete)
+    if (interp == AutomationInterpolation::Discrete)
         return p0.value;
 
-    double dt = p1.timeSeconds - p0.timeSeconds;
+    const double dt = p1.timeSeconds - p0.timeSeconds;
     if (dt <= 0.0)
         return p0.value;
 
-    double t = (timeSeconds - p0.timeSeconds) / dt;  // 0.0 to 1.0
+    double fraction = (timeSeconds - p0.timeSeconds) / dt;
+    if (interp == AutomationInterpolation::Exponential)
+        fraction *= fraction;
 
-    if (interpolation == AutomationInterpolation::Exponential)
-    {
-        // Quadratic ease for smoother volume curves
-        t = t * t;
-    }
-
-    return static_cast<float>(p0.value + (p1.value - p0.value) * t);
+    return static_cast<float>(p0.value + (p1.value - p0.value) * fraction);
 }
 
 void AutomationList::evalBlock(double startTimeSeconds, double sampleRate, int numSamples, float* outputBuffer) const
 {
-    juce::ignoreUnused(sampleRate);
+    if (outputBuffer == nullptr || numSamples <= 0)
+        return;
 
-    const juce::ScopedTryLock sl(lock);
-    if (!sl.isLocked() || points.empty())
+    auto snapshot = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    if (!snapshot || snapshot->empty() || sampleRate <= 0.0)
     {
-        float def = defaultValue.load(std::memory_order_relaxed);
+        const float def = defaultValue.load(std::memory_order_relaxed);
         for (int i = 0; i < numSamples; ++i)
             outputBuffer[i] = def;
         return;
     }
 
-    auto sz = static_cast<int>(points.size());
-
-    // Start search from the point before the block start
-    int idx = findPointBefore(startTimeSeconds);
+    const auto& points = *snapshot;
+    const auto size = static_cast<int>(points.size());
+    const auto interp = interpolation.load(std::memory_order_acquire);
+    int idx = findPointBefore(points, startTimeSeconds);
 
     for (int i = 0; i < numSamples; ++i)
     {
-        double t = startTimeSeconds + static_cast<double>(i) / sampleRate;
-
-        // Advance idx to the correct segment for this sample
-        while (idx < sz - 1 && points[static_cast<size_t>(idx + 1)].timeSeconds <= t)
+        const double timeSeconds = startTimeSeconds + static_cast<double>(i) / sampleRate;
+        while (idx < size - 1 && points[static_cast<size_t>(idx + 1)].timeSeconds <= timeSeconds)
             ++idx;
 
         if (idx < 0)
         {
-            // Before first point
             outputBuffer[i] = points.front().value;
         }
-        else if (idx >= sz - 1)
+        else if (idx >= size - 1)
         {
-            // At/after last point — fill rest of buffer and break
-            float val = points.back().value;
+            const float value = points.back().value;
             for (int j = i; j < numSamples; ++j)
-                outputBuffer[j] = val;
+                outputBuffer[j] = value;
             break;
         }
         else
@@ -207,25 +257,23 @@ void AutomationList::evalBlock(double startTimeSeconds, double sampleRate, int n
             const auto& p0 = points[static_cast<size_t>(idx)];
             const auto& p1 = points[static_cast<size_t>(idx + 1)];
 
-            if (interpolation == AutomationInterpolation::Discrete)
+            if (interp == AutomationInterpolation::Discrete)
             {
                 outputBuffer[i] = p0.value;
+                continue;
             }
-            else
+
+            const double dt = p1.timeSeconds - p0.timeSeconds;
+            if (dt <= 0.0)
             {
-                double dt = p1.timeSeconds - p0.timeSeconds;
-                if (dt <= 0.0)
-                {
-                    outputBuffer[i] = p0.value;
-                }
-                else
-                {
-                    double frac = (t - p0.timeSeconds) / dt;
-                    if (interpolation == AutomationInterpolation::Exponential)
-                        frac = frac * frac;
-                    outputBuffer[i] = static_cast<float>(p0.value + (p1.value - p0.value) * frac);
-                }
+                outputBuffer[i] = p0.value;
+                continue;
             }
+
+            double fraction = (timeSeconds - p0.timeSeconds) / dt;
+            if (interp == AutomationInterpolation::Exponential)
+                fraction *= fraction;
+            outputBuffer[i] = static_cast<float>(p0.value + (p1.value - p0.value) * fraction);
         }
     }
 }

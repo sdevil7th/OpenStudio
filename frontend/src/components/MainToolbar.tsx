@@ -64,8 +64,6 @@ export function MainToolbar({
     toggleMuteTool,
     showPitchEditor,
     aiToolsStatus,
-    installAiTools,
-    reopenStemSeparation,
     openAiToolsSetup,
   } = useDAWStore(
     useShallow((s) => ({
@@ -91,8 +89,6 @@ export function MainToolbar({
       toggleMuteTool: s.toggleMuteTool,
       showPitchEditor: s.showPitchEditor,
       aiToolsStatus: s.aiToolsStatus,
-      installAiTools: s.installAiTools,
-      reopenStemSeparation: s.reopenStemSeparation,
       openAiToolsSetup: s.openAiToolsSetup,
     })),
   );
@@ -109,22 +105,8 @@ export function MainToolbar({
   const effectiveCanRedo = showPitchEditor ? peRedoStack.length > 0 : canRedo;
   const hasArmedTracks = tracks.some((t) => t.armed);
 
-  const handleAiToolsClick = async () => {
-    if (aiToolsStatus.installInProgress) {
-      reopenStemSeparation();
-      return;
-    }
-
-    if (aiToolsStatus.available) {
-      return;
-    }
-
-    if (aiToolsStatus.state === "pythonMissing" || aiToolsStatus.state === "error") {
-      openAiToolsSetup();
-      return;
-    }
-
-    await installAiTools();
+  const handleAiToolsClick = () => {
+    openAiToolsSetup();
   };
 
   const aiToolsTitle = aiToolsStatus.available

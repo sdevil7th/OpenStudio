@@ -5,10 +5,25 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import {
   getFXChainSlots,
   notifyFXChainChanged,
+  notifyInstrumentChanged,
   waitForFXChainLength,
 } from "../../utils/fxChain";
-import { automationToBackend } from "../automationParams";
-import { syncAutomationLaneToBackend } from "./storeHelpers";
+import {
+  automationToBackend,
+  getAutomationDefault,
+  interpolateAtTime,
+  VOLUME_DB_RANGE,
+  VOLUME_MIN_DB,
+} from "../automationParams";
+import {
+  syncAutomationLaneToBackend,
+  _autoRecordTimers,
+  AUTO_RECORD_INTERVAL_MS,
+  _automationTouchedParams,
+  _automationLatchedParams,
+  _automationWriteValues,
+  automationTouchKey,
+} from "./storeHelpers";
 
 // @ts-nocheck
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,6 +41,47 @@ function buildAutomationSuspendSnapshot(track: any) {
       ]),
     ),
   };
+}
+
+const AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS = 0.025;
+
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+}
+
+function currentNormalizedAutomationValue(track: any, lane: any, time: number): number {
+  const writeValue = _automationWriteValues.get(automationTouchKey(track.id, lane.param));
+  if (writeValue !== undefined)
+    return clamp01(writeValue);
+
+  switch (lane.param) {
+    case "volume":
+      return clamp01(((track.volumeDB ?? 0) - VOLUME_MIN_DB) / VOLUME_DB_RANGE);
+    case "pan":
+    case "pan_prefx":
+      return clamp01(((track.pan ?? 0) + 1) / 2);
+    case "width":
+      return clamp01((track.stereoWidth ?? 100) / 200);
+    case "volume_prefx":
+    case "trim_volume":
+    case "width_prefx":
+    case "midi_pitch_bend":
+      return lane.points?.length ? interpolateAtTime(lane.points, time) : getAutomationDefault(lane.param);
+    case "mute":
+      return track.muted ? 1 : 0;
+    default:
+      return lane.points?.length ? interpolateAtTime(lane.points, time) : getAutomationDefault(lane.param);
+  }
+}
+
+function writeAutomationPoint(points: any[], time: number, value: number) {
+  const start = Math.max(0, time - AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS);
+  const end = time + AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS;
+  const next = (points || [])
+    .filter((point) => point.time < start || point.time > end)
+    .concat([{ time: Math.max(0, time), value: clamp01(value) }]);
+  next.sort((a, b) => a.time - b.time);
+  return next;
 }
 
 export const automationActions = (set: SetFn, get: GetFn) => ({
@@ -122,6 +178,233 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       return true;
     },
 
+    loadInstrumentWithUndo: async (trackId, pluginPath) => {
+      const track = get().tracks.find((t: any) => t.id === trackId);
+      if (!track) return false;
+
+      const previousPlugin = track.instrumentPlugin || "";
+      const previousType = track.type;
+      const previousState = previousPlugin
+        ? await nativeBridge.getInstrumentState(trackId).catch(() => "")
+        : "";
+
+      const success = await nativeBridge.loadInstrument(trackId, pluginPath);
+      if (!success) return false;
+
+      get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath });
+      await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+      notifyInstrumentChanged({ trackId, instrumentPlugin: pluginPath });
+
+      const command: Command = {
+        type: "LOAD_INSTRUMENT",
+        description: "Load instrument",
+        timestamp: Date.now(),
+        execute: async () => {
+          await nativeBridge.loadInstrument(trackId, pluginPath);
+          get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+          notifyInstrumentChanged({ trackId, instrumentPlugin: pluginPath });
+        },
+        undo: async () => {
+          if (previousPlugin) {
+            await nativeBridge.loadInstrument(trackId, previousPlugin);
+            if (previousState) await nativeBridge.setInstrumentState(trackId, previousState);
+            get().updateTrack(trackId, { type: "instrument", instrumentPlugin: previousPlugin });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
+          } else {
+            await nativeBridge.removeInstrument(trackId);
+            get().updateTrack(trackId, { type: previousType || "midi", instrumentPlugin: undefined });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+          }
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    removeInstrumentWithUndo: async (trackId) => {
+      const track = get().tracks.find((t: any) => t.id === trackId);
+      if (!track?.instrumentPlugin) {
+        if (!track || track.type !== "instrument" || track.samplerSamplePath) return false;
+
+        const previousType = track.type;
+        await nativeBridge.setTrackType(trackId, "midi").catch(() => false);
+        get().updateTrack(trackId, { type: "midi", instrumentPlugin: undefined });
+        await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+
+        const command: Command = {
+          type: "REMOVE_INSTRUMENT",
+          description: "Remove basic synth",
+          timestamp: Date.now(),
+          execute: async () => {
+            await nativeBridge.setTrackType(trackId, "midi").catch(() => false);
+            get().updateTrack(trackId, { type: "midi", instrumentPlugin: undefined });
+            await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+          },
+          undo: async () => {
+            await nativeBridge.setTrackType(trackId, previousType || "instrument").catch(() => false);
+            get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: undefined });
+            await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+          },
+        };
+        commandManager.push(command);
+        set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+        return true;
+      }
+
+      const previousPlugin = track.instrumentPlugin;
+      const previousType = track.type;
+      const previousState = await nativeBridge.getInstrumentState(trackId).catch(() => "");
+      const typeAfterRemoval = (candidate: any) =>
+        candidate?.samplerSamplePath || previousType === "instrument" ? "instrument" : "midi";
+      const success = await nativeBridge.removeInstrument(trackId);
+      if (!success) return false;
+
+      get().updateTrack(trackId, {
+        type: typeAfterRemoval(track),
+        instrumentPlugin: undefined,
+      });
+      await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+      notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+
+      const command: Command = {
+        type: "REMOVE_INSTRUMENT",
+        description: "Remove instrument",
+        timestamp: Date.now(),
+        execute: async () => {
+          await nativeBridge.removeInstrument(trackId);
+          const currentTrack = get().tracks.find((t: any) => t.id === trackId);
+          get().updateTrack(trackId, {
+            type: typeAfterRemoval(currentTrack),
+            instrumentPlugin: undefined,
+          });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+          notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+        },
+        undo: async () => {
+          await nativeBridge.loadInstrument(trackId, previousPlugin);
+          if (previousState) await nativeBridge.setInstrumentState(trackId, previousState);
+          get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: previousPlugin });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+          notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    setTrackSamplerSampleWithUndo: async (trackId, samplePath, rootNote = 60) => {
+      const track = get().tracks.find((t: any) => t.id === trackId);
+      if (!track || !samplePath) return false;
+
+      const previousSamplePath = track.samplerSamplePath || "";
+      const previousRootNote = track.samplerRootNote ?? 60;
+      const previousType = track.type;
+      const nextRootNote = Math.max(0, Math.min(127, Math.round(rootNote)));
+
+      const success = await nativeBridge.setTrackSamplerSample(trackId, samplePath, nextRootNote);
+      if (!success) return false;
+
+      get().updateTrack(trackId, {
+        type: "instrument",
+        samplerSamplePath: samplePath,
+        samplerRootNote: nextRootNote,
+        samplerSourceType: String(samplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+      });
+      await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+
+      const command: Command = {
+        type: "LOAD_INSTRUMENT",
+        description: "Load sampler sample",
+        timestamp: Date.now(),
+        execute: async () => {
+          await nativeBridge.setTrackSamplerSample(trackId, samplePath, nextRootNote);
+          get().updateTrack(trackId, {
+            type: "instrument",
+            samplerSamplePath: samplePath,
+            samplerRootNote: nextRootNote,
+            samplerSourceType: String(samplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+          });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        },
+        undo: async () => {
+          if (previousSamplePath) {
+            await nativeBridge.setTrackSamplerSample(trackId, previousSamplePath, previousRootNote);
+            get().updateTrack(trackId, {
+              type: previousType === "audio" || previousType === "ai" || previousType === "bus" ? "instrument" : previousType,
+              samplerSamplePath: previousSamplePath,
+              samplerRootNote: previousRootNote,
+              samplerSourceType: String(previousSamplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+            });
+          } else {
+            await nativeBridge.clearTrackSamplerSample(trackId);
+            get().updateTrack(trackId, {
+              type: previousType,
+              samplerSamplePath: undefined,
+              samplerRootNote: previousRootNote,
+              samplerSourceType: undefined,
+            });
+          }
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    clearTrackSamplerSampleWithUndo: async (trackId) => {
+      const track = get().tracks.find((t: any) => t.id === trackId);
+      if (!track?.samplerSamplePath) return false;
+
+      const previousSamplePath = track.samplerSamplePath;
+      const previousRootNote = track.samplerRootNote ?? 60;
+      const previousType = track.type;
+      const success = await nativeBridge.clearTrackSamplerSample(trackId);
+      if (!success) return false;
+
+      get().updateTrack(trackId, {
+        samplerSamplePath: undefined,
+        samplerRootNote: previousRootNote,
+        samplerSourceType: undefined,
+      });
+      await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+
+      const command: Command = {
+        type: "REMOVE_INSTRUMENT",
+        description: "Clear sampler sample",
+        timestamp: Date.now(),
+        execute: async () => {
+          await nativeBridge.clearTrackSamplerSample(trackId);
+          get().updateTrack(trackId, {
+            samplerSamplePath: undefined,
+            samplerRootNote: previousRootNote,
+            samplerSourceType: undefined,
+          });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        },
+        undo: async () => {
+          await nativeBridge.setTrackSamplerSample(trackId, previousSamplePath, previousRootNote);
+          get().updateTrack(trackId, {
+            type: previousType || "instrument",
+            samplerSamplePath: previousSamplePath,
+            samplerRootNote: previousRootNote,
+            samplerSourceType: String(previousSamplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+          });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
 
     toggleTrackAutomation: (trackId) => {
       set((s) => ({
@@ -129,6 +412,112 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           t.id === trackId ? { ...t, showAutomation: !t.showAutomation } : t,
         ),
       }));
+    },
+
+    recordAutomationWriteTick: (nowMs = Date.now()) => {
+      const state = get();
+      if (!state.transport.isPlaying) return;
+
+      const time = state.transport.currentTime;
+      const lanesToSync: Array<{
+        trackId: string;
+        lane: any;
+        start: number;
+        end: number;
+        point: { time: number; value: number };
+      }> = [];
+
+      set((s) => {
+        let changed = false;
+        const tracks = s.tracks.map((track) => {
+          if (!track.automationEnabled) return track;
+
+          let trackChanged = false;
+          const automationLanes = track.automationLanes.map((lane) => {
+            if (!lane.armed || lane.mode === "off" || lane.mode === "read")
+              return lane;
+
+            const key = automationTouchKey(track.id, lane.param);
+            const shouldRecord = lane.mode === "write"
+              || (lane.mode === "touch" && _automationTouchedParams.has(key))
+              || (lane.mode === "latch" && (_automationTouchedParams.has(key) || _automationLatchedParams.has(key)));
+
+            if (!shouldRecord)
+              return lane;
+
+            const lastRecorded = _autoRecordTimers.get(key) ?? 0;
+            if (nowMs - lastRecorded < AUTO_RECORD_INTERVAL_MS)
+              return lane;
+
+            _autoRecordTimers.set(key, nowMs);
+            const value = currentNormalizedAutomationValue(track, lane, time);
+            const point = { time: Math.max(0, time), value: clamp01(value) };
+            const nextLane = {
+              ...lane,
+              points: writeAutomationPoint(lane.points, time, point.value),
+            };
+            lanesToSync.push({
+              trackId: track.id,
+              lane: nextLane,
+              start: Math.max(0, time - AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS),
+              end: time + AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS,
+              point,
+            });
+            trackChanged = true;
+            changed = true;
+            return nextLane;
+          });
+
+          return trackChanged ? { ...track, automationLanes } : track;
+        });
+
+        return changed ? { tracks, isModified: true } : s;
+      });
+
+      for (const { trackId, lane, start, end, point } of lanesToSync) {
+        const convertedPoint = {
+          time: point.time,
+          value: automationToBackend(lane.param, point.value),
+        };
+        nativeBridge
+          .replaceAutomationPointsInRange(trackId, lane.param, start, end, [convertedPoint])
+          .then((ok) => {
+            if (!ok) syncAutomationLaneToBackend(trackId, lane);
+          })
+          .catch(() => syncAutomationLaneToBackend(trackId, lane));
+      }
+    },
+
+    endAutomationWriteSession: () => {
+      _automationTouchedParams.clear();
+      _automationLatchedParams.clear();
+      _autoRecordTimers.clear();
+      _automationWriteValues.clear();
+    },
+
+    setAutomationWriteValue: (trackId, param, value) => {
+      _automationWriteValues.set(automationTouchKey(trackId, param), clamp01(value));
+    },
+
+    beginAutomationParamTouch: (trackId, param) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.param === param);
+      if (!lane || !lane.armed || (lane.mode !== "touch" && lane.mode !== "latch")) return;
+      const key = automationTouchKey(trackId, param);
+      _automationTouchedParams.add(key);
+      if (lane.mode === "latch") _automationLatchedParams.add(key);
+      else _automationLatchedParams.delete(key);
+      nativeBridge.beginTouchAutomation(trackId, param).catch(() => {});
+    },
+
+    endAutomationParamTouch: (trackId, param) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      const lane = track?.automationLanes.find((l) => l.param === param);
+      if (!lane) return;
+      const key = automationTouchKey(trackId, param);
+      _automationTouchedParams.delete(key);
+      if (lane.mode !== "latch") _automationLatchedParams.delete(key);
+      nativeBridge.endTouchAutomation(trackId, param).catch(() => {});
     },
 
     toggleTrackAutomationEnabled: (trackId) => {
@@ -162,7 +551,11 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         });
 
         for (const lane of track.automationLanes) {
+          const key = automationTouchKey(trackId, lane.param);
+          _automationTouchedParams.delete(key);
+          _automationLatchedParams.delete(key);
           nativeBridge.setAutomationMode(trackId, lane.param, "off").catch(logBridgeError("sync"));
+          nativeBridge.endTouchAutomation(trackId, lane.param).catch(logBridgeError("sync"));
         }
         nativeBridge.setTrackVolume(trackId, track.volumeDB).catch(logBridgeError("sync"));
         nativeBridge.setTrackPan(trackId, track.pan).catch(logBridgeError("sync"));
@@ -220,70 +613,92 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     addAutomationPoint: (trackId, laneId, time, value) => {
-      set((s) => ({
-        tracks: s.tracks.map((t) => {
-          if (t.id !== trackId) return t;
-          return {
-            ...t,
-            automationLanes: t.automationLanes.map((lane) => {
-              if (lane.id !== laneId) return lane;
-              // Insert point in time-sorted order
-              const newPoints = [...lane.points, { time, value: Math.max(0, Math.min(1, value)) }];
-              newPoints.sort((a, b) => a.time - b.time);
-              return { ...lane, points: newPoints };
-            }),
-          };
-        }),
-        isModified: true,
-      }));
-      // Sync to C++ backend
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (lane) syncAutomationLaneToBackend(trackId, lane);
+      if (!lane) return;
+      const oldPoints = [...lane.points];
+      const newPoints = [...lane.points, { time: Math.max(0, time), value: clamp01(value) }].sort((a, b) => a.time - b.time);
+      const applyPoints = (points) => {
+        set((s) => ({
+          tracks: s.tracks.map((t) => t.id !== trackId ? t : {
+            ...t,
+            automationLanes: t.automationLanes.map((candidate) =>
+              candidate.id === laneId ? { ...candidate, points } : candidate,
+            ),
+          }),
+          isModified: true,
+        }));
+        const updatedLane = get().tracks.find((t) => t.id === trackId)?.automationLanes.find((l) => l.id === laneId);
+        if (updatedLane) syncAutomationLaneToBackend(trackId, updatedLane);
+      };
+      commandManager.execute({
+        type: "AUTOMATION_POINT_ADD",
+        description: "Add automation point",
+        timestamp: Date.now(),
+        execute: () => applyPoints(newPoints),
+        undo: () => applyPoints(oldPoints),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     removeAutomationPoint: (trackId, laneId, pointIndex) => {
-      set((s) => ({
-        tracks: s.tracks.map((t) => {
-          if (t.id !== trackId) return t;
-          return {
-            ...t,
-            automationLanes: t.automationLanes.map((lane) => {
-              if (lane.id !== laneId) return lane;
-              return { ...lane, points: lane.points.filter((_, i) => i !== pointIndex) };
-            }),
-          };
-        }),
-        isModified: true,
-      }));
-      // Sync to C++ backend
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (lane) syncAutomationLaneToBackend(trackId, lane);
+      if (!lane || pointIndex < 0 || pointIndex >= lane.points.length) return;
+      const oldPoints = [...lane.points];
+      const newPoints = lane.points.filter((_, i) => i !== pointIndex);
+      const applyPoints = (points) => {
+        set((s) => ({
+          tracks: s.tracks.map((t) => t.id !== trackId ? t : {
+            ...t,
+            automationLanes: t.automationLanes.map((candidate) =>
+              candidate.id === laneId ? { ...candidate, points } : candidate,
+            ),
+          }),
+          isModified: true,
+        }));
+        const updatedLane = get().tracks.find((t) => t.id === trackId)?.automationLanes.find((l) => l.id === laneId);
+        if (updatedLane) syncAutomationLaneToBackend(trackId, updatedLane);
+      };
+      commandManager.execute({
+        type: "AUTOMATION_POINT_REMOVE",
+        description: "Remove automation point",
+        timestamp: Date.now(),
+        execute: () => applyPoints(newPoints),
+        undo: () => applyPoints(oldPoints),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     moveAutomationPoint: (trackId, laneId, pointIndex, time, value) => {
-      set((s) => ({
-        tracks: s.tracks.map((t) => {
-          if (t.id !== trackId) return t;
-          return {
-            ...t,
-            automationLanes: t.automationLanes.map((lane) => {
-              if (lane.id !== laneId) return lane;
-              const newPoints = lane.points.map((p, i) =>
-                i === pointIndex ? { time: Math.max(0, time), value: Math.max(0, Math.min(1, value)) } : p,
-              );
-              newPoints.sort((a, b) => a.time - b.time);
-              return { ...lane, points: newPoints };
-            }),
-          };
-        }),
-        isModified: true,
-      }));
-      // Sync to C++ backend
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (lane) syncAutomationLaneToBackend(trackId, lane);
+      if (!lane || pointIndex < 0 || pointIndex >= lane.points.length) return;
+      const oldPoints = [...lane.points];
+      const newPoints = lane.points
+        .map((p, i) => i === pointIndex ? { time: Math.max(0, time), value: clamp01(value) } : p)
+        .sort((a, b) => a.time - b.time);
+      const applyPoints = (points) => {
+        set((s) => ({
+          tracks: s.tracks.map((t) => t.id !== trackId ? t : {
+            ...t,
+            automationLanes: t.automationLanes.map((candidate) =>
+              candidate.id === laneId ? { ...candidate, points } : candidate,
+            ),
+          }),
+          isModified: true,
+        }));
+        const updatedLane = get().tracks.find((t) => t.id === trackId)?.automationLanes.find((l) => l.id === laneId);
+        if (updatedLane) syncAutomationLaneToBackend(trackId, updatedLane);
+      };
+      commandManager.execute({
+        type: "AUTOMATION_POINT_MOVE",
+        description: "Move automation point",
+        timestamp: Date.now(),
+        execute: () => applyPoints(newPoints),
+        undo: () => applyPoints(oldPoints),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     toggleAutomationLaneVisibility: (trackId, laneId) => {
@@ -303,6 +718,30 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     clearAutomationLane: (trackId, laneId) => {
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
+      if (!lane) return;
+      const oldPoints = [...lane.points];
+      const applyPoints = (points) => {
+        set((s) => ({
+          tracks: s.tracks.map((t) => t.id !== trackId ? t : {
+            ...t,
+            automationLanes: t.automationLanes.map((candidate) =>
+              candidate.id === laneId ? { ...candidate, points } : candidate,
+            ),
+          }),
+          isModified: true,
+        }));
+        const updatedLane = get().tracks.find((t) => t.id === trackId)?.automationLanes.find((l) => l.id === laneId);
+        if (updatedLane) syncAutomationLaneToBackend(trackId, updatedLane);
+      };
+      commandManager.execute({
+        type: "AUTOMATION_LANE_CLEAR",
+        description: "Clear automation lane",
+        timestamp: Date.now(),
+        execute: () => applyPoints([]),
+        undo: () => applyPoints(oldPoints),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return;
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -338,7 +777,15 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       }));
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (lane) nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
+      if (lane) {
+        if (mode === "off" || mode === "read") {
+          const key = automationTouchKey(trackId, lane.param);
+          _automationTouchedParams.delete(key);
+          _automationLatchedParams.delete(key);
+          nativeBridge.endTouchAutomation(trackId, lane.param).catch(() => {});
+        }
+        nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
+      }
     },
 
     setTrackAutomationMode: (trackId, mode) => {
@@ -356,6 +803,12 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const track = get().tracks.find((t) => t.id === trackId);
       if (track) {
         for (const lane of track.automationLanes) {
+          if (mode === "off" || mode === "read") {
+            const key = automationTouchKey(trackId, lane.param);
+            _automationTouchedParams.delete(key);
+            _automationLatchedParams.delete(key);
+            nativeBridge.endTouchAutomation(trackId, lane.param).catch(() => {});
+          }
           nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
         }
       }

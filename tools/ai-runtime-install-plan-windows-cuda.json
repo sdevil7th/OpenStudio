@@ -11,6 +11,7 @@
       "type": "pip_install",
       "description": "Installing GPU stem separation packages",
       "stepLabel": "Installing GPU stem separation packages",
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": [
         "audio-separator[gpu]==0.41.1"
       ]
@@ -19,6 +20,7 @@
       "type": "pip_uninstall",
       "description": "Removing default PyTorch wheels before applying the CUDA overlay",
       "stepLabel": "Removing default PyTorch wheels",
+      "features": ["audioGeneration"],
       "packages": [
         "torch",
         "torchvision",
@@ -29,6 +31,7 @@
       "type": "pip_install",
       "description": "Installing CUDA-capable PyTorch wheels from the official PyTorch index",
       "stepLabel": "Downloading CUDA PyTorch wheels",
+      "features": ["audioGeneration"],
       "downloadHint": "This is the largest Windows AI download and can take several minutes depending on your connection.",
       "isLargeDownload": true,
       "indexUrl": "https://download.pytorch.org/whl/cu128",
@@ -42,6 +45,7 @@
       "type": "pip_install",
       "description": "Installing Triton for the ACE-Step accelerated LM runtime",
       "stepLabel": "Installing Triton for music generation",
+      "features": ["audioGeneration"],
       "downloadHint": "OpenStudio is installing the Windows Triton runtime used by ACE-Step acceleration.",
       "isLargeDownload": true,
       "packages": [
@@ -54,6 +58,7 @@
       "type": "install_pinned_wheel",
       "description": "Installing Flash Attention for the ACE-Step accelerated LM runtime",
       "stepLabel": "Installing Flash Attention for music generation",
+      "features": ["audioGeneration"],
       "downloadHint": "OpenStudio is installing the pinned Flash Attention wheel for the Windows ACE-Step stack.",
       "isLargeDownload": true,
       "url": "https://github.com/sdbds/flash-attention-for-windows/releases/download/2.8.3/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSEfullbackward-cp311-cp311-win_amd64.whl",
@@ -66,6 +71,7 @@
       "type": "pip_install",
       "description": "Installing ACE-Step 1.5 runtime dependencies",
       "stepLabel": "Installing ACE-Step 1.5 runtime dependencies",
+      "features": ["audioGeneration"],
       "packages": [
         "transformers==4.50.0",
         "diffusers==0.35.2",
@@ -82,6 +88,7 @@
       "type": "hf_snapshot_pip_install",
       "description": "Preparing the ACE-Step 1.5 runtime source",
       "stepLabel": "Installing the ACE-Step 1.5 runtime bridge",
+      "features": ["audioGeneration"],
       "downloadHint": "OpenStudio is downloading the pinned ACE-Step 1.5 runtime bridge from Hugging Face.",
       "isLargeDownload": true,
       "repoId": "ACE-Step/Ace-Step-v1.5",

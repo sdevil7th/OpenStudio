@@ -1,13 +1,15 @@
-import { type NativeGlobalShortcutEvent } from "../services/NativeBridge";
+import { nativeBridge, type NativeGlobalShortcutEvent } from "../services/NativeBridge";
 import { getRegisteredActions, type ActionDef } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { isMac } from "./platform";
+import { windowRole, windowSessionId } from "./windowEnvironment";
 
 let _lastSpacebarMs = 0;
 
 export interface GlobalShortcutPayload extends NativeGlobalShortcutEvent {
   targetIsEditable?: boolean;
   preventDefault?: () => void;
+  stopPropagation?: () => void;
 }
 
 /**
@@ -50,7 +52,16 @@ function toPressedShortcut(payload: GlobalShortcutPayload): string | null {
 
 function markHandled(payload: GlobalShortcutPayload): true {
   payload.preventDefault?.();
+  payload.stopPropagation?.();
   return true;
+}
+
+function isPlainSpacebar(payload: GlobalShortcutPayload): boolean {
+  return (payload.key === " " || payload.code === "Space")
+    && !payload.ctrlKey
+    && !payload.metaKey
+    && !payload.altKey
+    && !payload.shiftKey;
 }
 
 function isGlobalShortcutAction(action: ActionDef): boolean {
@@ -70,16 +81,37 @@ function findMatchingGlobalAction(pressed: string): ActionDef | undefined {
   ));
 }
 
-export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean {
-  if (payload.targetIsEditable) {
-    return false;
-  }
+function publishDetachedCommand(command: string, payload: Record<string, unknown> = {}): void {
+  void nativeBridge.publishAppCommand({
+    command,
+    sessionId: windowSessionId || useDAWStore.getState().activeMidiEditorSessionId || undefined,
+    ...payload,
+  });
+}
 
+export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean {
   if (payload.repeat) {
     return false;
   }
 
   const pressed = toPressedShortcut(payload);
+  const state = useDAWStore.getState();
+  const key = payload.key ?? "";
+
+  if (payload.targetIsEditable) {
+    if (isPlainSpacebar(payload) && (state.transport.isRecording || state.transport.isPlaying)) {
+      markHandled(payload);
+      const now = Date.now();
+      if (now - _lastSpacebarMs < 150) return true;
+      _lastSpacebarMs = now;
+      if (windowRole !== "main") publishDetachedCommand("transport.stop");
+      else state.stop();
+      return true;
+    }
+
+    return false;
+  }
+
   if (pressed) {
     const customShortcuts = useDAWStore.getState().customShortcuts;
     for (const [actionId, shortcut] of Object.entries(customShortcuts)) {
@@ -94,8 +126,40 @@ export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean 
     }
   }
 
-  const state = useDAWStore.getState();
-  const key = payload.key ?? "";
+  if (windowRole !== "main") {
+    if (key === " " || payload.code === "Space") {
+      markHandled(payload);
+      const now = Date.now();
+      if (now - _lastSpacebarMs < 150) return true;
+      _lastSpacebarMs = now;
+      publishDetachedCommand("transport.toggle");
+      return true;
+    }
+
+    if (pressed === "Ctrl+R") {
+      markHandled(payload);
+      publishDetachedCommand("transport.record");
+      return true;
+    }
+
+    if (pressed === "Ctrl+Z") {
+      markHandled(payload);
+      publishDetachedCommand("edit.undo");
+      return true;
+    }
+
+    if (pressed === "Ctrl+Y" || pressed === "Ctrl+Shift+Z") {
+      markHandled(payload);
+      publishDetachedCommand("edit.redo");
+      return true;
+    }
+
+    if (pressed === "Q") {
+      markHandled(payload);
+      publishDetachedCommand("midi.quantize");
+      return true;
+    }
+  }
 
   if (key === " " || payload.code === "Space") {
     markHandled(payload);

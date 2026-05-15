@@ -3,15 +3,17 @@ import { createPortal } from "react-dom";
 import classNames from "classnames";
 import { useDAWStore, Track, getTrackGroupInfo, TRACK_GROUP_COLORS, getEffectiveTrackHeight, AUTOMATION_LANE_HEIGHT, AutomationModeType } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
+import { nativeBridge } from "../services/NativeBridge";
 import { FXChainPanel } from "./FXChainPanel";
 import { MIDIDeviceSelector } from "./MIDIDeviceSelector";
 import { ColorPicker } from "./ColorPicker";
 import { PluginBrowser } from "./PluginBrowser";
 import { PianoIcon, TRACK_ICONS, TRACK_ICON_LABELS } from "./icons";
-import { Power, StickyNote } from "lucide-react";
+import { FileAudio, Power, StickyNote, X } from "lucide-react";
 import { Button, Input, Select, Knob, Textarea, Slider } from "./ui";
 import { getAutomationParamDef, getAutomationColor, getAutomationShortLabel, getTrackAutomationParams, automationToBackend } from "../store/automationParams";
 import { subscribeToInstrumentChanged } from "../utils/fxChain";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 import {
   TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS,
   TCP_HEADER_BUTTON_PAIR_CLASS,
@@ -22,6 +24,12 @@ import {
 interface TrackHeaderProps {
   track: Track;
   isSelected?: boolean;
+}
+
+interface SamplerDialogState {
+  samplePath: string;
+  rootNote: string;
+  error: string | null;
 }
 
 export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }: TrackHeaderProps) {
@@ -50,6 +58,9 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
     trackHeight,
     trackGroups,
     setTrackNotes,
+    removeInstrumentWithUndo,
+    setTrackSamplerSampleWithUndo,
+    clearTrackSamplerSampleWithUndo,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -70,6 +81,9 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
       trackHeight: s.trackHeight,
       trackGroups: s.trackGroups,
       setTrackNotes: s.setTrackNotes,
+      removeInstrumentWithUndo: s.removeInstrumentWithUndo,
+      setTrackSamplerSampleWithUndo: s.setTrackSamplerSampleWithUndo,
+      clearTrackSamplerSampleWithUndo: s.clearTrackSamplerSampleWithUndo,
     })),
   );
 
@@ -85,6 +99,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
   const [showAutoMenu, setShowAutoMenu] = useState(false);
+  const [samplerDialog, setSamplerDialog] = useState<SamplerDialogState | null>(null);
   const autoBtnRef = useRef<HTMLDivElement>(null);
   const [notesValue, setNotesValue] = useState(track.notes || "");
   const [inputType, setInputType] = useState<"stereo" | "mono">(
@@ -136,7 +151,8 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
   }, [track.id]);
 
   const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
-  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin);
+  const hasFallbackInstrument = track.type === "instrument" && !track.instrumentPlugin;
+  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin) || hasFallbackInstrument;
   let fxButtonClass = "hover:text-green-500 hover:border-green-500";
   if (hasBypassableFx && track.fxBypassed)
     fxButtonClass =
@@ -154,7 +170,9 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
       ? track.fxBypassed
         ? "Enable FX"
         : "Bypass FX"
-      : "Instrument loaded"
+      : hasFallbackInstrument
+        ? "Built-in fallback synth active"
+        : "Instrument loaded"
     : "No FX loaded";
 
   const hasAutomation =
@@ -198,6 +216,42 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
   };
   const handleOpenFX = () => {
     setShowFXChain(true);
+  };
+
+  const handleLoadSamplerSample = async () => {
+    const samplePath = await nativeBridge.showOpenDialog(
+      "Load Sampler Sample",
+      "*.wav;*.aiff;*.aif;*.flac;*.ogg;*.mp3;*.sf2",
+    );
+    if (!samplePath) return;
+    setSamplerDialog({
+      samplePath,
+      rootNote: String(track.samplerRootNote ?? 60),
+      error: null,
+    });
+  };
+
+  const submitSamplerDialog = async () => {
+    if (!samplerDialog) return;
+    const parsedRootNote = Number(samplerDialog.rootNote);
+    if (!Number.isFinite(parsedRootNote)) {
+      setSamplerDialog({
+        ...samplerDialog,
+        error: "Enter a MIDI note from 0 to 127.",
+      });
+      return;
+    }
+
+    const rootNote = Math.max(0, Math.min(127, Math.round(parsedRootNote)));
+    const loaded = await setTrackSamplerSampleWithUndo(track.id, samplerDialog.samplePath, rootNote);
+    if (!loaded) {
+      setSamplerDialog({
+        ...samplerDialog,
+        error: "Could not load sampler sample.",
+      });
+      return;
+    }
+    setSamplerDialog(null);
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -707,16 +761,60 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
 
           {/* Instrument plugin button */}
           {track.type === "instrument" && (
-            <Button
-              variant="default"
-              size="icon-sm"
-              onClick={() => setShowInstrumentBrowser(true)}
-              title={track.instrumentPlugin || "Load Instrument Plugin"}
-              className="hover:text-purple-400 hover:border-purple-400 text-[9px] px-1.5 shrink-0"
-            >
-              <PianoIcon size={12} />
-              {track.instrumentPlugin ? null : "+"}
-            </Button>
+            <div className="flex items-center shrink-0">
+              <Button
+                variant="default"
+                size="icon-sm"
+                onClick={() => setShowInstrumentBrowser(true)}
+                title={track.instrumentPlugin || "Built-in fallback synth active. Load an instrument plugin."}
+                className={classNames(
+                  "hover:text-purple-400 hover:border-purple-400 text-[9px] px-1.5 shrink-0",
+                  hasFallbackInstrument && "text-purple-300! border-purple-500/60!",
+                )}
+              >
+                <PianoIcon size={12} />
+                {track.instrumentPlugin ? null : "+"}
+              </Button>
+              {track.instrumentPlugin && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => {
+                    void removeInstrumentWithUndo(track.id);
+                  }}
+                  title="Remove Instrument"
+                  className="hover:text-red-400 px-1 shrink-0"
+                >
+                  <X size={11} />
+                </Button>
+              )}
+              <Button
+                variant="default"
+                size="icon-sm"
+                onClick={handleLoadSamplerSample}
+                title={track.samplerSamplePath ? `Sampler: ${track.samplerSamplePath}` : "Load built-in sampler sample"}
+                aria-label="Load built-in sampler sample"
+                className={classNames(
+                  "hover:text-cyan-300 hover:border-cyan-400 px-1 shrink-0",
+                  track.samplerSamplePath && "text-cyan-300! border-cyan-500/60!",
+                )}
+              >
+                <FileAudio size={11} />
+              </Button>
+              {track.samplerSamplePath && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => {
+                    void clearTrackSamplerSampleWithUndo(track.id);
+                  }}
+                  title="Clear sampler sample"
+                  className="hover:text-red-400 px-1 shrink-0"
+                >
+                  <X size={11} />
+                </Button>
+              )}
+            </div>
           )}
 
           {/* MIDI Device Selector (conditional) */}
@@ -877,6 +975,80 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
             setShowInstrumentBrowser(false);
           }}
         />
+      )}
+
+      {samplerDialog && createPortal(
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/50"
+          data-modal-root="true"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sampler-root-note-title"
+          onContextMenu={guardModalContextMenu}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSamplerDialog(null);
+          }}
+        >
+          <form
+            className="w-[340px] rounded-md border border-white/15 bg-neutral-900 p-4 shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+            onContextMenu={guardModalContextMenu}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitSamplerDialog();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSamplerDialog(null);
+              }
+            }}
+          >
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div id="sampler-root-note-title" className="text-sm font-semibold text-white">
+                Sampler Root Note
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setSamplerDialog(null)}
+                aria-label="Close sampler root note dialog"
+              >
+                <X size={14} />
+              </Button>
+            </div>
+            <div className="mb-3 truncate text-xs text-neutral-400" title={samplerDialog.samplePath}>
+              {samplerDialog.samplePath}
+            </div>
+            <Input
+              id="sampler-root-note-input"
+              type="number"
+              min={0}
+              max={127}
+              step={1}
+              autoFocus
+              fullWidth
+              label="Root MIDI note"
+              value={samplerDialog.rootNote}
+              onChange={(event) => setSamplerDialog({
+                ...samplerDialog,
+                rootNote: event.target.value,
+                error: null,
+              })}
+              error={samplerDialog.error || undefined}
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={() => setSamplerDialog(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" size="sm">
+                Load
+              </Button>
+            </div>
+          </form>
+        </div>,
+        document.body,
       )}
     </>
   );

@@ -219,10 +219,21 @@ export const routingActions = (set: SetFn, get: GetFn) => ({
 
       // Find the clip and its old offset
       let oldOffset: number | null = null;
+      let trackId: string | null = null;
+      let isMidi = false;
       for (const track of state.tracks) {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) {
-          oldOffset = clip.offset;
+        const audioClip = track.clips.find((c) => c.id === clipId);
+        if (audioClip) {
+          oldOffset = audioClip.offset || 0;
+          trackId = track.id;
+          break;
+        }
+
+        const midiClip = track.midiClips.find((c) => c.id === clipId);
+        if (midiClip) {
+          oldOffset = midiClip.offset || 0;
+          trackId = track.id;
+          isMidi = true;
           break;
         }
       }
@@ -237,25 +248,45 @@ export const routingActions = (set: SetFn, get: GetFn) => ({
           set((s) => ({
             tracks: s.tracks.map((track) => ({
               ...track,
-              clips: track.clips.map((clip) =>
-                clip.id === clipId
-                  ? { ...clip, offset: newOffset }
-                  : clip,
-              ),
+              clips: isMidi
+                ? track.clips
+                : track.clips.map((clip) =>
+                    clip.id === clipId
+                      ? { ...clip, offset: newOffset }
+                      : clip,
+                  ),
+              midiClips: isMidi
+                ? track.midiClips.map((clip) =>
+                    clip.id === clipId
+                      ? { ...clip, offset: newOffset }
+                      : clip,
+                  )
+                : track.midiClips,
             })),
           }));
+          if (isMidi && trackId) void get().syncMIDITrackToBackend(trackId, { debounce: false });
         },
         undo: () => {
           set((s) => ({
             tracks: s.tracks.map((track) => ({
               ...track,
-              clips: track.clips.map((clip) =>
-                clip.id === clipId
-                  ? { ...clip, offset: capturedOldOffset }
-                  : clip,
-              ),
+              clips: isMidi
+                ? track.clips
+                : track.clips.map((clip) =>
+                    clip.id === clipId
+                      ? { ...clip, offset: capturedOldOffset }
+                      : clip,
+                  ),
+              midiClips: isMidi
+                ? track.midiClips.map((clip) =>
+                    clip.id === clipId
+                      ? { ...clip, offset: capturedOldOffset }
+                      : clip,
+                  )
+                : track.midiClips,
             })),
           }));
+          if (isMidi && trackId) void get().syncMIDITrackToBackend(trackId, { debounce: false });
         },
       };
 

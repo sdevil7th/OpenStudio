@@ -165,6 +165,21 @@ python build.py prod
 
 **No feature flags** — all features (ASIO, WASAPI, DirectSound, VST3 hosting, WebView2) are always enabled via hardcoded `target_compile_definitions` in CMakeLists.txt. The `build.py dev` mode uses Debug config; `build.py prod` uses Release.
 
+### Manual Testing Handoff Requirement
+
+When handing work to the user for manual testing, assume the user will run exactly:
+
+```bash
+python build.py dev --run
+```
+
+Before asking for manual testing:
+- Make sure the latest frontend code is built into `frontend/dist` when packaged fallback could be used.
+- Run `cmake --build build --config Debug` after frontend or C++ changes so the Debug app and copied `webui` assets are current.
+- Do not require the user to pre-run Vite, npm, or any other server. `python build.py dev --run` must start what it needs.
+- Stop any Codex-started dev servers, harness browsers, or background Vite/npm processes before handing off. Verify port `5173` is not left occupied by a Codex-started process.
+- In the handoff, state that the CMake Debug build was completed and that no pre-running server is required.
+
 ## Key Technical Details
 
 ### State Management

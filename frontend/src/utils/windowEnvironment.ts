@@ -20,6 +20,7 @@ function detectHostPlatform(): string {
 }
 
 export const windowRole = searchParams.get("window") ?? "main";
+export const windowSessionId = searchParams.get("sessionId") ?? "";
 export const startupMode = searchParams.get("startup") ?? "normal";
 export const hostPlatform =
   searchParams.get("platform") ?? detectHostPlatform();

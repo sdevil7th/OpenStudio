@@ -156,7 +156,7 @@ def start_vite_server():
     frontend_dir = os.path.join(os.getcwd(), "frontend")
     print("\n--- Starting Vite Dev Server ---")
     vite_process = subprocess.Popen(
-        [get_npm_executable(), "run", "dev"],
+        [get_npm_executable(), "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
         cwd=frontend_dir,
         shell=False
     )

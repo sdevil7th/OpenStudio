@@ -4,13 +4,15 @@
       "type": "pip_install",
       "description": "Installing GPU stem separation packages",
       "stepLabel": "Installing GPU stem separation packages",
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": ["audio-separator[gpu]==0.41.1"]
     },
-    { "type": "pip_uninstall", "packages": ["torch", "torchvision", "torchaudio"] },
+    { "type": "pip_uninstall", "features": ["audioGeneration"], "packages": ["torch", "torchvision", "torchaudio"] },
     {
       "type": "pip_install",
       "description": "Installing CUDA-capable PyTorch wheels",
       "stepLabel": "Installing CUDA PyTorch wheels",
+      "features": ["audioGeneration"],
       "indexUrl": "https://download.pytorch.org/whl/cu121",
       "packages": ["torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1"]
     },
@@ -18,6 +20,7 @@
       "type": "pip_install",
       "description": "Installing OpenStudio ACE runtime dependencies",
       "stepLabel": "Installing OpenStudio ACE runtime dependencies",
+      "features": ["audioGeneration"],
       "packages": [
         "torchsde",
         "numpy>=1.25.0",
@@ -55,6 +58,7 @@
       "type": "pip_install",
       "description": "Installing ACE-Step source bridge",
       "stepLabel": "Installing ACE-Step source bridge",
+      "features": ["audioGeneration"],
       "packages": ["git+https://github.com/ace-step/ACE-Step.git@1bee4c9f5b43e30995f8d4d33b3919197ce1bd68"],
       "errorCode": "music_generation_runtime_install_failed",
       "nonFatalForStemSeparation": true

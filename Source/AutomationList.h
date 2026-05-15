@@ -1,113 +1,88 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include <vector>
 #include <atomic>
+#include <memory>
+#include <vector>
 
 // Automation interpolation mode
 enum class AutomationInterpolation
 {
-    Discrete,   // Step — hold value until next point
+    Discrete,   // Step: hold value until next point
     Linear,     // Linear interpolation between points
-    Exponential // Exponential curve (useful for volume)
+    Exponential // Quadratic ease, useful for volume curves
 };
 
 // Automation playback/record mode
 enum class AutomationMode
 {
-    Off,    // No automation (use manual fader value)
-    Read,   // Play back recorded automation
-    Write,  // Overwrite all automation while transport rolls
-    Touch,  // Record only while touching a control
-    Latch   // Record on touch, continue writing last value after release
+    Off,    // No automation; use the manual/static value
+    Read,   // Play stored automation
+    Write,  // Overwrite armed automation while transport rolls
+    Touch,  // Write while touching, then return to reading
+    Latch   // Start writing on touch, then keep writing until transport stop
 };
 
-// A single automation point (timeline time + value)
 struct AutomationPoint
 {
-    double timeSeconds;  // Absolute timeline position in seconds
-    float value;         // Normalised 0.0–1.0 for most params, or raw dB for volume
+    double timeSeconds = 0.0;
+    float value = 0.0f;
 };
 
 // Thread-safe automation data for a single parameter.
-// Message thread writes the point list; audio thread evaluates via eval().
-// Uses ScopedTryLock pattern matching the rest of the codebase (REAPER-style).
+// Message thread publishes immutable point snapshots; audio thread evaluates
+// those snapshots without taking locks.
 class AutomationList
 {
 public:
     AutomationList();
     ~AutomationList() = default;
 
-    // --- Message-thread API (write side) ---
-
-    // Replace all points (bulk set from frontend JSON).
-    // Acquires lock — audio thread will output silence during very brief window.
     void setPoints(std::vector<AutomationPoint> newPoints);
-
-    // Add a single point (for recording). Keeps list sorted.
+    void replacePointsInRange(double startTimeSeconds, double endTimeSeconds,
+                              std::vector<AutomationPoint> replacementPoints);
     void addPoint(double timeSeconds, float value);
-
-    // Remove points in a time range (for automation trim / delete)
     void removePointsInRange(double startTimeSeconds, double endTimeSeconds);
-
-    // Clear all points
     void clear();
 
-    // Get current point count
-    int getNumPoints() const;
+    int getNumPoints() const { return pointCount.load(std::memory_order_acquire); }
 
-    // Set the default value (used when no points exist or mode is Off)
     void setDefaultValue(float val) { defaultValue.store(val, std::memory_order_relaxed); }
     float getDefaultValue() const { return defaultValue.load(std::memory_order_relaxed); }
 
-    // Mode
-    void setMode(AutomationMode newMode) { mode.store(newMode, std::memory_order_relaxed); }
+    void setMode(AutomationMode newMode);
     AutomationMode getMode() const { return mode.load(std::memory_order_relaxed); }
 
-    // Interpolation style
-    void setInterpolation(AutomationInterpolation interp) { interpolation = interp; }
-    AutomationInterpolation getInterpolation() const { return interpolation; }
+    void setInterpolation(AutomationInterpolation interp) { interpolation.store(interp, std::memory_order_release); }
+    AutomationInterpolation getInterpolation() const { return interpolation.load(std::memory_order_acquire); }
 
-    // Touch state (set from message thread when user grabs/releases a fader)
-    void beginTouch() { isTouching.store(true, std::memory_order_relaxed); }
-    void endTouch() { isTouching.store(false, std::memory_order_relaxed); }
+    void beginTouch();
+    void endTouch();
+    void resetTouchAndLatch();
     bool touching() const { return isTouching.load(std::memory_order_relaxed); }
 
-    // --- Audio-thread API (read side) ---
-
-    // Evaluate automation value at a single sample position.
-    // Returns the interpolated value, or defaultValue if no points / mode is Off.
-    // Uses ScopedTryLock — returns defaultValue if lock is held (message thread writing).
     float eval(double timeSeconds) const;
-
-    // Batch evaluate: fill outputBuffer with per-sample values for a block.
-    // startTimeSeconds = timeline position of first sample in block.
-    // Much more efficient than calling eval() per sample — uses cached search position.
     void evalBlock(double startTimeSeconds, double sampleRate, int numSamples, float* outputBuffer) const;
 
-    // Should the audio thread apply automation right now?
-    // Read mode: always. Touch: only when NOT touching. Latch: when NOT touching.
-    // Write mode: never (audio thread doesn't apply — it's being overwritten).
     bool shouldPlayback() const;
-
-    // Should the message thread record automation right now?
-    // Write: always during playback. Touch: only while touching. Latch: while touching + after.
+    bool shouldPlaybackForRead() const;
     bool shouldRecord() const;
 
 private:
-    // Points — sorted by timeSeconds, protected by lock
-    std::vector<AutomationPoint> points;
-    mutable juce::CriticalSection lock;
+    using PointList = std::vector<AutomationPoint>;
 
-    // Atomic state (read from audio thread without lock)
+    std::shared_ptr<const PointList> pointsSnapshot { std::make_shared<const PointList>() };
+    mutable juce::CriticalSection writerLock;
+    std::atomic<int> pointCount { 0 };
+
     std::atomic<AutomationMode> mode { AutomationMode::Off };
     std::atomic<float> defaultValue { 0.0f };
     std::atomic<bool> isTouching { false };
+    std::atomic<bool> latchActive { false };
+    std::atomic<AutomationInterpolation> interpolation { AutomationInterpolation::Linear };
 
-    AutomationInterpolation interpolation { AutomationInterpolation::Linear };
-
-    // Binary search helper — find index of last point at or before timeSeconds
-    int findPointBefore(double timeSeconds) const;
+    static int findPointBefore(const PointList& points, double timeSeconds);
+    void publishPoints(std::shared_ptr<const PointList> newSnapshot);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AutomationList)
 };

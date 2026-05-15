@@ -865,6 +865,13 @@ export function MenuBar() {
       ],
     },
     {
+      label: "MIDI Panic",
+      shortcut: shortcut("midi.panic", "Ctrl+Alt+P"),
+      onClick: () => {
+        void nativeBridge.panicMIDI();
+      },
+    },
+    {
       label: "Ripple Editing",
       submenu: [
         {
@@ -998,7 +1005,7 @@ export function MenuBar() {
 
   return (
     <div
-      className="h-8 bg-daw-darker border-b border-daw-border flex items-center text-sm shrink-0 relative z-9999 select-none"
+      className="h-8 bg-daw-darker border-b border-daw-border flex items-center text-sm shrink-0 relative z-[9999] select-none"
       onMouseDown={usesNativeWindowChrome ? undefined : handleDragStart}
       onDoubleClick={usesNativeWindowChrome ? undefined : handleDoubleClick}
     >
