@@ -1,4 +1,9 @@
-import { snapToGrid, type GridSize } from "./snapToGrid";
+import {
+  snapTimeByType,
+  type GridSize,
+  type QuantizePreset,
+  type SnapType,
+} from "./snapToGrid";
 
 export const RULER_CLICK_SNAP_PX = 10;
 
@@ -13,6 +18,11 @@ interface GetRulerClickSnapTimeParams {
   tempo: number;
   timeSignature: TimeSignature;
   gridSize: GridSize;
+  snapType?: SnapType;
+  quantizePreset?: QuantizePreset | null;
+  quantizeGridSize?: GridSize;
+  cursorTime?: number | null;
+  eventTimes?: readonly number[];
   snapEnabled: boolean;
   ctrlBypass?: boolean;
 }
@@ -23,6 +33,11 @@ export function getRulerClickSnapTime({
   tempo,
   timeSignature,
   gridSize,
+  snapType = "grid",
+  quantizePreset,
+  quantizeGridSize,
+  cursorTime,
+  eventTimes,
   snapEnabled,
   ctrlBypass = false,
 }: GetRulerClickSnapTimeParams): number {
@@ -38,7 +53,18 @@ export function getRulerClickSnapTime({
     return time;
   }
 
-  const gridSnapped = snapToGrid(time, tempo, timeSignature, gridSize);
+  const gridSnapped = snapTimeByType({
+    time,
+    tempo,
+    timeSignature,
+    gridSize,
+    snapType,
+    quantizePreset,
+    quantizeGridSize,
+    pixelsPerSecond,
+    cursorTime: cursorTime ?? undefined,
+    eventTimes,
+  });
   const gridSnapDistPx = Math.abs(gridSnapped - time) * pixelsPerSecond;
   return gridSnapDistPx <= RULER_CLICK_SNAP_PX ? gridSnapped : time;
 }

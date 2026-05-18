@@ -21,6 +21,37 @@ type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GetFn = () => any;
 
+const BUILT_IN_PLUGIN_NAMES = new Set([
+  "OpenStudio Piano",
+  "OpenStudio Drums",
+  "OpenStudio Basic Synth",
+  "Studio13 Piano",
+  "Studio13 Drums",
+  "Studio13 Basic Synth",
+  "OpenStudio EQ",
+  "OpenStudio Compressor",
+  "OpenStudio Gate",
+  "OpenStudio Limiter",
+  "OpenStudio Delay",
+  "OpenStudio Reverb",
+  "OpenStudio Chorus",
+  "OpenStudio Saturator",
+  "OpenStudio Pitch Correct",
+  "S13 EQ",
+  "S13 Compressor",
+  "S13 Gate",
+  "S13 Limiter",
+  "S13 Delay",
+  "S13 Reverb",
+  "S13 Chorus",
+  "S13 Saturator",
+  "S13 Pitch Correct",
+]);
+
+function isBuiltInPluginPath(pluginPath: string | undefined): boolean {
+  return Boolean(pluginPath && BUILT_IN_PLUGIN_NAMES.has(pluginPath));
+}
+
 function cloneAudioClip(clip: any): any {
   return {
     ...clip,
@@ -153,6 +184,13 @@ async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: 
 
   if (track.samplerSamplePath) {
     await nativeBridge.setTrackSamplerSample(track.id, track.samplerSamplePath, track.samplerRootNote ?? 60).catch(() => false);
+  } else if (track.type === "instrument" && track.builtInInstrument) {
+    const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
+    await nativeBridge.setBuiltInPluginParam(
+      { trackId: track.id, chain: "instrument", fxIndex: -1 },
+      "instrumentMode",
+      modeMap[track.builtInInstrument] ?? 0,
+    ).catch(() => false);
   }
 }
 
@@ -165,7 +203,9 @@ async function restoreTrackFxChain(sourceTrackId: string, newTrackId: string, is
   for (let i = 0; i < sourceFx.length; i++) {
     const pluginPath = sourceFx[i]?.pluginPath;
     if (!pluginPath) continue;
-    const success = await addFx(newTrackId, pluginPath, false).catch(() => false);
+    const success = isBuiltInPluginPath(pluginPath)
+      ? await nativeBridge.addTrackBuiltInFX(newTrackId, pluginPath, isInputFX).catch(() => false)
+      : await addFx(newTrackId, pluginPath, false).catch(() => false);
     if (!success) continue;
     const pluginState = await nativeBridge.getPluginState(sourceTrackId, i, isInputFX).catch(() => null);
     if (pluginState) {

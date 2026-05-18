@@ -6,12 +6,257 @@
 #include <limits>
 #include <optional>
 #include <regex>
+#include <vector>
 
 #if JUCE_WINDOWS
  #ifndef NOMINMAX
   #define NOMINMAX
  #endif
 #include <windows.h>
+#include <oleidl.h>
+#include <shellapi.h>
+#endif
+
+#if JUCE_WINDOWS
+class MainComponent::ExternalMediaDropTarget final : public IDropTarget
+{
+public:
+    explicit ExternalMediaDropTarget(MainComponent& ownerIn)
+        : owner(ownerIn)
+    {
+    }
+
+    ~ExternalMediaDropTarget()
+    {
+        for (auto hwnd : registeredWindows)
+            if (hwnd != nullptr && ::IsWindow(hwnd))
+                ::RevokeDragDrop(hwnd);
+
+        if (calledOleInitialize)
+            ::OleUninitialize();
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override
+    {
+        if (object == nullptr)
+            return E_POINTER;
+
+        if (iid == IID_IUnknown || iid == IID_IDropTarget)
+        {
+            *object = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override
+    {
+        return static_cast<ULONG>(refCount.fetch_add(1, std::memory_order_relaxed) + 1);
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const auto next = refCount.fetch_sub(1, std::memory_order_relaxed) - 1;
+        return static_cast<ULONG>(next);
+    }
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* dataObject, DWORD, POINTL point, DWORD* effect) override
+    {
+        lastFiles = extractFiles(dataObject);
+        if (lastFiles.isEmpty())
+        {
+            activeDragId.clear();
+            setEffect(effect, DROPEFFECT_NONE);
+            return S_OK;
+        }
+
+        activeDragId = "native-drop-" + juce::String(++dragCounter);
+        foregroundRequestedThisDrag = false;
+        requestForegroundOnce();
+        owner.emitExternalMediaDropTargetEvent("externalMediaDragEnter", buildPayload(activeDragId, lastFiles, point));
+        setEffect(effect, DROPEFFECT_COPY);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL point, DWORD* effect) override
+    {
+        if (activeDragId.isNotEmpty())
+        {
+            owner.emitExternalMediaDropTargetEvent("externalMediaDragMove", buildPayload(activeDragId, lastFiles, point));
+            setEffect(effect, DROPEFFECT_COPY);
+        }
+        else
+        {
+            setEffect(effect, DROPEFFECT_NONE);
+        }
+
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragLeave() override
+    {
+        if (activeDragId.isNotEmpty())
+            owner.emitExternalMediaDropTargetEvent("externalMediaDragLeave", buildPayload(activeDragId, juce::StringArray(), POINTL{}));
+
+        activeDragId.clear();
+        lastFiles.clear();
+        foregroundRequestedThisDrag = false;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* dataObject, DWORD, POINTL point, DWORD* effect) override
+    {
+        auto files = extractFiles(dataObject);
+        if (files.isEmpty())
+            files = lastFiles;
+
+        if (activeDragId.isNotEmpty() && ! files.isEmpty())
+        {
+            owner.emitExternalMediaDropTargetEvent("externalMediaDrop", buildPayload(activeDragId, files, point));
+            setEffect(effect, DROPEFFECT_COPY);
+        }
+        else
+        {
+            setEffect(effect, DROPEFFECT_NONE);
+        }
+
+        activeDragId.clear();
+        lastFiles.clear();
+        foregroundRequestedThisDrag = false;
+        return S_OK;
+    }
+
+    void registerWindow(HWND hwnd)
+    {
+        if (hwnd == nullptr || registeredWindows.count(hwnd) != 0)
+            return;
+
+        auto result = ::RegisterDragDrop(hwnd, this);
+        if (result == CO_E_NOTINITIALIZED && ! calledOleInitialize)
+        {
+            if (SUCCEEDED(::OleInitialize(nullptr)))
+            {
+                calledOleInitialize = true;
+                result = ::RegisterDragDrop(hwnd, this);
+            }
+        }
+
+        if (result == DRAGDROP_E_ALREADYREGISTERED)
+        {
+            ::RevokeDragDrop(hwnd);
+            result = ::RegisterDragDrop(hwnd, this);
+        }
+
+        if (SUCCEEDED(result))
+        {
+            registeredWindows.insert(hwnd);
+            juce::Logger::writeToLog("External media drop target registered");
+        }
+    }
+
+private:
+    static void setEffect(DWORD* effect, DWORD value)
+    {
+        if (effect != nullptr)
+            *effect = value;
+    }
+
+    static juce::StringArray extractFiles(IDataObject* dataObject)
+    {
+        juce::StringArray files;
+        if (dataObject == nullptr)
+            return files;
+
+        FORMATETC format {};
+        format.cfFormat = CF_HDROP;
+        format.dwAspect = DVASPECT_CONTENT;
+        format.lindex = -1;
+        format.tymed = TYMED_HGLOBAL;
+
+        STGMEDIUM medium {};
+        if (FAILED(dataObject->GetData(&format, &medium)))
+            return files;
+
+        auto dropHandle = reinterpret_cast<HDROP>(medium.hGlobal);
+        const auto count = ::DragQueryFileW(dropHandle, 0xFFFFFFFF, nullptr, 0);
+        for (UINT i = 0; i < count; ++i)
+        {
+            const auto length = ::DragQueryFileW(dropHandle, i, nullptr, 0);
+            if (length == 0)
+                continue;
+
+            std::wstring path;
+            path.resize(static_cast<size_t>(length) + 1);
+            if (::DragQueryFileW(dropHandle, i, path.data(), length + 1) > 0)
+                files.add(juce::String(path.c_str()));
+        }
+
+        ::ReleaseStgMedium(&medium);
+        return files;
+    }
+
+    juce::Point<int> toClientPoint(POINTL point) const
+    {
+        if (auto* peer = owner.getPeer())
+        {
+            auto hwnd = static_cast<HWND>(peer->getNativeHandle());
+            POINT nativePoint { static_cast<LONG>(point.x), static_cast<LONG>(point.y) };
+            if (hwnd != nullptr && ::ScreenToClient(hwnd, &nativePoint) != 0)
+                return { static_cast<int>(nativePoint.x), static_cast<int>(nativePoint.y) };
+        }
+
+        return { static_cast<int>(point.x), static_cast<int>(point.y) };
+    }
+
+    void requestForegroundOnce()
+    {
+        if (foregroundRequestedThisDrag)
+            return;
+
+        foregroundRequestedThisDrag = true;
+        owner.bringMainWindowToFrontForExternalMediaDrag();
+    }
+
+    juce::var buildPayload(const juce::String& dragId, const juce::StringArray& files, POINTL point) const
+    {
+        auto* payload = new juce::DynamicObject();
+        const auto clientPoint = toClientPoint(point);
+        payload->setProperty("dragId", dragId);
+        payload->setProperty("clientX", clientPoint.x);
+        payload->setProperty("clientY", clientPoint.y);
+        payload->setProperty("nativeClientX", clientPoint.x);
+        payload->setProperty("nativeClientY", clientPoint.y);
+        payload->setProperty("screenX", static_cast<int>(point.x));
+        payload->setProperty("screenY", static_cast<int>(point.y));
+        payload->setProperty("deviceScaleFactor", owner.getDesktopScaleFactor());
+
+        juce::Array<juce::var> fileArray;
+        for (const auto& path : files)
+        {
+            juce::File file(path);
+            auto* item = new juce::DynamicObject();
+            item->setProperty("path", file.getFullPathName());
+            item->setProperty("name", file.getFileName());
+            item->setProperty("extension", file.getFileExtension().toLowerCase());
+            item->setProperty("size", static_cast<double>(file.getSize()));
+            fileArray.add(juce::var(item));
+        }
+        payload->setProperty("files", fileArray);
+        return juce::var(payload);
+    }
+
+    MainComponent& owner;
+    std::atomic<uint32_t> refCount { 1 };
+    std::set<HWND> registeredWindows;
+    juce::String activeDragId;
+    juce::StringArray lastFiles;
+    uint64_t dragCounter = 0;
+    bool calledOleInitialize = false;
+    bool foregroundRequestedThisDrag = false;
+};
 #endif
 
 namespace
@@ -42,6 +287,117 @@ static void logAudioBridge(const juce::String& message)
 {
     if (kAudioBridgeDebugLogs)
         juce::Logger::writeToLog("[audio.bridge] " + message);
+}
+
+static juce::var buildMediaInfoResult(const juce::File& mediaFile,
+                                      const juce::File& resultFile,
+                                      juce::AudioFormatReader& reader)
+{
+    auto* result = new juce::DynamicObject();
+    const auto duration = reader.sampleRate > 0.0 ? reader.lengthInSamples / reader.sampleRate : 0.0;
+    result->setProperty("filePath", resultFile.getFullPathName());
+    result->setProperty("duration", duration);
+    result->setProperty("sampleRate", static_cast<int>(reader.sampleRate));
+    result->setProperty("numChannels", static_cast<int>(reader.numChannels));
+    result->setProperty("format", mediaFile.getFileExtension().toUpperCase().trimCharactersAtStart("."));
+    return juce::var(result);
+}
+
+static juce::var probeReadableMediaFile(const juce::String& filePath)
+{
+    juce::File mediaFile(filePath);
+    if (! mediaFile.existsAsFile())
+        return juce::var();
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(mediaFile));
+    if (reader == nullptr)
+        return juce::var();
+
+    return buildMediaInfoResult(mediaFile, mediaFile, *reader);
+}
+
+static juce::var buildWaveformPreviewPayload(const juce::String& requestId,
+                                             const juce::String& filePath,
+                                             int maxPoints)
+{
+    juce::File audioFile(filePath);
+    if (! audioFile.existsAsFile())
+        return juce::var();
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(audioFile));
+    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels <= 0)
+        return juce::var();
+
+    const int channels = juce::jlimit(1, 8, static_cast<int>(reader->numChannels));
+    const int pointCount = juce::jlimit(64, 4096, juce::jmin(maxPoints, static_cast<int>(reader->lengthInSamples)));
+    const auto samplesPerPoint = juce::jmax<juce::int64>(1, (reader->lengthInSamples + pointCount - 1) / pointCount);
+    juce::Array<juce::var> peaks;
+    peaks.ensureStorageAllocated(1 + pointCount * channels * 2);
+    peaks.add(channels);
+
+    std::vector<float> mins(static_cast<size_t>(pointCount * channels), 0.0f);
+    std::vector<float> maxs(static_cast<size_t>(pointCount * channels), 0.0f);
+    std::vector<uint8_t> touched(static_cast<size_t>(pointCount * channels), 0);
+
+    constexpr int chunkSize = 65536;
+    juce::AudioBuffer<float> buffer(channels, chunkSize);
+    juce::int64 samplePos = 0;
+    while (samplePos < reader->lengthInSamples)
+    {
+        const int samplesToRead = static_cast<int>(juce::jmin<juce::int64>(chunkSize, reader->lengthInSamples - samplePos));
+        buffer.clear();
+        if (! reader->read(&buffer, 0, samplesToRead, samplePos, true, true))
+            break;
+
+        for (int s = 0; s < samplesToRead; ++s)
+        {
+            const auto absoluteSample = samplePos + s;
+            const int pointIndex = juce::jlimit(0, pointCount - 1, static_cast<int>(absoluteSample / samplesPerPoint));
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                const auto index = static_cast<size_t>(pointIndex * channels + ch);
+                const auto value = buffer.getSample(ch, s);
+                if (touched[index] == 0)
+                {
+                    mins[index] = value;
+                    maxs[index] = value;
+                    touched[index] = 1;
+                }
+                else
+                {
+                    mins[index] = juce::jmin(mins[index], value);
+                    maxs[index] = juce::jmax(maxs[index], value);
+                }
+            }
+        }
+
+        samplePos += samplesToRead;
+    }
+
+    for (int point = 0; point < pointCount; ++point)
+    {
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const auto index = static_cast<size_t>(point * channels + ch);
+            peaks.add(juce::var(touched[index] != 0 ? mins[index] : 0.0f));
+            peaks.add(juce::var(touched[index] != 0 ? maxs[index] : 0.0f));
+        }
+    }
+
+    auto* payload = new juce::DynamicObject();
+    payload->setProperty("requestId", requestId);
+    payload->setProperty("filePath", audioFile.getFullPathName());
+    payload->setProperty("duration", reader->sampleRate > 0.0 ? reader->lengthInSamples / reader->sampleRate : 0.0);
+    payload->setProperty("sampleRate", static_cast<int>(reader->sampleRate));
+    payload->setProperty("numChannels", channels);
+    payload->setProperty("complete", true);
+    payload->setProperty("peaks", peaks);
+    return juce::var(payload);
 }
 
 juce::WebBrowserComponent::Options::Backend getPreferredBrowserBackend()
@@ -513,6 +869,9 @@ juce::String getDefaultFileFilter(const juce::String& defaultPath, const juce::S
     if (lowerPath.endsWith(".ostheme") || lowerPath.endsWith(".s13theme"))
         return "*.ostheme;*.s13theme;*.json";
 
+    if (lowerPath.endsWith(".mid") || lowerPath.endsWith(".midi"))
+        return "*.mid;*.midi";
+
     if (projectDialog)
         return "*.osproj;*.s13";
 
@@ -529,6 +888,10 @@ juce::String getPreferredExtension(const juce::String& defaultPath, const juce::
 
     if (lowerPath.endsWith(".ostheme") || lowerFilter.contains(".ostheme"))
         return ".ostheme";
+
+    if (lowerPath.endsWith(".mid") || lowerPath.endsWith(".midi")
+        || lowerFilter.contains(".mid") || lowerFilter.contains(".midi"))
+        return ".mid";
 
     return ".osproj";
 }
@@ -1442,6 +1805,35 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(juce::Array<juce::var>());
                         }
                     })
+                    .withNativeFunction ("getBuiltInPluginSchema", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 3 && args[0].isString()) {
+                            completion(audioEngine.getBuiltInPluginSchema(args[0].toString(), args[1].toString(), static_cast<int>(args[2])));
+                        } else {
+                            completion(juce::var());
+                        }
+                    })
+                    .withNativeFunction ("getBuiltInPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 3 && args[0].isString()) {
+                            completion(audioEngine.getBuiltInPluginState(args[0].toString(), args[1].toString(), static_cast<int>(args[2])));
+                        } else {
+                            completion(juce::var());
+                        }
+                    })
+                    .withNativeFunction ("setBuiltInPluginParam", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 5 && args[0].isString()) {
+                            completion(audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), static_cast<int>(args[2]),
+                                                                         args[3].toString(), static_cast<float>(static_cast<double>(args[4]))));
+                        } else {
+                            completion(false);
+                        }
+                    })
+                    .withNativeFunction ("setBuiltInPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 4 && args[0].isString()) {
+                            completion(audioEngine.setBuiltInPluginState(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args[3].toString()));
+                        } else {
+                            completion(false);
+                        }
+                    })
                     .withNativeFunction ("setPluginParameter", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 5 && args[0].isString()) {
                             juce::String trackId = args[0].toString();
@@ -2317,6 +2709,70 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
+                    })
+                    .withNativeFunction ("probeMediaFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 1 && args[0].isString())
+                            completion(probeReadableMediaFile(args[0].toString()));
+                        else
+                            completion(juce::var());
+                    })
+                    .withNativeFunction ("requestWaveformPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() < 3 || ! args[0].isString() || ! args[1].isString())
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        const auto filePath = args[0].toString();
+                        const auto requestId = args[1].toString();
+                        const int maxPoints = juce::jlimit(64, 4096, static_cast<int>(args[2]));
+
+#if JUCE_WINDOWS
+                        {
+                            const juce::ScopedLock sl(waveformPreviewRequestLock);
+                            cancelledWaveformPreviewRequests.erase(requestId);
+                        }
+#endif
+
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        mediaPreviewPool.addJob([safeThis, filePath, requestId, maxPoints]()
+                        {
+                            if (safeThis == nullptr)
+                                return;
+
+#if JUCE_WINDOWS
+                            if (safeThis->isWaveformPreviewRequestCancelled(requestId))
+                                return;
+#endif
+
+                            auto payload = buildWaveformPreviewPayload(requestId, filePath, maxPoints);
+                            if (payload.isVoid())
+                                return;
+
+#if JUCE_WINDOWS
+                            if (safeThis == nullptr || safeThis->isWaveformPreviewRequestCancelled(requestId))
+                                return;
+#endif
+
+                            safeThis->emitFrontendEvent("waveformPreviewReady", payload);
+                        });
+
+                        completion(true);
+                    })
+                    .withNativeFunction ("cancelWaveformPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 1 && args[0].isString())
+                        {
+#if JUCE_WINDOWS
+                            const juce::ScopedLock sl(waveformPreviewRequestLock);
+                            cancelledWaveformPreviewRequests.insert(args[0].toString());
+#else
+                            juce::ignoreUnused(args);
+#endif
+                            completion(true);
+                            return;
+                        }
+
+                        completion(false);
                     })
                     .withNativeFunction ("importMediaFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Read audio file metadata (duration, sample rate, channels, format).
@@ -4367,6 +4823,72 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
+                    .withNativeFunction ("prepareExternalMIDIFileDrag", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        auto* resultObj = new juce::DynamicObject();
+                        auto complete = [&completion, resultObj] (bool success, const juce::String& filePath, const juce::String& error = {}) {
+                            resultObj->setProperty("success", success);
+                            resultObj->setProperty("filePath", filePath);
+                            if (error.isNotEmpty())
+                                resultObj->setProperty("error", error);
+                            completion(juce::var(resultObj));
+                        };
+
+                        if (! isMainWindow())
+                        {
+                            complete(false, {}, "External MIDI drag is only available from the main window.");
+                            return;
+                        }
+
+                        if (args.size() < 2 || ! args[0].isString())
+                        {
+                            complete(false, {}, "Missing MIDI export data.");
+                            return;
+                        }
+
+                        auto tracks = args[1];
+                        if (tracks.isString())
+                            tracks = juce::JSON::parse(tracks.toString());
+
+                        if (! tracks.isArray())
+                        {
+                            complete(false, {}, "Invalid MIDI export data.");
+                            return;
+                        }
+
+                        auto suggestedName = juce::File::createLegalFileName(
+                            juce::File(args[0].toString()).getFileNameWithoutExtension());
+                        if (suggestedName.isEmpty())
+                            suggestedName = "Studio13 MIDI Clip";
+
+                        auto dragDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                            .getChildFile("Studio13")
+                            .getChildFile("MIDI Drag Exports");
+                        dragDir.createDirectory();
+
+                        auto outputFile = dragDir.getNonexistentChildFile(suggestedName, ".mid", false);
+                        const bool ok = audioEngine.exportProjectMIDI(outputFile.getFullPathName(), tracks, 120.0);
+                        complete(ok,
+                                 ok ? outputFile.getFullPathName() : juce::String(),
+                                 ok ? juce::String() : "Failed to export MIDI drag file.");
+                    })
+                    .withNativeFunction ("beginExternalFileDrag", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (! isMainWindow() || args.size() < 1 || ! args[0].isString())
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        const juce::File file(args[0].toString());
+                        if (! file.existsAsFile())
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        juce::StringArray files;
+                        files.add(file.getFullPathName());
+                        completion(juce::DragAndDropContainer::performExternalDragDropOfFiles(files, false, this));
+                    })
                     // Plugin Presets (Phase 19.14)
                     .withNativeFunction ("getPluginPresets", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 3) {
@@ -5804,15 +6326,15 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
        #if JUCE_DEBUG
         if (isLocalFrontendDevServerReachable())
         {
-            const auto frontendUrl = appendFrontendStartupQuery("http://localhost:5173", windowRole, startupMode, windowInstanceId);
-            juce::Logger::writeToLog("Loading frontend from localhost:5173");
+            const auto frontendUrl = appendFrontendStartupQuery("http://127.0.0.1:5173", windowRole, startupMode, windowInstanceId);
+            juce::Logger::writeToLog("Loading frontend from 127.0.0.1:5173");
             beginFrontendStartupWatchdog(frontendUrl);
             webView.goToURL(frontendUrl);
             loadedFrontend = true;
         }
         else
         {
-            juce::Logger::writeToLog("localhost:5173 is unreachable; falling back to the packaged frontend.");
+            juce::Logger::writeToLog("127.0.0.1:5173 is unreachable; falling back to the packaged frontend.");
         }
        #endif
 
@@ -5846,6 +6368,23 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         const juce::ScopedLock sl(instanceListLock);
         activeInstances.add(this);
     }
+
+#if JUCE_WINDOWS
+    if (isMainWindow())
+    {
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(750, [safeThis]()
+        {
+            if (safeThis != nullptr)
+                safeThis->installExternalMediaDropTarget();
+        });
+        juce::Timer::callAfterDelay(2500, [safeThis]()
+        {
+            if (safeThis != nullptr)
+                safeThis->installExternalMediaDropTarget();
+        });
+    }
+#endif
 
     initializePitchRegressionJob(pitchRegressionJobPathIn);
 
@@ -6154,9 +6693,74 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
 MainComponent::~MainComponent()
 {
     stopTimer();
+    mediaPreviewPool.removeAllJobs(true, 2000);
+#if JUCE_WINDOWS
+    externalMediaDropTarget.reset();
+#endif
     const juce::ScopedLock sl(instanceListLock);
     activeInstances.removeFirstMatchingValue(this);
 }
+
+#if JUCE_WINDOWS
+void MainComponent::emitExternalMediaDropTargetEvent(const juce::String& eventId, const juce::var& payload)
+{
+    emitFrontendEvent(eventId, payload);
+}
+
+void MainComponent::bringMainWindowToFrontForExternalMediaDrag()
+{
+    if (! isMainWindow())
+        return;
+
+    auto* peer = getPeer();
+    if (peer == nullptr)
+        return;
+
+    auto hwnd = static_cast<HWND>(peer->getNativeHandle());
+    if (hwnd == nullptr || ! ::IsWindow(hwnd))
+        return;
+
+    if (::IsIconic(hwnd))
+        ::ShowWindow(hwnd, SW_RESTORE);
+
+    ::SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    ::BringWindowToTop(hwnd);
+    ::SetForegroundWindow(hwnd);
+}
+
+void MainComponent::installExternalMediaDropTarget()
+{
+    if (! isMainWindow())
+        return;
+
+    auto* peer = getPeer();
+    if (peer == nullptr)
+        return;
+
+    if (externalMediaDropTarget == nullptr)
+        externalMediaDropTarget = std::make_unique<ExternalMediaDropTarget>(*this);
+
+    auto hwnd = static_cast<HWND>(peer->getNativeHandle());
+    externalMediaDropTarget->registerWindow(hwnd);
+    if (hwnd != nullptr)
+    {
+        ::EnumChildWindows(hwnd, [](HWND child, LPARAM param) -> BOOL
+        {
+            auto* self = reinterpret_cast<MainComponent*>(param);
+            if (self != nullptr && self->externalMediaDropTarget != nullptr)
+                self->externalMediaDropTarget->registerWindow(child);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(this));
+    }
+}
+
+bool MainComponent::isWaveformPreviewRequestCancelled(const juce::String& requestId) const
+{
+    const juce::ScopedLock sl(waveformPreviewRequestLock);
+    return cancelledWaveformPreviewRequests.count(requestId) != 0;
+}
+#endif
 
 void MainComponent::requestFrontendAppClose()
 {
@@ -6256,9 +6860,15 @@ bool MainComponent::tryFallbackToPackagedFrontendAfterLocalTimeout()
 
     attemptedPackagedFrontendFallbackAfterLocalTimeout = true;
 
+#if JUCE_DEBUG
+    juce::Logger::writeToLog("Frontend startup timed out while using local Vite; "
+                             "not retrying with packaged frontend in Debug mode.");
+    return false;
+#else
     juce::Logger::writeToLog("Frontend startup timed out while using localhost:5173; "
                              "retrying with the packaged frontend.");
     return loadPackagedFrontend();
+#endif
 }
 
 void MainComponent::beginFrontendStartupWatchdog(const juce::String& targetUrl)

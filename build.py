@@ -13,7 +13,7 @@ import urllib.error
 vite_process = None
 cpp_process = None
 
-VITE_DEV_URL = "http://localhost:5173"
+VITE_DEV_URL = "http://127.0.0.1:5173"
 
 def kill_process_tree(pid):
     """Kill a process and all its child processes (Windows: taskkill /T)"""
@@ -116,7 +116,9 @@ def build_frontend(mode="dev"):
     if mode == "prod":
         run_command("npm run build", cwd=frontend_dir)
     elif mode == "dev":
-        print("Frontend dependencies ready.")
+        # Keep packaged fallback assets current even in dev. The native app normally
+        # loads Vite, but it can fall back to webui if WebView2 startup times out.
+        run_command("npm run build", cwd=frontend_dir)
 
 def get_cpp_exe_path(config="Debug"):
     """Return the platform-appropriate path to the built C++ executable."""

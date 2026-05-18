@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "AppUpdater.h"
+#include <set>
 
 //==============================================================================
 /*
@@ -82,6 +83,11 @@ public:
     static juce::var buildStartupSelfTestReport();
     static bool writeStartupSelfTestReport(const juce::File& reportFile);
 
+#if JUCE_WINDOWS
+    void emitExternalMediaDropTargetEvent(const juce::String& eventId, const juce::var& payload);
+    void bringMainWindowToFrontForExternalMediaDrag();
+#endif
+
 private:
     juce::Rectangle<int> getDesktopWorkAreaForCurrentWindow() const;
     bool isWindowPseudoMaximized() const;
@@ -107,6 +113,10 @@ private:
     juce::var buildStartupDiagnostics() const;
     void initializePitchRegressionJob(const juce::String& pitchRegressionJobPathIn);
     bool completePitchRegressionJob(const juce::var& result);
+#if JUCE_WINDOWS
+    void installExternalMediaDropTarget();
+    bool isWaveformPreviewRequestCancelled(const juce::String& requestId) const;
+#endif
 
     //==============================================================================
     // Your private member variables go here...
@@ -141,6 +151,7 @@ private:
     juce::ThreadPool previewSegmentPool { 2 };
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
+    juce::ThreadPool mediaPreviewPool { 2 };
     juce::CriticalSection pitchCorrectionJobLock;
     juce::String activePreviewRequestGroup;
     juce::String activeNoteRenderRequestGroup;
@@ -164,6 +175,12 @@ private:
     bool pitchRegressionJobCompleted = false;
     juce::CriticalSection pitchRegressionNativeResultLock;
     juce::var lastPitchRegressionNativeResult;
+#if JUCE_WINDOWS
+    class ExternalMediaDropTarget;
+    std::unique_ptr<ExternalMediaDropTarget> externalMediaDropTarget;
+    mutable juce::CriticalSection waveformPreviewRequestLock;
+    std::set<juce::String> cancelledWaveformPreviewRequests;
+#endif
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

@@ -1139,6 +1139,10 @@ function App() {
       }
 
       if (mediaFiles.length === 0) return;
+      if (nativeBridge.usesNativeExternalMediaDrop()) {
+        console.warn("[App] Ignoring HTML5 file drop in native mode; native path-based timeline drop handles external media.");
+        return;
+      }
       console.log(`[App] ${mediaFiles.length} media file(s) dropped from OS`);
 
       for (const file of mediaFiles) {

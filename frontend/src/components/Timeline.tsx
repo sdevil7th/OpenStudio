@@ -20,13 +20,21 @@ import {
   DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT,
   getTimelineRowMetrics,
 } from "../store/useDAWStore";
-import { nativeBridge, WaveformPeak } from "../services/NativeBridge";
+import {
+  nativeBridge,
+  WaveformPeak,
+  type ExternalMediaDragEvent,
+  type MIDIImportTrack,
+} from "../services/NativeBridge";
 import { ContextMenu } from "./ContextMenu";
 import { HorizontalScrollbar } from "./HorizontalScrollbar";
 import { MemoizedPlayhead as Playhead } from "./Playhead";
 import {
-  snapToGrid,
   calculateGridInterval,
+  getQuantizePresetById,
+  resolveVisualGrid,
+  snapTimeByType,
+  ticksToSeconds,
 } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
 import { guardModalContextMenu, shouldSuppressWorkspaceContextMenu } from "../utils/modalEventGuards";
@@ -106,6 +114,106 @@ type WaveformCache = Map<string, WaveformPeak[]>;
 type RecordingWaveformData = { peaks: WaveformPeak[]; widthPixels: number };
 type RecordingWaveformCache = Map<string, RecordingWaveformData>;
 const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
+const EXTERNAL_MEDIA_EXTENSIONS = new Set([
+  ".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".wma", ".m4a", ".aac",
+  ".mid", ".midi",
+  ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv", ".m4v",
+]);
+const EXTERNAL_MIDI_EXTENSIONS = new Set([".mid", ".midi"]);
+const EXTERNAL_TRACK_INSERT_BAND_PX = 8;
+
+type ExternalMediaKind = "audio" | "midi";
+
+type ExternalMediaDropTarget =
+  | { kind: "existingTrack"; trackIndex: number }
+  | { kind: "insertTrack"; insertIndex: number };
+
+type ExternalMediaDropPreview = {
+  dragId: string;
+  filePath: string;
+  name: string;
+  mediaKind: ExternalMediaKind;
+  target: ExternalMediaDropTarget;
+  startTime: number;
+  duration: number;
+  peaks?: WaveformPeak[];
+  sampleRate?: number;
+  midiEvents?: MIDIEvent[];
+  midiTrackCount?: number;
+};
+
+type ExternalMediaDragContext = {
+  dragId: string;
+  files: NonNullable<ExternalMediaDragEvent["files"]>;
+  filePath: string;
+  name: string;
+  mediaKind: ExternalMediaKind;
+  duration?: number;
+  sampleRate?: number;
+  peaks?: WaveformPeak[];
+  midiTracks?: MIDIImportTrack[];
+  midiEvents?: MIDIEvent[];
+  midiTrackCount?: number;
+};
+
+const getExternalMediaFileExtension = (file: { extension?: string; name: string }) => {
+  const raw = (file.extension || `.${file.name.split(".").pop() || ""}`).trim().toLowerCase();
+  if (!raw) return "";
+  return raw.startsWith(".") ? raw : `.${raw}`;
+};
+
+const getExternalMediaKind = (file: { extension?: string; name: string }): ExternalMediaKind =>
+  EXTERNAL_MIDI_EXTENSIONS.has(getExternalMediaFileExtension(file)) ? "midi" : "audio";
+
+const normalizeExternalMIDIVelocity = (value: unknown, fallback = 80) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed > 0 && parsed <= 1) return Math.max(1, Math.min(127, Math.round(parsed * 127)));
+  return Math.max(1, Math.min(127, Math.round(parsed)));
+};
+
+const normalizeExternalMIDIEvents = (events: any[] = []): MIDIEvent[] =>
+  events
+    .map((event) => {
+      const timestamp = Math.max(0, Number(event?.timestamp) || 0);
+      const channel = Number.isFinite(Number(event?.channel))
+        ? Math.max(1, Math.min(16, Math.round(Number(event.channel))))
+        : undefined;
+
+      if (event?.type === "noteOn" || event?.type === "noteOff") {
+        return {
+          timestamp,
+          type: event.type,
+          note: Math.max(0, Math.min(127, Math.round(Number(event.note) || 60))),
+          velocity: event.type === "noteOn" ? normalizeExternalMIDIVelocity(event.velocity) : 0,
+          channel,
+        } as MIDIEvent;
+      }
+
+      if (event?.type === "pitchBend") {
+        return {
+          timestamp,
+          type: "pitchBend",
+          value: Math.max(0, Math.min(16383, Math.round(Number(event.value) || 8192))),
+          channel,
+        } as MIDIEvent;
+      }
+
+      return null;
+    })
+    .filter((event): event is MIDIEvent => Boolean(event))
+    .sort((a, b) => a.timestamp - b.timestamp || (a.note ?? 0) - (b.note ?? 0));
+
+const getNonEmptyExternalMIDITracks = (tracks: MIDIImportTrack[] | undefined) =>
+  (tracks ?? []).filter((track) => Array.isArray(track.events) && track.events.length > 0);
+
+const getExternalMIDITrackDuration = (track: MIDIImportTrack | undefined) => {
+  const maxTime = (track?.events ?? []).reduce((max, event) => {
+    const timestamp = Number(event?.timestamp);
+    return Number.isFinite(timestamp) ? Math.max(max, timestamp) : max;
+  }, 0);
+  return Math.max(0.25, maxTime || 4);
+};
 
 // Clip context menu state type
 type ClipContextMenuState = {
@@ -164,6 +272,7 @@ type TimelineGestureUndoSnapshot = {
   tracks: Track[];
   selectedClipId: string | null;
   selectedClipIds: string[];
+  isModified: boolean;
 };
 
 const createEmptyTimelineDragState = (): TimelineDragState => ({
@@ -235,6 +344,7 @@ export function Timeline({
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
+  const [waveformPreviewCache, setWaveformPreviewCache] = useState<WaveformCache>(new Map());
   const [recordingWaveformCache, setRecordingWaveformCache] = useState<RecordingWaveformCache>(new Map());
   const waveformCacheRef = useRef(waveformCache);
   waveformCacheRef.current = waveformCache;
@@ -281,6 +391,7 @@ export function Timeline({
   const [dragState, setDragStateState] = useState<TimelineDragState>(createEmptyTimelineDragState);
   const dragStateRef = useRef<TimelineDragState>(dragState);
   const timelineGestureUndoRef = useRef<TimelineGestureUndoSnapshot | null>(null);
+  const externalMidiDragRef = useRef<{ clipId: string } | null>(null);
 
   const setTimelineDragState = useCallback((
     next: TimelineDragState | ((previous: TimelineDragState) => TimelineDragState),
@@ -373,11 +484,24 @@ export function Timeline({
       tracks: cloneTimelineGestureTracks(state.tracks),
       selectedClipId: state.selectedClipId,
       selectedClipIds: [...state.selectedClipIds],
+      isModified: state.isModified,
     };
   }, []);
 
   const clearTimelineGestureUndo = useCallback(() => {
     timelineGestureUndoRef.current = null;
+  }, []);
+
+  const restoreTimelineGestureUndo = useCallback(() => {
+    const before = timelineGestureUndoRef.current;
+    if (!before) return;
+
+    useDAWStore.setState({
+      tracks: cloneTimelineGestureTracks(before.tracks),
+      selectedClipId: before.selectedClipId,
+      selectedClipIds: [...before.selectedClipIds],
+      isModified: before.isModified,
+    });
   }, []);
 
   const commitTimelineGestureUndo = useCallback((description: string) => {
@@ -389,6 +513,7 @@ export function Timeline({
       tracks: cloneTimelineGestureTracks(state.tracks),
       selectedClipId: state.selectedClipId,
       selectedClipIds: [...state.selectedClipIds],
+      isModified: state.isModified,
     };
 
     if (timelineGestureSignature(before.tracks) === timelineGestureSignature(after.tracks)) {
@@ -579,6 +704,7 @@ export function Timeline({
 
   // Split tool preview line
   const [splitPreviewX, setSplitPreviewX] = useState<number | null>(null);
+  const [externalMediaPreview, setExternalMediaPreview] = useState<ExternalMediaDropPreview | null>(null);
 
   // Ruler interaction state (ref-based to avoid stale closures in global listeners)
   const rulerDragRef = useRef<{
@@ -618,11 +744,16 @@ export function Timeline({
     repeatClip,
     clipboard,
     addTrack,
+    importExternalMediaAtTimeline,
+    importExternalMIDIAtTimeline,
     timeSignature,
     markers,
     regions,
     snapEnabled,
+    snapType,
     gridSize,
+    quantizePresetId,
+    quantizePresets,
     timeSelection,
     setTimeSelection,
     clearTimeSelection,
@@ -675,11 +806,16 @@ export function Timeline({
       repeatClip: state.repeatClip,
       clipboard: state.clipboard,
       addTrack: state.addTrack,
+      importExternalMediaAtTimeline: state.importExternalMediaAtTimeline,
+      importExternalMIDIAtTimeline: state.importExternalMIDIAtTimeline,
       timeSignature: state.timeSignature,
       markers: state.markers,
       regions: state.regions,
       snapEnabled: state.snapEnabled,
+      snapType: state.snapType,
       gridSize: state.gridSize,
+      quantizePresetId: state.quantizePresetId,
+      quantizePresets: state.quantizePresets,
       timeSelection: state.timeSelection,
       setTimeSelection: state.setTimeSelection,
       clearTimeSelection: state.clearTimeSelection,
@@ -865,12 +1001,55 @@ export function Timeline({
   snapEnabledRef.current = snapEnabled;
   const gridSizeRef = useRef(gridSize);
   gridSizeRef.current = gridSize;
+  const snapTypeRef = useRef(snapType);
+  snapTypeRef.current = snapType;
+  const quantizePresetIdRef = useRef(quantizePresetId);
+  quantizePresetIdRef.current = quantizePresetId;
+  const quantizePresetsRef = useRef(quantizePresets);
+  quantizePresetsRef.current = quantizePresets;
   const tempoRef = useRef(tempo);
   tempoRef.current = tempo;
   const timeSignatureRef = useRef(timeSignature);
   timeSignatureRef.current = timeSignature;
   const toolModeRef = useRef(toolMode);
   toolModeRef.current = toolMode;
+
+  const timelineSnapEventTimes = useMemo(() => {
+    const times: number[] = [];
+    for (const track of tracks) {
+      for (const clip of track.clips || []) {
+        times.push(clip.startTime, clip.startTime + clip.duration);
+      }
+      for (const clip of track.midiClips || []) {
+        const duration = clip.duration || clip.sourceLength || clip.loopLength || 0;
+        times.push(clip.startTime, clip.startTime + duration);
+      }
+    }
+    for (const marker of markers || []) {
+      times.push(marker.time);
+    }
+    for (const region of regions || []) {
+      times.push(region.startTime, region.endTime);
+    }
+    return times.filter((time) => Number.isFinite(time) && time >= 0);
+  }, [markers, regions, tracks]);
+
+  const snapTimelineTime = useCallback((time: number, originalTime?: number) => {
+    const preset = getQuantizePresetById(quantizePresetsRef.current, quantizePresetIdRef.current);
+    return snapTimeByType({
+      time,
+      originalTime,
+      tempo: tempoRef.current,
+      timeSignature: timeSignatureRef.current,
+      gridSize: gridSizeRef.current,
+      snapType: snapTypeRef.current,
+      quantizePreset: preset,
+      quantizeGridSize: preset.gridSize,
+      pixelsPerSecond: pixelsPerSecondRef.current,
+      cursorTime: useDAWStore.getState().transport.currentTime,
+      eventTimes: timelineSnapEventTimes,
+    });
+  }, [timelineSnapEventTimes]);
 
   // Handle container resize using ResizeObserver for accurate detection
   useEffect(() => {
@@ -1137,6 +1316,424 @@ export function Timeline({
   const setTrackWaveformZoomRef = useRef(setTrackWaveformZoom);
   setTrackWaveformZoomRef.current = setTrackWaveformZoom;
 
+  const externalMediaPreviewRef = useRef<ExternalMediaDropPreview | null>(null);
+  externalMediaPreviewRef.current = externalMediaPreview;
+  const externalMediaDragContextRef = useRef<ExternalMediaDragContext | null>(null);
+  const requestedExternalPreviewIdsRef = useRef<Set<string>>(new Set());
+
+  const getSupportedExternalMediaFiles = useCallback((files: ExternalMediaDragEvent["files"] | undefined) => {
+    const inputFiles = files ?? [];
+    return inputFiles.filter((file) => {
+      const ext = getExternalMediaFileExtension(file);
+      return EXTERNAL_MEDIA_EXTENSIONS.has(ext);
+    });
+  }, []);
+
+  const getFirstSupportedExternalMediaFile = useCallback((event: ExternalMediaDragEvent) => {
+    const eventFiles = getSupportedExternalMediaFiles(event.files);
+    if (eventFiles.length > 0) return eventFiles[0];
+    const context = externalMediaDragContextRef.current;
+    if (context?.dragId === event.dragId) {
+      return getSupportedExternalMediaFiles(context.files)[0] ?? null;
+    }
+    return null;
+  }, [getSupportedExternalMediaFiles]);
+
+  const getExternalMediaEventFiles = useCallback((event: ExternalMediaDragEvent) => {
+    const eventFiles = getSupportedExternalMediaFiles(event.files);
+    if (eventFiles.length > 0) return eventFiles;
+    const context = externalMediaDragContextRef.current;
+    if (context?.dragId === event.dragId) {
+      return getSupportedExternalMediaFiles(context.files);
+    }
+    return [];
+  }, [getSupportedExternalMediaFiles]);
+
+  const isExternalTrackCompatible = useCallback((track: Track | undefined, mediaKind: ExternalMediaKind) => {
+    if (!track) return false;
+    return mediaKind === "midi"
+      ? track.type === "midi" || track.type === "instrument"
+      : track.type !== "midi" && track.type !== "instrument";
+  }, []);
+
+  const resolveExternalMediaDropTarget = useCallback((
+    absoluteY: number,
+    mediaKind: ExternalMediaKind,
+    midiTrackCount = 1,
+  ): ExternalMediaDropTarget => {
+    const currentTracks = tracksRef.current;
+    const currentTrackYs = trackYsRef.current;
+    const currentTrackHeight = trackHeightRef.current;
+    if (currentTracks.length === 0) return { kind: "insertTrack", insertIndex: 0 };
+
+    const halfBand = EXTERNAL_TRACK_INSERT_BAND_PX / 2;
+    for (let index = 1; index < currentTracks.length; index += 1) {
+      const dividerY = currentTrackYs[index] ?? 0;
+      if (Math.abs(absoluteY - dividerY) <= halfBand) {
+        return { kind: "insertTrack", insertIndex: index };
+      }
+    }
+
+    if (absoluteY >= contentHeightRef.current - halfBand) {
+      return { kind: "insertTrack", insertIndex: currentTracks.length };
+    }
+
+    const hit = getTrackAtY(absoluteY, currentTracks, currentTrackYs, currentTrackHeight);
+    if (!hit) {
+      return { kind: "insertTrack", insertIndex: absoluteY >= contentHeightRef.current ? currentTracks.length : 0 };
+    }
+
+    const hitTrack = currentTracks[hit.trackIndex];
+    const needsTrackInsertion =
+      !isExternalTrackCompatible(hitTrack, mediaKind) ||
+      (mediaKind === "midi" && midiTrackCount > 1);
+
+    return needsTrackInsertion
+      ? { kind: "insertTrack", insertIndex: hit.trackIndex }
+      : { kind: "existingTrack", trackIndex: hit.trackIndex };
+  }, [isExternalTrackCompatible]);
+
+  const getNormalizedExternalDragPoint = useCallback((event: ExternalMediaDragEvent, rect: DOMRect) => {
+    const nativeClientX = typeof event.nativeClientX === "number" ? event.nativeClientX : event.clientX;
+    const nativeClientY = typeof event.nativeClientY === "number" ? event.nativeClientY : event.clientY;
+    const scale = event.deviceScaleFactor || window.devicePixelRatio || 1;
+
+    let clientX = nativeClientX / scale;
+    let clientY = nativeClientY / scale;
+    const scaledInside =
+      clientX >= rect.left - 2 &&
+      clientX <= rect.right + 2 &&
+      clientY >= rect.top - 2 &&
+      clientY <= rect.bottom + 2;
+    const rawInside =
+      nativeClientX >= rect.left - 2 &&
+      nativeClientX <= rect.right + 2 &&
+      nativeClientY >= rect.top - 2 &&
+      nativeClientY <= rect.bottom + 2;
+
+    if (!scaledInside && rawInside) {
+      clientX = nativeClientX;
+      clientY = nativeClientY;
+    }
+
+    return {
+      clientX,
+      clientY,
+      nativeClientX,
+      nativeClientY,
+      scale,
+      localX: clientX - rect.left,
+      localY: clientY - rect.top,
+    };
+  }, []);
+
+  const buildExternalMediaPreview = useCallback((event: ExternalMediaDragEvent): ExternalMediaDropPreview | null => {
+    const file = getFirstSupportedExternalMediaFile(event);
+    const container = containerRef.current;
+    if (!file || !container) return null;
+
+    const rect = container.getBoundingClientRect();
+    const point = getNormalizedExternalDragPoint(event, rect);
+    const localX = point.localX;
+    const stageY = point.localY - (showRuler ? RULER_HEIGHT : 0);
+    if (localX < 0 || localX > rect.width || stageY < 0) return null;
+
+    const absoluteY = stageY + scrollYRef.current;
+    const timelineLocalX = Math.abs(localX) <= 8 ? 0 : localX;
+    const rawStartTime = Math.max(0, (timelineLocalX + scrollXRef.current) / pixelsPerSecondRef.current);
+    const startTime = snapEnabled
+      ? snapTimelineTime(rawStartTime)
+      : rawStartTime;
+    const context = externalMediaDragContextRef.current;
+    const mediaKind = context?.filePath === file.path ? context.mediaKind : getExternalMediaKind(file);
+    const midiTracks = context?.filePath === file.path ? getNonEmptyExternalMIDITracks(context.midiTracks) : [];
+    const midiTrackCount = mediaKind === "midi" ? Math.max(1, context?.midiTrackCount || midiTracks.length || 1) : undefined;
+    const target = resolveExternalMediaDropTarget(absoluteY, mediaKind, midiTrackCount);
+    const firstMidiTrack = midiTracks[0];
+
+    if (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost") {
+      console.debug("[audio.import] external drag coordinates", {
+        dragId: event.dragId,
+        mediaKind,
+        target,
+        nativeClientX: point.nativeClientX,
+        nativeClientY: point.nativeClientY,
+        scale: point.scale,
+        cssClientX: point.clientX,
+        cssClientY: point.clientY,
+        rectLeft: rect.left,
+        rectTop: rect.top,
+        localX,
+        stageY,
+        rawStartTime,
+        startTime,
+      });
+    }
+
+    return {
+      dragId: event.dragId,
+      filePath: file.path,
+      name: file.name.replace(/\.[^.]+$/, "") || file.name,
+      mediaKind,
+      target,
+      startTime,
+      duration: context?.filePath === file.path && context.duration
+        ? context.duration
+        : mediaKind === "midi"
+          ? getExternalMIDITrackDuration(firstMidiTrack)
+        : externalMediaPreviewRef.current?.filePath === file.path
+          ? externalMediaPreviewRef.current.duration
+          : 4,
+      peaks: context?.filePath === file.path && context.peaks
+        ? context.peaks
+        : externalMediaPreviewRef.current?.filePath === file.path
+          ? externalMediaPreviewRef.current.peaks
+          : undefined,
+      sampleRate: context?.filePath === file.path && context.sampleRate
+        ? context.sampleRate
+        : externalMediaPreviewRef.current?.filePath === file.path
+          ? externalMediaPreviewRef.current.sampleRate
+          : undefined,
+      midiEvents: context?.filePath === file.path && context.midiEvents
+        ? context.midiEvents
+        : mediaKind === "midi"
+          ? normalizeExternalMIDIEvents(firstMidiTrack?.events ?? [])
+          : undefined,
+      midiTrackCount,
+    };
+  }, [getFirstSupportedExternalMediaFile, getNormalizedExternalDragPoint, isExternalTrackCompatible, resolveExternalMediaDropTarget, showRuler, snapEnabled, snapTimelineTime]);
+
+  useEffect(() => {
+    const requestPreviewData = (dragId: string, filePath: string, mediaKind: ExternalMediaKind) => {
+      if (requestedExternalPreviewIdsRef.current.has(dragId)) return;
+      requestedExternalPreviewIdsRef.current.add(dragId);
+
+      if (mediaKind === "midi") {
+        void nativeBridge.importMIDIFile(filePath).then((info) => {
+          if (!info.success) return;
+          const nonEmptyTracks = getNonEmptyExternalMIDITracks(info.tracks);
+          const firstTrack = nonEmptyTracks[0];
+          const duration = Math.max(0.25, ...nonEmptyTracks.map(getExternalMIDITrackDuration), 4);
+          const midiEvents = normalizeExternalMIDIEvents(firstTrack?.events ?? []);
+          const context = externalMediaDragContextRef.current;
+          if (context?.dragId === dragId && context.filePath === filePath) {
+            context.midiTracks = nonEmptyTracks;
+            context.midiTrackCount = Math.max(1, nonEmptyTracks.length);
+            context.midiEvents = midiEvents;
+            context.duration = duration;
+          }
+          setExternalMediaPreview((current) =>
+            current?.dragId === dragId && current.filePath === filePath
+              ? {
+                  ...current,
+                  duration,
+                  midiEvents,
+                  midiTrackCount: Math.max(1, nonEmptyTracks.length),
+                }
+              : current,
+          );
+        }).catch(() => {});
+        return;
+      }
+
+      void nativeBridge.probeMediaFile(filePath).then((info) => {
+        if (!info) return;
+        const context = externalMediaDragContextRef.current;
+        if (context?.dragId === dragId && context.filePath === filePath) {
+          context.duration = Math.max(0.25, info.duration || context.duration || 4);
+          context.sampleRate = info.sampleRate || context.sampleRate;
+        }
+        setExternalMediaPreview((current) =>
+          current?.dragId === dragId && current.filePath === filePath
+            ? {
+                ...current,
+                duration: Math.max(0.25, info.duration || current.duration),
+                sampleRate: info.sampleRate || current.sampleRate,
+              }
+            : current,
+        );
+      }).catch(() => {});
+
+      void nativeBridge.requestWaveformPreview(filePath, dragId, 640);
+    };
+
+    const ensureDragContext = (event: ExternalMediaDragEvent): ExternalMediaDragContext | null => {
+      const files = getExternalMediaEventFiles(event);
+      const file = files[0] ?? null;
+      if (!file) {
+        return externalMediaDragContextRef.current?.dragId === event.dragId
+          ? externalMediaDragContextRef.current
+          : null;
+      }
+
+      const existing = externalMediaDragContextRef.current;
+      const mediaKind = getExternalMediaKind(file);
+      const context: ExternalMediaDragContext =
+        existing?.dragId === event.dragId && existing.filePath === file.path
+          ? { ...existing, files }
+          : {
+              dragId: event.dragId,
+              files,
+              filePath: file.path,
+              name: file.name.replace(/\.[^.]+$/, "") || file.name,
+              mediaKind,
+            };
+      externalMediaDragContextRef.current = context;
+      requestPreviewData(context.dragId, context.filePath, context.mediaKind);
+      return context;
+    };
+
+    const onEnter = (event: ExternalMediaDragEvent) => {
+      const context = ensureDragContext(event);
+      if (!context) return;
+      const preview = buildExternalMediaPreview(event);
+      if (preview) setExternalMediaPreview(preview);
+      console.log("[audio.import] external drag entered", {
+        filePath: context.filePath,
+        previewVisible: Boolean(preview),
+      });
+    };
+
+    const onMove = (event: ExternalMediaDragEvent) => {
+      ensureDragContext(event);
+      const preview = buildExternalMediaPreview(event);
+      if (preview) setExternalMediaPreview(preview);
+    };
+
+    const clearDragContext = (dragId?: string) => {
+      const targetDragId = dragId || externalMediaDragContextRef.current?.dragId;
+      if (targetDragId) {
+        void nativeBridge.cancelWaveformPreview(targetDragId);
+        requestedExternalPreviewIdsRef.current.delete(targetDragId);
+      }
+      externalMediaDragContextRef.current = null;
+      setExternalMediaPreview(null);
+    };
+
+    const onLeave = (event: ExternalMediaDragEvent) => {
+      clearDragContext(event?.dragId);
+    };
+
+    const onDrop = (event: ExternalMediaDragEvent) => {
+      const context = ensureDragContext(event);
+      const preview = buildExternalMediaPreview(event) ?? externalMediaPreviewRef.current;
+      const mediaFiles = getExternalMediaEventFiles(event);
+      if (!context || !preview || mediaFiles.length === 0) {
+        clearDragContext(event?.dragId);
+        return;
+      }
+
+      console.log("[audio.import] external drop committed", {
+        count: mediaFiles.length,
+        mediaKind: preview.mediaKind,
+        target: preview.target,
+        startTime: Number(preview.startTime.toFixed(3)),
+      });
+
+      mediaFiles.forEach((file, index) => {
+        const mediaKind = getExternalMediaKind(file);
+        const name = file.name.replace(/\.[^.]+$/, "") || file.name;
+        if (mediaKind === "midi") {
+          const targetTrack =
+            preview.target.kind === "existingTrack"
+              ? tracksRef.current[preview.target.trackIndex]
+              : undefined;
+          const useExisting =
+            index === 0 &&
+            targetTrack &&
+            isExternalTrackCompatible(targetTrack, "midi") &&
+            (preview.midiTrackCount ?? 1) <= 1;
+          const insertIndex = preview.target.kind === "insertTrack"
+            ? preview.target.insertIndex + index
+            : preview.target.kind === "existingTrack"
+              ? preview.target.trackIndex + index
+              : tracksRef.current.length + index;
+
+          void importExternalMIDIAtTimeline({
+            filePath: file.path,
+            name,
+            targetTrackId: useExisting ? targetTrack.id : undefined,
+            insertIndex: useExisting ? undefined : insertIndex,
+            startTime: preview.startTime,
+            parsedTracks: index === 0 && context.filePath === file.path && context.midiTracks && context.midiTracks.length > 0
+              ? context.midiTracks
+              : undefined,
+          }).catch((error) => console.error("[Timeline] External MIDI drop import failed", error));
+          return;
+        }
+
+        const targetTrack =
+          preview.target.kind === "existingTrack"
+            ? tracksRef.current[preview.target.trackIndex]
+            : undefined;
+        const useExisting =
+          index === 0 &&
+          targetTrack &&
+          isExternalTrackCompatible(targetTrack, "audio");
+        const insertIndex = preview.target.kind === "insertTrack"
+          ? preview.target.insertIndex + index
+          : preview.target.kind === "existingTrack"
+            ? preview.target.trackIndex + index
+            : tracksRef.current.length + index;
+
+        void importExternalMediaAtTimeline({
+          filePath: file.path,
+          name,
+          trackId: useExisting ? targetTrack.id : undefined,
+          insertIndex: useExisting ? undefined : insertIndex,
+          startTime: preview.startTime,
+          duration: index === 0 ? preview.duration : undefined,
+          sampleRate: index === 0 ? preview.sampleRate : undefined,
+          waveformStatus: index === 0 && preview.peaks ? "preview" : "building",
+        }).catch((error) => console.error("[audio.import] external drop import failed", error));
+      });
+
+      clearDragContext(preview.dragId);
+    };
+
+    const unsubscribers = [
+      nativeBridge.onExternalMediaDragEnter(onEnter),
+      nativeBridge.onExternalMediaDragMove(onMove),
+      nativeBridge.onExternalMediaDragLeave(onLeave),
+      nativeBridge.onExternalMediaDrop(onDrop),
+      nativeBridge.onWaveformPreviewReady((data) => {
+        if (data.filePath && data.peaks.length > 0) {
+          setWaveformPreviewCache((prev) => {
+            const next = new Map(prev);
+            next.set(data.filePath, data.peaks);
+            if (next.size > 32) {
+              const oldest = next.keys().next().value;
+              if (oldest) next.delete(oldest);
+            }
+            return next;
+          });
+        }
+
+        const context = externalMediaDragContextRef.current;
+        if (context?.dragId === data.requestId && context.filePath === data.filePath) {
+          context.peaks = data.peaks;
+          context.duration = Math.max(0.25, data.duration || context.duration || 4);
+          context.sampleRate = data.sampleRate || context.sampleRate;
+        }
+
+        setExternalMediaPreview((current) =>
+          current?.dragId === data.requestId && current.filePath === data.filePath
+            ? {
+                ...current,
+                peaks: data.peaks,
+                duration: Math.max(0.25, data.duration || current.duration),
+                sampleRate: data.sampleRate || current.sampleRate,
+              }
+            : current,
+        );
+      }),
+    ];
+
+    return () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+  }, [buildExternalMediaPreview, getExternalMediaEventFiles, importExternalMIDIAtTimeline, importExternalMediaAtTimeline, isExternalTrackCompatible]);
+
   const findCurrentTimelineClip = useCallback((clipId: string) => {
     for (let trackIndex = 0; trackIndex < useDAWStore.getState().tracks.length; trackIndex += 1) {
       const track = useDAWStore.getState().tracks[trackIndex];
@@ -1151,6 +1748,58 @@ export function Timeline({
     }
     return null;
   }, []);
+
+  const beginExternalMIDIClipFileDrag = useCallback((clipId: string) => {
+    if (externalMidiDragRef.current) return;
+
+    const found = findCurrentTimelineClip(clipId);
+    if (!found || found.kind !== "midi") return;
+
+    externalMidiDragRef.current = { clipId };
+    restoreTimelineGestureUndo();
+    clearTimelineGestureUndo();
+    resetDragState();
+
+    const state = useDAWStore.getState();
+    const track = state.tracks.find((candidate) => candidate.id === found.track.id);
+    const midiClip = track?.midiClips.find((candidate) => candidate.id === clipId);
+    if (!track || !midiClip) {
+      externalMidiDragRef.current = null;
+      return;
+    }
+
+    const exportClip = { ...midiClip, startTime: 0 };
+    const exported = serializeMIDIClipsForBackend([exportClip], track.midiEffects || [])[0];
+    const defaultFileName = `${midiClip.name || "MIDI Clip"}.mid`;
+    const midiTracks = [{
+      name: track.name || "MIDI Track",
+      clips: [{
+        startTime: 0,
+        duration: exported?.duration ?? midiClip.duration,
+        events: exported?.events ?? getVisibleMIDIEventsForClip(midiClip),
+      }],
+    }];
+
+    void (async () => {
+      const prepared = await nativeBridge.prepareExternalMIDIFileDrag(defaultFileName, midiTracks);
+      if (!prepared.success || !prepared.filePath) {
+        useDAWStore.getState().showToast(prepared.error || "Failed to prepare MIDI drag export", "error");
+        return;
+      }
+
+      const started = await nativeBridge.beginExternalFileDrag(prepared.filePath);
+      if (!started) {
+        useDAWStore.getState().showToast("Could not start external MIDI drag", "error");
+      }
+    })().finally(() => {
+      externalMidiDragRef.current = null;
+    });
+  }, [
+    clearTimelineGestureUndo,
+    findCurrentTimelineClip,
+    resetDragState,
+    restoreTimelineGestureUndo,
+  ]);
 
   const getTimelineDropTrackIndex = useCallback((
     absoluteY: number,
@@ -1185,7 +1834,7 @@ export function Timeline({
         deltaTime,
         sourceLength: found.clip.sourceLength,
         snapTime: isSnapActive(ctrlBypass)
-          ? (time) => snapToGrid(time, tempoRef.current, timeSignatureRef.current, gridSizeRef.current)
+          ? (time) => snapTimelineTime(time, gesture.originalStartTime)
           : undefined,
       });
       previewResizeTimelineClip(gesture.clipId, isMidi, nextValues);
@@ -1197,7 +1846,7 @@ export function Timeline({
       gesture.originalStartTime,
       deltaTime,
       isSnapActive(ctrlBypass)
-        ? (time) => snapToGrid(time, tempoRef.current, timeSignatureRef.current, gridSizeRef.current)
+        ? (time) => snapTimelineTime(time, gesture.originalStartTime)
         : undefined,
     );
     const latestTracks = tracksRef.current;
@@ -1488,6 +2137,26 @@ export function Timeline({
 
       const activeDrag = dragStateRef.current;
       if (activeDrag.type !== null && activeDrag.clipId) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        const isOutsideWindow =
+          rect &&
+          (event.clientX < rect.left - 12 ||
+            event.clientX > rect.right + 12 ||
+            event.clientY < rect.top - 12 ||
+            event.clientY > rect.bottom + 12);
+        if (
+          isOutsideWindow &&
+          activeDrag.type === "move" &&
+          !activeDrag.copyOnDrag &&
+          (!activeDrag.multiClipInfo || activeDrag.multiClipInfo.length <= 1)
+        ) {
+          const found = findCurrentTimelineClip(activeDrag.clipId);
+          if (found?.kind === "midi") {
+            beginExternalMIDIClipFileDrag(activeDrag.clipId);
+            return;
+          }
+        }
+
         previewTimelineGestureFromPointer(point.x, point.y, Boolean(event.ctrlKey || event.metaKey));
       }
 
@@ -1529,6 +2198,8 @@ export function Timeline({
       window.removeEventListener("mouseup", handleWindowMouseUp);
     };
   }, [
+    beginExternalMIDIClipFileDrag,
+    findCurrentTimelineClip,
     finalizeSlipTimelineGesture,
     finalizeTimelineClipGesture,
     previewTimelineGestureFromPointer,
@@ -1622,12 +2293,18 @@ export function Timeline({
     if (!pointerPos) return;
 
     const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    const quantizePreset = getQuantizePresetById(quantizePresetsRef.current, quantizePresetIdRef.current);
     const clickedTime = getRulerClickSnapTime({
       time: rawClickedTime,
       pixelsPerSecond: pixelsPerSecondRef.current,
       tempo: tempoRef.current,
       timeSignature: timeSignatureRef.current,
       gridSize: gridSizeRef.current,
+      snapType: snapTypeRef.current,
+      quantizePreset,
+      quantizeGridSize: quantizePreset.gridSize,
+      cursorTime: useDAWStore.getState().transport.currentTime,
+      eventTimes: timelineSnapEventTimes,
       snapEnabled: shouldUseSnapRef.current,
       ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
     });
@@ -1760,7 +2437,7 @@ export function Timeline({
 
       // Apply snap-to-grid if enabled
       if (isSnapActive(Boolean(e.ctrlKey || e.metaKey))) {
-        time = snapToGrid(time, tempoRef.current, timeSignatureRef.current, gridSizeRef.current);
+        time = snapTimelineTime(time, drag.startTime);
       }
 
       if (drag.type === "handle-pending") {
@@ -1785,7 +2462,7 @@ export function Timeline({
           // Snap the drag start time too
           let startTime = drag.startTime;
           if (isSnapActive(Boolean(e.ctrlKey || e.metaKey))) {
-            startTime = snapToGrid(startTime, tempoRef.current, timeSignatureRef.current, gridSizeRef.current);
+            startTime = snapTimelineTime(startTime, drag.startTime);
             drag.startTime = startTime;
           }
           setProjectRange(Math.min(startTime, time), Math.max(startTime, time));
@@ -2727,6 +3404,7 @@ export function Timeline({
 
     const cacheKey = `${clip.filePath}-${cacheSpp}-${alignedStartSample}`;
     const waveformData = isNarrowClip ? undefined : waveformCache.get(cacheKey);
+    const previewWaveformData = isNarrowClip ? undefined : waveformPreviewCache.get(clip.filePath);
 
     if (!isNarrowClip && clip.filePath && !waveformData) {
       fetchWaveformData(clip.filePath, cacheSpp, alignedStartSample, numPeaksToFetch);
@@ -2886,9 +3564,57 @@ export function Timeline({
       return shapes;
     };
 
+    const generatePreviewWaveformPoints = (): React.ReactNode[] => {
+      if (!previewWaveformData || previewWaveformData.length === 0) return [];
+      const numChannels = previewWaveformData[0]?.channels?.length || 1;
+      const waveforms: React.ReactNode[] = [];
+      const visibleStart = Math.max(0, Math.floor(-x));
+      const visibleEnd = Math.min(Math.ceil(width), Math.ceil(dimensions.width - x));
+      if (visibleEnd <= visibleStart) return [];
+
+      for (let ch = 0; ch < numChannels; ch += 1) {
+        const points: number[] = [];
+        const channelHeight = waveformHeight / numChannels;
+        const channelY = clipY + 5 + ch * channelHeight;
+        const centerY = channelY + channelHeight / 2;
+        const halfHeight = channelHeight / 2 - 2;
+        for (let i = visibleStart; i < visibleEnd; i += 1) {
+          const dataIndex = Math.min(previewWaveformData.length - 1, Math.floor((i / Math.max(1, width)) * previewWaveformData.length));
+          const channelData = previewWaveformData[dataIndex]?.channels[ch];
+          if (!channelData) continue;
+          points.push(x + i, centerY - Math.max(-1, Math.min(1, channelData.max)) * halfHeight);
+        }
+        for (let i = visibleEnd - 1; i >= visibleStart; i -= 1) {
+          const dataIndex = Math.min(previewWaveformData.length - 1, Math.floor((i / Math.max(1, width)) * previewWaveformData.length));
+          const channelData = previewWaveformData[dataIndex]?.channels[ch];
+          if (!channelData) continue;
+          points.push(x + i, centerY - Math.max(-1, Math.min(1, channelData.min)) * halfHeight);
+        }
+        if (points.length > 0) {
+          waveforms.push(
+            <Line
+              key={`preview-waveform-${clip.id}-ch${ch}`}
+              points={points}
+              fill={clip.color || trackColor}
+              opacity={0.38}
+              closed
+              stroke={clip.color || trackColor}
+              strokeWidth={1}
+              listening={false}
+            />,
+          );
+        }
+      }
+      return waveforms;
+    };
+
     const isSpectral = tracks.find((t) => t.id === trackId)?.spectralView;
     // Skip expensive waveform generation during active zoom or for narrow clips — just show clip rect
-    const waveformShapes = (isZoomingRef.current || isNarrowClip) ? [] : (isSpectral ? generateSpectralView() : generateWaveformPoints());
+    const waveformShapes = (isZoomingRef.current || isNarrowClip)
+      ? []
+      : waveformData
+        ? (isSpectral ? generateSpectralView() : generateWaveformPoints())
+        : generatePreviewWaveformPoints();
 
     // Clip click — selection is handled in handleMouseDown to support drag
     const handleClipClick = () => {};
@@ -2920,7 +3646,7 @@ export function Timeline({
         gesture.originalStartTime,
         deltaTime,
         isSnapActive(Boolean(e.evt?.ctrlKey))
-          ? (time) => snapToGrid(time, tempo, timeSignature, gridSize)
+          ? (time) => snapTimelineTime(time, gesture.originalStartTime)
           : undefined,
       );
 
@@ -3069,7 +3795,7 @@ export function Timeline({
         const pointerPos = stage.getPointerPosition();
         let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
         if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
-          splitTime = snapToGrid(splitTime, tempo, timeSignature, gridSize);
+          splitTime = snapTimelineTime(splitTime, splitTime);
         }
         splitClipAtPosition(clip.id, splitTime);
         return;
@@ -3233,7 +3959,7 @@ export function Timeline({
           deltaTime,
           sourceLength: clip.sourceLength,
           snapTime: isSnapActive(Boolean(e.evt?.ctrlKey))
-            ? (time) => snapToGrid(time, tempo, timeSignature, gridSize)
+            ? (time) => snapTimelineTime(time, gesture.originalStartTime)
             : undefined,
         }));
       } else {
@@ -3998,7 +4724,7 @@ export function Timeline({
         const pointerPos = stage.getPointerPosition();
         let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
         if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
-          splitTime = snapToGrid(splitTime, tempo, timeSignature, gridSize);
+          splitTime = snapTimelineTime(splitTime, splitTime);
         }
         splitMIDIClipAtPosition(clip.id, splitTime);
         return;
@@ -4133,7 +4859,7 @@ export function Timeline({
           originalOffset: gesture.originalOffset,
           deltaTime,
           snapTime: isSnapActive(Boolean(e.evt?.ctrlKey))
-            ? (time) => snapToGrid(time, tempo, timeSignature, gridSize)
+            ? (time) => snapTimelineTime(time, gesture.originalStartTime)
             : undefined,
         }));
         return;
@@ -4149,7 +4875,7 @@ export function Timeline({
           deltaTime,
           sourceLength: clip.sourceLength,
           snapTime: isSnapActive(Boolean(e.evt?.ctrlKey))
-            ? (time) => snapToGrid(time, tempo, timeSignature, gridSize)
+            ? (time) => snapTimelineTime(time, gesture.originalStartTime)
             : undefined,
         }));
         return;
@@ -4162,7 +4888,7 @@ export function Timeline({
         gesture.originalStartTime,
         deltaTime,
         isSnapActive(Boolean(e.evt?.ctrlKey))
-          ? (time) => snapToGrid(time, tempo, timeSignature, gridSize)
+          ? (time) => snapTimelineTime(time, gesture.originalStartTime)
           : undefined,
       );
 
@@ -4839,34 +5565,56 @@ export function Timeline({
     if (!snapEnabled) return null;
 
     const gridLines: React.ReactNode[] = [];
-    const gridInterval = calculateGridInterval(tempo, timeSignature, gridSize);
-
-    // Calculate visible time range
+    const quantizePreset = getQuantizePresetById(quantizePresets, quantizePresetId);
+    const visualGrid = resolveVisualGrid(tempo, timeSignature, gridSize, {
+      quantizePreset,
+      quantizeGridSize: quantizePreset.gridSize,
+      pixelsPerSecond,
+      viewportPixels: dimensions.width,
+      maxVisibleLines: 180,
+      minPixelsPerGrid: 18,
+    });
     const startTime = scrollX / pixelsPerSecond;
     const endTime = (scrollX + dimensions.width) / pixelsPerSecond;
 
-    // Generate grid lines for visible range
-    const startIndex = Math.floor(startTime / gridInterval);
-    const endIndex = Math.ceil(endTime / gridInterval);
-
-    for (let i = startIndex; i <= endIndex; i++) {
-      const time = i * gridInterval;
+    const pushGridLine = (time: number, key: string) => {
+      if (time < 0) return;
       const x = time * pixelsPerSecond - scrollX;
 
-      // Skip if outside visible range
-      if (x < -10 || x > dimensions.width + 10) continue;
+      if (x < -10 || x > dimensions.width + 10) return;
 
+      const barPosition = time / Math.max(0.000001, visualGrid.barInterval);
+      const isBar = Math.abs(barPosition - Math.round(barPosition)) < 0.0001;
       gridLines.push(
         <Line
-          key={`snap-grid-${i}`}
+          key={key}
           points={[x, 0, x, stageHeight]}
           stroke="#10b981"
-          strokeWidth={0.5}
-          opacity={0.2}
-          dash={[4, 4]}
+          strokeWidth={isBar ? 0.75 : 0.5}
+          opacity={isBar ? 0.12 : 0.2}
+          dash={isBar ? [5, 5] : [4, 4]}
           listening={false}
         />
       );
+    };
+
+    if (visualGrid.alignedToBar) {
+      const startBar = Math.floor(startTime / visualGrid.barInterval) - 1;
+      const endBar = Math.ceil(endTime / visualGrid.barInterval) + 1;
+      for (let bar = Math.max(0, startBar); bar <= endBar; bar += 1) {
+        const barTime = bar * visualGrid.barInterval;
+        for (let division = 0; division < visualGrid.divisionsPerBar; division += 1) {
+          const time = barTime + division * visualGrid.visualInterval;
+          pushGridLine(time, `snap-grid-bar-${bar}-${division}`);
+        }
+      }
+    } else {
+      const startIndex = Math.floor(startTime / visualGrid.visualInterval);
+      const endIndex = Math.ceil(endTime / visualGrid.visualInterval);
+
+      for (let index = startIndex; index <= endIndex; index += 1) {
+        pushGridLine(index * visualGrid.visualInterval, `snap-grid-${index}`);
+      }
     }
 
     return <Group>{gridLines}</Group>;
@@ -5006,10 +5754,16 @@ export function Timeline({
       ? track?.midiClips.find((candidate) => candidate.id === menu.clipId)
       : track?.clips.find((candidate) => candidate.id === menu.clipId);
     const isMidi = menu.kind === "midi";
+    const quantizePreset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
     const gridSeconds = calculateGridInterval(
       state.transport.tempo,
       state.timeSignature,
-      state.gridSize,
+      quantizePreset.gridSize,
+      {
+        quantizePreset,
+        quantizeGridSize: quantizePreset.gridSize,
+        pixelsPerSecond: state.pixelsPerSecond,
+      },
     );
 
     const openAndSelectAllMidiNotes = () => {
@@ -5021,18 +5775,26 @@ export function Timeline({
       if (!clip || !isMidi) return;
       const midiClip = clip as MIDIClip;
       void (async () => {
-        const filePath = await nativeBridge.showSaveDialog(`${midiClip.name || "MIDI Clip"}.mid`, "Export MIDI Clip");
+        const filePath = await nativeBridge.showSaveDialog(
+          `${midiClip.name || "MIDI Clip"}.mid`,
+          "Export MIDI Clip",
+          "*.mid;*.midi",
+        );
         if (!filePath) return;
         const exportClip = { ...midiClip, startTime: 0 };
         const exported = serializeMIDIClipsForBackend([exportClip], track?.midiEffects || [])[0];
-        await nativeBridge.exportMIDIFile(filePath, JSON.stringify([{
+        const success = await nativeBridge.exportProjectMIDI(filePath, [{
           name: track?.name || "MIDI Track",
           clips: [{
             startTime: 0,
             duration: exported?.duration ?? midiClip.duration,
             events: exported?.events ?? getVisibleMIDIEventsForClip(midiClip),
           }],
-        }]));
+        }]);
+        useDAWStore.getState().showToast(
+          success ? "MIDI clip exported" : "Failed to export MIDI clip",
+          success ? "success" : "error",
+        );
       })();
     };
     const getMIDIContentEnd = () => {
@@ -5128,7 +5890,18 @@ export function Timeline({
               label: "Quantize Notes",
               onClick: () => {
                 openAndSelectAllMidiNotes();
-                useDAWStore.getState().quantizeSelectedMIDINotes(menu.trackId, menu.clipId, gridSeconds, 1);
+                useDAWStore.getState().quantizeSelectedMIDINotes(menu.trackId, menu.clipId, gridSeconds, quantizePreset.strength, {
+                  presetId: quantizePreset.id,
+                  gridSize: quantizePreset.gridSize,
+                  mode: "start",
+                  swing: quantizePreset.swing,
+                  groovePreset: quantizePreset.groovePreset,
+                  tupletDivisions: quantizePreset.tupletDivisions,
+                  catchRangeMs: ticksToSeconds(quantizePreset.catchRangeTicks, state.transport.tempo) * 1000,
+                  safeRangeMs: ticksToSeconds(quantizePreset.safeRangeTicks, state.transport.tempo) * 1000,
+                  randomizeMs: ticksToSeconds(quantizePreset.roughTicks, state.transport.tempo) * 1000,
+                  moveControllers: quantizePreset.moveControllers,
+                });
               },
             },
             {
@@ -5896,6 +6669,225 @@ export function Timeline({
         </Layer>
 
         <Layer listening={false}>
+          {externalMediaPreview && (() => {
+            const target = externalMediaPreview.target;
+            const targetTrack = target.kind === "existingTrack" ? tracks[target.trackIndex] : undefined;
+            const rowMetrics = targetTrack
+              ? getTimelineRowMetrics(targetTrack, trackHeight)
+              : { clipInsetY: 6, clipHeight: Math.max(24, trackHeight - 12) };
+            const targetY = target.kind === "existingTrack"
+              ? (trackYs[target.trackIndex] ?? 0)
+              : target.insertIndex >= tracks.length
+                ? contentHeight
+                : (trackYs[target.insertIndex] ?? contentHeight);
+            const clipY = targetY + rowMetrics.clipInsetY;
+            const clipHeight = rowMetrics.clipHeight;
+            const x = externalMediaPreview.startTime * pixelsPerSecond - scrollX;
+            const width = Math.max(48, externalMediaPreview.duration * pixelsPerSecond);
+            if (x + width < 0 || x > dimensions.width) {
+              return target.kind === "insertTrack"
+                ? (
+                    <Group>
+                      <Line
+                        points={[0, targetY, dimensions.width, targetY]}
+                        stroke={externalMediaPreview.mediaKind === "midi" ? "#a78bfa" : "#67e8f9"}
+                        strokeWidth={2}
+                        dash={[8, 4]}
+                        opacity={0.9}
+                        listening={false}
+                      />
+                    </Group>
+                  )
+                : null;
+            }
+
+            const previewShapes: React.ReactNode[] = [];
+            if (target.kind === "insertTrack") {
+              const insertColor = externalMediaPreview.mediaKind === "midi" ? "#a78bfa" : "#67e8f9";
+              previewShapes.push(
+                <Rect
+                  key="external-insert-lane"
+                  x={0}
+                  y={Math.round(targetY) + 0.5}
+                  width={dimensions.width}
+                  height={trackHeight}
+                  fill={insertColor}
+                  opacity={0.08}
+                  listening={false}
+                />,
+                <Line
+                  key="external-insert-line"
+                  points={[0, Math.round(targetY) + 0.5, dimensions.width, Math.round(targetY) + 0.5]}
+                  stroke={insertColor}
+                  strokeWidth={2}
+                  dash={[8, 4]}
+                  opacity={0.95}
+                  listening={false}
+                />,
+                <Text
+                  key="external-insert-label"
+                  x={10}
+                  y={Math.round(targetY) + 8}
+                  text={externalMediaPreview.mediaKind === "midi" ? "+ MIDI Track" : "+ Audio Track"}
+                  fontSize={11}
+                  fill={insertColor}
+                  opacity={0.9}
+                  listening={false}
+                />,
+              );
+            }
+
+            if (externalMediaPreview.mediaKind === "midi") {
+              const midiColor = "#c4b5fd";
+              const midiEvents = externalMediaPreview.midiEvents ?? [];
+              const bars = sampleMIDIThumbnailBars(
+                buildMIDIThumbnailBars(midiEvents, externalMediaPreview.duration),
+                width,
+              );
+              const noteMin = bars.length > 0 ? Math.min(...bars.map((bar) => bar.note)) : 36;
+              const noteMax = bars.length > 0 ? Math.max(...bars.map((bar) => bar.note)) : 84;
+              const noteSpan = Math.max(1, noteMax - noteMin + 1);
+              const contentTop = clipY + 18;
+              const contentHeight = Math.max(8, clipHeight - 24);
+
+              if (bars.length > 0) {
+                bars.forEach((bar, index) => {
+                  const barX = x + (bar.start / externalMediaPreview.duration) * width;
+                  const barW = Math.max(3, ((Math.max(bar.end, bar.start + 0.06) - bar.start) / externalMediaPreview.duration) * width);
+                  const normalizedNote = (bar.note - noteMin) / noteSpan;
+                  const barY = contentTop + (1 - normalizedNote) * Math.max(0, contentHeight - 4);
+                  previewShapes.push(
+                    <Rect
+                      key={`external-midi-note-${index}`}
+                      x={barX}
+                      y={barY}
+                      width={barW}
+                      height={4}
+                      fill={midiColor}
+                      opacity={0.68}
+                      cornerRadius={1}
+                      listening={false}
+                    />,
+                  );
+                });
+              } else {
+                const barCount = Math.min(18, Math.max(6, Math.floor(width / 18)));
+                for (let i = 0; i < barCount; i += 1) {
+                  const barW = Math.max(10, width / barCount * 0.55);
+                  const barX = x + i * (width / barCount) + 3;
+                  const barY = contentTop + ((i * 7) % Math.max(8, contentHeight - 4));
+                  previewShapes.push(
+                    <Rect
+                      key={`external-midi-skeleton-${i}`}
+                      x={barX}
+                      y={barY}
+                      width={barW}
+                      height={4}
+                      fill={midiColor}
+                      opacity={0.28}
+                      cornerRadius={1}
+                      listening={false}
+                    />,
+                  );
+                }
+              }
+            } else {
+              const peaks = externalMediaPreview.peaks;
+              if (peaks && peaks.length > 0) {
+              const numChannels = peaks[0]?.channels?.length || 1;
+              for (let ch = 0; ch < numChannels; ch += 1) {
+                const points: number[] = [];
+                const channelHeight = Math.max(6, (clipHeight - 14) / numChannels);
+                const channelY = clipY + 8 + ch * channelHeight;
+                const centerY = channelY + channelHeight / 2;
+                const halfHeight = Math.max(2, channelHeight / 2 - 1);
+                const visibleStart = Math.max(0, Math.floor(-x));
+                const visibleEnd = Math.min(Math.ceil(width), Math.ceil(dimensions.width - x));
+                for (let px = visibleStart; px < visibleEnd; px += 1) {
+                  const peakIndex = Math.min(peaks.length - 1, Math.floor((px / width) * peaks.length));
+                  const channel = peaks[peakIndex]?.channels[ch];
+                  if (!channel) continue;
+                  points.push(x + px, centerY - Math.max(-1, Math.min(1, channel.max)) * halfHeight);
+                }
+                for (let px = visibleEnd - 1; px >= visibleStart; px -= 1) {
+                  const peakIndex = Math.min(peaks.length - 1, Math.floor((px / width) * peaks.length));
+                  const channel = peaks[peakIndex]?.channels[ch];
+                  if (!channel) continue;
+                  points.push(x + px, centerY - Math.max(-1, Math.min(1, channel.min)) * halfHeight);
+                }
+                if (points.length > 0) {
+                  previewShapes.push(
+                    <Line
+                      key={`external-wave-${ch}`}
+                      points={points}
+                      fill="#67e8f9"
+                      stroke="#67e8f9"
+                      strokeWidth={1}
+                      opacity={0.55}
+                      closed
+                      listening={false}
+                    />,
+                  );
+                }
+              }
+            } else {
+              const barCount = Math.min(40, Math.max(8, Math.floor(width / 8)));
+              const barSpacing = width / barCount;
+              const barWidth = Math.max(2, barSpacing * 0.42);
+              const waveformTop = clipY + 22;
+              const waveformHeight = Math.max(8, clipHeight - 30);
+              for (let i = 0; i < barCount; i += 1) {
+                const pseudo = Math.abs(Math.sin((i + 1) * 1.873 + externalMediaPreview.name.length)) * 0.7 + 0.18;
+                const barHeight = waveformHeight * pseudo;
+                previewShapes.push(
+                  <Rect
+                    key={`external-wave-skeleton-${i}`}
+                    x={x + i * barSpacing + (barSpacing - barWidth) / 2}
+                    y={waveformTop + (waveformHeight - barHeight) / 2}
+                    width={barWidth}
+                    height={barHeight}
+                    fill="#67e8f9"
+                    opacity={0.22}
+                    cornerRadius={1}
+                    listening={false}
+                  />,
+                );
+              }
+            }
+            }
+
+            return (
+              <Group>
+                <Rect
+                  x={Math.round(x) + 0.5}
+                  y={Math.round(clipY) + 0.5}
+                  width={Math.round(width)}
+                  height={Math.round(clipHeight)}
+                  fill={externalMediaPreview.mediaKind === "midi" ? "#312e81" : "#164e63"}
+                  opacity={0.42}
+                  stroke={externalMediaPreview.mediaKind === "midi" ? "#c4b5fd" : "#67e8f9"}
+                  strokeWidth={2}
+                  dash={[6, 4]}
+                  cornerRadius={3}
+                  listening={false}
+                />
+                {previewShapes}
+                <Text
+                  x={Math.round(x) + 8}
+                  y={Math.round(clipY) + 6}
+                  text={externalMediaPreview.mediaKind === "midi" && (externalMediaPreview.midiTrackCount ?? 1) > 1
+                    ? `${externalMediaPreview.name} (${externalMediaPreview.midiTrackCount} tracks)`
+                    : externalMediaPreview.name}
+                  fontSize={11}
+                  fill={externalMediaPreview.mediaKind === "midi" ? "#ede9fe" : "#e0f2fe"}
+                  width={Math.max(20, Math.round(width) - 16)}
+                  height={16}
+                  ellipsis
+                  listening={false}
+                />
+              </Group>
+            );
+          })()}
           {(() => {
             let firstVisibleTrack = 0;
             for (let j = 0; j < tracks.length; j += 1) {

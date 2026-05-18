@@ -1,5 +1,6 @@
 import classNames from 'classnames';
 import { forwardRef } from 'react';
+import { ChevronDown } from 'lucide-react';
 import {
   SelectProps,
   selectSizeStyles,
@@ -74,7 +75,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     const selectClasses = classNames(
       selectSizeStyles[size],
       selectVariantStyles[variant],
-      'rounded cursor-pointer transition-colors',
+      'w-full appearance-none rounded cursor-pointer transition-colors',
       fullWidth && 'w-full',
       error && 'border-red-500 focus:border-red-500',
       disabled && 'opacity-50 cursor-not-allowed',
@@ -91,39 +92,48 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     };
 
     const WrapperComponent = label ? 'div' : 'span';
+    const wrapperClasses = classNames(label ? 'block' : 'inline-block', fullWidth && 'w-full');
+    const controlClasses = classNames('relative inline-flex min-w-0', fullWidth && 'w-full');
 
     return (
-      <WrapperComponent className={className}>
+      <WrapperComponent className={wrapperClasses}>
         {label && (
           <label className="block text-sm font-medium text-daw-text-muted mb-1">
             {label}
           </label>
         )}
 
-        <select
-          ref={ref}
-          value={value !== undefined ? String(value) : ''}
-          onChange={handleChange}
-          disabled={disabled}
-          title={title}
-          className={selectClasses}
-        >
-          {placeholder && (
-            <option value="" disabled className="bg-neutral-900 text-neutral-400">
-              {placeholder}
-            </option>
-          )}
-          {options.map((option) => (
-            <option
-              key={String(option.value)}
-              value={String(option.value)}
-              disabled={option.disabled}
-              className="bg-neutral-900 text-white"
-            >
-              {option.label}
-            </option>
-          ))}
-        </select>
+        <span className={controlClasses}>
+          <select
+            ref={ref}
+            value={value !== undefined ? String(value) : ''}
+            onChange={handleChange}
+            disabled={disabled}
+            title={title}
+            className={selectClasses}
+          >
+            {placeholder && (
+              <option value="" disabled className="bg-neutral-900 text-neutral-400">
+                {placeholder}
+              </option>
+            )}
+            {options.map((option) => (
+              <option
+                key={String(option.value)}
+                value={String(option.value)}
+                disabled={option.disabled}
+                className="bg-neutral-900 text-white"
+              >
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={12}
+            className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-neutral-500"
+            aria-hidden="true"
+          />
+        </span>
 
         {error && (
           <span className="block text-xs text-red-500 mt-1">{error}</span>

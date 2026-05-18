@@ -25,6 +25,12 @@ import { chooseResponsiveToolbarGroups } from "../utils/responsiveToolbar";
 import type { ResponsiveToolbarGroup } from "../utils/responsiveToolbar";
 import { NOTE_NAMES, SCALE_DISPLAY_NAMES } from "../utils/pianoRollPitch";
 import { PIANO_ROLL_TOOL_BUTTONS } from "../utils/pianoRollTools";
+import {
+  SNAP_TYPE_OPTIONS,
+  type GridSize,
+  type QuantizePreset,
+  type SnapType,
+} from "../utils/snapToGrid";
 
 interface StepSizeOption {
   label: string;
@@ -60,6 +66,18 @@ interface PianoRollToolbarProps {
   readonly visibleLanes: readonly PianoRollVisibleLane[];
   readonly activeLaneId?: string;
   readonly onActiveLaneChange: (laneId: string) => void;
+  readonly snapEnabled: boolean;
+  readonly onSnapToggle: () => void;
+  readonly snapType: SnapType;
+  readonly onSnapTypeChange: (snapType: SnapType) => void;
+  readonly gridSize: GridSize;
+  readonly onGridSizeChange: (gridSize: GridSize) => void;
+  readonly gridTypeOptions: readonly { value: GridSize; label: string }[];
+  readonly quantizePresetId: string;
+  readonly quantizePresets: readonly QuantizePreset[];
+  readonly onQuantizePresetChange: (presetId: string) => void;
+  readonly onApplyQuantize: () => void;
+  readonly onLengthQuantize: () => void;
   readonly onQuantizeLast: () => void;
   readonly onOpenQuantizeDialog: () => void;
   readonly onResetQuantize: () => void;
@@ -171,6 +189,18 @@ export const PianoRollToolbar = forwardRef<HTMLDivElement, PianoRollToolbarProps
       visibleLanes,
       activeLaneId,
       onActiveLaneChange,
+      snapEnabled,
+      onSnapToggle,
+      snapType,
+      onSnapTypeChange,
+      gridSize,
+      onGridSizeChange,
+      gridTypeOptions,
+      quantizePresetId,
+      quantizePresets,
+      onQuantizePresetChange,
+      onApplyQuantize,
+      onLengthQuantize,
       onQuantizeLast,
       onOpenQuantizeDialog,
       onResetQuantize,
@@ -451,6 +481,68 @@ export const PianoRollToolbar = forwardRef<HTMLDivElement, PianoRollToolbarProps
       >
         <button
           type="button"
+          className="piano-roll-strip-command"
+          data-active={snapEnabled}
+          onClick={onSnapToggle}
+          title={snapEnabled ? "Snap enabled" : "Snap disabled"}
+          data-tooltip={snapEnabled ? "Disable snap" : "Enable snap"}
+          aria-label={snapEnabled ? "Disable snap" : "Enable snap"}
+          aria-pressed={snapEnabled}
+          onMouseDown={preventToolbarButtonFocus}
+          tabIndex={placement === "measure" ? -1 : undefined}
+        >
+          Snap
+        </button>
+        <select
+          className="piano-roll-compact-select piano-roll-snap-type-select"
+          value={snapType}
+          onChange={(event) => onSnapTypeChange(event.target.value as SnapType)}
+          title="Snap type"
+          aria-label="Snap type"
+          tabIndex={placement === "measure" ? -1 : undefined}
+        >
+          {SNAP_TYPE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <select
+          className="piano-roll-compact-select piano-roll-grid-select"
+          value={gridSize}
+          onChange={(event) => onGridSizeChange(event.target.value as GridSize)}
+          title="Grid type"
+          aria-label="Grid type"
+          tabIndex={placement === "measure" ? -1 : undefined}
+        >
+          {gridTypeOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <select
+          className="piano-roll-compact-select piano-roll-quantize-preset-select"
+          value={quantizePresetId}
+          onChange={(event) => onQuantizePresetChange(event.target.value)}
+          title="Quantize preset"
+          aria-label="Quantize preset"
+          tabIndex={placement === "measure" ? -1 : undefined}
+        >
+          {quantizePresets.map((preset) => (
+            <option key={preset.id} value={preset.id}>{preset.name}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="piano-roll-strip-command piano-roll-quantize-command"
+          onClick={onApplyQuantize}
+          title="Apply selected quantize preset"
+          data-tooltip="Apply selected quantize preset"
+          aria-label="Apply selected quantize preset"
+          onMouseDown={preventToolbarButtonFocus}
+          tabIndex={placement === "measure" ? -1 : undefined}
+        >
+          Apply
+        </button>
+        <button
+          type="button"
           className="piano-roll-strip-command piano-roll-quantize-command"
           onClick={onQuantizeLast}
           title="Quantize notes using last settings (Q). If no notes are selected, quantize the whole active clip."
@@ -471,7 +563,19 @@ export const PianoRollToolbar = forwardRef<HTMLDivElement, PianoRollToolbarProps
           onMouseDown={preventToolbarButtonFocus}
           tabIndex={placement === "measure" ? -1 : undefined}
         >
-          Quantize
+          Panel
+        </button>
+        <button
+          type="button"
+          className="piano-roll-strip-command"
+          onClick={onLengthQuantize}
+          title="Length Quantize using the selected preset"
+          data-tooltip="Length Quantize using selected preset"
+          aria-label="Length Quantize using selected preset"
+          onMouseDown={preventToolbarButtonFocus}
+          tabIndex={placement === "measure" ? -1 : undefined}
+        >
+          Length
         </button>
         <button
           type="button"

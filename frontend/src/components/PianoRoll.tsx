@@ -60,13 +60,25 @@ import {
 } from "../utils/pianoRollInteraction";
 import {
   midiSourceTimeToProjectX,
-  pianoRollRulerTimeFromX,
   projectXToMidiSourceTime,
 } from "../utils/timelineGeometry";
 import {
   guardModalContextMenu,
   shouldSuppressWorkspaceContextMenu,
 } from "../utils/modalEventGuards";
+import {
+  calculateGridInterval,
+  GRID_SIZE_GROUPS,
+  GRID_TICKS_PER_SIXTEENTH,
+  GRID_TYPE_MODE_OPTIONS,
+  getGridSizeLabel,
+  getQuantizePresetById,
+  resolveVisualGrid,
+  snapTimeByType,
+  ticksToSeconds,
+  type GridSize,
+  type QuantizeGroovePreset,
+} from "../utils/snapToGrid";
 import { windowRole, windowSessionId } from "../utils/windowEnvironment";
 import {
   getNoteNameFromPitch,
@@ -186,10 +198,9 @@ interface ControllerLaneClipboard {
 }
 
 type QuantizeMode = "start" | "ends" | "both" | "length";
-type QuantizeGroovePreset = "straight" | "swingLight" | "swingHeavy" | "laidBack16" | "push16";
 
 type TransformDialogState =
-  | { type: "quantize"; value: number; strength: number; mode: QuantizeMode; swing: number; groovePreset: QuantizeGroovePreset; tupletDivisions: number; catchRangeMs: number; safeRangeMs: number; randomizeMs: number; fixedLength: number; moveControllers: boolean }
+  | { type: "quantize"; value: number; gridSize: GridSize; strength: number; mode: QuantizeMode; swing: number; groovePreset: QuantizeGroovePreset; tupletDivisions: number; catchRangeTicks: number; safeRangeTicks: number; roughTicks: number; fixedLength: number; fixedLengthGridSize: GridSize | "quantize_link"; moveControllers: boolean; autoApply: boolean }
   | { type: "humanize"; timingMs: number; velocity: number }
   | { type: "velocity"; value: number }
   | { type: "randomVelocity"; amount: number }
@@ -244,7 +255,6 @@ const NOTE_HEIGHT = 12;
 const PIANO_WIDTH = 0;
 const PIANO_KEY_STRIP_MIN_WIDTH = 56;
 const PIANO_KEY_STRIP_MAX_WIDTH = 86;
-const GRID_SNAP = 0.25;
 const VELOCITY_LANE_HEIGHT = 60;
 const CC_LANE_HEIGHT = 80;
 const LANE_DIVIDER_HEIGHT = 1;
@@ -439,6 +449,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     timelinePixelsPerSecond,
     timelineScrollX,
     timelineScrollY,
+    snapEnabled,
+    snapType,
+    gridSize,
+    quantizePresetId,
+    quantizePresets,
     isTransportPlaying,
     tcpWidth,
   } = useDAWStore(
@@ -464,6 +479,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       timelinePixelsPerSecond: state.pixelsPerSecond,
       timelineScrollX: state.scrollX,
       timelineScrollY: state.scrollY,
+      snapEnabled: state.snapEnabled,
+      snapType: state.snapType,
+      gridSize: state.gridSize,
+      quantizePresetId: state.quantizePresetId,
+      quantizePresets: state.quantizePresets,
       isTransportPlaying: state.transport.isPlaying,
       tcpWidth: state.tcpWidth,
     })),
@@ -476,7 +496,6 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const {
     toggleStepInput,
     setStepInputSize,
-    advanceStepInput,
     setStepInputPosition,
     setTrackMidiPitchBendRange,
     updateMIDINoteVelocity,
@@ -531,6 +550,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     setPianoRollEditCursorTime,
     setPianoRollInsertVelocity,
     setPianoRollAuditionEnabled,
+    toggleSnap,
+    setSnapType,
+    setGridSize,
+    setQuantizePresetId,
     setPianoRollScaleRoot,
     setPianoRollScaleType,
     setTimelineZoom,
@@ -547,7 +570,6 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     useShallow((state) => ({
       toggleStepInput: state.toggleStepInput,
       setStepInputSize: state.setStepInputSize,
-      advanceStepInput: state.advanceStepInput,
       setStepInputPosition: state.setStepInputPosition,
       setTrackMidiPitchBendRange: state.setTrackMidiPitchBendRange,
       updateMIDINoteVelocity: state.updateMIDINoteVelocity,
@@ -602,6 +624,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       setPianoRollEditCursorTime: state.setPianoRollEditCursorTime,
       setPianoRollInsertVelocity: state.setPianoRollInsertVelocity,
       setPianoRollAuditionEnabled: state.setPianoRollAuditionEnabled,
+      toggleSnap: state.toggleSnap,
+      setSnapType: state.setSnapType,
+      setGridSize: state.setGridSize,
+      setQuantizePresetId: state.setQuantizePresetId,
       setPianoRollScaleRoot: state.setPianoRollScaleRoot,
       setPianoRollScaleType: state.setPianoRollScaleType,
       setTimelineZoom: state.setZoom,
@@ -633,8 +659,19 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const beatsPerSecond = tempo / 60;
   const pixelsPerSecond = timelinePixelsPerSecond;
   const scrollX = timelineScrollX - clipStartTime * pixelsPerSecond;
-  const stepDurationSeconds = stepInputSize / beatsPerSecond;
-  const snapDuration = GRID_SNAP / beatsPerSecond;
+  const activeQuantizePreset = useMemo(
+    () => getQuantizePresetById(quantizePresets, quantizePresetId),
+    [quantizePresetId, quantizePresets],
+  );
+  const snapDuration = useMemo(
+    () => calculateGridInterval(tempo, timeSignature, gridSize, {
+      quantizePreset: activeQuantizePreset,
+      quantizeGridSize: activeQuantizePreset.gridSize,
+      pixelsPerSecond,
+    }),
+    [activeQuantizePreset, gridSize, pixelsPerSecond, tempo, timeSignature],
+  );
+  const stepDurationSeconds = snapDuration || stepInputSize / beatsPerSecond;
   const sidebarWidth = tcpWidth;
   const pianoKeyStripWidth = clamp(
     Math.round(sidebarWidth * 0.32),
@@ -966,9 +1003,54 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     return clamp(TOTAL_NOTES - 1 - Math.floor((y + scrollY) / NOTE_HEIGHT), 0, 127);
   }, [scrollY]);
 
-  const snapTime = useCallback((time: number): number => {
-    return Math.max(0, Math.round(time / snapDuration) * snapDuration);
-  }, [snapDuration]);
+  const midiSnapEventTimes = useMemo(() => {
+    const times: number[] = [];
+    for (const pair of notePairs) {
+      times.push(pair.startTime, pair.startTime + pair.duration);
+    }
+    for (const event of clipCCEvents || []) {
+      times.push(event.time);
+    }
+    for (const event of clipEvents || []) {
+      if (Number.isFinite(event.timestamp)) times.push(event.timestamp);
+    }
+    return times.filter((time) => Number.isFinite(time) && time >= 0);
+  }, [clipCCEvents, clipEvents, notePairs]);
+
+  const snapTime = useCallback((
+    time: number,
+    options: { bypassSnap?: boolean; originalTime?: number } = {},
+  ): number => {
+    if (!snapEnabled || options.bypassSnap) return Math.max(0, time);
+    const projectTime = clipStartTime + time;
+    const originalProjectTime = options.originalTime === undefined
+      ? undefined
+      : clipStartTime + options.originalTime;
+    const snappedProjectTime = snapTimeByType({
+      time: projectTime,
+      originalTime: originalProjectTime,
+      tempo,
+      timeSignature,
+      gridSize,
+      snapType,
+      quantizePreset: activeQuantizePreset,
+      quantizeGridSize: activeQuantizePreset.gridSize,
+      pixelsPerSecond,
+      cursorTime: useDAWStore.getState().transport.currentTime,
+      eventTimes: midiSnapEventTimes.map((eventTime) => clipStartTime + eventTime),
+    });
+    return Math.max(0, snappedProjectTime - clipStartTime);
+  }, [
+    activeQuantizePreset,
+    clipStartTime,
+    gridSize,
+    midiSnapEventTimes,
+    pixelsPerSecond,
+    snapEnabled,
+    snapType,
+    tempo,
+    timeSignature,
+  ]);
 
   const getTimeFromX = useCallback((x: number) => {
     return projectXToMidiSourceTime(x - PIANO_WIDTH, {
@@ -1513,7 +1595,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       }
       if (key === "arrowright") {
         event.preventDefault();
-        advanceStepInput();
+        setStepInputPosition(stepInputPosition + stepDurationSeconds);
         setTimelineScroll(clamp(timelineScrollX + stepDurationSeconds * pixelsPerSecond, 0, maxScrollX), timelineScrollY);
         return;
       }
@@ -1527,14 +1609,13 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const newId = addMIDINote(trackId, clipId, stepInputPosition, noteNumber, stepDurationSeconds, pianoRollInsertVelocity);
       setSelectedNoteIds(newId ? [newId] : []);
       auditionNote(noteNumber, pianoRollInsertVelocity);
-      advanceStepInput();
+      setStepInputPosition(stepInputPosition + stepDurationSeconds);
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     addMIDINote,
-    advanceStepInput,
     auditionNote,
     clipId,
     maxScrollX,
@@ -2754,7 +2835,12 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     const pos = getPointer(event);
     if (!pos) return;
 
-    const pointerTime = snapTime(getTimeFromX(pos.x));
+    const nativeEvent = event.evt as MouseEvent;
+    const bypassSnap = Boolean(nativeEvent?.ctrlKey || nativeEvent?.metaKey);
+    const pointerTime = snapTime(getTimeFromX(pos.x), {
+      bypassSnap,
+      originalTime: dragState.startPointerTime,
+    });
     const pointerNote = getNoteFromY(pos.y);
     const deltaTime = pointerTime - dragState.startPointerTime;
     const deltaNote = pointerNote - dragState.startPointerNote;
@@ -2912,7 +2998,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
     if (tool === "split") {
       if (!pos) return;
-      const splitTime = snapTime(getTimeFromX(pos.x));
+      const splitTime = snapTime(getTimeFromX(pos.x), {
+        bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
+        originalTime: pair.startTime,
+      });
       const noteEnd = pair.startTime + pair.duration;
       if (splitTime <= pair.startTime + 0.01 || splitTime >= noteEnd - 0.01) return;
       const oldEvents = getLatestClipEvents();
@@ -2950,10 +3039,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       return;
     }
 
-    const modifier = nativeEvent.ctrlKey || nativeEvent.metaKey || nativeEvent.shiftKey;
+    const modifier = nativeEvent.shiftKey;
     if (
       tool === "select"
-      && (nativeEvent.ctrlKey || nativeEvent.metaKey)
+      && nativeEvent.altKey
       && selectedNoteIds.includes(id)
       && selectedNoteIds.length > 0
     ) {
@@ -2965,7 +3054,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         mode: "move",
         noteIds: nextIds,
         originalEvents: getLatestClipEvents(),
-        startPointerTime: snapTime(getTimeFromX(pos.x)),
+        startPointerTime: snapTime(getTimeFromX(pos.x), {
+          bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
+          originalTime: pair.startTime,
+        }),
         startPointerNote: pair.noteNumber,
         activeNoteId: nextIds[0],
       });
@@ -3002,7 +3094,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       mode,
       noteIds: mode === "move" ? nextSelection : [id],
       originalEvents: getLatestClipEvents(),
-      startPointerTime: snapTime(getTimeFromX(pos.x)),
+      startPointerTime: snapTime(getTimeFromX(pos.x), {
+        bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
+        originalTime: pair.startTime,
+      }),
       startPointerNote: pair.noteNumber,
       activeNoteId: id,
     });
@@ -3177,12 +3272,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       || hitTarget.kind === "loop-boundary";
     if (!isNoteGridCaptureTarget) return;
 
-    const time = snapTime(hitTarget.kind === "grid" ? hitTarget.time : getTimeFromX(pos.x));
+    const nativeEvent = event.evt as MouseEvent;
+    const ctrlSnapBypass = Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey);
+    const rawTime = hitTarget.kind === "grid" ? hitTarget.time : getTimeFromX(pos.x);
+    const time = snapTime(rawTime, { bypassSnap: ctrlSnapBypass, originalTime: rawTime });
     const note = hitTarget.kind === "grid" ? hitTarget.noteNumber : getNoteFromY(pos.y);
     setPianoRollEditCursorTime(time);
 
-    const nativeEvent = event.evt as MouseEvent;
-    const selectionModifier = nativeEvent.shiftKey || nativeEvent.ctrlKey || nativeEvent.metaKey;
+    const selectionModifier = nativeEvent.shiftKey;
 
     if (tool === "range") {
       setSelectedNoteIds([]);
@@ -3208,11 +3305,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
 
     if (tool === "select" || selectionModifier) {
-      const mode = nativeEvent.shiftKey
-        ? "toggle"
-        : nativeEvent.ctrlKey || nativeEvent.metaKey
-          ? "add"
-          : "replace";
+      const mode = nativeEvent.shiftKey ? "toggle" : "replace";
       clearMIDIEditRange();
       if (mode === "replace") setSelectedNoteIds([]);
       setMarqueeState({
@@ -3317,10 +3410,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
 
     if (loopBoundaryDrag) {
+      const nativeEvent = event.evt as MouseEvent;
       setStageCursor("ew-resize");
       const nextX = clamp(pos.x, PIANO_WIDTH, stageWidth);
       setLoopBoundaryDrag((current) => current ? { ...current, currentX: nextX } : null);
-      setPianoRollEditCursorTime(snapTime(getTimeFromX(nextX)));
+      setPianoRollEditCursorTime(snapTime(getTimeFromX(nextX), {
+        bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
+        originalTime: getTimeFromX(nextX),
+      }));
       return;
     }
 
@@ -3337,11 +3434,16 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
 
     if (drawingState) {
+      const nativeEvent = event.evt as MouseEvent;
       setDrawingState((current) => {
         if (!current) return null;
+        const rawTime = getTimeFromX(pos.x);
         return {
           ...current,
-          endTime: Math.max(0, snapTime(getTimeFromX(pos.x))),
+          endTime: Math.max(0, snapTime(rawTime, {
+            bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
+            originalTime: current.startTime,
+          })),
           noteNumber: getNoteFromY(pos.y),
         };
       });
@@ -3718,23 +3820,48 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       );
     }
 
-    const divisionInterval = beatInterval * GRID_SNAP;
-    const firstDivisionIndex = Math.max(0, Math.floor(visibleProjectStart / divisionInterval));
-    const lastDivisionIndex = Math.ceil(Math.min(visibleProjectEnd, projectContentEnd) / divisionInterval);
-    for (let divisionIndex = firstDivisionIndex; divisionIndex <= lastDivisionIndex; divisionIndex += 1) {
-      const projectTime = divisionIndex * divisionInterval;
+    const visualGrid = resolveVisualGrid(tempo, timeSignature, gridSize, {
+      quantizePreset: activeQuantizePreset,
+      quantizeGridSize: activeQuantizePreset.gridSize,
+      pixelsPerSecond,
+      viewportPixels: visibleGridWidth,
+      maxVisibleLines: 180,
+      minPixelsPerGrid: 18,
+    });
+    const pushDivisionLine = (projectTime: number, key: string) => {
+      if (projectTime > projectContentEnd) return;
       const x = projectTime * pixelsPerSecond - timelineScrollX;
-      if (x < PIANO_WIDTH || x > stageWidth) continue;
-      const isBeat = divisionIndex % Math.round(1 / GRID_SNAP) === 0;
+      if (x < PIANO_WIDTH || x > stageWidth) return;
+      const beatIndex = projectTime / beatInterval;
+      const isBeat = Math.abs(beatIndex - Math.round(beatIndex)) < 0.0001;
+      const barIndex = projectTime / Math.max(0.000001, visualGrid.barInterval);
+      const isBar = Math.abs(barIndex - Math.round(barIndex)) < 0.0001;
       elements.push(
         <Line
-          key={`v-${projectTime.toFixed(4)}`}
+          key={key}
           points={[x, 0, x, noteGridHeight]}
-          stroke={isBeat ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.055)"}
-          strokeWidth={isBeat ? 1 : 0.5}
+          stroke={isBar || isBeat ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.055)"}
+          strokeWidth={isBar || isBeat ? 1 : 0.5}
           listening={false}
         />,
       );
+    };
+
+    if (visualGrid.alignedToBar) {
+      const startBar = Math.floor(visibleProjectStart / visualGrid.barInterval) - 1;
+      const endBar = Math.ceil(Math.min(visibleProjectEnd, projectContentEnd) / visualGrid.barInterval) + 1;
+      for (let bar = Math.max(0, startBar); bar <= endBar; bar += 1) {
+        const barTime = bar * visualGrid.barInterval;
+        for (let division = 0; division < visualGrid.divisionsPerBar; division += 1) {
+          pushDivisionLine(barTime + division * visualGrid.visualInterval, `v-bar-${bar}-${division}`);
+        }
+      }
+    } else {
+      const firstDivisionIndex = Math.max(0, Math.floor(visibleProjectStart / visualGrid.visualInterval));
+      const lastDivisionIndex = Math.ceil(Math.min(visibleProjectEnd, projectContentEnd) / visualGrid.visualInterval);
+      for (let divisionIndex = firstDivisionIndex; divisionIndex <= lastDivisionIndex; divisionIndex += 1) {
+        pushDivisionLine(divisionIndex * visualGrid.visualInterval, `v-${divisionIndex}`);
+      }
     }
 
     return elements;
@@ -4163,14 +4290,32 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     const ruler = containerRef.current?.querySelector(".piano-roll-ruler") as HTMLDivElement | null;
     const rect = ruler?.getBoundingClientRect();
     const x = rect ? clientX - rect.left : 0;
-    return pianoRollRulerTimeFromX(x, {
+    const rawTime = Math.max(0, (x + timelineScrollX) / pixelsPerSecond);
+    if (!snapEnabled || bypassSnap) return rawTime;
+    return snapTimeByType({
+      time: rawTime,
+      tempo,
+      timeSignature,
+      gridSize,
+      snapType,
+      quantizePreset: activeQuantizePreset,
+      quantizeGridSize: activeQuantizePreset.gridSize,
       pixelsPerSecond,
-      scrollX: timelineScrollX,
-      snapSeconds: snapDuration,
-      snapEnabled: true,
-      bypassSnap,
+      cursorTime: useDAWStore.getState().transport.currentTime,
+      eventTimes: midiSnapEventTimes.map((time) => clipStartTime + time),
     });
-  }, [pixelsPerSecond, snapDuration, timelineScrollX]);
+  }, [
+    activeQuantizePreset,
+    clipStartTime,
+    gridSize,
+    midiSnapEventTimes,
+    pixelsPerSecond,
+    snapEnabled,
+    snapType,
+    tempo,
+    timeSignature,
+    timelineScrollX,
+  ]);
 
   const handleRulerPointerDown = useCallback((event: any) => {
     if (event.button !== 0) return;
@@ -4459,6 +4604,65 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     setContextMenu(null);
   };
 
+  const openQuantizePanel = useCallback((overrides: Partial<Extract<TransformDialogState, { type: "quantize" }>> = {}) => {
+    const preset = activeQuantizePreset;
+    const panelGridSize = overrides.gridSize ?? preset.gridSize;
+    const panelGridSeconds = calculateGridInterval(tempo, timeSignature, panelGridSize, {
+      quantizePreset: preset,
+      quantizeGridSize: preset.gridSize,
+      pixelsPerSecond,
+    });
+    openTransformDialog({
+      type: "quantize",
+      value: panelGridSeconds,
+      gridSize: panelGridSize,
+      strength: overrides.strength ?? preset.strength,
+      mode: overrides.mode ?? "start",
+      swing: overrides.swing ?? preset.swing,
+      groovePreset: overrides.groovePreset ?? preset.groovePreset,
+      tupletDivisions: overrides.tupletDivisions ?? preset.tupletDivisions,
+      catchRangeTicks: overrides.catchRangeTicks ?? preset.catchRangeTicks,
+      safeRangeTicks: overrides.safeRangeTicks ?? preset.safeRangeTicks,
+      roughTicks: overrides.roughTicks ?? preset.roughTicks,
+      fixedLength: overrides.fixedLength ?? panelGridSeconds,
+      fixedLengthGridSize: overrides.fixedLengthGridSize ?? "quantize_link",
+      moveControllers: overrides.moveControllers ?? preset.moveControllers,
+      autoApply: overrides.autoApply ?? false,
+    });
+  }, [activeQuantizePreset, pixelsPerSecond, tempo, timeSignature]);
+
+  const applyCurrentQuantizePreset = useCallback((mode: QuantizeMode = "start") => {
+    const preset = activeQuantizePreset;
+    const gridSeconds = calculateGridInterval(tempo, timeSignature, preset.gridSize, {
+      quantizePreset: preset,
+      quantizeGridSize: preset.gridSize,
+      pixelsPerSecond,
+    });
+    const nextIds = quantizeSelectedMIDINotes(trackId, clipId, gridSeconds, preset.strength, {
+      presetId: preset.id,
+      gridSize: preset.gridSize,
+      mode,
+      swing: preset.swing,
+      groovePreset: preset.groovePreset,
+      tupletDivisions: preset.tupletDivisions,
+      catchRangeMs: ticksToSeconds(preset.catchRangeTicks, tempo) * 1000,
+      safeRangeMs: ticksToSeconds(preset.safeRangeTicks, tempo) * 1000,
+      randomizeMs: ticksToSeconds(preset.roughTicks, tempo) * 1000,
+      fixedLength: mode === "length" ? gridSeconds : undefined,
+      moveControllers: preset.moveControllers,
+    });
+    if (nextIds.length > 0) setSelectedNoteIds(nextIds);
+  }, [
+    activeQuantizePreset,
+    clipId,
+    pixelsPerSecond,
+    quantizeSelectedMIDINotes,
+    setSelectedNoteIds,
+    tempo,
+    timeSignature,
+    trackId,
+  ]);
+
   const buildPianoRollContextMenuItems = (menu: NonNullable<PianoRollContextMenuState>): MenuItem[] => {
     const hasSelection = selectedNoteIds.length > 0;
     const hasRange = !!midiEditRange;
@@ -4560,7 +4764,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             { label: "Select Same Pitch", onClick: () => selectMIDINotesByPitch(clipId, menu.noteNumber) },
           ]),
       { divider: true, label: "" },
-      { label: "Quantize...", disabled: !hasSelection, onClick: () => openTransformDialog({ type: "quantize", value: snapDuration, strength: 1, mode: "start", swing: 0, groovePreset: "straight", tupletDivisions: 1, catchRangeMs: 0, safeRangeMs: 0, randomizeMs: 0, fixedLength: snapDuration, moveControllers: true }) },
+      { label: "Quantize...", disabled: !hasSelection, onClick: () => openQuantizePanel() },
       { label: "Humanize...", disabled: !hasSelection, onClick: () => openTransformDialog({ type: "humanize", timingMs: 10, velocity: 5 }) },
       {
         label: "Transpose",
@@ -4592,20 +4796,54 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     ];
   };
 
+  const applyQuantizeDialogSettings = useCallback((settings: Extract<TransformDialogState, { type: "quantize" }>) => {
+    const quantizeGridSeconds = calculateGridInterval(tempo, timeSignature, settings.gridSize, {
+      quantizePreset: activeQuantizePreset,
+      quantizeGridSize: activeQuantizePreset.gridSize,
+      pixelsPerSecond,
+    });
+    const fixedLengthSeconds = settings.fixedLengthGridSize === "quantize_link"
+      ? quantizeGridSeconds
+      : calculateGridInterval(tempo, timeSignature, settings.fixedLengthGridSize, {
+          quantizePreset: activeQuantizePreset,
+          quantizeGridSize: activeQuantizePreset.gridSize,
+          pixelsPerSecond,
+        });
+    const nextIds = quantizeSelectedMIDINotes(trackId, clipId, quantizeGridSeconds, settings.strength, {
+      presetId: activeQuantizePreset.id,
+      gridSize: settings.gridSize,
+      mode: settings.mode,
+      swing: settings.swing,
+      groovePreset: settings.groovePreset,
+      tupletDivisions: settings.tupletDivisions,
+      catchRangeMs: ticksToSeconds(settings.catchRangeTicks, tempo) * 1000,
+      safeRangeMs: ticksToSeconds(settings.safeRangeTicks, tempo) * 1000,
+      randomizeMs: ticksToSeconds(settings.roughTicks, tempo) * 1000,
+      fixedLength: settings.mode === "length" ? fixedLengthSeconds : undefined,
+      moveControllers: settings.moveControllers,
+    });
+    if (nextIds.length > 0) setSelectedNoteIds(nextIds);
+  }, [
+    activeQuantizePreset,
+    clipId,
+    pixelsPerSecond,
+    quantizeSelectedMIDINotes,
+    setSelectedNoteIds,
+    tempo,
+    timeSignature,
+    trackId,
+  ]);
+
+  useEffect(() => {
+    if (transformDialog?.type !== "quantize" || !transformDialog.autoApply) return undefined;
+    const timeoutId = window.setTimeout(() => applyQuantizeDialogSettings(transformDialog), 250);
+    return () => window.clearTimeout(timeoutId);
+  }, [applyQuantizeDialogSettings, transformDialog]);
+
   const applyTransformDialog = () => {
     if (!transformDialog) return;
     if (transformDialog.type === "quantize") {
-      quantizeSelectedMIDINotes(trackId, clipId, transformDialog.value, transformDialog.strength, {
-        mode: transformDialog.mode,
-        swing: transformDialog.swing,
-        groovePreset: transformDialog.groovePreset,
-        tupletDivisions: transformDialog.tupletDivisions,
-        catchRangeMs: transformDialog.catchRangeMs,
-        safeRangeMs: transformDialog.safeRangeMs,
-        randomizeMs: transformDialog.randomizeMs,
-        fixedLength: transformDialog.mode === "length" ? transformDialog.fixedLength : undefined,
-        moveControllers: transformDialog.moveControllers,
-      });
+      applyQuantizeDialogSettings(transformDialog);
     } else if (transformDialog.type === "humanize") {
       humanizeSelectedMIDINotes(trackId, clipId, { timingMs: transformDialog.timingMs, velocity: transformDialog.velocity });
     } else if (transformDialog.type === "velocity") {
@@ -4655,24 +4893,23 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           const lane = visibleLanes.find((candidate) => candidate.id === laneId);
           if (lane) selectControllerLane(lane);
         }}
+        snapEnabled={snapEnabled}
+        onSnapToggle={toggleSnap}
+        snapType={snapType}
+        onSnapTypeChange={setSnapType}
+        gridSize={gridSize}
+        onGridSizeChange={setGridSize}
+        gridTypeOptions={GRID_TYPE_MODE_OPTIONS}
+        quantizePresetId={quantizePresetId}
+        quantizePresets={quantizePresets}
+        onQuantizePresetChange={setQuantizePresetId}
+        onApplyQuantize={() => applyCurrentQuantizePreset("start")}
+        onLengthQuantize={() => applyCurrentQuantizePreset("length")}
         onQuantizeLast={() => {
           const nextIds = quantizeSelectedMIDINotesUsingLast(trackId, clipId);
           if (nextIds.length > 0) setSelectedNoteIds(nextIds);
         }}
-        onOpenQuantizeDialog={() => openTransformDialog({
-          type: "quantize",
-          value: snapDuration,
-          strength: 1,
-          mode: "start",
-          swing: 0,
-          groovePreset: "straight",
-          tupletDivisions: 1,
-          catchRangeMs: 0,
-          safeRangeMs: 0,
-          randomizeMs: 0,
-          fixedLength: snapDuration,
-          moveControllers: true,
-        })}
+        onOpenQuantizeDialog={() => openQuantizePanel()}
         onResetQuantize={() => resetMIDIQuantize(trackId, clipId)}
         onFreezeQuantize={() => freezeMIDIQuantize(trackId, clipId)}
         onDetach={!isDetached ? onDetach : undefined}
@@ -5329,7 +5566,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
           <PianoRollStatusStrip
             tool={tool}
-            snapBeats={GRID_SNAP}
+            snapLabel={getGridSizeLabel(gridSize === "use_quantize" ? activeQuantizePreset.gridSize : gridSize)}
             cursorSeconds={pianoRollEditCursorTime}
             sourceSeconds={clipDuration}
             laneLabel={controllerLaneLabel}
@@ -5443,6 +5680,36 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             </div>
             {transformDialog.type === "quantize" && (
               <>
+                <label>Preset</label>
+                <select
+                  className="piano-roll-select"
+                  value={quantizePresetId}
+                  onChange={(event) => {
+                    const preset = getQuantizePresetById(quantizePresets, event.target.value);
+                    setQuantizePresetId(preset.id);
+                    setTransformDialog({
+                      ...transformDialog,
+                      gridSize: preset.gridSize,
+                      value: calculateGridInterval(tempo, timeSignature, preset.gridSize, {
+                        quantizePreset: preset,
+                        quantizeGridSize: preset.gridSize,
+                        pixelsPerSecond,
+                      }),
+                      strength: preset.strength,
+                      swing: preset.swing,
+                      groovePreset: preset.groovePreset,
+                      tupletDivisions: preset.tupletDivisions,
+                      catchRangeTicks: preset.catchRangeTicks,
+                      safeRangeTicks: preset.safeRangeTicks,
+                      roughTicks: preset.roughTicks,
+                      moveControllers: preset.moveControllers,
+                    });
+                  }}
+                >
+                  {quantizePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.name}</option>
+                  ))}
+                </select>
                 <label>Mode</label>
                 <select className="piano-roll-select" value={transformDialog.mode} onChange={(event) => setTransformDialog({ ...transformDialog, mode: event.target.value as QuantizeMode })}>
                   <option value="start">Starts</option>
@@ -5450,10 +5717,34 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
                   <option value="both">Starts + Ends</option>
                   <option value="length">Length</option>
                 </select>
-                <label>Grid Seconds</label>
-                <input type="number" step="0.01" min="0.01" value={transformDialog.value} onChange={(event) => setTransformDialog({ ...transformDialog, value: Number(event.target.value) })} />
-                <label>Strength</label>
+                <label>Quantize Grid</label>
+                <select
+                  className="piano-roll-select"
+                  value={transformDialog.gridSize}
+                  onChange={(event) => {
+                    const nextGridSize = event.target.value as GridSize;
+                    setTransformDialog({
+                      ...transformDialog,
+                      gridSize: nextGridSize,
+                      value: calculateGridInterval(tempo, timeSignature, nextGridSize, {
+                        quantizePreset: activeQuantizePreset,
+                        quantizeGridSize: activeQuantizePreset.gridSize,
+                        pixelsPerSecond,
+                      }),
+                    });
+                  }}
+                >
+                  {GRID_SIZE_GROUPS.flatMap((group) => [
+                    <option key={`${group.label}-label`} value={`__${group.label}`} disabled>{group.label}</option>,
+                    ...group.options.map((option) => (
+                      <option key={option} value={option}>{getGridSizeLabel(option)}</option>
+                    )),
+                  ])}
+                </select>
+                <label>Soft Quantize</label>
                 <input type="number" step="0.05" min="0" max="1" value={transformDialog.strength} onChange={(event) => setTransformDialog({ ...transformDialog, strength: Number(event.target.value) })} />
+                <label>Tuplet</label>
+                <input type="number" step="1" min="1" max="12" value={transformDialog.tupletDivisions} onChange={(event) => setTransformDialog({ ...transformDialog, tupletDivisions: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
                 <label>Swing</label>
                 <input type="number" step="0.05" min="-1" max="1" value={transformDialog.swing} onChange={(event) => setTransformDialog({ ...transformDialog, swing: Number(event.target.value) })} />
                 <label>Groove</label>
@@ -5464,23 +5755,33 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
                   <option value="laidBack16">Laid Back 16</option>
                   <option value="push16">Push 16</option>
                 </select>
-                <label>Tuplet</label>
-                <input type="number" step="1" min="1" max="12" value={transformDialog.tupletDivisions} onChange={(event) => setTransformDialog({ ...transformDialog, tupletDivisions: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
-                <label>Catch Range ms</label>
-                <input type="number" step="1" min="0" value={transformDialog.catchRangeMs} onChange={(event) => setTransformDialog({ ...transformDialog, catchRangeMs: Number(event.target.value) })} />
-                <label>Safe Zone ms</label>
-                <input type="number" step="1" min="0" value={transformDialog.safeRangeMs} onChange={(event) => setTransformDialog({ ...transformDialog, safeRangeMs: Number(event.target.value) })} />
-                <label>Randomize ms</label>
-                <input type="number" step="1" min="0" value={transformDialog.randomizeMs} onChange={(event) => setTransformDialog({ ...transformDialog, randomizeMs: Number(event.target.value) })} />
+                <label>Catch Range</label>
+                <input type="number" step={GRID_TICKS_PER_SIXTEENTH} min="0" value={transformDialog.catchRangeTicks} onChange={(event) => setTransformDialog({ ...transformDialog, catchRangeTicks: Math.max(0, Math.round(Number(event.target.value) || 0)) })} />
+                <label>Safe Range</label>
+                <input type="number" step={GRID_TICKS_PER_SIXTEENTH} min="0" value={transformDialog.safeRangeTicks} onChange={(event) => setTransformDialog({ ...transformDialog, safeRangeTicks: Math.max(0, Math.round(Number(event.target.value) || 0)) })} />
+                <label>Rough Quantize</label>
+                <input type="number" step={GRID_TICKS_PER_SIXTEENTH} min="0" value={transformDialog.roughTicks} onChange={(event) => setTransformDialog({ ...transformDialog, roughTicks: Math.max(0, Math.round(Number(event.target.value) || 0)) })} />
                 {transformDialog.mode === "length" && (
                   <>
-                    <label>Length Seconds</label>
-                    <input type="number" step="0.01" min="0.01" value={transformDialog.fixedLength} onChange={(event) => setTransformDialog({ ...transformDialog, fixedLength: Number(event.target.value) })} />
+                    <label>Length Quantize</label>
+                    <select className="piano-roll-select" value={transformDialog.fixedLengthGridSize} onChange={(event) => setTransformDialog({ ...transformDialog, fixedLengthGridSize: event.target.value as GridSize | "quantize_link" })}>
+                      <option value="quantize_link">Quantize Link</option>
+                      {GRID_SIZE_GROUPS.flatMap((group) => [
+                        <option key={`${group.label}-length-label`} value={`__length-${group.label}`} disabled>{group.label}</option>,
+                        ...group.options.map((option) => (
+                          <option key={`length-${option}`} value={option}>{getGridSizeLabel(option)}</option>
+                        )),
+                      ])}
+                    </select>
                   </>
                 )}
                 <label className="piano-roll-checkbox-row">
                   <input type="checkbox" checked={transformDialog.moveControllers} onChange={(event) => setTransformDialog({ ...transformDialog, moveControllers: event.target.checked })} />
                   Move Controllers
+                </label>
+                <label className="piano-roll-checkbox-row">
+                  <input type="checkbox" checked={transformDialog.autoApply} onChange={(event) => setTransformDialog({ ...transformDialog, autoApply: event.target.checked })} />
+                  Auto Apply
                 </label>
               </>
             )}
@@ -5517,6 +5818,9 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
               </>
             )}
             <div className="piano-roll-transform-dialog-actions">
+              {transformDialog.type === "quantize" && (
+                <Button variant="default" size="sm" onClick={() => openQuantizePanel()}>Reset</Button>
+              )}
               <Button variant="default" size="sm" onClick={() => setTransformDialog(null)}>Cancel</Button>
               <Button variant="primary" size="sm" onClick={applyTransformDialog}>Apply</Button>
             </div>

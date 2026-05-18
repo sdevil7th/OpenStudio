@@ -94,11 +94,18 @@ public:
         std::atomic<float> gain { 0.0f };       // dB (-30 to +30)
         std::atomic<float> q { 1.0f };          // 0.1 to 30.0
         std::atomic<float> slope { 1.0f };      // FilterSlope as float (for cut/shelf)
+        std::atomic<float> dynamicEnabled { 0.0f };   // 0 = static, 1 = dynamic
+        std::atomic<float> dynamicThreshold { -24.0f }; // detector threshold dB
+        std::atomic<float> dynamicRange { 0.0f };      // dB added above threshold
+        std::atomic<float> dynamicAttack { 10.0f };    // ms
+        std::atomic<float> dynamicRelease { 150.0f };  // ms
     };
     std::array<BandParams, numBands> bands;
 
     std::atomic<float> outputGain { 0.0f };    // dB (-12 to +12)
     std::atomic<float> autoGain { 0.0f };      // 0 = off, 1 = on
+    std::atomic<float> auditionBand { 0.0f };  // 0 = off, 1-8 = solo/audition band
+    std::atomic<float> stereoMode { 0.0f };    // 0 = stereo, 1 = mid, 2 = side
 
     // Spectrum analyzer data
     static constexpr int fftOrder = 11;        // 2048-point FFT
@@ -114,6 +121,7 @@ public:
 
     // Get magnitude response at given frequencies (for drawing the EQ curve)
     std::vector<float> getMagnitudeResponse(const std::vector<float>& frequencies) const;
+    float getBandDynamicGainDB(int bandIndex) const;
 
 private:
     static constexpr int maxStagesPerBand = 4; // for 48 dB/oct cascaded biquads
@@ -122,12 +130,40 @@ private:
 
     StereoIIR bandFilters[numBands][maxStagesPerBand];
     int activeStages[numBands] = {};
+    juce::dsp::IIR::Filter<float> dynamicDetectorFilters[numBands][2];
+    std::array<float, numBands> dynamicEnvelope {};
+    std::array<std::atomic<float>, numBands> dynamicGainDB {};
+    juce::AudioBuffer<float> msScratch;
+    int lastProcessingMode = 0;
+
+    struct CachedBandState
+    {
+        bool valid = false;
+        float enabled = -1.0f;
+        int type = -1;
+        float freq = -1.0f;
+        float gain = -999.0f;
+        float q = -1.0f;
+        int slope = -1;
+    };
+    std::array<CachedBandState, numBands> cachedBandStates {};
+
+    struct CachedDynamicDetectorState
+    {
+        bool valid = false;
+        float freq = -1.0f;
+        float q = -1.0f;
+    };
+    std::array<CachedDynamicDetectorState, numBands> cachedDynamicDetectorStates {};
 
     double cachedSampleRate = 44100.0;
+    float smoothedAutoGainDB = 0.0f;
 
     void updateFilters();
     void updateBand(int bandIndex);
+    void updateDynamicBands(const juce::AudioBuffer<float>& buffer);
     int getNumStagesForSlope(FilterSlope slope) const;
+    float estimateAutoGainCompensationDB() const;
 
     // FFT for spectrum analyzer
     juce::dsp::FFT fft { fftOrder };
@@ -185,6 +221,8 @@ public:
     std::atomic<float> autoRelease { 0.0f };   // 0 = off, 1 = on
     std::atomic<float> sidechainHPF { 20.0f }; // 20-500 Hz
     std::atomic<float> lookaheadMs { 0.0f };   // 0-20 ms
+    std::atomic<float> detectorMode { 0.0f };  // 0=Peak, 1=RMS, 2=Auto
+    std::atomic<float> stereoLink { 1.0f };    // 0=average detector, 1=linked peak detector
 
     // Metering
     float getCurrentGainReduction() const { return gainReductionDB.load(); }
@@ -193,6 +231,7 @@ public:
 
 private:
     float envelopeLevel = 0.0f;
+    float rmsEnvelopeLevel = 0.0f;
     float currentGainLin = 1.0f;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMakeup;
@@ -243,11 +282,13 @@ public:
     std::atomic<float> sidechainHPF { 20.0f }; // 20-2000 Hz
     std::atomic<float> sidechainLPF { 20000.0f }; // 200-20000 Hz
     std::atomic<float> mix { 1.0f };           // 0-1
+    std::atomic<float> detectorMode { 0.0f };  // 0=Peak, 1=RMS, 2=Auto
 
     bool isGateOpen() const { return gateOpen.load(); }
 
 private:
     float envelopeLevel = 0.0f;
+    float rmsEnvelopeLevel = 0.0f;
     int holdCounter = 0;
     float currentGain = 0.0f;
     std::atomic<bool> gateOpen { false };
@@ -263,6 +304,8 @@ private:
     juce::dsp::IIR::Filter<float> scLPF_L, scLPF_R;
 
     double cachedSampleRate = 44100.0;
+    float lastSidechainHPF = -1.0f;
+    float lastSidechainLPF = -1.0f;
 
     void updateCoefficients();
 
@@ -298,6 +341,12 @@ private:
     juce::dsp::Limiter<float> limiter;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCeiling;
     double cachedSampleRate = 44100.0;
+
+    juce::AudioBuffer<float> lookaheadBuffer;
+    juce::AudioBuffer<float> truePeakScratch;
+    int lookaheadWriteIndex = 0;
+    float gainEnvelope = 1.0f;
+    std::array<float, 2> previousDetectorSample {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Limiter)
 };

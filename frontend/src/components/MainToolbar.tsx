@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Repeat,
   Circle,
@@ -6,6 +7,8 @@ import {
   Undo2,
   Redo2,
   Grid3x3,
+  Check,
+  ChevronDown,
   SlidersHorizontal,
   Settings,
   Blend,
@@ -18,7 +21,17 @@ import { usePitchEditorStore } from "../store/pitchEditorStore";
 import { getDisplayShortcut, getActionShortcutScopeLabel } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import { Button } from "./ui";
+import { Button, NativeSelect } from "./ui";
+import {
+  calculateGridInterval,
+  GRID_TYPE_MODE_OPTIONS,
+  SNAP_TYPE_OPTIONS,
+  getGridSizeLabel,
+  getQuantizePresetById,
+  ticksToSeconds,
+  type GridSize,
+  type SnapType,
+} from "../utils/snapToGrid";
 
 interface MainToolbarProps {
   onOpenSettings: () => void;
@@ -31,6 +44,10 @@ export function MainToolbar({
   onToggleMixer,
   showMixer,
 }: MainToolbarProps) {
+  const [showQuantizePanel, setShowQuantizePanel] = useState(false);
+  const [quantizeApplyState, setQuantizeApplyState] = useState<"idle" | "applied">("idle");
+  const gridPanelRef = useRef<HTMLSpanElement | null>(null);
+  const applyCloseTimerRef = useRef<number | null>(null);
   const mixerShortcut = getDisplayShortcut("view.toggleMixer") ?? "Ctrl+M";
   const loopShortcut = getDisplayShortcut("transport.loop") ?? "L";
   const recordShortcut = getDisplayShortcut("transport.record") ?? "Ctrl+R";
@@ -51,6 +68,17 @@ export function MainToolbar({
     toggleLoop,
     tracks,
     snapEnabled,
+    snapType,
+    setSnapType,
+    gridSize,
+    setGridSize,
+    quantizePresetId,
+    quantizePresets,
+    setQuantizePresetId,
+    saveQuantizePreset,
+    renameQuantizePreset,
+    removeQuantizePreset,
+    restoreFactoryQuantizePresets,
     toggleSnap,
     undo,
     redo,
@@ -76,6 +104,17 @@ export function MainToolbar({
       toggleLoop: s.toggleLoop,
       tracks: s.tracks,
       snapEnabled: s.snapEnabled,
+      snapType: s.snapType,
+      setSnapType: s.setSnapType,
+      gridSize: s.gridSize,
+      setGridSize: s.setGridSize,
+      quantizePresetId: s.quantizePresetId,
+      quantizePresets: s.quantizePresets,
+      setQuantizePresetId: s.setQuantizePresetId,
+      saveQuantizePreset: s.saveQuantizePreset,
+      renameQuantizePreset: s.renameQuantizePreset,
+      removeQuantizePreset: s.removeQuantizePreset,
+      restoreFactoryQuantizePresets: s.restoreFactoryQuantizePresets,
       toggleSnap: s.toggleSnap,
       undo: s.undo,
       redo: s.redo,
@@ -104,6 +143,118 @@ export function MainToolbar({
   const effectiveCanUndo = showPitchEditor ? peUndoStack.length > 0 : canUndo;
   const effectiveCanRedo = showPitchEditor ? peRedoStack.length > 0 : canRedo;
   const hasArmedTracks = tracks.some((t) => t.armed);
+  const gridOptions = useMemo(
+    () => [...GRID_TYPE_MODE_OPTIONS],
+    [],
+  );
+  const quantizeOptions = useMemo(
+    () => quantizePresets.map((preset) => ({
+      value: preset.id,
+      label: preset.name,
+    })),
+    [quantizePresets],
+  );
+  const selectedQuantizePreset = useMemo(
+    () => getQuantizePresetById(quantizePresets, quantizePresetId),
+    [quantizePresetId, quantizePresets],
+  );
+  const toolbarGridLabel = getGridSizeLabel(
+    gridSize === "use_quantize" ? selectedQuantizePreset.gridSize : gridSize,
+  );
+
+  useEffect(() => {
+    if (!showQuantizePanel) return undefined;
+    setQuantizeApplyState("idle");
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!gridPanelRef.current?.contains(event.target as Node)) {
+        setShowQuantizePanel(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowQuantizePanel(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showQuantizePanel]);
+
+  useEffect(() => {
+    return () => {
+      if (applyCloseTimerRef.current !== null) {
+        window.clearTimeout(applyCloseTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleApplyQuantize = () => {
+    const state = useDAWStore.getState();
+    const preset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
+    const gridSeconds = calculateGridInterval(
+      state.transport.tempo,
+      state.timeSignature,
+      preset.gridSize,
+      {
+        quantizePreset: preset,
+        quantizeGridSize: preset.gridSize,
+        pixelsPerSecond: state.pixelsPerSecond,
+      },
+    );
+
+    if (state.pianoRollTrackId && state.pianoRollClipId) {
+      state.quantizeSelectedMIDINotes(
+        state.pianoRollTrackId,
+        state.pianoRollClipId,
+        gridSeconds,
+        preset.strength,
+        {
+          presetId: preset.id,
+          gridSize: preset.gridSize,
+          mode: "start",
+          swing: preset.swing,
+          groovePreset: preset.groovePreset,
+          tupletDivisions: preset.tupletDivisions,
+          catchRangeMs: ticksToSeconds(preset.catchRangeTicks, state.transport.tempo) * 1000,
+          safeRangeMs: ticksToSeconds(preset.safeRangeTicks, state.transport.tempo) * 1000,
+          randomizeMs: ticksToSeconds(preset.roughTicks, state.transport.tempo) * 1000,
+          moveControllers: preset.moveControllers,
+        },
+      );
+    } else {
+      state.quantizeSelectedClips();
+    }
+
+    setQuantizeApplyState("applied");
+    if (applyCloseTimerRef.current !== null) {
+      window.clearTimeout(applyCloseTimerRef.current);
+    }
+    applyCloseTimerRef.current = window.setTimeout(() => {
+      setShowQuantizePanel(false);
+      setQuantizeApplyState("idle");
+      applyCloseTimerRef.current = null;
+    }, 450);
+  };
+
+  const handleSavePreset = () => {
+    const name = window.prompt("Quantize preset name:", selectedQuantizePreset.name);
+    if (!name) return;
+    saveQuantizePreset(name, selectedQuantizePreset);
+  };
+
+  const handleRenamePreset = () => {
+    if (selectedQuantizePreset.isFactory) return;
+    const name = window.prompt("Rename quantize preset:", selectedQuantizePreset.name);
+    if (!name) return;
+    renameQuantizePreset(selectedQuantizePreset.id, name);
+  };
+
+  const handleRemovePreset = () => {
+    if (selectedQuantizePreset.isFactory) return;
+    if (!window.confirm(`Remove quantize preset "${selectedQuantizePreset.name}"?`)) return;
+    removeQuantizePreset(selectedQuantizePreset.id);
+  };
 
   const handleAiToolsClick = () => {
     openAiToolsSetup();
@@ -135,7 +286,7 @@ export function MainToolbar({
 
   return (
     <div
-      className="h-12 bg-neutral-900 border-b border-b-neutral-950 flex items-center px-4 gap-4 shrink-0"
+      className="relative z-[2000] h-12 overflow-visible bg-neutral-900 border-b border-b-neutral-950 flex items-center px-4 gap-4 shrink-0"
       role="toolbar"
       aria-label="Main Toolbar"
     >
@@ -324,6 +475,91 @@ export function MainToolbar({
 
       {/* Settings */}
       <div className="flex items-center gap-1">
+        <span className="relative inline-flex" ref={gridPanelRef}>
+          <Button
+            variant="default"
+            size="sm"
+            active={showQuantizePanel}
+            onClick={() => setShowQuantizePanel((value) => !value)}
+            title="Grid, Snap, and Quantize settings"
+            aria-label="Grid, Snap, and Quantize settings"
+          >
+            Grid: {toolbarGridLabel}
+            <ChevronDown size={14} />
+          </Button>
+          {showQuantizePanel && (
+            <div className="absolute right-0 top-full z-[3000] mt-2 w-[320px] rounded-md border border-neutral-700 bg-neutral-950 p-3 text-xs text-neutral-200 shadow-2xl shadow-black/70 ring-1 ring-black/50">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-normal text-neutral-500">Grid / Snap</div>
+                  <div className="truncate text-sm font-semibold text-neutral-100">{toolbarGridLabel}</div>
+                </div>
+                <Button
+                  variant={quantizeApplyState === "applied" ? "success" : "primary"}
+                  size="sm"
+                  onClick={handleApplyQuantize}
+                  disabled={quantizeApplyState === "applied"}
+                >
+                  <Check size={13} />
+                  {quantizeApplyState === "applied" ? "Applied" : "Apply"}
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-[90px_1fr] items-center gap-x-2 gap-y-2 border-t border-neutral-800 pt-3 text-[11px]">
+                <span className="text-neutral-500">Snap Type</span>
+                <NativeSelect
+                  size="sm"
+                  variant="compact"
+                  className="w-full"
+                  options={[...SNAP_TYPE_OPTIONS]}
+                  value={snapType}
+                  onChange={(value) => setSnapType(value as SnapType)}
+                  title="Snap Type"
+                />
+                <span className="text-neutral-500">Grid Mode</span>
+                <NativeSelect
+                  size="sm"
+                  variant="compact"
+                  className="w-full"
+                  options={gridOptions}
+                  value={gridSize}
+                  onChange={(value) => setGridSize(value as GridSize)}
+                  title="Grid Mode"
+                />
+                <span className="text-neutral-500">Quantize</span>
+                <NativeSelect
+                  size="sm"
+                  variant="compact"
+                  className="w-full"
+                  options={quantizeOptions}
+                  value={quantizePresetId}
+                  onChange={(value) => setQuantizePresetId(String(value))}
+                  title="Quantize Presets"
+                />
+              </div>
+
+              <div className="mt-3 grid grid-cols-[90px_1fr] gap-x-2 gap-y-1 border-t border-neutral-800 pt-3 text-[11px]">
+                <span className="text-neutral-500">Strength</span>
+                <span>{Math.round(selectedQuantizePreset.strength * 100)}%</span>
+                <span className="text-neutral-500">Swing</span>
+                <span>{Math.round(selectedQuantizePreset.swing * 100)}%</span>
+                <span className="text-neutral-500">Tuplet</span>
+                <span>{selectedQuantizePreset.tupletDivisions > 1 ? selectedQuantizePreset.tupletDivisions : "Off"}</span>
+                <span className="text-neutral-500">Catch/Safe</span>
+                <span>{selectedQuantizePreset.catchRangeTicks} / {selectedQuantizePreset.safeRangeTicks} ticks</span>
+                <span className="text-neutral-500">Rough</span>
+                <span>{selectedQuantizePreset.roughTicks} ticks</span>
+              </div>
+
+              <div className="mt-3 flex flex-wrap justify-end gap-1.5 border-t border-neutral-800 pt-3">
+                <Button variant="default" size="sm" onClick={handleSavePreset}>Save</Button>
+                <Button variant="default" size="sm" onClick={handleRenamePreset} disabled={selectedQuantizePreset.isFactory}>Rename</Button>
+                <Button variant="default" size="sm" onClick={handleRemovePreset} disabled={selectedQuantizePreset.isFactory}>Remove</Button>
+                <Button variant="default" size="sm" onClick={restoreFactoryQuantizePresets}>Restore</Button>
+              </div>
+            </div>
+          )}
+        </span>
         <Button
           variant={aiToolsStatus.available ? "success" : aiToolsStatus.installInProgress ? "primary" : "default"}
           size="icon-lg"

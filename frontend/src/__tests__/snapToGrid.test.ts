@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   calculateGridInterval,
+  FACTORY_QUANTIZE_PRESETS,
+  getQuantizePresetById,
+  resolveVisualGrid,
+  snapTimeByType,
   snapToGrid,
   snapToGridFloor,
   snapToGridCeil,
@@ -44,6 +48,94 @@ describe("calculateGridInterval", () => {
     // 60 BPM = 1s per beat, 4 beats = 4s per bar
     expect(calculateGridInterval(60, TS_4_4, "bar")).toBe(4);
     expect(calculateGridInterval(60, TS_4_4, "beat")).toBe(1);
+  });
+
+  it("resolves straight, triplet, and dotted Cubase-style note values", () => {
+    expect(calculateGridInterval(120, TS_4_4, "1/1")).toBe(2);
+    expect(calculateGridInterval(120, TS_3_4, "1/1")).toBe(2);
+    expect(calculateGridInterval(120, TS_4_4, "1/16")).toBe(0.125);
+    expect(calculateGridInterval(120, TS_4_4, "1/8T")).toBeCloseTo(1 / 6, 6);
+    expect(calculateGridInterval(120, TS_4_4, "1/8D")).toBe(0.375);
+  });
+
+  it("resolves Use Quantize through the active quantize preset", () => {
+    const preset = getQuantizePresetById(FACTORY_QUANTIZE_PRESETS, "factory-1/32");
+    expect(calculateGridInterval(120, TS_4_4, "use_quantize", { quantizePreset: preset })).toBe(0.0625);
+  });
+
+  it("adapts to zoom from coarse bars to fine subdivisions", () => {
+    expect(calculateGridInterval(120, TS_4_4, "adapt_to_zoom", { pixelsPerSecond: 4 })).toBe(2);
+    expect(calculateGridInterval(120, TS_4_4, "adapt_to_zoom", { pixelsPerSecond: 1200 })).toBe(0.03125);
+  });
+});
+
+describe("resolveVisualGrid", () => {
+  it("thins dense straight grids using equal bar subdivisions", () => {
+    const visual = resolveVisualGrid(120, TS_4_4, "1/16", {
+      pixelsPerSecond: 55,
+      minPixelsPerGrid: 18,
+    });
+
+    expect(visual.alignedToBar).toBe(true);
+    expect(visual.divisionsPerBar).toBe(4);
+    expect(visual.visualInterval).toBe(0.5);
+  });
+
+  it("shows the full grid when spacing is readable", () => {
+    const visual = resolveVisualGrid(120, TS_4_4, "1/16", {
+      pixelsPerSecond: 200,
+      minPixelsPerGrid: 18,
+    });
+
+    expect(visual.alignedToBar).toBe(true);
+    expect(visual.divisionsPerBar).toBe(16);
+    expect(visual.visualInterval).toBe(0.125);
+  });
+});
+
+describe("snapTimeByType", () => {
+  it("snaps to grid candidates", () => {
+    expect(snapTimeByType({
+      time: 0.19,
+      tempo: 120,
+      timeSignature: TS_4_4,
+      gridSize: "1/16",
+      snapType: "grid",
+    })).toBe(0.25);
+  });
+
+  it("preserves the original offset for Grid Relative", () => {
+    expect(snapTimeByType({
+      time: 0.44,
+      originalTime: 0.06,
+      tempo: 120,
+      timeSignature: TS_4_4,
+      gridSize: "1/16",
+      snapType: "grid_relative",
+    })).toBeCloseTo(0.435, 6);
+  });
+
+  it("chooses event and cursor candidates for combined snap types", () => {
+    expect(snapTimeByType({
+      time: 1.03,
+      tempo: 120,
+      timeSignature: TS_4_4,
+      gridSize: "1/4",
+      snapType: "events_grid_cursor",
+      cursorTime: 0.88,
+      eventTimes: [1.01, 1.7],
+    })).toBe(1.01);
+  });
+
+  it("includes adjacent event candidates for Shuffle snap", () => {
+    expect(snapTimeByType({
+      time: 0.92,
+      tempo: 120,
+      timeSignature: TS_4_4,
+      gridSize: "1/4",
+      snapType: "shuffle",
+      eventTimes: [0.91, 1.5],
+    })).toBe(0.91);
   });
 });
 

@@ -4,6 +4,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Checkbox, Input, NativeSelect } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
+import { GRID_TYPE_MODE_OPTIONS, type GridSize } from "../utils/snapToGrid";
 
 interface PreferencesModalProps {
   isOpen: boolean;
@@ -127,15 +128,11 @@ function GeneralTab() {
           size="sm"
         />
       </Row>
-      <Row label="Default Grid Size">
+      <Row label="Default Grid Type">
         <NativeSelect
-          options={["bar", "half_bar", "quarter_bar", "eighth_bar", "beat", "half_beat", "quarter_beat", "second", "minute"]}
+          options={[...GRID_TYPE_MODE_OPTIONS]}
           value={gridSize}
-          onChange={(val) => useDAWStore.getState().setGridSize(val as any)}
-          formatLabel={(v) => {
-            const labels: Record<string, string> = { bar: "Bar", half_bar: "1/2 Bar", quarter_bar: "1/4 Bar", eighth_bar: "1/8 Bar", beat: "Beat", half_beat: "Half Beat", quarter_beat: "Quarter Beat", second: "Second", minute: "Minute" };
-            return labels[String(v)] || String(v);
-          }}
+          onChange={(val) => useDAWStore.getState().setGridSize(val as GridSize)}
         />
       </Row>
 

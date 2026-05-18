@@ -122,7 +122,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
   ];
 
   return (
-    <div className="flex items-center gap-1 px-1 py-0.5 bg-white/5 rounded text-[10px]">
+    <div className="flex min-w-0 items-center gap-1.5 rounded-md border border-neutral-700/70 bg-neutral-900/55 px-1.5 py-0.5 text-[10px]">
       {/* Device selector - compact */}
       <NativeSelect
         variant="compact"
@@ -131,7 +131,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         value={track.midiInputDevice || ""}
         onChange={(val) => handleDeviceChange(String(val))}
         title={track.midiInputDevice || "All MIDI inputs"}
-        className="max-w-[80px] truncate"
+        className="w-[122px] max-w-[122px] truncate"
       />
 
       {/* Channel selector - compact */}
@@ -142,7 +142,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         value={track.midiChannel || 0}
         onChange={(val) => handleChannelChange(Number(val))}
         title={`Channel: ${track.midiChannel || "All"}`}
-        className="max-w-[55px]"
+        className="w-[68px]"
       />
 
       <NativeSelect
@@ -152,7 +152,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         value={track.midiOutputDevice || ""}
         onChange={(val) => handleOutputChange(String(val))}
         title={track.midiOutputDevice ? `MIDI out: ${track.midiOutputDevice}` : "No MIDI output"}
-        className="max-w-[80px] truncate"
+        className="w-[104px] max-w-[104px] truncate"
       />
     </div>
   );

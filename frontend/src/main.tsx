@@ -98,6 +98,21 @@ async function reportFrontendStartupStateViaNativeFunction(
   state: string,
   detail: string,
 ) {
+  const backend = await waitForNativeBackend();
+  const directReporter = backend?.reportFrontendStartupState as
+    | ((state: string, detail?: string) => Promise<boolean>)
+    | undefined;
+  if (typeof directReporter === "function") {
+    const directResult = await withTimeout(
+      directReporter(state, detail),
+      STARTUP_REPORT_TIMEOUT_MS,
+      `Direct native startup reporting (${state})`,
+    );
+    if (directResult !== undefined) {
+      return;
+    }
+  }
+
   const nativeResult = await withTimeout(
     invokeNativeFunction("reportFrontendStartupState", state, detail),
     STARTUP_REPORT_TIMEOUT_MS,

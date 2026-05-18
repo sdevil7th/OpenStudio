@@ -101,10 +101,10 @@ export interface SelectProps {
  * Size style mappings
  */
 export const selectSizeStyles: Record<SelectSize, string> = {
-  'xs': 'h-5 px-1 py-0.5 text-[10px]',
-  'sm': 'h-6 px-2 py-1 text-xs',
-  'md': 'h-8 px-3 py-1.5 text-sm',
-  'lg': 'h-10 px-4 py-2 text-base',
+  'xs': 'h-5 pl-1.5 pr-5 py-0.5 text-[10px]',
+  'sm': 'h-6 pl-2 pr-6 py-1 text-xs',
+  'md': 'h-8 pl-3 pr-7 py-1.5 text-sm',
+  'lg': 'h-10 pl-4 pr-8 py-2 text-base',
 };
 
 /**

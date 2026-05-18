@@ -163,7 +163,6 @@ void PlaybackEngine::preloadReader(const juce::File& file)
     std::unique_ptr<juce::AudioFormatReader> newReader(formatManager.createReaderFor(file));
     if (newReader)
     {
-        preloadAudioData(file, *newReader);
         readers[filePath] = std::move(newReader);
         readerAccessTimes[filePath] = juce::Time::currentTimeMillis();
         evictOldReaders();

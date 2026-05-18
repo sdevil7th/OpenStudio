@@ -16,6 +16,47 @@ import { createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../../data/aiWorkflows";
 import { normalizeMIDIClipLoopLength, serializeMIDIClipsForBackend, syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
+import { FACTORY_QUANTIZE_PRESETS } from "../../utils/snapToGrid";
+
+const BUILT_IN_PLUGIN_NAMES = new Set([
+  "OpenStudio Piano",
+  "OpenStudio Drums",
+  "OpenStudio Basic Synth",
+  "Studio13 Piano",
+  "Studio13 Drums",
+  "Studio13 Basic Synth",
+  "OpenStudio EQ",
+  "OpenStudio Compressor",
+  "OpenStudio Gate",
+  "OpenStudio Limiter",
+  "OpenStudio Delay",
+  "OpenStudio Reverb",
+  "OpenStudio Chorus",
+  "OpenStudio Saturator",
+  "OpenStudio Pitch Correct",
+  "S13 EQ",
+  "S13 Compressor",
+  "S13 Gate",
+  "S13 Limiter",
+  "S13 Delay",
+  "S13 Reverb",
+  "S13 Chorus",
+  "S13 Saturator",
+  "S13 Pitch Correct",
+]);
+
+function isBuiltInPluginPath(pluginPath: string | undefined): boolean {
+  return Boolean(pluginPath && BUILT_IN_PLUGIN_NAMES.has(pluginPath));
+}
+
+function isBuiltInInstrumentPluginPath(pluginPath: string | undefined): boolean {
+  return pluginPath === "OpenStudio Piano" ||
+    pluginPath === "OpenStudio Drums" ||
+    pluginPath === "OpenStudio Basic Synth" ||
+    pluginPath === "Studio13 Piano" ||
+    pluginPath === "Studio13 Drums" ||
+    pluginPath === "Studio13 Basic Synth";
+}
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "meterLevels", "peakLevels", "masterLevel", "automatedParamValues",
@@ -143,6 +184,11 @@ function buildSerializedProjectData(
     metronomeAccentBeats: state.metronomeAccentBeats,
     metronomeTrackId: state.metronomeTrackId,
     projectRange: state.projectRange,
+    snapEnabled: state.snapEnabled,
+    snapType: state.snapType,
+    gridSize: state.gridSize,
+    quantizePresetId: state.quantizePresetId,
+    quantizePresets: state.quantizePresets,
     markers: state.markers,
     regions: state.regions,
     tempoMarkers: state.tempoMarkers,
@@ -473,6 +519,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             samplerSamplePath: track.samplerSamplePath,
             samplerRootNote: track.samplerRootNote ?? 60,
             samplerSourceType: track.samplerSourceType,
+            builtInInstrument: track.builtInInstrument,
             icon: track.icon,
             aiWorkflow: track.aiWorkflow,
             aiWorkflowParams: track.aiWorkflowParams,
@@ -635,6 +682,12 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           ...freshProjectState.clipLauncher,
           ...(data.clipLauncher || {}),
         };
+        const loadedQuantizePresets = Array.isArray(data.quantizePresets) && data.quantizePresets.length > 0
+          ? data.quantizePresets
+          : [...FACTORY_QUANTIZE_PRESETS];
+        const loadedQuantizePresetId = loadedQuantizePresets.some((preset) => preset.id === data.quantizePresetId)
+          ? data.quantizePresetId
+          : "factory-1/16";
 
         await nativeBridge.setProcessingPrecision(loadedProcessingPrecision).catch(logBridgeError("sync"));
         await nativeBridge.setTempo(loadedTempo).catch(logBridgeError("sync"));
@@ -664,6 +717,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           metronomeAccentBeats: loadedMetronomeAccentBeats,
           metronomeTrackId: data.metronomeTrackId ?? null,
           projectRange: data.projectRange || freshProjectState.projectRange,
+          snapEnabled: data.snapEnabled ?? freshProjectState.snapEnabled,
+          snapType: data.snapType || freshProjectState.snapType,
+          gridSize: data.gridSize || freshProjectState.gridSize,
+          quantizePresetId: loadedQuantizePresetId,
+          quantizePresets: loadedQuantizePresets,
           markers: Array.isArray(data.markers) ? data.markers : freshProjectState.markers,
           regions: Array.isArray(data.regions) ? data.regions : freshProjectState.regions,
           tempoMarkers: Array.isArray(data.tempoMarkers) ? data.tempoMarkers : freshProjectState.tempoMarkers,
@@ -793,8 +851,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               await new Promise((r) => setTimeout(r, 0));
               for (let i = 0; i < trackData.inputFXPaths.length; i++) {
                 console.log(`[DEBUG LOAD]   Restoring input FX[${i}]: "${trackData.inputFXPaths[i]}"`);
-                const success = await nativeBridge.addTrackInputFX(trackData.id, trackData.inputFXPaths[i], false);
-                console.log(`[DEBUG LOAD]   addTrackInputFX result: ${success}`);
+                const fxPath = trackData.inputFXPaths[i];
+                const success = isBuiltInPluginPath(fxPath)
+                  ? await nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, true)
+                  : await nativeBridge.addTrackInputFX(trackData.id, fxPath, false);
+                console.log(`[DEBUG LOAD]   addInputFX result: ${success}`);
                 if (success) {
                   if (trackData.inputFXStates && trackData.inputFXStates[i]) {
                     const stateResult = await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
@@ -806,12 +867,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             }
 
             let trackFxRestored = 0;
+            let restoredBuiltInInstrumentFX = false;
             if (!bypassFX && trackData.trackFXPaths && trackData.trackFXPaths.length > 0) {
               set({ projectLoadingMessage: `Restoring track FX for ${trackData.name}...` });
               await new Promise((r) => setTimeout(r, 0));
               for (let i = 0; i < trackData.trackFXPaths.length; i++) {
                 console.log(`[DEBUG LOAD]   Restoring track FX[${i}]: "${trackData.trackFXPaths[i]}"`);
-                const success = await nativeBridge.addTrackFX(trackData.id, trackData.trackFXPaths[i], false);
+                const fxPath = trackData.trackFXPaths[i];
+                restoredBuiltInInstrumentFX = restoredBuiltInInstrumentFX || isBuiltInInstrumentPluginPath(fxPath);
+                const success = isBuiltInPluginPath(fxPath)
+                  ? await nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, false)
+                  : await nativeBridge.addTrackFX(trackData.id, fxPath, false);
                 console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
                 if (success) {
                   if (trackData.trackFXStates && trackData.trackFXStates[i]) {
@@ -823,6 +889,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               }
             }
 
+            if (restoredBuiltInInstrumentFX) {
+              await nativeBridge.setTrackType(trackData.id, "instrument").catch(logBridgeError("built-in instrument type restore"));
+            }
+
             console.log(`[DEBUG LOAD] Track "${trackData.name}" restored ${inputFxRestored} input FX and ${trackFxRestored} track FX`);
 
             const restoredMidiClips = (trackData.midiClips || []).map((clip: any) =>
@@ -831,7 +901,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
             const frontendTrack: Track = {
               ...trackData,
-              type: restoredInstrumentPlugin ? "instrument" : trackData.type,
+              type: restoredInstrumentPlugin || restoredBuiltInInstrumentFX ? "instrument" : trackData.type,
               aiWorkflow:
                 trackData.type === "ai"
                   ? trackData.aiWorkflow || "text-to-music"
@@ -953,6 +1023,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               samplerSamplePath: trackData.samplerSamplePath || undefined,
               samplerRootNote: trackData.samplerRootNote ?? 60,
               samplerSourceType: trackData.samplerSourceType || (String(trackData.samplerSamplePath || "").toLowerCase().endsWith(".sf2") ? "soundfont" : undefined),
+              builtInInstrument: trackData.builtInInstrument || undefined,
               midiPitchBendRangeUp: trackData.midiPitchBendRangeUp ?? 2,
               midiPitchBendRangeDown: trackData.midiPitchBendRangeDown ?? trackData.midiPitchBendRangeUp ?? 2,
               midiPitchBendRangeLinked: trackData.midiPitchBendRangeLinked ?? true,
@@ -971,6 +1042,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               if (samplerLoaded && !frontendTrack.instrumentPlugin) {
                 frontendTrack.type = "instrument";
               }
+            } else if (frontendTrack.type === "instrument" && frontendTrack.builtInInstrument) {
+              const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
+              await nativeBridge
+                .setBuiltInPluginParam(
+                  { trackId: frontendTrack.id, chain: "instrument", fxIndex: -1 },
+                  "instrumentMode",
+                  modeMap[frontendTrack.builtInInstrument] ?? 0,
+                )
+                .catch(logBridgeError("built-in instrument load"));
             }
 
             if (
@@ -996,7 +1076,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           set({ projectLoadingMessage: "Restoring master FX..." });
           await new Promise((r) => setTimeout(r, 0));
           for (let i = 0; i < data.masterFXPaths.length; i++) {
-            const success = await nativeBridge.addMasterFX(data.masterFXPaths[i]);
+            const masterFxPath = data.masterFXPaths[i];
+            const success = isBuiltInPluginPath(masterFxPath)
+              ? await nativeBridge.addMasterBuiltInFX(masterFxPath)
+              : await nativeBridge.addMasterFX(masterFxPath);
             if (success && data.masterFXStates && data.masterFXStates[i]) {
               await nativeBridge.setMasterPluginState(i, data.masterFXStates[i]);
             }

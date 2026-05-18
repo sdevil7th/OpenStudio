@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import type { ParametricGraphProps, GraphNode } from "./ParametricGraph.types";
 
 // --- Coordinate helpers ---
@@ -16,6 +16,17 @@ const NODE_COLORS = [
   "#8b5cf6", // violet
   "#ec4899", // pink
 ];
+
+const GRAPH_COLORS = {
+  surface: "var(--s13-graph-surface, #0a0a0a)",
+  plot: "var(--s13-graph-plot, #111111)",
+  grid: "var(--s13-graph-grid, #222222)",
+  gridZero: "var(--s13-graph-grid-zero, #444444)",
+  label: "var(--s13-graph-label, #737373)",
+  tooltip: "var(--s13-graph-tooltip, #d4d4d4)",
+  response: "var(--s13-graph-response, #38bdf8)",
+  responseFill: "var(--s13-graph-response-fill, rgba(56, 189, 248, 0.08))",
+};
 
 function valueToPixelX(
   value: number,
@@ -91,6 +102,7 @@ export function ParametricGraph({
   nodes,
   nodeConfig,
   responseCurve,
+  backgroundCurves,
   perNodeCurves,
   onNodeAdd,
   onNodeChange,
@@ -100,6 +112,7 @@ export function ParametricGraph({
   className,
 }: ParametricGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const clipPathId = useId();
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
@@ -238,6 +251,18 @@ export function ParametricGraph({
     }
   }
 
+  const backgroundCurvePaths =
+    backgroundCurves?.map((curve) => {
+      const pts = curve.points.map((p) => ({
+        px: toPixelX(p.x),
+        py: toPixelY(p.y),
+      }));
+      return {
+        ...curve,
+        path: pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.px} ${p.py}`).join(" "),
+      };
+    }) ?? [];
+
   // Find the enabled nodes for rendering
   const enabledNodes = nodes.filter((n) => n.enabled);
 
@@ -246,15 +271,15 @@ export function ParametricGraph({
       ref={svgRef}
       width={width}
       height={height}
-      className={`select-none ${className ?? ""}`}
-      style={{ background: "#0a0a0a" }}
+      className={`parametric-graph select-none ${className ?? ""}`}
+      style={{ background: GRAPH_COLORS.surface }}
     >
       <g transform={`translate(${MARGIN.left}, ${MARGIN.top})`}>
         {/* Plot background */}
         <rect
           width={plotWidth}
           height={plotHeight}
-          fill="#111111"
+          fill={GRAPH_COLORS.plot}
           rx={2}
           onClick={handleBackgroundClick}
           style={{ cursor: "crosshair" }}
@@ -271,7 +296,7 @@ export function ParametricGraph({
               y1={0}
               x2={px}
               y2={plotHeight}
-              stroke="#222"
+              stroke={GRAPH_COLORS.grid}
               strokeWidth={1}
             />
           );
@@ -288,7 +313,7 @@ export function ParametricGraph({
               y1={py}
               x2={plotWidth}
               y2={py}
-              stroke={v === 0 ? "#444" : "#222"}
+              stroke={v === 0 ? GRAPH_COLORS.gridZero : GRAPH_COLORS.grid}
               strokeWidth={v === 0 ? 1 : 0.5}
             />
           );
@@ -303,7 +328,7 @@ export function ParametricGraph({
               key={`xl-${v}`}
               x={px}
               y={plotHeight + 14}
-              fill="#555"
+              fill={GRAPH_COLORS.label}
               fontSize={8}
               textAnchor="middle"
             >
@@ -321,7 +346,7 @@ export function ParametricGraph({
               key={`yl-${v}`}
               x={-6}
               y={py + 3}
-              fill="#555"
+              fill={GRAPH_COLORS.label}
               fontSize={8}
               textAnchor="end"
             >
@@ -334,10 +359,23 @@ export function ParametricGraph({
         {responseAreaPath && (
           <path
             d={responseAreaPath}
-            fill="rgba(59, 130, 246, 0.08)"
-            clipPath="url(#plotClip)"
+            fill={GRAPH_COLORS.responseFill}
+            clipPath={`url(#${clipPathId})`}
           />
         )}
+
+        {/* Background analyzer/modulation curves */}
+        {backgroundCurvePaths.map((curve) => (
+          <path
+            key={curve.id}
+            d={curve.path}
+            fill="none"
+            stroke={curve.color ?? GRAPH_COLORS.label}
+            strokeWidth={curve.strokeWidth ?? 1}
+            strokeOpacity={curve.opacity ?? 0.35}
+            clipPath={`url(#${clipPathId})`}
+          />
+        ))}
 
         {/* Per-node individual curves */}
         {nodeCurvePaths.map((nc) => {
@@ -352,7 +390,7 @@ export function ParametricGraph({
               stroke={color}
               strokeWidth={1}
               strokeOpacity={hoveredNodeId === nc.nodeId ? 0.6 : 0.2}
-              clipPath="url(#plotClip)"
+              clipPath={`url(#${clipPathId})`}
             />
           );
         })}
@@ -362,15 +400,15 @@ export function ParametricGraph({
           <path
             d={responsePath}
             fill="none"
-            stroke="#3b82f6"
+            stroke={GRAPH_COLORS.response}
             strokeWidth={1.5}
-            clipPath="url(#plotClip)"
+            clipPath={`url(#${clipPathId})`}
           />
         )}
 
         {/* Clip path for curves */}
         <defs>
-          <clipPath id="plotClip">
+          <clipPath id={clipPathId}>
             <rect width={plotWidth} height={plotHeight} />
           </clipPath>
         </defs>
@@ -408,7 +446,7 @@ export function ParametricGraph({
                 r={isDragging ? 7 : isHovered ? 6 : 5}
                 fill={color}
                 fillOpacity={0.85}
-                stroke={isHovered || isDragging ? "#fff" : color}
+                stroke={isHovered || isDragging ? "var(--s13-graph-node-stroke, #ffffff)" : color}
                 strokeWidth={isHovered || isDragging ? 1.5 : 1}
                 strokeOpacity={0.8}
                 pointerEvents="none"
@@ -432,7 +470,7 @@ export function ParametricGraph({
                 <text
                   x={cx}
                   y={cy - 12}
-                  fill="#ccc"
+                  fill={GRAPH_COLORS.tooltip}
                   fontSize={9}
                   textAnchor="middle"
                   pointerEvents="none"

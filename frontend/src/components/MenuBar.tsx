@@ -8,6 +8,7 @@ import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { usesNativeWindowChrome } from "../utils/windowEnvironment";
 import { createTrackOfType } from "../utils/trackCreation";
+import { GRID_TYPE_MODE_OPTIONS, type GridSize } from "../utils/snapToGrid";
 
 /**
  * Main Menu Bar Component
@@ -582,54 +583,12 @@ export function MenuBar() {
       ],
     },
     {
-      label: "Grid Size",
-      submenu: [
-        {
-          label: "Bar",
-          onClick: () => setGridSize("bar"),
-          checked: gridSize === "bar",
-        },
-        {
-          label: "1/2 Bar",
-          onClick: () => setGridSize("half_bar"),
-          checked: gridSize === "half_bar",
-        },
-        {
-          label: "1/4 Bar",
-          onClick: () => setGridSize("quarter_bar"),
-          checked: gridSize === "quarter_bar",
-        },
-        {
-          label: "1/8 Bar",
-          onClick: () => setGridSize("eighth_bar"),
-          checked: gridSize === "eighth_bar",
-        },
-        {
-          label: "Beat",
-          onClick: () => setGridSize("beat"),
-          checked: gridSize === "beat",
-        },
-        {
-          label: "Half Beat",
-          onClick: () => setGridSize("half_beat"),
-          checked: gridSize === "half_beat",
-        },
-        {
-          label: "Quarter Beat",
-          onClick: () => setGridSize("quarter_beat"),
-          checked: gridSize === "quarter_beat",
-        },
-        {
-          label: "Second",
-          onClick: () => setGridSize("second"),
-          checked: gridSize === "second",
-        },
-        {
-          label: "Minute",
-          onClick: () => setGridSize("minute"),
-          checked: gridSize === "minute",
-        },
-      ],
+      label: "Grid Type",
+      submenu: GRID_TYPE_MODE_OPTIONS.map((option) => ({
+        label: option.label,
+        onClick: () => setGridSize(option.value as GridSize),
+        checked: gridSize === option.value,
+      })),
     },
   ];
 

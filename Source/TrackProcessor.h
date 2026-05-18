@@ -247,6 +247,8 @@ public:
     void clearFallbackSamplerSample();
     bool hasFallbackSamplerSample() const;
     juce::String getFallbackSamplerSamplePath() const;
+    float getFallbackInstrumentParam(const juce::String& paramId) const;
+    bool setFallbackInstrumentParam(const juce::String& paramId, float value);
     struct MIDINoteActivity
     {
         int note = 0;
@@ -642,6 +644,9 @@ private:
     std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteActive {};
     std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteReleasing {};
     std::array<std::array<float, 128>, 16> fallbackInstrumentPhase {};
+    std::array<std::array<float, 128>, 16> fallbackInstrumentPhaseB {};
+    std::array<std::array<float, 128>, 16> fallbackInstrumentSubPhase {};
+    std::array<std::array<float, 128>, 16> fallbackInstrumentFilterState {};
     std::array<std::array<float, 128>, 16> fallbackInstrumentVelocity {};
     std::array<std::array<float, 128>, 16> fallbackInstrumentEnvelope {};
     std::array<std::array<double, 128>, 16> fallbackSamplerPosition {};
@@ -649,6 +654,20 @@ private:
     std::array<float, 16> fallbackInstrumentPitchBend {};
     std::array<float, 16> fallbackInstrumentModulation {};
     std::array<float, 16> fallbackInstrumentModPhase {};
+    std::atomic<float> fallbackSynthAttackMs { 8.0f };
+    std::atomic<float> fallbackSynthReleaseMs { 180.0f };
+    std::atomic<float> fallbackSynthBrightness { 0.62f };
+    std::atomic<float> fallbackSynthDetuneCents { 7.0f };
+    std::atomic<float> fallbackSynthSubLevel { 0.18f };
+    std::atomic<float> fallbackSynthNoiseLevel { 0.015f };
+    std::atomic<float> fallbackSynthOutputGainDb { -15.0f };
+    std::atomic<float> fallbackInstrumentMode { 0.0f }; // 0=synth, 1=piano, 2=drums
+    std::atomic<float> fallbackPianoTone { 0.58f };
+    std::atomic<float> fallbackPianoBody { 0.72f };
+    std::atomic<float> fallbackDrumKit { 0.0f }; // 0=studio, 1=rock, 2=electronic
+    std::atomic<float> fallbackDrumTuning { 0.0f };
+    std::atomic<float> fallbackDrumAmbience { 0.18f };
+    std::array<std::array<int, 128>, 16> fallbackInstrumentVoiceAgeSamples {};
     std::array<std::array<std::atomic<bool>, 128>, 16> midiNoteCurrentlyActive {};
     std::array<std::array<std::atomic<juce::uint32>, 128>, 16> midiNoteLastOnMs {};
     std::array<std::array<std::atomic<juce::uint32>, 128>, 16> midiNoteLastOffMs {};

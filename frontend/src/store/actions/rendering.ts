@@ -375,11 +375,16 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
             duration: c.duration,
             events: c.events,
           })),
-        }));
-      if (midiTracks.length === 0) return false;
-      const filePath = await nativeBridge.showSaveDialog(undefined, "Export Project MIDI");
+      }));
+      if (midiTracks.length === 0) {
+        get().showToast("No MIDI clips to export.", "info");
+        return false;
+      }
+      const filePath = await nativeBridge.showSaveDialog("Studio13 Project.mid", "Export Project MIDI", "*.mid;*.midi");
       if (!filePath) return false;
-      return await nativeBridge.exportProjectMIDI(filePath, midiTracks);
+      const success = await nativeBridge.exportProjectMIDI(filePath, midiTracks);
+      get().showToast(success ? "Project MIDI exported" : "Failed to export project MIDI", success ? "success" : "error");
+      return success;
     },
     consolidateTrack: async (trackId) => {
       const state = get();

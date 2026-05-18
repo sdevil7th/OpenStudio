@@ -227,6 +227,12 @@ public:
     juce::var getTrackFX(const juce::String& trackId);
     juce::var getPluginParameters(const juce::String& trackId, int fxIndex, bool isInputFX);
     bool setPluginParameter(const juce::String& trackId, int fxIndex, bool isInputFX, int paramIndex, float value);
+    juce::var getBuiltInPluginSchema(const juce::String& trackId, const juce::String& chainType, int fxIndex);
+    juce::var getBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex);
+    bool setBuiltInPluginParam(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                               const juce::String& paramId, float value);
+    bool setBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                               const juce::String& stateJSON);
     void removeTrackInputFX(const juce::String& trackId, int fxIndex);
     void removeTrackFX(const juce::String& trackId, int fxIndex);
     void bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed);

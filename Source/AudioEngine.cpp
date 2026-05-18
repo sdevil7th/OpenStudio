@@ -7,6 +7,7 @@
 #include "PitchResynthesizer.h"
 #include "CrashDiagnostics.h"
 #include <algorithm>
+#include <initializer_list>
 
 namespace
 {
@@ -6442,6 +6443,13 @@ juce::var AudioEngine::runReleaseGuardrails()
     return juce::var(root);
 }
 
+static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
+                                          const juce::String& chainType,
+                                          int fxIndex);
+static bool setBuiltInProcessorParam(juce::AudioProcessor* processor,
+                                     const juce::String& paramId,
+                                     float value);
+
 juce::var AudioEngine::runAutomatedRegressionSuite()
 {
     auto releaseGuardrails = runReleaseGuardrails();
@@ -6558,6 +6566,786 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         addSuite("release_guardrails", false, "Guardrail payload missing");
         addSuite("precision_benchmark_matrix", false, "Guardrail payload missing");
         addSuite("plugin_capability_matrix", false, "Guardrail payload missing");
+    }
+
+    auto bufferFiniteAndBounded = [] (const juce::AudioBuffer<float>& buffer, float peakLimit)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            const auto* samples = buffer.getReadPointer(ch);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                if (!std::isfinite(samples[sample]) || std::abs(samples[sample]) > peakLimit)
+                    return false;
+            }
+        }
+        return true;
+    };
+
+    auto fillDspFixture = [] (juce::AudioBuffer<float>& buffer, double sampleRate)
+    {
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            const float t = static_cast<float>(sample / sampleRate);
+            const float sine = std::sin(juce::MathConstants<float>::twoPi * 220.0f * t) * 0.24f;
+            const float high = std::sin(juce::MathConstants<float>::twoPi * 2200.0f * t) * 0.08f;
+            const float impulse = sample == 0 ? 0.55f : 0.0f;
+            buffer.setSample(0, sample, sine + high + impulse);
+            if (buffer.getNumChannels() > 1)
+                buffer.setSample(1, sample, sine * 0.82f - high * 0.35f - impulse * 0.4f);
+        }
+    };
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        bool builtInSmokePass = true;
+        juce::StringArray builtInSmokeDetails;
+
+        auto runEffectSmoke = [&] (const juce::String& name, juce::AudioProcessor& processor)
+        {
+            juce::AudioBuffer<float> fixtureBuffer(2, fixtureBlockSize);
+            fillDspFixture(fixtureBuffer, fixtureSampleRate);
+            juce::MidiBuffer fixtureMidi;
+            processor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            processor.processBlock(fixtureBuffer, fixtureMidi);
+            const float peak = peakFromFloatBuffer(fixtureBuffer, fixtureBuffer.getNumSamples());
+            const bool pass = bufferFiniteAndBounded(fixtureBuffer, 3.0f) && peak <= 3.0f;
+            builtInSmokePass = builtInSmokePass && pass;
+            builtInSmokeDetails.add(name + ": pass=" + juce::String(pass ? "true" : "false")
+                                    + ", peak=" + juce::String(peak, 6));
+            processor.releaseResources();
+        };
+
+        auto runInstrumentSmoke = [&] (const juce::String& name, juce::AudioProcessor& processor, int noteNumber)
+        {
+            juce::AudioBuffer<float> fixtureBuffer(2, fixtureBlockSize);
+            fixtureBuffer.clear();
+            juce::MidiBuffer fixtureMidi;
+            fixtureMidi.addEvent(juce::MidiMessage::noteOn(1, noteNumber, static_cast<juce::uint8>(108)), 0);
+            processor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            processor.processBlock(fixtureBuffer, fixtureMidi);
+            const float peak = peakFromFloatBuffer(fixtureBuffer, fixtureBuffer.getNumSamples());
+            const bool pass = bufferFiniteAndBounded(fixtureBuffer, 2.0f) && peak > 1.0e-5f && peak <= 2.0f;
+            builtInSmokePass = builtInSmokePass && pass;
+            builtInSmokeDetails.add(name + ": pass=" + juce::String(pass ? "true" : "false")
+                                    + ", peak=" + juce::String(peak, 6));
+            processor.releaseResources();
+        };
+
+        S13EQ eq;
+        eq.bands[2].dynamicEnabled.store(1.0f);
+        eq.bands[2].dynamicRange.store(-4.0f);
+        eq.bands[2].dynamicThreshold.store(-36.0f);
+        eq.stereoMode.store(1.0f);
+        runEffectSmoke("eq_dynamic_mid", eq);
+
+        S13Compressor compressor;
+        compressor.threshold.store(-24.0f);
+        compressor.ratio.store(4.0f);
+        compressor.detectorMode.store(2.0f);
+        runEffectSmoke("compressor", compressor);
+
+        S13Gate gate;
+        gate.threshold.store(-42.0f);
+        runEffectSmoke("gate", gate);
+
+        S13Limiter limiter;
+        limiter.threshold.store(-6.0f);
+        limiter.ceiling.store(-0.5f);
+        runEffectSmoke("limiter", limiter);
+
+        S13Delay delay;
+        delay.feedback.store(0.32f);
+        delay.ducking.store(0.25f);
+        runEffectSmoke("delay", delay);
+
+        S13Reverb reverb;
+        reverb.algorithm.store(2.0f);
+        reverb.decayTime.store(2.4f);
+        runEffectSmoke("reverb", reverb);
+
+        S13Chorus chorus;
+        chorus.characterMode.store(1.0f);
+        runEffectSmoke("chorus_ensemble", chorus);
+
+        S13Saturator saturator;
+        saturator.satType.store(6.0f);
+        saturator.oversampleMode.store(2.0f);
+        runEffectSmoke("saturator", saturator);
+
+        S13BasicSynthInstrument synth;
+        runInstrumentSmoke("basic_synth", synth, 60);
+
+        S13PianoInstrument piano;
+        runInstrumentSmoke("piano", piano, 64);
+
+        S13DrumInstrument drums;
+        drums.mapPreset.store(1.0f);
+        juce::AudioBuffer<float> drumBuffer(2, fixtureBlockSize);
+        drumBuffer.clear();
+        juce::MidiBuffer drumMidi;
+        drumMidi.addEvent(juce::MidiMessage::controllerEvent(1, 4, 96), 0);
+        drumMidi.addEvent(juce::MidiMessage::noteOn(1, 22, static_cast<juce::uint8>(112)), 0);
+        drums.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        drums.processBlock(drumBuffer, drumMidi);
+        const float drumPeak = peakFromFloatBuffer(drumBuffer, drumBuffer.getNumSamples());
+        const bool drumPass = bufferFiniteAndBounded(drumBuffer, 2.0f) && drumPeak > 1.0e-5f && drumPeak <= 2.0f;
+        builtInSmokePass = builtInSmokePass && drumPass;
+        builtInSmokeDetails.add("drums_roland_td_hat: pass=" + juce::String(drumPass ? "true" : "false")
+                                + ", peak=" + juce::String(drumPeak, 6));
+        drums.releaseResources();
+
+        addSuite("built_in_plugin_dsp_smoke_fixture", builtInSmokePass, builtInSmokeDetails.joinIntoString("; "));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        constexpr int fixtureBlockSize = 64;
+        const std::array<int, 7> chordNotes { 36, 43, 48, 52, 55, 60, 64 };
+
+        S13PianoInstrument piano;
+        piano.outputGain.store(-15.0f);
+        piano.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+
+        bool finite = true;
+        float peak = 0.0f;
+        const double startMs = juce::Time::getMillisecondCounterHiRes();
+        for (int block = 0; block < 48; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            juce::MidiBuffer midi;
+            if (block == 0)
+            {
+                for (const int note : chordNotes)
+                    midi.addEvent(juce::MidiMessage::noteOn(1, note, static_cast<juce::uint8>(127)), 0);
+            }
+            else if (block == 24)
+            {
+                for (const int note : chordNotes)
+                    midi.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+            }
+
+            piano.processBlock(buffer, midi);
+            finite = finite && bufferFiniteAndBounded(buffer, 1.05f);
+            peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+        piano.releaseResources();
+
+        const bool pianoHighVelocityPass = finite && peak > 1.0e-5f && peak <= 1.05f;
+        addSuite("piano_high_velocity_headroom_fixture", pianoHighVelocityPass,
+                 "peak=" + juce::String(peak, 6)
+                     + ", avg64SampleBlockMs=" + juce::String(elapsedMs / 48.0, 4));
+
+        TrackProcessor track;
+        track.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        track.setTrackType(TrackType::Instrument);
+        const bool fxAdded = track.addTrackFX(std::make_unique<S13PianoInstrument>(),
+                                              fixtureSampleRate,
+                                              fixtureBlockSize);
+        const bool livenessPass = fxAdded
+                               && track.needsProcessing(0.0, fixtureBlockSize, fixtureSampleRate, false);
+        track.releaseResources();
+        addSuite("built_in_fx_instrument_liveness_fixture", livenessPass,
+                 "fxAdded=" + juce::String(fxAdded ? "true" : "false")
+                     + ", needsProcessingWhenStopped="
+                     + juce::String(livenessPass ? "true" : "false"));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        auto runCompressorHPFProbe = [&] (float hpfFreq)
+        {
+            S13Compressor compressor;
+            compressor.threshold.store(-28.0f);
+            compressor.ratio.store(8.0f);
+            compressor.attack.store(1.0f);
+            compressor.release.store(90.0f);
+            compressor.sidechainHPF.store(hpfFreq);
+            compressor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            juce::MidiBuffer midi;
+            juce::AudioBuffer<float> probe(2, fixtureBlockSize);
+            for (int block = 0; block < 8; ++block)
+            {
+                for (int sample = 0; sample < fixtureBlockSize; ++sample)
+                {
+                    const double absoluteSample = static_cast<double>(block * fixtureBlockSize + sample);
+                    const float t = static_cast<float>(absoluteSample / fixtureSampleRate);
+                    const float value = std::sin(juce::MathConstants<float>::twoPi * 60.0f * t) * 0.75f;
+                    probe.setSample(0, sample, value);
+                    probe.setSample(1, sample, value);
+                }
+                compressor.processBlock(probe, midi);
+            }
+            const float gr = compressor.getCurrentGainReduction();
+            compressor.releaseResources();
+            return gr;
+        };
+
+        const float lowHpfGR = runCompressorHPFProbe(20.0f);
+        const float highHpfGR = runCompressorHPFProbe(500.0f);
+        const bool hpfPass = std::isfinite(lowHpfGR)
+                          && std::isfinite(highHpfGR)
+                          && lowHpfGR < -1.0f
+                          && highHpfGR > lowHpfGR + 1.0f;
+        addSuite("compressor_sidechain_hpf_fixture", hpfPass,
+                 "gr20Hz=" + juce::String(lowHpfGR, 4)
+                     + ", gr500Hz=" + juce::String(highHpfGR, 4));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+
+        S13EQ eq;
+        eq.bands[1].enabled.store(1.0f);
+        eq.bands[1].type.store(static_cast<float>(S13EQ::FilterType::Bell));
+        eq.bands[1].freq.store(1000.0f);
+        eq.bands[1].gain.store(6.0f);
+        eq.bands[1].q.store(1.0f);
+        eq.outputGain.store(0.0f);
+        eq.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        const std::vector<float> frequencies { 100.0f, 1000.0f, 10000.0f };
+        const auto response = eq.getMagnitudeResponse(frequencies);
+        const bool eqCurvePass = response.size() == frequencies.size()
+                              && response[1] > 4.5f
+                              && response[1] < 7.5f
+                              && std::abs(response[0]) < 2.0f
+                              && std::abs(response[2]) < 2.5f;
+        addSuite("built_in_eq_curve_fixture", eqCurvePass,
+                 "100Hz=" + juce::String(response.size() > 0 ? response[0] : -999.0f, 4)
+                     + ", 1kHz=" + juce::String(response.size() > 1 ? response[1] : -999.0f, 4)
+                     + ", 10kHz=" + juce::String(response.size() > 2 ? response[2] : -999.0f, 4));
+        eq.releaseResources();
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        juce::MidiBuffer midi;
+
+        auto fillSine = [] (juce::AudioBuffer<float>& buffer, double sampleRate, double frequency, float gain, int blockIndex)
+        {
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                const double absoluteSample = static_cast<double>(blockIndex * buffer.getNumSamples() + sample);
+                const float value = std::sin(juce::MathConstants<float>::twoPi * static_cast<float>(frequency * absoluteSample / sampleRate)) * gain;
+                for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                    buffer.setSample(ch, sample, value);
+            }
+        };
+
+        S13Compressor compressor;
+        compressor.threshold.store(-24.0f);
+        compressor.ratio.store(6.0f);
+        compressor.attack.store(1.0f);
+        compressor.release.store(120.0f);
+        compressor.detectorMode.store(2.0f);
+        compressor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        float compressorPeak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            fillSine(buffer, fixtureSampleRate, 440.0, 0.82f, block);
+            compressor.processBlock(buffer, midi);
+            compressorPeak = juce::jmax(compressorPeak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        const float compressorGR = compressor.getCurrentGainReduction();
+        compressor.releaseResources();
+
+        S13Gate gate;
+        gate.threshold.store(-26.0f);
+        gate.range.store(-60.0f);
+        gate.attackMs.store(0.1f);
+        gate.releaseMs.store(35.0f);
+        gate.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::AudioBuffer<float> gateBuffer(2, fixtureBlockSize);
+        fillSine(gateBuffer, fixtureSampleRate, 440.0, 0.01f, 0);
+        gate.processBlock(gateBuffer, midi);
+        const float gatePeak = peakFromFloatBuffer(gateBuffer, gateBuffer.getNumSamples());
+        const float gateGR = gate.getGainReductionDB();
+        gate.releaseResources();
+
+        S13Limiter limiter;
+        limiter.threshold.store(-6.0f);
+        limiter.ceiling.store(-1.0f);
+        limiter.lookaheadMs.store(5.0f);
+        limiter.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        float limiterPeak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            fillSine(buffer, fixtureSampleRate, 1000.0, 1.35f, block);
+            limiter.processBlock(buffer, midi);
+            limiterPeak = juce::jmax(limiterPeak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        const float limiterGR = limiter.getGainReductionDB();
+        limiter.releaseResources();
+
+        const bool dynamicsPass = std::isfinite(compressorGR)
+                               && std::isfinite(gateGR)
+                               && std::isfinite(limiterGR)
+                               && compressorGR < -1.0f
+                               && compressorPeak < 0.82f
+                               && gatePeak < 0.006f
+                               && gateGR < -6.0f
+                               && limiterPeak <= 0.94f
+                               && limiterGR < -1.0f;
+        addSuite("built_in_dynamics_gain_fixture", dynamicsPass,
+                 "compressorGR=" + juce::String(compressorGR, 4)
+                     + ", compressorPeak=" + juce::String(compressorPeak, 4)
+                     + ", gateGR=" + juce::String(gateGR, 4)
+                     + ", gatePeak=" + juce::String(gatePeak, 4)
+                     + ", limiterGR=" + juce::String(limiterGR, 4)
+                     + ", limiterPeak=" + juce::String(limiterPeak, 4));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Limiter limiter;
+        limiter.threshold.store(-3.0f);
+        limiter.ceiling.store(-1.0f);
+        limiter.lookaheadMs.store(5.0f);
+        limiter.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        float peak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float sign = (sample & 1) == 0 ? 1.0f : -1.0f;
+                buffer.setSample(0, sample, sign * 1.22f);
+                buffer.setSample(1, sample, -sign * 1.18f);
+            }
+            limiter.processBlock(buffer, midi);
+            peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        limiter.releaseResources();
+        const bool limiterPass = peak <= 0.94f && std::isfinite(peak);
+        addSuite("limiter_true_peak_ceiling_fixture", limiterPass,
+                 "peak=" + juce::String(peak, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Delay delay;
+        delay.tempoSync.store(1.0f);
+        delay.syncNoteL.store(4.0f); // 1/16 at default 120 BPM = 125 ms target
+        delay.syncNoteR.store(4.0f);
+        delay.mix.store(1.0f);
+        delay.feedback.store(0.0f);
+        delay.delayMode.store(0.0f);
+        delay.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        int peakSample = -1;
+        float peak = 0.0f;
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 0.45 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            if (block == 0)
+            {
+                buffer.setSample(0, 0, 1.0f);
+                buffer.setSample(1, 0, 1.0f);
+            }
+            delay.processBlock(buffer, midi);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float value = std::abs(buffer.getSample(0, sample));
+                if (value > peak)
+                {
+                    peak = value;
+                    peakSample = block * fixtureBlockSize + sample;
+                }
+            }
+        }
+        delay.releaseResources();
+        const double peakMs = peakSample >= 0 ? (static_cast<double>(peakSample) / fixtureSampleRate) * 1000.0 : -1.0;
+        const bool delayPass = peak > 0.2f && peakMs >= 100.0 && peakMs <= 300.0;
+        addSuite("delay_tempo_timing_fixture", delayPass,
+                 "peak=" + juce::String(peak, 6) + ", peakMs=" + juce::String(peakMs, 3));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Reverb reverb;
+        reverb.dryLevel.store(0.0f);
+        reverb.wetLevel.store(1.0f);
+        reverb.earlyLevel.store(0.4f);
+        reverb.decayTime.store(1.5f);
+        reverb.roomSize.store(0.6f);
+        reverb.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        double firstHalfEnergy = 0.0;
+        double secondHalfEnergy = 0.0;
+        float peakAfter100ms = 0.0f;
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 2.0 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            if (block == 0)
+            {
+                buffer.setSample(0, 0, 1.0f);
+                buffer.setSample(1, 0, 1.0f);
+            }
+            reverb.processBlock(buffer, midi);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const int absoluteSample = block * fixtureBlockSize + sample;
+                const float value = (std::abs(buffer.getSample(0, sample)) + std::abs(buffer.getSample(1, sample))) * 0.5f;
+                if (absoluteSample > static_cast<int>(fixtureSampleRate * 0.1))
+                    peakAfter100ms = juce::jmax(peakAfter100ms, value);
+                const double square = static_cast<double>(value) * static_cast<double>(value);
+                if (absoluteSample < static_cast<int>(fixtureSampleRate))
+                    firstHalfEnergy += square;
+                else
+                    secondHalfEnergy += square;
+            }
+        }
+        reverb.releaseResources();
+        const bool reverbPass = std::isfinite(firstHalfEnergy)
+                             && std::isfinite(secondHalfEnergy)
+                             && peakAfter100ms > 1.0e-5f
+                             && secondHalfEnergy < firstHalfEnergy * 1.15;
+        addSuite("reverb_tail_decay_fixture", reverbPass,
+                 "peakAfter100ms=" + juce::String(peakAfter100ms, 8)
+                     + ", firstHalfEnergy=" + juce::String(firstHalfEnergy, 8)
+                     + ", secondHalfEnergy=" + juce::String(secondHalfEnergy, 8));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Limiter limiter;
+        limiter.threshold.store(0.0f);
+        limiter.ceiling.store(0.0f);
+        limiter.lookaheadMs.store(6.0f);
+        limiter.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        int firstNonZeroSample = -1;
+        float peak = 0.0f;
+        const int expectedLatencySamples = static_cast<int>(std::round(fixtureSampleRate * 0.006));
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 0.08 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            if (block == 0)
+            {
+                buffer.setSample(0, 0, 0.35f);
+                buffer.setSample(1, 0, 0.35f);
+            }
+            limiter.processBlock(buffer, midi);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float value = std::abs(buffer.getSample(0, sample));
+                peak = juce::jmax(peak, value);
+                if (firstNonZeroSample < 0 && value > 1.0e-5f)
+                    firstNonZeroSample = block * fixtureBlockSize + sample;
+            }
+        }
+        limiter.releaseResources();
+
+        const bool latencyPass = firstNonZeroSample >= 0
+                              && std::abs(firstNonZeroSample - expectedLatencySamples) <= 2
+                              && peak > 0.25f
+                              && peak <= 0.36f;
+        addSuite("built_in_latency_tail_fixture", latencyPass,
+                 "limiterFirstNonZero=" + juce::String(firstNonZeroSample)
+                     + ", expectedLatencySamples=" + juce::String(expectedLatencySamples)
+                     + ", peak=" + juce::String(peak, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Delay delay;
+        delay.tempoSync.store(0.0f);
+        delay.delayTimeL.store(85.0f);
+        delay.delayTimeR.store(85.0f);
+        delay.feedback.store(0.18f);
+        delay.mix.store(1.0f);
+        delay.lpfFreq.store(18000.0f);
+        delay.hpfFreq.store(20.0f);
+        delay.delayMode.store(0.0f);
+        delay.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        bool finite = true;
+        bool hasSignal = false;
+        float peak = 0.0f;
+        float maxAdjacentStep = 0.0f;
+        float previousSample = 0.0f;
+        bool hasPreviousSample = false;
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 0.55 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            if (block == 12)
+            {
+                delay.delayTimeL.store(620.0f);
+                delay.delayTimeR.store(620.0f);
+            }
+
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const double absoluteSample = static_cast<double>(block * fixtureBlockSize + sample);
+                const float value = std::sin(juce::MathConstants<float>::twoPi * static_cast<float>(330.0 * absoluteSample / fixtureSampleRate)) * 0.28f;
+                buffer.setSample(0, sample, value);
+                buffer.setSample(1, sample, value);
+            }
+
+            delay.processBlock(buffer, midi);
+            finite = finite && bufferFiniteAndBounded(buffer, 1.5f);
+            peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+            hasSignal = hasSignal || peak > 1.0e-5f;
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float currentSampleValue = buffer.getSample(0, sample);
+                if (hasPreviousSample)
+                    maxAdjacentStep = juce::jmax(maxAdjacentStep, std::abs(currentSampleValue - previousSample));
+                previousSample = currentSampleValue;
+                hasPreviousSample = true;
+            }
+        }
+        delay.releaseResources();
+
+        const bool smoothingPass = finite
+                                && hasSignal
+                                && peak <= 1.2f
+                                && maxAdjacentStep < 0.72f;
+        addSuite("built_in_parameter_smoothing_fixture", smoothingPass,
+                 "finite=" + juce::String(finite ? "true" : "false")
+                     + ", peak=" + juce::String(peak, 6)
+                     + ", maxAdjacentStep=" + juce::String(maxAdjacentStep, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13PianoInstrument piano;
+        piano.releaseMs.store(160.0f);
+        piano.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+
+        midi.addEvent(juce::MidiMessage::controllerEvent(1, 64, 127), 0);
+        midi.addEvent(juce::MidiMessage::noteOn(1, 60, static_cast<juce::uint8>(112)), 0);
+        buffer.clear();
+        piano.processBlock(buffer, midi);
+        const float attackPeak = peakFromFloatBuffer(buffer, buffer.getNumSamples());
+
+        midi.clear();
+        midi.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+        buffer.clear();
+        piano.processBlock(buffer, midi);
+        const float sustainedPeak = peakFromFloatBuffer(buffer, buffer.getNumSamples());
+
+        midi.clear();
+        midi.addEvent(juce::MidiMessage::controllerEvent(1, 64, 0), 0);
+        float releaseTailPeak = 0.0f;
+        for (int block = 0; block < 40; ++block)
+        {
+            buffer.clear();
+            piano.processBlock(buffer, midi);
+            midi.clear();
+            releaseTailPeak = peakFromFloatBuffer(buffer, buffer.getNumSamples());
+        }
+        piano.releaseResources();
+
+        const bool pianoPass = attackPeak > 1.0e-5f
+                            && sustainedPeak > 1.0e-5f
+                            && releaseTailPeak < sustainedPeak * 0.6f;
+        addSuite("piano_sustain_voice_cleanup_fixture", pianoPass,
+                 "attackPeak=" + juce::String(attackPeak, 6)
+                     + ", sustainedPeak=" + juce::String(sustainedPeak, 6)
+                     + ", releaseTailPeak=" + juce::String(releaseTailPeak, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13PitchCorrector pitch;
+        const bool setOk = setBuiltInProcessorParam(&pitch, "mix", 0.42f)
+                         && setBuiltInProcessorParam(&pitch, "key", 7.0f)
+                         && setBuiltInProcessorParam(&pitch, "scale", 1.0f)
+                         && setBuiltInProcessorParam(&pitch, "retuneSpeed", 23.0f)
+                         && setBuiltInProcessorParam(&pitch, "transpose", 2.0f)
+                         && setBuiltInProcessorParam(&pitch, "midiOutputEnabled", 1.0f)
+                         && setBuiltInProcessorParam(&pitch, "midiOutputChannel", 2.0f);
+
+        auto schema = describeBuiltInProcessor(&pitch, "track", 3);
+        bool schemaOk = false;
+        int parameterCount = 0;
+        if (auto* schemaObj = schema.getDynamicObject())
+        {
+            const auto params = schemaObj->getProperty("parameters");
+            bool hasMix = false;
+            bool hasScale = false;
+            bool hasRetune = false;
+            bool hasMidiOut = false;
+            if (params.isArray())
+            {
+                parameterCount = params.getArray()->size();
+                for (const auto& param : *params.getArray())
+                {
+                    if (auto* paramObj = param.getDynamicObject())
+                    {
+                        const auto id = paramObj->getProperty("id").toString();
+                        hasMix = hasMix || id == "mix";
+                        hasScale = hasScale || id == "scale";
+                        hasRetune = hasRetune || id == "retuneSpeed";
+                        hasMidiOut = hasMidiOut || id == "midiOutputEnabled";
+                    }
+                }
+            }
+            schemaOk = schemaObj->getProperty("category").toString() == "Pitch"
+                    && schemaObj->getProperty("chain").toString() == "track"
+                    && static_cast<int>(schemaObj->getProperty("fxIndex")) == 3
+                    && hasMix
+                    && hasScale
+                    && hasRetune
+                    && hasMidiOut;
+        }
+
+        pitch.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        pitch.bypass.store(1.0f);
+        juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+        for (int sample = 0; sample < fixtureBlockSize; ++sample)
+        {
+            const float t = static_cast<float>(static_cast<double>(sample) / fixtureSampleRate);
+            const float left = std::sin(juce::MathConstants<float>::twoPi * 220.0f * t) * 0.25f;
+            const float right = std::sin(juce::MathConstants<float>::twoPi * 330.0f * t) * 0.18f;
+            buffer.setSample(0, sample, left);
+            buffer.setSample(1, sample, right);
+        }
+        juce::AudioBuffer<float> original;
+        original.makeCopyOf(buffer);
+        juce::MidiBuffer midi;
+        pitch.processBlock(buffer, midi);
+        float maxDiff = 0.0f;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                maxDiff = juce::jmax(maxDiff, std::abs(buffer.getSample(ch, sample) - original.getSample(ch, sample)));
+        pitch.releaseResources();
+
+        const bool pitchPass = setOk
+                            && schemaOk
+                            && maxDiff <= 1.0e-7f
+                            && pitch.getMapper().getKey() == 7
+                            && pitch.getMapper().getScale() == PitchMapper::Scale::Major
+                            && pitch.getMapper().getTranspose() == 2
+                            && pitch.midiOutputEnabled.load() >= 0.5f
+                            && std::abs(pitch.midiOutputChannel.load() - 2.0f) <= 0.01f;
+        addSuite("pitch_correct_schema_bypass_fixture", pitchPass,
+                 "setOk=" + juce::String(setOk ? "true" : "false")
+                     + ", schemaOk=" + juce::String(schemaOk ? "true" : "false")
+                     + ", parameterCount=" + juce::String(parameterCount)
+                     + ", maxBypassDiff=" + juce::String(maxDiff, 9));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+
+        struct SynthProbe
+        {
+            float peak = 0.0f;
+            float estimatedHz = 0.0f;
+            float releaseTailPeak = 0.0f;
+            bool finite = true;
+        };
+
+        auto estimatePositiveCrossingHz = [] (const std::vector<float>& samples, double sampleRate, double startSec, double endSec)
+        {
+            const int start = juce::jlimit(1, static_cast<int>(samples.size()) - 1, static_cast<int>(startSec * sampleRate));
+            const int end = juce::jlimit(start + 1, static_cast<int>(samples.size()), static_cast<int>(endSec * sampleRate));
+            int crossings = 0;
+            for (int i = start; i < end; ++i)
+                if (samples[static_cast<size_t>(i - 1)] <= 0.0f && samples[static_cast<size_t>(i)] > 0.0f)
+                    ++crossings;
+            const double duration = static_cast<double>(end - start) / sampleRate;
+            return duration > 0.0 ? static_cast<float>(static_cast<double>(crossings) / duration) : 0.0f;
+        };
+
+        auto renderSynthProbe = [&] (int pitchWheelValue, int modWheelValue, bool releaseNote)
+        {
+            S13BasicSynthInstrument synth;
+            synth.detuneCents.store(0.0f);
+            synth.subLevel.store(0.0f);
+            synth.noiseLevel.store(0.0f);
+            synth.releaseMs.store(95.0f);
+            synth.outputGain.store(-12.0f);
+            synth.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+
+            SynthProbe probe;
+            std::vector<float> captured;
+            const int totalBlocks = static_cast<int>(std::ceil(fixtureSampleRate * 0.45 / static_cast<double>(fixtureBlockSize)));
+            captured.reserve(static_cast<size_t>(totalBlocks * fixtureBlockSize));
+            const int noteOffSample = static_cast<int>(fixtureSampleRate * 0.18);
+            juce::MidiBuffer midi;
+            for (int block = 0; block < totalBlocks; ++block)
+            {
+                juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+                buffer.clear();
+                midi.clear();
+                if (block == 0)
+                {
+                    midi.addEvent(juce::MidiMessage::pitchWheel(1, pitchWheelValue), 0);
+                    midi.addEvent(juce::MidiMessage::controllerEvent(1, 1, modWheelValue), 0);
+                    midi.addEvent(juce::MidiMessage::noteOn(1, 69, static_cast<juce::uint8>(112)), 0);
+                }
+                if (releaseNote)
+                {
+                    const int blockStart = block * fixtureBlockSize;
+                    if (noteOffSample >= blockStart && noteOffSample < blockStart + fixtureBlockSize)
+                        midi.addEvent(juce::MidiMessage::noteOff(1, 69), noteOffSample - blockStart);
+                }
+
+                synth.processBlock(buffer, midi);
+                probe.peak = juce::jmax(probe.peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+                for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                {
+                    const float value = buffer.getSample(0, sample);
+                    probe.finite = probe.finite && std::isfinite(value);
+                    captured.push_back(value);
+                }
+            }
+            synth.releaseResources();
+            probe.estimatedHz = estimatePositiveCrossingHz(captured, fixtureSampleRate, 0.08, 0.16);
+            const int tailStart = juce::jlimit(0, static_cast<int>(captured.size()), static_cast<int>(fixtureSampleRate * 0.36));
+            for (int i = tailStart; i < static_cast<int>(captured.size()); ++i)
+                probe.releaseTailPeak = juce::jmax(probe.releaseTailPeak, std::abs(captured[static_cast<size_t>(i)]));
+            return probe;
+        };
+
+        const auto normal = renderSynthProbe(8192, 0, true);
+        const auto bent = renderSynthProbe(16383, 0, false);
+        const auto modulated = renderSynthProbe(8192, 127, false);
+        const bool synthPass = normal.finite
+                            && bent.finite
+                            && modulated.finite
+                            && normal.peak > 1.0e-5f
+                            && normal.estimatedHz > 400.0f
+                            && normal.estimatedHz < 480.0f
+                            && bent.estimatedHz > normal.estimatedHz * 1.08f
+                            && bent.estimatedHz < normal.estimatedHz * 1.17f
+                            && modulated.peak > 1.0e-5f
+                            && normal.releaseTailPeak < normal.peak * 0.35f;
+        addSuite("basic_synth_midi_pitch_fixture", synthPass,
+                 "normalHz=" + juce::String(normal.estimatedHz, 3)
+                     + ", bentHz=" + juce::String(bent.estimatedHz, 3)
+                     + ", normalPeak=" + juce::String(normal.peak, 6)
+                     + ", modPeak=" + juce::String(modulated.peak, 6)
+                     + ", releaseTailPeak=" + juce::String(normal.releaseTailPeak, 6));
     }
 
     const juce::String midiFixtureTrackId = "midi_scheduler_regression_" + juce::Uuid().toString();
@@ -7155,7 +7943,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     const juce::File midiExportFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
         .getChildFile("studio13_midi_export_fixture_" + juce::Uuid().toString() + ".mid");
     auto midiExportTracks = juce::JSON::parse(
-        R"json([{"name":"Export Fixture","clips":[{"startTime":0.5,"duration":1.0,"events":[{"type":"programChange","timestamp":0.0,"value":7,"channel":3},{"type":"cc","timestamp":0.04,"controller":0,"value":3,"channel":3},{"type":"cc","timestamp":0.05,"controller":32,"value":45,"channel":3},{"type":"noteOn","timestamp":0.1,"note":60,"velocity":101,"channel":3},{"type":"cc","timestamp":0.12,"controller":1,"value":96,"channel":3},{"type":"cc","timestamp":0.12,"controller":33,"value":12,"channel":3},{"type":"pitchBend","timestamp":0.15,"value":12288,"channel":3},{"type":"channelPressure","timestamp":0.18,"value":55,"channel":3},{"type":"polyPressure","timestamp":0.2,"note":60,"value":66,"channel":3},{"type":"noteOff","timestamp":0.45,"note":60,"releaseVelocity":40,"channel":3}]}]}])json");
+        R"json([{"name":"Export Fixture","clips":[{"startTime":0.5,"duration":1.0,"events":[{"type":"programChange","timestamp":0.0,"value":7,"channel":3},{"type":"cc","timestamp":0.04,"controller":0,"value":3,"channel":3},{"type":"cc","timestamp":0.05,"controller":32,"value":45,"channel":3},{"type":"noteOn","timestamp":0.1,"note":60,"velocity":101,"channel":3},{"type":"cc","timestamp":0.12,"controller":1,"value":96,"channel":3},{"type":"cc","timestamp":0.12,"controller":33,"value":12,"channel":3},{"type":"pitchBend","timestamp":0.15,"value":12288,"channel":3},{"type":"channelPressure","timestamp":0.18,"value":55,"channel":3},{"type":"polyPressure","timestamp":0.2,"note":60,"value":66,"channel":3},{"type":"noteOn","timestamp":0.25,"note":64,"velocity":0.8,"channel":3},{"type":"noteOff","timestamp":0.35,"note":64,"velocity":0,"channel":3},{"type":"noteOff","timestamp":0.45,"note":60,"releaseVelocity":40,"channel":3}]}]}])json");
     const bool midiExportOk = exportProjectMIDI(midiExportFile.getFullPathName(), midiExportTracks, 120.0);
     bool midiReadable = false;
     bool hasExportNote = false;
@@ -7168,6 +7956,9 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     bool hasExportChannelPressure = false;
     bool hasExportPolyPressure = false;
     bool hasExportNoteOff = false;
+    bool hasExportScaledVelocity = false;
+    bool roundTripImportOk = false;
+    bool roundTripHasNote = false;
     int midiTrackCount = 0;
     if (midiExportOk && midiExportFile.existsAsFile())
     {
@@ -7192,6 +7983,9 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
                     const auto& message = holder->message;
                     if (message.isNoteOn() && message.getChannel() == 3 && message.getNoteNumber() == 60)
                         hasExportNote = true;
+                    else if (message.isNoteOn() && message.getChannel() == 3 && message.getNoteNumber() == 64
+                             && message.getVelocity() >= 101 && message.getVelocity() <= 103)
+                        hasExportScaledVelocity = true;
                     else if (message.isNoteOff() && message.getChannel() == 3 && message.getNoteNumber() == 60)
                         hasExportNoteOff = true;
                     else if (message.isController() && message.getChannel() == 3 && message.getControllerNumber() == 0 && message.getControllerValue() == 3)
@@ -7214,6 +8008,37 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
                 }
             }
         }
+
+        const auto roundTrip = importMIDIFile(midiExportFile.getFullPathName());
+        if (auto* roundTripObj = roundTrip.getDynamicObject())
+        {
+            if (auto* importedTracks = roundTripObj->getProperty("tracks").getArray())
+            {
+                roundTripImportOk = static_cast<bool>(roundTripObj->getProperty("success")) && importedTracks->size() > 0;
+                for (const auto& importedTrackVar : *importedTracks)
+                {
+                    auto* importedTrackObj = importedTrackVar.getDynamicObject();
+                    if (importedTrackObj == nullptr)
+                        continue;
+
+                    if (auto* importedEvents = importedTrackObj->getProperty("events").getArray())
+                    {
+                        for (const auto& importedEventVar : *importedEvents)
+                        {
+                            auto* importedEventObj = importedEventVar.getDynamicObject();
+                            if (importedEventObj == nullptr)
+                                continue;
+
+                            if (importedEventObj->getProperty("type").toString() == "noteOn"
+                                && static_cast<int>(importedEventObj->getProperty("note")) == 60)
+                            {
+                                roundTripHasNote = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     midiExportPass = midiExportOk
@@ -7228,7 +8053,10 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         && hasExportPitch
         && hasExportProgram
         && hasExportChannelPressure
-        && hasExportPolyPressure;
+        && hasExportPolyPressure
+        && hasExportScaledVelocity
+        && roundTripImportOk
+        && roundTripHasNote;
     midiExportDetail = "exportOk=" + juce::String(midiExportOk ? "true" : "false")
         + ", readable=" + juce::String(midiReadable ? "true" : "false")
         + ", tracks=" + juce::String(midiTrackCount)
@@ -7241,7 +8069,10 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         + ", pitchBend=" + juce::String(hasExportPitch ? "true" : "false")
         + ", program=" + juce::String(hasExportProgram ? "true" : "false")
         + ", channelPressure=" + juce::String(hasExportChannelPressure ? "true" : "false")
-        + ", polyPressure=" + juce::String(hasExportPolyPressure ? "true" : "false");
+        + ", polyPressure=" + juce::String(hasExportPolyPressure ? "true" : "false")
+        + ", scaledVelocity=" + juce::String(hasExportScaledVelocity ? "true" : "false")
+        + ", roundTripImport=" + juce::String(roundTripImportOk ? "true" : "false")
+        + ", roundTripNote=" + juce::String(roundTripHasNote ? "true" : "false");
     midiExportFile.deleteFile();
     addSuite("midi_export_fixture", midiExportPass, midiExportDetail);
 
@@ -7560,6 +8391,9 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
 
 static std::unique_ptr<juce::AudioProcessor> createBuiltInEffect(const juce::String& name)
 {
+    if (name == "Studio13 Basic Synth" || name == "OpenStudio Basic Synth") return std::make_unique<S13BasicSynthInstrument>();
+    if (name == "Studio13 Piano" || name == "OpenStudio Piano")        return std::make_unique<S13PianoInstrument>();
+    if (name == "Studio13 Drums" || name == "OpenStudio Drums")        return std::make_unique<S13DrumInstrument>();
     if (name == "S13 EQ" || name == "OpenStudio EQ")                   return std::make_unique<S13EQ>();
     if (name == "S13 Compressor" || name == "OpenStudio Compressor")   return std::make_unique<S13Compressor>();
     if (name == "S13 Gate" || name == "OpenStudio Gate")               return std::make_unique<S13Gate>();
@@ -7570,6 +8404,662 @@ static std::unique_ptr<juce::AudioProcessor> createBuiltInEffect(const juce::Str
     if (name == "S13 Saturator" || name == "OpenStudio Saturator")     return std::make_unique<S13Saturator>();
     if (name == "S13 Pitch Correct" || name == "OpenStudio Pitch Correct") return std::make_unique<S13PitchCorrector>();
     return nullptr;
+}
+
+static juce::var makeBuiltInParam(const juce::String& id,
+                                  const juce::String& label,
+                                  const juce::String& type,
+                                  float value,
+                                  float minValue,
+                                  float maxValue,
+                                  float defaultValue,
+                                  const juce::String& unit = {},
+                                  const juce::String& graphRole = {},
+                                  juce::Array<juce::var> enumOptions = {})
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("id", id);
+    obj->setProperty("label", label);
+    obj->setProperty("type", type);
+    obj->setProperty("value", value);
+    obj->setProperty("min", minValue);
+    obj->setProperty("max", maxValue);
+    obj->setProperty("defaultValue", defaultValue);
+    obj->setProperty("unit", unit);
+    obj->setProperty("automatable", true);
+    if (graphRole.isNotEmpty())
+        obj->setProperty("graphRole", graphRole);
+    if (!enumOptions.isEmpty())
+        obj->setProperty("enumOptions", enumOptions);
+    return juce::var(obj);
+}
+
+static juce::Array<juce::var> makeEnumOptions(std::initializer_list<const char*> names)
+{
+    juce::Array<juce::var> options;
+    int index = 0;
+    for (auto* name : names)
+    {
+        auto* option = new juce::DynamicObject();
+        option->setProperty("value", static_cast<float>(index));
+        option->setProperty("label", juce::String(name));
+        options.add(juce::var(option));
+        ++index;
+    }
+    return options;
+}
+
+static juce::Array<juce::var> makeFloatVarArray(const std::vector<float>& values)
+{
+    juce::Array<juce::var> result;
+    for (float value : values)
+        result.add(value);
+    return result;
+}
+
+static juce::var makeBuiltInSchemaObject(const juce::String& name,
+                                         const juce::String& category,
+                                         const juce::String& chainType,
+                                         int fxIndex,
+                                         const juce::Array<juce::var>& params)
+{
+    auto* root = new juce::DynamicObject();
+    root->setProperty("schemaVersion", 1);
+    root->setProperty("name", name);
+    root->setProperty("category", category);
+    root->setProperty("chain", chainType);
+    root->setProperty("fxIndex", fxIndex);
+    root->setProperty("parameters", params);
+    return juce::var(root);
+}
+
+static void addToggleParam(juce::Array<juce::var>& params,
+                           const juce::String& id,
+                           const juce::String& label,
+                           float value,
+                           float defaultValue,
+                           const juce::String& graphRole = {})
+{
+    params.add(makeBuiltInParam(id, label, "toggle", value, 0.0f, 1.0f, defaultValue, {}, graphRole));
+}
+
+static void addContinuousParam(juce::Array<juce::var>& params,
+                               const juce::String& id,
+                               const juce::String& label,
+                               float value,
+                               float minValue,
+                               float maxValue,
+                               float defaultValue,
+                               const juce::String& unit = {},
+                               const juce::String& graphRole = {})
+{
+    params.add(makeBuiltInParam(id, label, "continuous", value, minValue, maxValue, defaultValue, unit, graphRole));
+}
+
+static void addEnumParam(juce::Array<juce::var>& params,
+                         const juce::String& id,
+                         const juce::String& label,
+                         float value,
+                         float defaultValue,
+                         const juce::Array<juce::var>& enumOptions,
+                         const juce::String& graphRole = {})
+{
+    params.add(makeBuiltInParam(id, label, "enum", value, 0.0f,
+                                static_cast<float>(juce::jmax(0, enumOptions.size() - 1)),
+                                defaultValue, {}, graphRole, enumOptions));
+}
+
+static bool storeClamped(std::atomic<float>& target, float value, float minValue, float maxValue)
+{
+    target.store(juce::jlimit(minValue, maxValue, value), std::memory_order_relaxed);
+    return true;
+}
+
+static juce::var describeFallbackInstrument(TrackProcessor* track, const juce::String& chainType, int fxIndex)
+{
+    juce::Array<juce::var> params;
+    if (track == nullptr)
+        return makeBuiltInSchemaObject("OpenStudio Basic Synth", "Instrument", chainType, fxIndex, params);
+
+    const auto instrumentModes = makeEnumOptions({ "Basic Synth", "Piano", "Drums" });
+    const auto drumKits = makeEnumOptions({ "Studio", "Rock", "Electronic" });
+    const int mode = juce::jlimit(0, 2, static_cast<int>(std::round(track->getFallbackInstrumentParam("instrumentMode"))));
+    addEnumParam(params, "instrumentMode", "Instrument", static_cast<float>(mode), 0.0f, instrumentModes, "instrument");
+    addContinuousParam(params, "attackMs", "Attack", track->getFallbackInstrumentParam("attackMs"), 0.5f, 2000.0f, 8.0f, "ms", "envelope");
+    addContinuousParam(params, "releaseMs", "Release", track->getFallbackInstrumentParam("releaseMs"), 5.0f, 5000.0f, 180.0f, "ms", "envelope");
+    addContinuousParam(params, "brightness", "Brightness", track->getFallbackInstrumentParam("brightness"), 0.0f, 1.0f, 0.62f, {}, "tone");
+    addContinuousParam(params, "detuneCents", "Detune", track->getFallbackInstrumentParam("detuneCents"), 0.0f, 35.0f, 7.0f, "ct", "oscillator");
+    addContinuousParam(params, "subLevel", "Sub", track->getFallbackInstrumentParam("subLevel"), 0.0f, 0.8f, 0.18f, {}, "oscillator");
+    addContinuousParam(params, "noiseLevel", "Air", track->getFallbackInstrumentParam("noiseLevel"), 0.0f, 0.25f, 0.015f, {}, "oscillator");
+    addContinuousParam(params, "pianoTone", "Piano Tone", track->getFallbackInstrumentParam("pianoTone"), 0.0f, 1.0f, 0.58f, {}, "piano");
+    addContinuousParam(params, "pianoBody", "Piano Body", track->getFallbackInstrumentParam("pianoBody"), 0.0f, 1.0f, 0.72f, {}, "piano");
+    addEnumParam(params, "drumKit", "Drum Kit", track->getFallbackInstrumentParam("drumKit"), 0.0f, drumKits, "drums");
+    addContinuousParam(params, "drumTuning", "Drum Tuning", track->getFallbackInstrumentParam("drumTuning"), -12.0f, 12.0f, 0.0f, "st", "drums");
+    addContinuousParam(params, "drumAmbience", "Drum Room", track->getFallbackInstrumentParam("drumAmbience"), 0.0f, 1.0f, 0.18f, {}, "drums");
+    addContinuousParam(params, "outputGainDb", "Output", track->getFallbackInstrumentParam("outputGainDb"), -36.0f, 0.0f, -15.0f, "dB", "output");
+
+    const juce::String name = track->hasFallbackSamplerSample()
+        ? "OpenStudio Basic Sampler"
+        : (mode == 1 ? "OpenStudio Piano" : (mode == 2 ? "OpenStudio Drums" : "OpenStudio Basic Synth"));
+    return makeBuiltInSchemaObject(name,
+                                   "Instrument", chainType, fxIndex, params);
+}
+
+static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
+                                          const juce::String& chainType,
+                                          int fxIndex)
+{
+    juce::Array<juce::var> params;
+    if (processor == nullptr)
+        return makeBuiltInSchemaObject({}, {}, chainType, fxIndex, params);
+
+    if (auto* synth = dynamic_cast<S13BasicSynthInstrument*>(processor))
+    {
+        addContinuousParam(params, "attackMs", "Attack", synth->attackMs.load(), 0.5f, 2000.0f, 8.0f, "ms", "envelope");
+        addContinuousParam(params, "releaseMs", "Release", synth->releaseMs.load(), 5.0f, 5000.0f, 180.0f, "ms", "envelope");
+        addContinuousParam(params, "brightness", "Brightness", synth->brightness.load(), 0.0f, 1.0f, 0.62f, {}, "tone");
+        addContinuousParam(params, "detuneCents", "Detune", synth->detuneCents.load(), 0.0f, 35.0f, 7.0f, "ct", "oscillator");
+        addContinuousParam(params, "subLevel", "Sub", synth->subLevel.load(), 0.0f, 0.8f, 0.18f, {}, "oscillator");
+        addContinuousParam(params, "noiseLevel", "Air", synth->noiseLevel.load(), 0.0f, 0.25f, 0.015f, {}, "oscillator");
+        addContinuousParam(params, "outputGain", "Output", synth->outputGain.load(), -36.0f, 0.0f, -15.0f, "dB", "output");
+        return makeBuiltInSchemaObject(synth->getName(), "Instrument", chainType, fxIndex, params);
+    }
+
+    if (auto* piano = dynamic_cast<S13PianoInstrument*>(processor))
+    {
+        addEnumParam(params, "model", "Model", piano->model.load(), 0.0f, makeEnumOptions({ "Studio Grand", "Bright Upright", "Soft Felt" }), "character");
+        addContinuousParam(params, "tone", "Tone", piano->tone.load(), 0.0f, 1.0f, 0.58f, {}, "tone");
+        addContinuousParam(params, "body", "Body", piano->body.load(), 0.0f, 1.0f, 0.72f, {}, "body");
+        addContinuousParam(params, "hammer", "Hammer", piano->hammer.load(), 0.0f, 1.0f, 0.42f, {}, "character");
+        addContinuousParam(params, "resonance", "Resonance", piano->resonance.load(), 0.0f, 1.0f, 0.38f, {}, "body");
+        addContinuousParam(params, "stereoWidth", "Width", piano->stereoWidth.load(), 0.0f, 1.0f, 0.62f, {}, "width");
+        addContinuousParam(params, "releaseMs", "Release", piano->releaseMs.load(), 80.0f, 5000.0f, 950.0f, "ms", "envelope");
+        addContinuousParam(params, "outputGain", "Output", piano->outputGain.load(), -36.0f, 0.0f, -15.0f, "dB", "output");
+        return makeBuiltInSchemaObject(piano->getName(), "Instrument", chainType, fxIndex, params);
+    }
+
+    if (auto* drums = dynamic_cast<S13DrumInstrument*>(processor))
+    {
+        addEnumParam(params, "kit", "Kit", drums->kit.load(), 0.0f, makeEnumOptions({ "Studio", "Rock", "Electronic" }), "drums");
+        addEnumParam(params, "mapPreset", "MIDI Map", drums->mapPreset.load(), 0.0f, makeEnumOptions({ "GM", "Roland TD" }), "drums");
+        addContinuousParam(params, "tuning", "Tuning", drums->tuning.load(), -12.0f, 12.0f, 0.0f, "st", "drums");
+        addContinuousParam(params, "ambience", "Room", drums->ambience.load(), 0.0f, 1.0f, 0.18f, {}, "space");
+        addContinuousParam(params, "hihatTightness", "Hat Tightness", drums->hihatTightness.load(), 0.0f, 1.0f, 0.65f, {}, "drums");
+        addContinuousParam(params, "punch", "Punch", drums->punch.load(), 0.0f, 1.0f, 0.55f, {}, "character");
+        addContinuousParam(params, "stereoWidth", "Width", drums->stereoWidth.load(), 0.0f, 1.0f, 0.7f, {}, "width");
+        addContinuousParam(params, "velocityCurve", "Velocity Curve", drums->velocityCurve.load(), -1.0f, 1.0f, 0.0f, {}, "drums");
+        addContinuousParam(params, "outputGain", "Output", drums->outputGain.load(), -36.0f, 0.0f, -10.0f, "dB", "output");
+        return makeBuiltInSchemaObject(drums->getName(), "Instrument", chainType, fxIndex, params);
+    }
+
+    if (auto* eq = dynamic_cast<S13EQ*>(processor))
+    {
+        const auto types = makeEnumOptions({ "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Notch", "Band Pass" });
+        const auto slopes = makeEnumOptions({ "6 dB/oct", "12 dB/oct", "24 dB/oct", "48 dB/oct" });
+        for (int band = 0; band < S13EQ::numBands; ++band)
+        {
+            const auto prefix = "band" + juce::String(band) + ".";
+            const auto bandLabel = "Band " + juce::String(band + 1) + " ";
+            addToggleParam(params, prefix + "enabled", bandLabel + "On", eq->bands[band].enabled.load(), band == 0 || band == S13EQ::numBands - 1 ? 0.0f : 1.0f, "eqBand");
+            addEnumParam(params, prefix + "type", bandLabel + "Type", eq->bands[band].type.load(), 0.0f, types, "eqBand");
+            addContinuousParam(params, prefix + "freq", bandLabel + "Freq", eq->bands[band].freq.load(), 20.0f, 20000.0f, 1000.0f, "Hz", "eqBand");
+            addContinuousParam(params, prefix + "gain", bandLabel + "Gain", eq->bands[band].gain.load(), -30.0f, 30.0f, 0.0f, "dB", "eqBand");
+            addContinuousParam(params, prefix + "q", bandLabel + "Q", eq->bands[band].q.load(), 0.1f, 30.0f, 1.0f, {}, "eqBand");
+            addEnumParam(params, prefix + "slope", bandLabel + "Slope", eq->bands[band].slope.load(), 1.0f, slopes, "eqBand");
+            addToggleParam(params, prefix + "dynamicEnabled", bandLabel + "Dyn", eq->bands[band].dynamicEnabled.load(), 0.0f, "dynamic");
+            addContinuousParam(params, prefix + "dynamicThreshold", bandLabel + "Dyn Thresh", eq->bands[band].dynamicThreshold.load(), -80.0f, 0.0f, -24.0f, "dB", "dynamic");
+            addContinuousParam(params, prefix + "dynamicRange", bandLabel + "Dyn Range", eq->bands[band].dynamicRange.load(), -24.0f, 24.0f, 0.0f, "dB", "dynamic");
+            addContinuousParam(params, prefix + "dynamicAttack", bandLabel + "Dyn Attack", eq->bands[band].dynamicAttack.load(), 0.2f, 250.0f, 10.0f, "ms", "dynamic");
+            addContinuousParam(params, prefix + "dynamicRelease", bandLabel + "Dyn Release", eq->bands[band].dynamicRelease.load(), 5.0f, 2000.0f, 150.0f, "ms", "dynamic");
+        }
+        addContinuousParam(params, "outputGain", "Output", eq->outputGain.load(), -12.0f, 12.0f, 0.0f, "dB", "output");
+        addToggleParam(params, "autoGain", "Auto Gain", eq->autoGain.load(), 0.0f, "output");
+        addEnumParam(params, "auditionBand", "Audition", eq->auditionBand.load(), 0.0f,
+                     makeEnumOptions({ "Off", "Band 1", "Band 2", "Band 3", "Band 4", "Band 5", "Band 6", "Band 7", "Band 8" }), "eqBand");
+        addEnumParam(params, "stereoMode", "Processing", eq->stereoMode.load(), 0.0f, makeEnumOptions({ "Stereo", "Mid", "Side" }), "routing");
+
+        auto schema = makeBuiltInSchemaObject(eq->getName(), "EQ", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            std::vector<float> frequencies;
+            frequencies.reserve(96);
+            for (int i = 0; i < 96; ++i)
+            {
+                const float t = static_cast<float>(i) / 95.0f;
+                frequencies.push_back(20.0f * std::pow(1000.0f, t));
+            }
+
+            auto response = eq->getMagnitudeResponse(frequencies);
+            auto spectrum = eq->getSpectrumData();
+            std::vector<float> dynamicGains;
+            dynamicGains.reserve(S13EQ::numBands);
+            for (int band = 0; band < S13EQ::numBands; ++band)
+                dynamicGains.push_back(eq->getBandDynamicGainDB(band));
+            const double sr = eq->getSampleRate() > 0.0 ? eq->getSampleRate() : 44100.0;
+            std::vector<float> preSpectrum;
+            std::vector<float> postSpectrum;
+            preSpectrum.reserve(frequencies.size());
+            postSpectrum.reserve(frequencies.size());
+            for (float freq : frequencies)
+            {
+                const int bin = juce::jlimit(0, S13EQ::fftSize / 2 - 1,
+                                             static_cast<int>(std::round((static_cast<double>(freq) / (sr * 0.5)) * static_cast<double>(S13EQ::fftSize / 2 - 1))));
+                preSpectrum.push_back(spectrum.ready ? spectrum.preEQ[static_cast<size_t>(bin)] : -100.0f);
+                postSpectrum.push_back(spectrum.ready ? spectrum.postEQ[static_cast<size_t>(bin)] : -100.0f);
+            }
+
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("frequencies", makeFloatVarArray(frequencies));
+            viz->setProperty("responseDb", makeFloatVarArray(response));
+            viz->setProperty("spectrumPreDb", makeFloatVarArray(preSpectrum));
+            viz->setProperty("spectrumPostDb", makeFloatVarArray(postSpectrum));
+            viz->setProperty("dynamicGainDb", makeFloatVarArray(dynamicGains));
+            viz->setProperty("spectrumReady", spectrum.ready);
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* compressor = dynamic_cast<S13Compressor*>(processor))
+    {
+        addContinuousParam(params, "threshold", "Threshold", compressor->threshold.load(), -60.0f, 0.0f, 0.0f, "dB", "dynamics");
+        addContinuousParam(params, "ratio", "Ratio", compressor->ratio.load(), 1.0f, 20.0f, 1.0f, ":1", "dynamics");
+        addContinuousParam(params, "attack", "Attack", compressor->attack.load(), 0.1f, 100.0f, 10.0f, "ms", "dynamics");
+        addContinuousParam(params, "release", "Release", compressor->release.load(), 10.0f, 2000.0f, 100.0f, "ms", "dynamics");
+        addContinuousParam(params, "knee", "Knee", compressor->knee.load(), 0.0f, 24.0f, 0.0f, "dB", "dynamics");
+        addContinuousParam(params, "makeupGain", "Makeup", compressor->makeupGain.load(), 0.0f, 36.0f, 0.0f, "dB", "output");
+        addContinuousParam(params, "mix", "Mix", compressor->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addEnumParam(params, "style", "Style", compressor->style.load(), 0.0f, makeEnumOptions({ "Clean", "Punch", "Opto", "FET", "VCA" }), "character");
+        addToggleParam(params, "autoMakeup", "Auto Makeup", compressor->autoMakeup.load(), 0.0f, "output");
+        addToggleParam(params, "autoRelease", "Auto Release", compressor->autoRelease.load(), 0.0f, "dynamics");
+        addContinuousParam(params, "sidechainHPF", "SC HPF", compressor->sidechainHPF.load(), 20.0f, 500.0f, 20.0f, "Hz", "sidechain");
+        addContinuousParam(params, "lookaheadMs", "Lookahead", compressor->lookaheadMs.load(), 0.0f, 20.0f, 0.0f, "ms", "dynamics");
+        addEnumParam(params, "detectorMode", "Detector", compressor->detectorMode.load(), 0.0f, makeEnumOptions({ "Peak", "RMS", "Auto" }), "detection");
+        addContinuousParam(params, "stereoLink", "Stereo Link", compressor->stereoLink.load(), 0.0f, 1.0f, 1.0f, {}, "detection");
+        auto schema = makeBuiltInSchemaObject(compressor->getName(), "Dynamics", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("gainReductionDb", compressor->getCurrentGainReduction());
+            viz->setProperty("inputLevelDb", compressor->getInputLevel());
+            viz->setProperty("outputLevelDb", compressor->getOutputLevel());
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* gate = dynamic_cast<S13Gate*>(processor))
+    {
+        addContinuousParam(params, "threshold", "Threshold", gate->threshold.load(), -80.0f, 0.0f, -40.0f, "dB", "dynamics");
+        addContinuousParam(params, "attackMs", "Attack", gate->attackMs.load(), 0.01f, 50.0f, 1.0f, "ms", "dynamics");
+        addContinuousParam(params, "holdMs", "Hold", gate->holdMs.load(), 0.0f, 500.0f, 50.0f, "ms", "dynamics");
+        addContinuousParam(params, "releaseMs", "Release", gate->releaseMs.load(), 5.0f, 2000.0f, 50.0f, "ms", "dynamics");
+        addContinuousParam(params, "range", "Range", gate->range.load(), -80.0f, 0.0f, -80.0f, "dB", "dynamics");
+        addContinuousParam(params, "hysteresis", "Hysteresis", gate->hysteresis.load(), 0.0f, 20.0f, 0.0f, "dB", "dynamics");
+        addContinuousParam(params, "sidechainHPF", "SC HPF", gate->sidechainHPF.load(), 20.0f, 2000.0f, 20.0f, "Hz", "sidechain");
+        addContinuousParam(params, "sidechainLPF", "SC LPF", gate->sidechainLPF.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "sidechain");
+        addContinuousParam(params, "mix", "Mix", gate->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addEnumParam(params, "detectorMode", "Detector", gate->detectorMode.load(), 0.0f, makeEnumOptions({ "Peak", "RMS", "Auto" }), "detection");
+        auto schema = makeBuiltInSchemaObject(gate->getName(), "Dynamics", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("gainReductionDb", gate->getGainReductionDB());
+            viz->setProperty("gateOpen", gate->isGateOpen());
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* limiter = dynamic_cast<S13Limiter*>(processor))
+    {
+        addContinuousParam(params, "threshold", "Threshold", limiter->threshold.load(), -20.0f, 0.0f, -1.0f, "dB", "dynamics");
+        addContinuousParam(params, "releaseMs", "Release", limiter->releaseMs.load(), 10.0f, 500.0f, 100.0f, "ms", "dynamics");
+        addContinuousParam(params, "ceiling", "Ceiling", limiter->ceiling.load(), -3.0f, 0.0f, 0.0f, "dB", "output");
+        addContinuousParam(params, "lookaheadMs", "Lookahead", limiter->lookaheadMs.load(), 0.0f, 20.0f, 5.0f, "ms", "dynamics");
+        auto schema = makeBuiltInSchemaObject(limiter->getName(), "Dynamics", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("gainReductionDb", limiter->getGainReductionDB());
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* delay = dynamic_cast<S13Delay*>(processor))
+    {
+        addContinuousParam(params, "delayTimeL", "Delay L", delay->delayTimeL.load(), 1.0f, 2000.0f, 250.0f, "ms", "time");
+        addContinuousParam(params, "delayTimeR", "Delay R", delay->delayTimeR.load(), 1.0f, 2000.0f, 250.0f, "ms", "time");
+        addContinuousParam(params, "feedback", "Feedback", delay->feedback.load(), 0.0f, 0.95f, 0.4f, {}, "feedback");
+        addContinuousParam(params, "crossFeed", "Crossfeed", delay->crossFeed.load(), 0.0f, 0.95f, 0.0f, {}, "feedback");
+        addContinuousParam(params, "mix", "Mix", delay->mix.load(), 0.0f, 1.0f, 0.5f, {}, "mix");
+        addToggleParam(params, "pingPong", "Ping Pong", delay->pingPong.load(), 0.0f, "time");
+        addToggleParam(params, "tempoSync", "Sync", delay->tempoSync.load(), 0.0f, "time");
+        addEnumParam(params, "syncNoteL", "Note L", delay->syncNoteL.load(), 0.0f, makeEnumOptions({ "1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/4D", "1/8D" }), "time");
+        addEnumParam(params, "syncNoteR", "Note R", delay->syncNoteR.load(), 0.0f, makeEnumOptions({ "1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/4D", "1/8D" }), "time");
+        addContinuousParam(params, "lpfFreq", "LPF", delay->lpfFreq.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "hpfFreq", "HPF", delay->hpfFreq.load(), 20.0f, 2000.0f, 20.0f, "Hz", "tone");
+        addContinuousParam(params, "fbSaturation", "Saturation", delay->fbSaturation.load(), 0.0f, 1.0f, 0.0f, {}, "character");
+        addContinuousParam(params, "stereoWidth", "Width", delay->stereoWidth.load(), 0.0f, 2.0f, 1.0f, {}, "width");
+        addEnumParam(params, "delayMode", "Mode", delay->delayMode.load(), 0.0f, makeEnumOptions({ "Digital", "Tape", "Analog" }), "character");
+        addContinuousParam(params, "ducking", "Ducking", delay->ducking.load(), 0.0f, 1.0f, 0.0f, {}, "dynamics");
+        return makeBuiltInSchemaObject(delay->getName(), "Delay", chainType, fxIndex, params);
+    }
+
+    if (auto* reverb = dynamic_cast<S13Reverb*>(processor))
+    {
+        addEnumParam(params, "algorithm", "Algorithm", reverb->algorithm.load(), 0.0f, makeEnumOptions({ "Room", "Hall", "Plate", "Chamber", "Shimmer" }), "space");
+        addContinuousParam(params, "roomSize", "Size", reverb->roomSize.load(), 0.0f, 1.0f, 0.5f, {}, "space");
+        addContinuousParam(params, "damping", "Damping", reverb->damping.load(), 0.0f, 1.0f, 0.5f, {}, "tone");
+        addContinuousParam(params, "wetLevel", "Wet", reverb->wetLevel.load(), 0.0f, 1.0f, 0.33f, {}, "mix");
+        addContinuousParam(params, "dryLevel", "Dry", reverb->dryLevel.load(), 0.0f, 1.0f, 0.7f, {}, "mix");
+        addContinuousParam(params, "width", "Width", reverb->width.load(), 0.0f, 1.0f, 1.0f, {}, "width");
+        addToggleParam(params, "freezeMode", "Freeze", reverb->freezeMode.load(), 0.0f, "space");
+        addContinuousParam(params, "preDelay", "Pre-delay", reverb->preDelay.load(), 0.0f, 500.0f, 0.0f, "ms", "time");
+        addContinuousParam(params, "diffusion", "Diffusion", reverb->diffusion.load(), 0.0f, 1.0f, 0.5f, {}, "space");
+        addContinuousParam(params, "lowCut", "Low Cut", reverb->lowCut.load(), 20.0f, 500.0f, 20.0f, "Hz", "tone");
+        addContinuousParam(params, "highCut", "High Cut", reverb->highCut.load(), 1000.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "earlyLevel", "Early", reverb->earlyLevel.load(), 0.0f, 1.0f, 0.5f, {}, "space");
+        addContinuousParam(params, "decayTime", "Decay", reverb->decayTime.load(), 0.1f, 20.0f, 2.0f, "s", "space");
+        return makeBuiltInSchemaObject(reverb->getName(), "Reverb", chainType, fxIndex, params);
+    }
+
+    if (auto* chorus = dynamic_cast<S13Chorus*>(processor))
+    {
+        addEnumParam(params, "mode", "Mode", chorus->mode.load(), 0.0f, makeEnumOptions({ "Chorus", "Flanger", "Phaser" }), "modulation");
+        addContinuousParam(params, "rate", "Rate", chorus->rate.load(), 0.01f, 20.0f, 1.0f, "Hz", "modulation");
+        addContinuousParam(params, "depth", "Depth", chorus->depth.load(), 0.0f, 1.0f, 0.5f, {}, "modulation");
+        addContinuousParam(params, "fbAmount", "Feedback", chorus->fbAmount.load(), -1.0f, 1.0f, 0.0f, {}, "feedback");
+        addContinuousParam(params, "mix", "Mix", chorus->mix.load(), 0.0f, 1.0f, 0.5f, {}, "mix");
+        addContinuousParam(params, "voices", "Voices", chorus->voices.load(), 1.0f, 6.0f, 2.0f, {}, "modulation");
+        addEnumParam(params, "lfoShape", "LFO", chorus->lfoShape.load(), 0.0f, makeEnumOptions({ "Sine", "Triangle", "Square", "S&H" }), "modulation");
+        addContinuousParam(params, "spread", "Spread", chorus->spread.load(), 0.0f, 1.0f, 0.5f, {}, "width");
+        addEnumParam(params, "characterMode", "Character", chorus->characterMode.load(), 0.0f, makeEnumOptions({ "Clean", "Ensemble", "BBD" }), "character");
+        addContinuousParam(params, "highCut", "High Cut", chorus->highCut.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "lowCut", "Low Cut", chorus->lowCut.load(), 20.0f, 2000.0f, 20.0f, "Hz", "tone");
+        addToggleParam(params, "tempoSync", "Sync", chorus->tempoSync.load(), 0.0f, "modulation");
+        return makeBuiltInSchemaObject(chorus->getName(), "Modulation", chainType, fxIndex, params);
+    }
+
+    if (auto* saturator = dynamic_cast<S13Saturator*>(processor))
+    {
+        addEnumParam(params, "satType", "Type", saturator->satType.load(), 0.0f, makeEnumOptions({ "Tape", "Tube", "Transistor", "Clip", "Crush", "Console", "Transformer", "Foldback" }), "character");
+        addContinuousParam(params, "drive", "Drive", saturator->drive.load(), 0.0f, 30.0f, 6.0f, "dB", "drive");
+        addContinuousParam(params, "mix", "Mix", saturator->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addContinuousParam(params, "toneFreq", "Tone", saturator->toneFreq.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "lowCutFreq", "Low Cut", saturator->lowCutFreq.load(), 20.0f, 1000.0f, 20.0f, "Hz", "tone");
+        addContinuousParam(params, "outputGain", "Output", saturator->outputGain.load(), -12.0f, 0.0f, 0.0f, "dB", "output");
+        addContinuousParam(params, "asymmetry", "Bias", saturator->asymmetry.load(), -1.0f, 1.0f, 0.0f, {}, "character");
+        addEnumParam(params, "oversampleMode", "Oversampling", saturator->oversampleMode.load(), 1.0f, makeEnumOptions({ "Off", "2x", "4x" }), "quality");
+        return makeBuiltInSchemaObject(saturator->getName(), "Saturation", chainType, fxIndex, params);
+    }
+
+    if (auto* pitch = dynamic_cast<S13PitchCorrector*>(processor))
+    {
+        auto& mapper = pitch->getMapper();
+        addToggleParam(params, "bypass", "Bypass", pitch->bypass.load(), 0.0f, "mix");
+        addContinuousParam(params, "mix", "Mix", pitch->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addContinuousParam(params, "sensitivity", "Sensitivity", pitch->sensitivity.load(), 0.02f, 0.35f, 0.15f, {}, "detection");
+        addContinuousParam(params, "minFreqParam", "Min Freq", pitch->minFreqParam.load(), 40.0f, 400.0f, 80.0f, "Hz", "detection");
+        addContinuousParam(params, "maxFreqParam", "Max Freq", pitch->maxFreqParam.load(), 400.0f, 4000.0f, 1000.0f, "Hz", "detection");
+        addEnumParam(params, "key", "Key", static_cast<float>(mapper.getKey()), 0.0f, makeEnumOptions({ "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }), "scale");
+        addEnumParam(params, "scale", "Scale", static_cast<float>(mapper.getScale()), 0.0f,
+                     makeEnumOptions({ "Chromatic", "Major", "Natural Minor", "Harmonic Minor", "Melodic Minor", "Pentatonic Major", "Pentatonic Minor", "Blues", "Dorian", "Mixolydian", "Lydian", "Phrygian", "Locrian", "Whole Tone", "Diminished", "Custom" }), "scale");
+        addContinuousParam(params, "retuneSpeed", "Retune", mapper.getRetuneSpeed(), 0.0f, 400.0f, 50.0f, "ms", "correction");
+        addContinuousParam(params, "humanize", "Humanize", mapper.getHumanize(), 0.0f, 100.0f, 0.0f, "%", "correction");
+        addContinuousParam(params, "transpose", "Transpose", static_cast<float>(mapper.getTranspose()), -24.0f, 24.0f, 0.0f, "st", "correction");
+        addContinuousParam(params, "correctionStrength", "Strength", mapper.getCorrectionStrength(), 0.0f, 1.0f, 1.0f, {}, "correction");
+        addToggleParam(params, "formantCorrection", "Formants", mapper.getFormantCorrection() ? 1.0f : 0.0f, 0.0f, "formant");
+        addContinuousParam(params, "formantShift", "Formant Shift", mapper.getFormantShift(), -12.0f, 12.0f, 0.0f, "st", "formant");
+        addToggleParam(params, "midiOutputEnabled", "MIDI Out", pitch->midiOutputEnabled.load(), 0.0f, "midi");
+        addContinuousParam(params, "midiOutputChannel", "MIDI Ch", pitch->midiOutputChannel.load(), 1.0f, 16.0f, 1.0f, {}, "midi");
+        auto schema = makeBuiltInSchemaObject(pitch->getName(), "Pitch", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            const auto pitchData = pitch->getCurrentPitchData();
+            const auto history = pitch->getPitchHistory(96);
+            std::vector<float> detectedMidi;
+            std::vector<float> correctedMidi;
+            std::vector<float> confidence;
+            detectedMidi.reserve(history.size());
+            correctedMidi.reserve(history.size());
+            confidence.reserve(history.size());
+            for (const auto& frame : history)
+            {
+                detectedMidi.push_back(frame.detectedMidi);
+                correctedMidi.push_back(frame.correctedMidi);
+                confidence.push_back(frame.confidence);
+            }
+
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("detectedHz", pitchData.detectedHz);
+            viz->setProperty("correctedHz", pitchData.correctedHz);
+            viz->setProperty("confidence", pitchData.confidence);
+            viz->setProperty("centsDeviation", pitchData.centsDeviation);
+            viz->setProperty("noteName", pitchData.noteName);
+            viz->setProperty("historyDetectedMidi", makeFloatVarArray(detectedMidi));
+            viz->setProperty("historyCorrectedMidi", makeFloatVarArray(correctedMidi));
+            viz->setProperty("historyConfidence", makeFloatVarArray(confidence));
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    return makeBuiltInSchemaObject(processor->getName(), "Built-in", chainType, fxIndex, params);
+}
+
+static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce::String& paramId, float value)
+{
+    if (processor == nullptr)
+        return false;
+
+    if (auto* synth = dynamic_cast<S13BasicSynthInstrument*>(processor))
+    {
+        if (paramId == "attackMs") return storeClamped(synth->attackMs, value, 0.5f, 2000.0f);
+        if (paramId == "releaseMs") return storeClamped(synth->releaseMs, value, 5.0f, 5000.0f);
+        if (paramId == "brightness") return storeClamped(synth->brightness, value, 0.0f, 1.0f);
+        if (paramId == "detuneCents") return storeClamped(synth->detuneCents, value, 0.0f, 35.0f);
+        if (paramId == "subLevel") return storeClamped(synth->subLevel, value, 0.0f, 0.8f);
+        if (paramId == "noiseLevel") return storeClamped(synth->noiseLevel, value, 0.0f, 0.25f);
+        if (paramId == "outputGain") return storeClamped(synth->outputGain, value, -36.0f, 0.0f);
+        return false;
+    }
+
+    if (auto* piano = dynamic_cast<S13PianoInstrument*>(processor))
+    {
+        if (paramId == "model") return storeClamped(piano->model, value, 0.0f, 2.0f);
+        if (paramId == "tone") return storeClamped(piano->tone, value, 0.0f, 1.0f);
+        if (paramId == "body") return storeClamped(piano->body, value, 0.0f, 1.0f);
+        if (paramId == "hammer") return storeClamped(piano->hammer, value, 0.0f, 1.0f);
+        if (paramId == "resonance") return storeClamped(piano->resonance, value, 0.0f, 1.0f);
+        if (paramId == "stereoWidth") return storeClamped(piano->stereoWidth, value, 0.0f, 1.0f);
+        if (paramId == "releaseMs") return storeClamped(piano->releaseMs, value, 80.0f, 5000.0f);
+        if (paramId == "outputGain") return storeClamped(piano->outputGain, value, -36.0f, 0.0f);
+        return false;
+    }
+
+    if (auto* drums = dynamic_cast<S13DrumInstrument*>(processor))
+    {
+        if (paramId == "kit") return storeClamped(drums->kit, value, 0.0f, 2.0f);
+        if (paramId == "mapPreset") return storeClamped(drums->mapPreset, value, 0.0f, 1.0f);
+        if (paramId == "tuning") return storeClamped(drums->tuning, value, -12.0f, 12.0f);
+        if (paramId == "ambience") return storeClamped(drums->ambience, value, 0.0f, 1.0f);
+        if (paramId == "hihatTightness") return storeClamped(drums->hihatTightness, value, 0.0f, 1.0f);
+        if (paramId == "punch") return storeClamped(drums->punch, value, 0.0f, 1.0f);
+        if (paramId == "stereoWidth") return storeClamped(drums->stereoWidth, value, 0.0f, 1.0f);
+        if (paramId == "velocityCurve") return storeClamped(drums->velocityCurve, value, -1.0f, 1.0f);
+        if (paramId == "outputGain") return storeClamped(drums->outputGain, value, -36.0f, 0.0f);
+        return false;
+    }
+
+    if (auto* eq = dynamic_cast<S13EQ*>(processor))
+    {
+        if (paramId == "outputGain") return storeClamped(eq->outputGain, value, -12.0f, 12.0f);
+        if (paramId == "autoGain") return storeClamped(eq->autoGain, value, 0.0f, 1.0f);
+        if (paramId == "auditionBand") return storeClamped(eq->auditionBand, value, 0.0f, 8.0f);
+        if (paramId == "stereoMode") return storeClamped(eq->stereoMode, value, 0.0f, 2.0f);
+        if (paramId.startsWith("band"))
+        {
+            const int dot = paramId.indexOfChar('.');
+            const int band = paramId.substring(4, dot).getIntValue();
+            if (band < 0 || band >= S13EQ::numBands || dot < 0)
+                return false;
+            const auto field = paramId.substring(dot + 1);
+            auto& params = eq->bands[band];
+            if (field == "enabled") return storeClamped(params.enabled, value, 0.0f, 1.0f);
+            if (field == "type") return storeClamped(params.type, value, 0.0f, 6.0f);
+            if (field == "freq") return storeClamped(params.freq, value, 20.0f, 20000.0f);
+            if (field == "gain") return storeClamped(params.gain, value, -30.0f, 30.0f);
+            if (field == "q") return storeClamped(params.q, value, 0.1f, 30.0f);
+            if (field == "slope") return storeClamped(params.slope, value, 0.0f, 3.0f);
+            if (field == "dynamicEnabled") return storeClamped(params.dynamicEnabled, value, 0.0f, 1.0f);
+            if (field == "dynamicThreshold") return storeClamped(params.dynamicThreshold, value, -80.0f, 0.0f);
+            if (field == "dynamicRange") return storeClamped(params.dynamicRange, value, -24.0f, 24.0f);
+            if (field == "dynamicAttack") return storeClamped(params.dynamicAttack, value, 0.2f, 250.0f);
+            if (field == "dynamicRelease") return storeClamped(params.dynamicRelease, value, 5.0f, 2000.0f);
+        }
+        return false;
+    }
+
+    if (auto* compressor = dynamic_cast<S13Compressor*>(processor))
+    {
+        if (paramId == "threshold") return storeClamped(compressor->threshold, value, -60.0f, 0.0f);
+        if (paramId == "ratio") return storeClamped(compressor->ratio, value, 1.0f, 20.0f);
+        if (paramId == "attack") return storeClamped(compressor->attack, value, 0.1f, 100.0f);
+        if (paramId == "release") return storeClamped(compressor->release, value, 10.0f, 2000.0f);
+        if (paramId == "knee") return storeClamped(compressor->knee, value, 0.0f, 24.0f);
+        if (paramId == "makeupGain") return storeClamped(compressor->makeupGain, value, 0.0f, 36.0f);
+        if (paramId == "mix") return storeClamped(compressor->mix, value, 0.0f, 1.0f);
+        if (paramId == "style") return storeClamped(compressor->style, value, 0.0f, 4.0f);
+        if (paramId == "autoMakeup") return storeClamped(compressor->autoMakeup, value, 0.0f, 1.0f);
+        if (paramId == "autoRelease") return storeClamped(compressor->autoRelease, value, 0.0f, 1.0f);
+        if (paramId == "sidechainHPF") return storeClamped(compressor->sidechainHPF, value, 20.0f, 500.0f);
+        if (paramId == "lookaheadMs") return storeClamped(compressor->lookaheadMs, value, 0.0f, 20.0f);
+        if (paramId == "detectorMode") return storeClamped(compressor->detectorMode, value, 0.0f, 2.0f);
+        if (paramId == "stereoLink") return storeClamped(compressor->stereoLink, value, 0.0f, 1.0f);
+        return false;
+    }
+
+    if (auto* gate = dynamic_cast<S13Gate*>(processor))
+    {
+        if (paramId == "threshold") return storeClamped(gate->threshold, value, -80.0f, 0.0f);
+        if (paramId == "attackMs") return storeClamped(gate->attackMs, value, 0.01f, 50.0f);
+        if (paramId == "holdMs") return storeClamped(gate->holdMs, value, 0.0f, 500.0f);
+        if (paramId == "releaseMs") return storeClamped(gate->releaseMs, value, 5.0f, 2000.0f);
+        if (paramId == "range") return storeClamped(gate->range, value, -80.0f, 0.0f);
+        if (paramId == "hysteresis") return storeClamped(gate->hysteresis, value, 0.0f, 20.0f);
+        if (paramId == "sidechainHPF") return storeClamped(gate->sidechainHPF, value, 20.0f, 2000.0f);
+        if (paramId == "sidechainLPF") return storeClamped(gate->sidechainLPF, value, 200.0f, 20000.0f);
+        if (paramId == "mix") return storeClamped(gate->mix, value, 0.0f, 1.0f);
+        if (paramId == "detectorMode") return storeClamped(gate->detectorMode, value, 0.0f, 2.0f);
+        return false;
+    }
+
+    if (auto* limiter = dynamic_cast<S13Limiter*>(processor))
+    {
+        if (paramId == "threshold") return storeClamped(limiter->threshold, value, -20.0f, 0.0f);
+        if (paramId == "releaseMs") return storeClamped(limiter->releaseMs, value, 10.0f, 500.0f);
+        if (paramId == "ceiling") return storeClamped(limiter->ceiling, value, -3.0f, 0.0f);
+        if (paramId == "lookaheadMs") return storeClamped(limiter->lookaheadMs, value, 0.0f, 20.0f);
+        return false;
+    }
+
+    if (auto* delay = dynamic_cast<S13Delay*>(processor))
+    {
+        if (paramId == "delayTimeL") return storeClamped(delay->delayTimeL, value, 1.0f, 2000.0f);
+        if (paramId == "delayTimeR") return storeClamped(delay->delayTimeR, value, 1.0f, 2000.0f);
+        if (paramId == "feedback") return storeClamped(delay->feedback, value, 0.0f, 0.95f);
+        if (paramId == "crossFeed") return storeClamped(delay->crossFeed, value, 0.0f, 0.95f);
+        if (paramId == "mix") return storeClamped(delay->mix, value, 0.0f, 1.0f);
+        if (paramId == "pingPong") return storeClamped(delay->pingPong, value, 0.0f, 1.0f);
+        if (paramId == "tempoSync") return storeClamped(delay->tempoSync, value, 0.0f, 1.0f);
+        if (paramId == "syncNoteL") return storeClamped(delay->syncNoteL, value, 0.0f, 8.0f);
+        if (paramId == "syncNoteR") return storeClamped(delay->syncNoteR, value, 0.0f, 8.0f);
+        if (paramId == "lpfFreq") return storeClamped(delay->lpfFreq, value, 200.0f, 20000.0f);
+        if (paramId == "hpfFreq") return storeClamped(delay->hpfFreq, value, 20.0f, 2000.0f);
+        if (paramId == "fbSaturation") return storeClamped(delay->fbSaturation, value, 0.0f, 1.0f);
+        if (paramId == "stereoWidth") return storeClamped(delay->stereoWidth, value, 0.0f, 2.0f);
+        if (paramId == "delayMode") return storeClamped(delay->delayMode, value, 0.0f, 2.0f);
+        if (paramId == "ducking") return storeClamped(delay->ducking, value, 0.0f, 1.0f);
+        return false;
+    }
+
+    if (auto* reverb = dynamic_cast<S13Reverb*>(processor))
+    {
+        if (paramId == "algorithm") return storeClamped(reverb->algorithm, value, 0.0f, 4.0f);
+        if (paramId == "roomSize") return storeClamped(reverb->roomSize, value, 0.0f, 1.0f);
+        if (paramId == "damping") return storeClamped(reverb->damping, value, 0.0f, 1.0f);
+        if (paramId == "wetLevel") return storeClamped(reverb->wetLevel, value, 0.0f, 1.0f);
+        if (paramId == "dryLevel") return storeClamped(reverb->dryLevel, value, 0.0f, 1.0f);
+        if (paramId == "width") return storeClamped(reverb->width, value, 0.0f, 1.0f);
+        if (paramId == "freezeMode") return storeClamped(reverb->freezeMode, value, 0.0f, 1.0f);
+        if (paramId == "preDelay") return storeClamped(reverb->preDelay, value, 0.0f, 500.0f);
+        if (paramId == "diffusion") return storeClamped(reverb->diffusion, value, 0.0f, 1.0f);
+        if (paramId == "lowCut") return storeClamped(reverb->lowCut, value, 20.0f, 500.0f);
+        if (paramId == "highCut") return storeClamped(reverb->highCut, value, 1000.0f, 20000.0f);
+        if (paramId == "earlyLevel") return storeClamped(reverb->earlyLevel, value, 0.0f, 1.0f);
+        if (paramId == "decayTime") return storeClamped(reverb->decayTime, value, 0.1f, 20.0f);
+        return false;
+    }
+
+    if (auto* chorus = dynamic_cast<S13Chorus*>(processor))
+    {
+        if (paramId == "mode") return storeClamped(chorus->mode, value, 0.0f, 2.0f);
+        if (paramId == "rate") return storeClamped(chorus->rate, value, 0.01f, 20.0f);
+        if (paramId == "depth") return storeClamped(chorus->depth, value, 0.0f, 1.0f);
+        if (paramId == "fbAmount") return storeClamped(chorus->fbAmount, value, -1.0f, 1.0f);
+        if (paramId == "mix") return storeClamped(chorus->mix, value, 0.0f, 1.0f);
+        if (paramId == "voices") return storeClamped(chorus->voices, value, 1.0f, 6.0f);
+        if (paramId == "lfoShape") return storeClamped(chorus->lfoShape, value, 0.0f, 3.0f);
+        if (paramId == "spread") return storeClamped(chorus->spread, value, 0.0f, 1.0f);
+        if (paramId == "characterMode") return storeClamped(chorus->characterMode, value, 0.0f, 2.0f);
+        if (paramId == "highCut") return storeClamped(chorus->highCut, value, 200.0f, 20000.0f);
+        if (paramId == "lowCut") return storeClamped(chorus->lowCut, value, 20.0f, 2000.0f);
+        if (paramId == "tempoSync") return storeClamped(chorus->tempoSync, value, 0.0f, 1.0f);
+        return false;
+    }
+
+    if (auto* saturator = dynamic_cast<S13Saturator*>(processor))
+    {
+        if (paramId == "satType") return storeClamped(saturator->satType, value, 0.0f, 7.0f);
+        if (paramId == "drive") return storeClamped(saturator->drive, value, 0.0f, 30.0f);
+        if (paramId == "mix") return storeClamped(saturator->mix, value, 0.0f, 1.0f);
+        if (paramId == "toneFreq") return storeClamped(saturator->toneFreq, value, 200.0f, 20000.0f);
+        if (paramId == "lowCutFreq") return storeClamped(saturator->lowCutFreq, value, 20.0f, 1000.0f);
+        if (paramId == "outputGain") return storeClamped(saturator->outputGain, value, -12.0f, 0.0f);
+        if (paramId == "asymmetry") return storeClamped(saturator->asymmetry, value, -1.0f, 1.0f);
+        if (paramId == "oversampleMode")
+        {
+            const bool ok = storeClamped(saturator->oversampleMode, value, 0.0f, 2.0f);
+            saturator->setOversamplingEnabled(value >= 0.5f);
+            return ok;
+        }
+        return false;
+    }
+
+    if (auto* pitch = dynamic_cast<S13PitchCorrector*>(processor))
+    {
+        auto& mapper = pitch->getMapper();
+        if (paramId == "bypass") return storeClamped(pitch->bypass, value, 0.0f, 1.0f);
+        if (paramId == "mix") return storeClamped(pitch->mix, value, 0.0f, 1.0f);
+        if (paramId == "sensitivity") return storeClamped(pitch->sensitivity, value, 0.02f, 0.35f);
+        if (paramId == "minFreqParam") return storeClamped(pitch->minFreqParam, value, 40.0f, 400.0f);
+        if (paramId == "maxFreqParam") return storeClamped(pitch->maxFreqParam, value, 400.0f, 4000.0f);
+        if (paramId == "key") { mapper.setKey(juce::jlimit(0, 11, static_cast<int>(std::round(value)))); return true; }
+        if (paramId == "scale") { mapper.setScale(static_cast<PitchMapper::Scale>(juce::jlimit(0, 15, static_cast<int>(std::round(value))))); return true; }
+        if (paramId == "retuneSpeed") { mapper.setRetuneSpeed(juce::jlimit(0.0f, 400.0f, value)); return true; }
+        if (paramId == "humanize") { mapper.setHumanize(juce::jlimit(0.0f, 100.0f, value)); return true; }
+        if (paramId == "transpose") { mapper.setTranspose(juce::jlimit(-24, 24, static_cast<int>(std::round(value)))); return true; }
+        if (paramId == "correctionStrength") { mapper.setCorrectionStrength(juce::jlimit(0.0f, 1.0f, value)); return true; }
+        if (paramId == "formantCorrection") { mapper.setFormantCorrection(value >= 0.5f); return true; }
+        if (paramId == "formantShift") { mapper.setFormantShift(juce::jlimit(-12.0f, 12.0f, value)); return true; }
+        if (paramId == "midiOutputEnabled") return storeClamped(pitch->midiOutputEnabled, value, 0.0f, 1.0f);
+        if (paramId == "midiOutputChannel") return storeClamped(pitch->midiOutputChannel, value, 1.0f, 16.0f);
+        return false;
+    }
+
+    return false;
 }
 
 bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::String& effectName, bool isInputFX)
@@ -7637,6 +9127,7 @@ bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
     slot.slotId = nextMasterStageSlotId++;
     slot.name = plugin->getName();
     slot.type = "builtin";
+    slot.pluginPath = plugin->getName();
     slot.pluginFormat = "Built-in";
     slot.serializedState = serialiseProcessorStateToBase64(plugin.get());
     specCopy.slots.push_back(std::move(slot));
@@ -7651,14 +9142,35 @@ bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
 juce::var AudioEngine::getAvailableBuiltInFX()
 {
     juce::Array<juce::var> list;
-    const char* names[] = { "OpenStudio EQ", "OpenStudio Compressor", "OpenStudio Gate", "OpenStudio Limiter",
-                            "OpenStudio Delay", "OpenStudio Reverb", "OpenStudio Chorus", "OpenStudio Saturator",
-                            "OpenStudio Pitch Correct" };
-    for (auto& n : names)
+    struct BuiltInDescriptor
+    {
+        const char* name;
+        const char* category;
+        bool isInstrument;
+        int instrumentMode;
+    };
+    const BuiltInDescriptor descriptors[] = {
+        { "OpenStudio Basic Synth", "Built-in Instrument", true, 0 },
+        { "OpenStudio Piano", "Built-in Instrument", true, 1 },
+        { "OpenStudio Drums", "Built-in Instrument", true, 2 },
+        { "OpenStudio EQ", "Built-in", false, -1 },
+        { "OpenStudio Compressor", "Built-in", false, -1 },
+        { "OpenStudio Gate", "Built-in", false, -1 },
+        { "OpenStudio Limiter", "Built-in", false, -1 },
+        { "OpenStudio Delay", "Built-in", false, -1 },
+        { "OpenStudio Reverb", "Built-in", false, -1 },
+        { "OpenStudio Chorus", "Built-in", false, -1 },
+        { "OpenStudio Saturator", "Built-in", false, -1 },
+        { "OpenStudio Pitch Correct", "Built-in", false, -1 }
+    };
+    for (const auto& descriptor : descriptors)
     {
         juce::DynamicObject::Ptr obj = new juce::DynamicObject();
-        obj->setProperty("name", juce::String(n));
-        obj->setProperty("category", "Built-in");
+        obj->setProperty("name", juce::String(descriptor.name));
+        obj->setProperty("category", juce::String(descriptor.category));
+        obj->setProperty("isInstrument", descriptor.isInstrument);
+        if (descriptor.isInstrument)
+            obj->setProperty("instrumentMode", descriptor.instrumentMode);
         list.add(juce::var(obj.get()));
     }
     return juce::var(list);
@@ -8216,9 +9728,13 @@ juce::var AudioEngine::getTrackInputFX(const juce::String& trackId)
                 || dynamic_cast<S13Reverb*>(processorPtr)
                 || dynamic_cast<S13Chorus*>(processorPtr)
                 || dynamic_cast<S13Saturator*>(processorPtr)
-                || dynamic_cast<S13PitchCorrector*>(processorPtr))
+                || dynamic_cast<S13PitchCorrector*>(processorPtr)
+                || dynamic_cast<S13BasicSynthInstrument*>(processorPtr)
+                || dynamic_cast<S13PianoInstrument*>(processorPtr)
+                || dynamic_cast<S13DrumInstrument*>(processorPtr))
             {
                 fxInfo->setProperty("type", "builtin");
+                fxInfo->setProperty("pluginPath", processor->getName());
             }
             else if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processorPtr))
             {
@@ -8275,9 +9791,13 @@ juce::var AudioEngine::getTrackFX(const juce::String& trackId)
                 || dynamic_cast<S13Reverb*>(processorPtr)
                 || dynamic_cast<S13Chorus*>(processorPtr)
                 || dynamic_cast<S13Saturator*>(processorPtr)
-                || dynamic_cast<S13PitchCorrector*>(processorPtr))
+                || dynamic_cast<S13PitchCorrector*>(processorPtr)
+                || dynamic_cast<S13BasicSynthInstrument*>(processorPtr)
+                || dynamic_cast<S13PianoInstrument*>(processorPtr)
+                || dynamic_cast<S13DrumInstrument*>(processorPtr))
             {
                 fxInfo->setProperty("type", "builtin");
+                fxInfo->setProperty("pluginPath", processor->getName());
             }
             else if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processorPtr))
             {
@@ -8347,6 +9867,175 @@ juce::var AudioEngine::getPluginParameters(const juce::String& trackId, int fxIn
     }
 
     return paramList;
+}
+
+juce::var AudioEngine::getBuiltInPluginSchema(const juce::String& trackId, const juce::String& chainType, int fxIndex)
+{
+    if (chainType == "instrument")
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        return describeFallbackInstrument(it != trackMap.end() ? it->second : nullptr, chainType, fxIndex);
+    }
+
+    if (chainType == "master")
+    {
+        int slotId = 0;
+        {
+            const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+                slotId = slot->slotId;
+        }
+
+        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        if (const auto* activeSlot = findActiveStageSlot(activeStage, slotId))
+            return describeBuiltInProcessor(activeSlot->processor.get(), chainType, fxIndex);
+
+        return describeBuiltInProcessor(nullptr, chainType, fxIndex);
+    }
+
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return describeBuiltInProcessor(nullptr, chainType, fxIndex);
+
+    auto* processor = chainType == "input"
+        ? it->second->getInputFXProcessor(fxIndex)
+        : it->second->getTrackFXProcessor(fxIndex);
+    return describeBuiltInProcessor(processor, chainType, fxIndex);
+}
+
+juce::var AudioEngine::getBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex)
+{
+    const auto schema = getBuiltInPluginSchema(trackId, chainType, fxIndex);
+    auto* root = new juce::DynamicObject();
+    root->setProperty("schemaVersion", 1);
+    root->setProperty("chain", chainType);
+    root->setProperty("fxIndex", fxIndex);
+
+    juce::DynamicObject* schemaObject = schema.getDynamicObject();
+    if (schemaObject != nullptr)
+    {
+        root->setProperty("name", schemaObject->getProperty("name"));
+        juce::DynamicObject::Ptr values = new juce::DynamicObject();
+        const auto paramsVar = schemaObject->getProperty("parameters");
+        if (auto* params = paramsVar.getArray())
+        {
+            for (const auto& paramVar : *params)
+            {
+                if (auto* param = paramVar.getDynamicObject())
+                    values->setProperty(param->getProperty("id").toString(), param->getProperty("value"));
+            }
+        }
+        root->setProperty("values", values.get());
+    }
+
+    return juce::var(root);
+}
+
+bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                                        const juce::String& paramId, float value)
+{
+    if (chainType == "instrument")
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        return it != trackMap.end() && it->second != nullptr
+            ? it->second->setFallbackInstrumentParam(paramId, value)
+            : false;
+    }
+
+    if (chainType == "master")
+    {
+        int slotId = 0;
+        {
+            const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+                slotId = slot->slotId;
+        }
+
+        if (slotId == 0)
+            return false;
+
+        juce::String serializedState;
+        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        if (const auto* activeSlot = findActiveStageSlot(activeStage, slotId))
+        {
+            if (!activeSlot->processor)
+                return false;
+
+            {
+                const juce::ScopedLock processorLock(activeSlot->processor->getCallbackLock());
+                if (!setBuiltInProcessorParam(activeSlot->processor.get(), paramId, value))
+                    return false;
+                serializedState = serialiseProcessorStateToBase64(activeSlot->processor.get());
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        if (auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            slot->serializedState = serializedState;
+        return true;
+    }
+
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return false;
+
+    auto* processor = chainType == "input"
+        ? it->second->getInputFXProcessor(fxIndex)
+        : it->second->getTrackFXProcessor(fxIndex);
+    if (processor == nullptr)
+        return false;
+
+    const juce::ScopedLock processorLock(processor->getCallbackLock());
+    return setBuiltInProcessorParam(processor, paramId, value);
+}
+
+bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                                        const juce::String& stateJSON)
+{
+    const auto parsed = juce::JSON::parse(stateJSON);
+    if (parsed.isVoid())
+        return false;
+
+    bool anyApplied = false;
+    if (auto* stateObject = parsed.getDynamicObject())
+    {
+        const auto valuesVar = stateObject->getProperty("values");
+        if (auto* valuesObject = valuesVar.getDynamicObject())
+        {
+            const auto& properties = valuesObject->getProperties();
+            for (int i = 0; i < properties.size(); ++i)
+            {
+                const auto name = properties.getName(i).toString();
+                const auto value = static_cast<float>(static_cast<double>(properties.getValueAt(i)));
+                anyApplied = setBuiltInPluginParam(trackId, chainType, fxIndex, name, value) || anyApplied;
+            }
+        }
+
+        const auto parametersVar = stateObject->getProperty("parameters");
+        if (auto* parameters = parametersVar.getArray())
+        {
+            for (const auto& paramVar : *parameters)
+            {
+                if (auto* param = paramVar.getDynamicObject())
+                {
+                    const auto id = param->getProperty("id").toString();
+                    const auto value = static_cast<float>(static_cast<double>(param->getProperty("value")));
+                    if (id.isNotEmpty())
+                        anyApplied = setBuiltInPluginParam(trackId, chainType, fxIndex, id, value) || anyApplied;
+                }
+            }
+        }
+    }
+
+    return anyApplied;
 }
 
 bool AudioEngine::setPluginParameter(const juce::String& trackId, int fxIndex, bool isInputFX, int paramIndex, float value)
@@ -12181,6 +13870,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
     midiFile.convertTimestampTicksToSeconds();
 
     auto* result = new juce::DynamicObject();
+    result->setProperty("success", true);
     result->setProperty("numTracks", midiFile.getNumTracks());
     result->setProperty("ticksPerQuarterNote", midiFile.getTimeFormat());
 
@@ -12193,17 +13883,26 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
 
         auto* trackObj = new juce::DynamicObject();
         juce::Array<juce::var> eventsArray;
+        juce::String trackName;
+        int channelCounts[17] {};
 
         for (int i = 0; i < midiTrack->getNumEvents(); ++i)
         {
             const auto* holder = midiTrack->getEventPointer(i);
             const auto& msg = holder->message;
 
+            if (msg.isTrackNameEvent())
+            {
+                trackName = msg.getTextFromTextMetaEvent();
+                continue;
+            }
+
             auto* evtObj = new juce::DynamicObject();
             evtObj->setProperty("timestamp", msg.getTimeStamp());
 
             if (msg.isNoteOn())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "noteOn");
                 evtObj->setProperty("note", msg.getNoteNumber());
                 evtObj->setProperty("velocity", msg.getVelocity());
@@ -12211,6 +13910,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             }
             else if (msg.isNoteOff())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "noteOff");
                 evtObj->setProperty("note", msg.getNoteNumber());
                 evtObj->setProperty("velocity", 0);
@@ -12218,6 +13918,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             }
             else if (msg.isController())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "cc");
                 evtObj->setProperty("controller", msg.getControllerNumber());
                 evtObj->setProperty("value", msg.getControllerValue());
@@ -12225,6 +13926,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             }
             else if (msg.isPitchWheel())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "pitchBend");
                 evtObj->setProperty("value", msg.getPitchWheelValue());
                 evtObj->setProperty("channel", msg.getChannel());
@@ -12242,31 +13944,57 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             eventsArray.add(juce::var(evtObj));
         }
 
+        int dominantChannel = 0;
+        for (int channel = 1; channel <= 16; ++channel)
+            if (channelCounts[channel] > channelCounts[dominantChannel])
+                dominantChannel = channel;
+
+        trackObj->setProperty("name", trackName.isNotEmpty() ? trackName : "MIDI Track " + juce::String(t + 1));
+        trackObj->setProperty("channel", dominantChannel);
         trackObj->setProperty("events", eventsArray);
         tracksArray.add(juce::var(trackObj));
     }
 
     result->setProperty("tracks", tracksArray);
-    juce::Logger::writeToLog("importMIDIFile: " + filePath + " - " +
-                             juce::String(midiFile.getNumTracks()) + " tracks");
     return juce::var(result);
 }
 
 bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm)
 {
-    auto* tracksArray = midiTracks.getArray();
+    auto tracksVar = midiTracks;
+    if (tracksVar.isString())
+        tracksVar = juce::JSON::parse(tracksVar.toString());
+
+    auto* tracksArray = tracksVar.getArray();
     if (tracksArray == nullptr)
         return false;
 
     if (bpm <= 0.0)
         bpm = 120.0;
 
+    auto getDoubleProperty = [] (juce::DynamicObject* obj, const char* name, double fallback)
+    {
+        if (obj == nullptr || ! obj->hasProperty(name))
+            return fallback;
+
+        return static_cast<double>(obj->getProperty(name));
+    };
+
     auto getIntProperty = [] (juce::DynamicObject* obj, const char* name, int fallback, int minValue, int maxValue)
     {
         if (obj == nullptr || ! obj->hasProperty(name))
             return fallback;
 
-        return juce::jlimit(minValue, maxValue, static_cast<int>(obj->getProperty(name)));
+        return juce::jlimit(minValue, maxValue, juce::roundToInt(static_cast<double>(obj->getProperty(name))));
+    };
+
+    auto getVelocityProperty = [&] (juce::DynamicObject* obj, const char* name, int fallback, int minValue)
+    {
+        auto value = getDoubleProperty(obj, name, static_cast<double>(fallback));
+        if (value > 0.0 && value <= 1.0)
+            value *= 127.0;
+
+        return juce::jlimit(minValue, 127, juce::roundToInt(value));
     };
 
     auto addEventToSequence = [&] (juce::MidiMessageSequence& sequence,
@@ -12283,15 +14011,15 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
         if (eventType == "noteOn")
         {
             const int note = getIntProperty(eventObj, "note", 60, 0, 127);
-            const int velocity = getIntProperty(eventObj, "velocity", 100, 1, 127);
+            const int velocity = getVelocityProperty(eventObj, "velocity", 100, 1);
             sequence.addEvent(juce::MidiMessage::noteOn(channel, note, static_cast<juce::uint8>(velocity)), ticks);
         }
         else if (eventType == "noteOff")
         {
             const int note = getIntProperty(eventObj, "note", 60, 0, 127);
-            const int velocity = getIntProperty(eventObj,
-                                                eventObj->hasProperty("releaseVelocity") ? "releaseVelocity" : "velocity",
-                                                0, 0, 127);
+            const int velocity = getVelocityProperty(eventObj,
+                                                     eventObj->hasProperty("releaseVelocity") ? "releaseVelocity" : "velocity",
+                                                     0, 0);
             sequence.addEvent(juce::MidiMessage::noteOff(channel, note, static_cast<juce::uint8>(velocity)), ticks);
         }
         else if (eventType == "cc")
@@ -12335,6 +14063,10 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
 
         juce::MidiMessageSequence sequence;
         sequence.addEvent(juce::MidiMessage::tempoMetaEvent(static_cast<int>(60000000.0 / bpm)), 0.0);
+        const juce::String trackName = trackObj->getProperty("name").toString();
+        if (trackName.isNotEmpty())
+            sequence.addEvent(juce::MidiMessage::textMetaEvent(0x03, trackName), 0.0);
+
         int eventCount = 0;
 
         if (auto* clips = trackObj->getProperty("clips").getArray())
@@ -12374,17 +14106,16 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
         return false;
 
     juce::File outFile(outputPath);
+    if (! outFile.hasFileExtension(".mid") && ! outFile.hasFileExtension(".midi"))
+        outFile = outFile.withFileExtension(".mid");
+
     outFile.getParentDirectory().createDirectory();
     outFile.deleteFile();
     std::unique_ptr<juce::FileOutputStream> outputStream(outFile.createOutputStream());
     if (! outputStream)
         return false;
 
-    const bool success = midiFile.writeTo(*outputStream);
-    juce::Logger::writeToLog("exportProjectMIDI: " + outputPath
-        + " tracks=" + juce::String(exportedTrackCount)
-        + " success=" + juce::String(success ? "true" : "false"));
-    return success;
+    return midiFile.writeTo(*outputStream);
 }
 
 bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String& clipId,
@@ -12394,6 +14125,28 @@ bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String
     juce::ignoreUnused(trackId, clipId);
 
     if (clipTempo <= 0.0) clipTempo = 120.0;
+
+    auto getDoubleProperty = [] (juce::DynamicObject* obj, const char* name, double fallback)
+    {
+        if (obj == nullptr || ! obj->hasProperty(name))
+            return fallback;
+
+        return static_cast<double>(obj->getProperty(name));
+    };
+
+    auto getIntProperty = [&] (juce::DynamicObject* obj, const char* name, int fallback, int minValue, int maxValue)
+    {
+        return juce::jlimit(minValue, maxValue, juce::roundToInt(getDoubleProperty(obj, name, static_cast<double>(fallback))));
+    };
+
+    auto getVelocityProperty = [&] (juce::DynamicObject* obj, const char* name, int fallback, int minValue)
+    {
+        auto value = getDoubleProperty(obj, name, static_cast<double>(fallback));
+        if (value > 0.0 && value <= 1.0)
+            value *= 127.0;
+
+        return juce::jlimit(minValue, 127, juce::roundToInt(value));
+    };
 
     juce::MidiFile midiFile;
     midiFile.setTicksPerQuarterNote(480);
@@ -12420,53 +14173,51 @@ bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String
 
             if (eventType == "noteOn")
             {
-                int note = static_cast<int>(obj->getProperty("note"));
-                int velocity = static_cast<int>(obj->getProperty("velocity"));
-                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                const int note = getIntProperty(obj, "note", 60, 0, 127);
+                const int velocity = getVelocityProperty(obj, "velocity", 100, 1);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
                 sequence.addEvent(juce::MidiMessage::noteOn(channel, note, static_cast<juce::uint8>(velocity)), ticks);
             }
             else if (eventType == "noteOff")
             {
-                int note = static_cast<int>(obj->getProperty("note"));
-                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
-                sequence.addEvent(juce::MidiMessage::noteOff(channel, note), ticks);
+                const int note = getIntProperty(obj, "note", 60, 0, 127);
+                const int velocity = getVelocityProperty(obj,
+                                                         obj->hasProperty("releaseVelocity") ? "releaseVelocity" : "velocity",
+                                                         0, 0);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::noteOff(channel, note, static_cast<juce::uint8>(velocity)), ticks);
             }
             else if (eventType == "cc")
             {
-                int controller = static_cast<int>(obj->getProperty("controller"));
-                int value = static_cast<int>(obj->getProperty("value"));
-                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                const int controller = getIntProperty(obj, "controller", 0, 0, 127);
+                const int value = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
                 sequence.addEvent(juce::MidiMessage::controllerEvent(channel, controller, value), ticks);
             }
             else if (eventType == "pitchBend")
             {
-                const int value = obj->hasProperty("value") ? static_cast<int>(obj->getProperty("value")) : 8192;
-                const int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
-                sequence.addEvent(juce::MidiMessage::pitchWheel(juce::jlimit(1, 16, channel),
-                                                                juce::jlimit(0, 16383, value)), ticks);
+                const int value = getIntProperty(obj, "value", 8192, 0, 16383);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::pitchWheel(channel, value), ticks);
             }
             else if (eventType == "programChange")
             {
-                const int program = obj->hasProperty("value") ? static_cast<int>(obj->getProperty("value")) : 0;
-                const int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
-                sequence.addEvent(juce::MidiMessage::programChange(juce::jlimit(1, 16, channel),
-                                                                   juce::jlimit(0, 127, program)), ticks);
+                const int program = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::programChange(channel, program), ticks);
             }
             else if (eventType == "channelPressure")
             {
-                const int pressure = obj->hasProperty("value") ? static_cast<int>(obj->getProperty("value")) : 0;
-                const int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
-                sequence.addEvent(juce::MidiMessage::channelPressureChange(juce::jlimit(1, 16, channel),
-                                                                           juce::jlimit(0, 127, pressure)), ticks);
+                const int pressure = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::channelPressureChange(channel, pressure), ticks);
             }
             else if (eventType == "polyPressure")
             {
-                const int note = obj->hasProperty("note") ? static_cast<int>(obj->getProperty("note")) : 60;
-                const int pressure = obj->hasProperty("value") ? static_cast<int>(obj->getProperty("value")) : 0;
-                const int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
-                sequence.addEvent(juce::MidiMessage::aftertouchChange(juce::jlimit(1, 16, channel),
-                                                                      juce::jlimit(0, 127, note),
-                                                                      juce::jlimit(0, 127, pressure)), ticks);
+                const int note = getIntProperty(obj, "note", 60, 0, 127);
+                const int pressure = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::aftertouchChange(channel, note, pressure), ticks);
             }
         }
     }
@@ -12475,14 +14226,16 @@ bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String
     midiFile.addTrack(sequence);
 
     juce::File outFile(outputPath);
+    if (! outFile.hasFileExtension(".mid") && ! outFile.hasFileExtension(".midi"))
+        outFile = outFile.withFileExtension(".mid");
+
+    outFile.getParentDirectory().createDirectory();
     outFile.deleteFile();
     std::unique_ptr<juce::FileOutputStream> outputStream(outFile.createOutputStream());
     if (!outputStream)
         return false;
 
-    bool success = midiFile.writeTo(*outputStream);
-    juce::Logger::writeToLog("exportMIDIFile: " + outputPath + " success=" + juce::String(success ? "true" : "false"));
-    return success;
+    return midiFile.writeTo(*outputStream);
 }
 
 // =============================================================================

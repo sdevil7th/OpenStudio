@@ -191,7 +191,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const success = await nativeBridge.loadInstrument(trackId, pluginPath);
       if (!success) return false;
 
-      get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath });
+      get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath, builtInInstrument: undefined });
       await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
       notifyInstrumentChanged({ trackId, instrumentPlugin: pluginPath });
 
@@ -201,7 +201,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         timestamp: Date.now(),
         execute: async () => {
           await nativeBridge.loadInstrument(trackId, pluginPath);
-          get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath });
+          get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath, builtInInstrument: undefined });
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
           notifyInstrumentChanged({ trackId, instrumentPlugin: pluginPath });
         },
@@ -209,11 +209,108 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           if (previousPlugin) {
             await nativeBridge.loadInstrument(trackId, previousPlugin);
             if (previousState) await nativeBridge.setInstrumentState(trackId, previousState);
-            get().updateTrack(trackId, { type: "instrument", instrumentPlugin: previousPlugin });
+            get().updateTrack(trackId, { type: "instrument", instrumentPlugin: previousPlugin, builtInInstrument: undefined });
             notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
           } else {
             await nativeBridge.removeInstrument(trackId);
-            get().updateTrack(trackId, { type: previousType || "midi", instrumentPlugin: undefined });
+            get().updateTrack(trackId, { type: previousType || "midi", instrumentPlugin: undefined, builtInInstrument: track.builtInInstrument });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+          }
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+        },
+      };
+      commandManager.push(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    setBuiltInInstrumentWithUndo: async (trackId, instrument) => {
+      const track = get().tracks.find((t: any) => t.id === trackId);
+      if (!track) return false;
+
+      const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
+      const mode = modeMap[instrument] ?? 0;
+      const previousType = track.type;
+      const previousPlugin = track.instrumentPlugin || "";
+      const previousPluginState = previousPlugin
+        ? await nativeBridge.getInstrumentState(trackId).catch(() => "")
+        : "";
+      const previousBuiltIn = track.builtInInstrument;
+      const previousSamplePath = track.samplerSamplePath || "";
+      const previousRootNote = track.samplerRootNote ?? 60;
+
+      if (previousPlugin) await nativeBridge.removeInstrument(trackId).catch(() => false);
+      if (previousSamplePath) await nativeBridge.clearTrackSamplerSample(trackId).catch(() => false);
+      await nativeBridge.setTrackType(trackId, "instrument").catch(() => false);
+      const success = await nativeBridge.setBuiltInPluginParam(
+        { trackId, chain: "instrument", fxIndex: -1 },
+        "instrumentMode",
+        mode,
+      );
+      if (!success) return false;
+
+      get().updateTrack(trackId, {
+        type: "instrument",
+        instrumentPlugin: undefined,
+        builtInInstrument: instrument,
+        samplerSamplePath: undefined,
+        samplerSourceType: undefined,
+      });
+      await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+      notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+
+      const command: Command = {
+        type: "LOAD_INSTRUMENT",
+        description: `Load Studio13 ${instrument}`,
+        timestamp: Date.now(),
+        execute: async () => {
+          await nativeBridge.removeInstrument(trackId).catch(() => false);
+          await nativeBridge.clearTrackSamplerSample(trackId).catch(() => false);
+          await nativeBridge.setTrackType(trackId, "instrument").catch(() => false);
+          await nativeBridge.setBuiltInPluginParam({ trackId, chain: "instrument", fxIndex: -1 }, "instrumentMode", mode);
+          get().updateTrack(trackId, {
+            type: "instrument",
+            instrumentPlugin: undefined,
+            builtInInstrument: instrument,
+            samplerSamplePath: undefined,
+            samplerSourceType: undefined,
+          });
+          await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
+          notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+        },
+        undo: async () => {
+          if (previousPlugin) {
+            await nativeBridge.loadInstrument(trackId, previousPlugin);
+            if (previousPluginState) await nativeBridge.setInstrumentState(trackId, previousPluginState);
+            get().updateTrack(trackId, {
+              type: previousType || "instrument",
+              instrumentPlugin: previousPlugin,
+              builtInInstrument: undefined,
+            });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
+          } else if (previousSamplePath) {
+            await nativeBridge.setTrackSamplerSample(trackId, previousSamplePath, previousRootNote);
+            get().updateTrack(trackId, {
+              type: "instrument",
+              instrumentPlugin: undefined,
+              builtInInstrument: undefined,
+              samplerSamplePath: previousSamplePath,
+              samplerRootNote: previousRootNote,
+              samplerSourceType: String(previousSamplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+            });
+            notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
+          } else {
+            await nativeBridge.setTrackType(trackId, previousType || "instrument").catch(() => false);
+            await nativeBridge.setBuiltInPluginParam(
+              { trackId, chain: "instrument", fxIndex: -1 },
+              "instrumentMode",
+              modeMap[previousBuiltIn || "synth"] ?? 0,
+            ).catch(() => false);
+            get().updateTrack(trackId, {
+              type: previousType || "instrument",
+              instrumentPlugin: undefined,
+              builtInInstrument: previousBuiltIn,
+            });
             notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
           }
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
@@ -230,8 +327,9 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         if (!track || track.type !== "instrument" || track.samplerSamplePath) return false;
 
         const previousType = track.type;
+        const previousBuiltIn = track.builtInInstrument;
         await nativeBridge.setTrackType(trackId, "midi").catch(() => false);
-        get().updateTrack(trackId, { type: "midi", instrumentPlugin: undefined });
+        get().updateTrack(trackId, { type: "midi", instrumentPlugin: undefined, builtInInstrument: undefined });
         await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
         notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
 
@@ -241,13 +339,21 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           timestamp: Date.now(),
           execute: async () => {
             await nativeBridge.setTrackType(trackId, "midi").catch(() => false);
-            get().updateTrack(trackId, { type: "midi", instrumentPlugin: undefined });
+            get().updateTrack(trackId, { type: "midi", instrumentPlugin: undefined, builtInInstrument: undefined });
             await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
             notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
           },
           undo: async () => {
             await nativeBridge.setTrackType(trackId, previousType || "instrument").catch(() => false);
-            get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: undefined });
+            if (previousBuiltIn) {
+              const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
+              await nativeBridge.setBuiltInPluginParam(
+                { trackId, chain: "instrument", fxIndex: -1 },
+                "instrumentMode",
+                modeMap[previousBuiltIn] ?? 0,
+              ).catch(() => false);
+            }
+            get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: undefined, builtInInstrument: previousBuiltIn });
             await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
             notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
           },
@@ -268,6 +374,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       get().updateTrack(trackId, {
         type: typeAfterRemoval(track),
         instrumentPlugin: undefined,
+        builtInInstrument: track.builtInInstrument,
       });
       await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
       notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
@@ -282,6 +389,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           get().updateTrack(trackId, {
             type: typeAfterRemoval(currentTrack),
             instrumentPlugin: undefined,
+            builtInInstrument: currentTrack?.builtInInstrument,
           });
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
           notifyInstrumentChanged({ trackId, instrumentPlugin: undefined });
@@ -289,7 +397,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         undo: async () => {
           await nativeBridge.loadInstrument(trackId, previousPlugin);
           if (previousState) await nativeBridge.setInstrumentState(trackId, previousState);
-          get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: previousPlugin });
+          get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: previousPlugin, builtInInstrument: undefined });
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
           notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
         },
@@ -316,6 +424,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         samplerSamplePath: samplePath,
         samplerRootNote: nextRootNote,
         samplerSourceType: String(samplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+        builtInInstrument: undefined,
       });
       await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
 
@@ -330,6 +439,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
             samplerSamplePath: samplePath,
             samplerRootNote: nextRootNote,
             samplerSourceType: String(samplePath).toLowerCase().endsWith(".sf2") ? "soundfont" : "audio",
+            builtInInstrument: undefined,
           });
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
         },

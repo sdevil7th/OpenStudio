@@ -13,6 +13,7 @@ import {
   rebuildMIDIEventsForNotes,
   sortMIDIEvents as sortSharedMIDIEvents,
 } from "../../utils/midiNotes";
+import { calculateGridInterval, getQuantizePresetById, ticksToSeconds } from "../../utils/snapToGrid";
 
 type SetFn = (...args: any[]) => void;
 type GetFn = () => any;
@@ -20,6 +21,34 @@ type GetFn = () => any;
 const MIDI_SYNC_DEBOUNCE_MS = 120;
 const MIDI_NOTE_MIN_DURATION = 0.01;
 const midiSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function midiQuantizeSettingsFromPreset(state: any) {
+  const preset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
+  const tempo = state.transport?.tempo ?? 120;
+  return {
+    presetId: preset.id,
+    gridSize: preset.gridSize,
+    gridSeconds: calculateGridInterval(
+      tempo,
+      state.timeSignature ?? { numerator: 4, denominator: 4 },
+      preset.gridSize,
+      {
+        quantizePreset: preset,
+        quantizeGridSize: preset.gridSize,
+        pixelsPerSecond: state.pixelsPerSecond,
+      },
+    ),
+    strength: preset.strength,
+    mode: "start",
+    swing: preset.swing,
+    groovePreset: preset.groovePreset,
+    tupletDivisions: preset.tupletDivisions,
+    catchRangeMs: ticksToSeconds(preset.catchRangeTicks, tempo) * 1000,
+    safeRangeMs: ticksToSeconds(preset.safeRangeTicks, tempo) * 1000,
+    randomizeMs: ticksToSeconds(preset.roughTicks, tempo) * 1000,
+    moveControllers: preset.moveControllers,
+  };
+}
 
 function cloneVisibleLanes(lanes: any[] = []) {
   return lanes.map((lane) => ({ ...lane }));
@@ -1435,6 +1464,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       if (selectedPairs.length === 0) return [];
 
       const baseGrid = Math.max(SHARED_MIDI_NOTE_MIN_DURATION, gridSeconds || 0.25);
+      const gridOrigin = Number.isFinite(clip.startTime) ? Math.max(0, clip.startTime) : 0;
       const tupletDivisions = Number.isFinite(options.tupletDivisions)
         ? Math.max(1, Math.round(options.tupletDivisions))
         : 1;
@@ -1463,18 +1493,19 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
         return Math.max(0, index * grid + swingDelay + grooveOffset);
       };
       const snapToGridWithSwing = (time: number) => {
-        const center = Math.round(time / grid);
+        const projectTime = time + gridOrigin;
+        const center = Math.round(projectTime / grid);
         let best = snapGridPoint(center);
-        let bestDistance = Math.abs(time - best);
+        let bestDistance = Math.abs(projectTime - best);
         for (let index = center - 3; index <= center + 3; index += 1) {
           const candidate = snapGridPoint(index);
-          const distance = Math.abs(time - candidate);
+          const distance = Math.abs(projectTime - candidate);
           if (distance < bestDistance) {
             best = candidate;
             bestDistance = distance;
           }
         }
-        return best;
+        return Math.max(0, best - gridOrigin);
       };
       const applyStrengthAndRandomness = (original: number, target: number) => {
         const shifted = original + (target - original) * normalizedStrength;
@@ -1575,6 +1606,8 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       set({
         selectedNoteIds: result.nextIds,
         lastMIDIQuantizeSettings: {
+          presetId: options.presetId,
+          gridSize: options.gridSize,
           gridSeconds: baseGrid,
           strength: normalizedStrength,
           mode,
@@ -1616,19 +1649,13 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       const targetTrackId = trackId || state.pianoRollTrackId;
       const targetClipId = clipId || state.pianoRollClipId;
       if (!targetTrackId || !targetClipId) return [];
-      const settings = state.lastMIDIQuantizeSettings || {
-        gridSeconds: 0.125,
-        strength: 1,
-        mode: "start",
-        swing: 0,
-        groovePreset: "straight",
-        tupletDivisions: 1,
-        catchRangeMs: 0,
-        safeRangeMs: 0,
-        randomizeMs: 0,
-        moveControllers: true,
-      };
+      const settings = !state.lastMIDIQuantizeSettings
+        || state.lastMIDIQuantizeSettings.presetId !== state.quantizePresetId
+        ? midiQuantizeSettingsFromPreset(state)
+        : state.lastMIDIQuantizeSettings;
       return get().quantizeSelectedMIDINotes(targetTrackId, targetClipId, settings.gridSeconds, settings.strength, {
+        presetId: settings.presetId,
+        gridSize: settings.gridSize,
         mode: settings.mode,
         swing: settings.swing,
         groovePreset: settings.groovePreset,

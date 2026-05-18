@@ -38,6 +38,13 @@ export interface ParametricGraphProps {
   nodes: GraphNode[];
   nodeConfig: GraphNodeConfig;
   responseCurve?: { x: number; y: number }[];
+  backgroundCurves?: Array<{
+    id: string;
+    points: { x: number; y: number }[];
+    color?: string;
+    opacity?: number;
+    strokeWidth?: number;
+  }>;
   perNodeCurves?: { nodeId: string; points: { x: number; y: number }[] }[];
   onNodeAdd?: (x: number, y: number) => void;
   onNodeChange?: (id: string, changes: Partial<GraphNode>) => void;

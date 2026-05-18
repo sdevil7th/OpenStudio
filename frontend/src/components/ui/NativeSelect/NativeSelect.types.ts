@@ -105,10 +105,10 @@ export interface NativeSelectProps {
  * Size style mappings
  */
 export const nativeSelectSizeStyles: Record<NativeSelectSize, string> = {
-  xs: 'h-5 px-1 text-[10px]',
-  sm: 'h-6 px-1.5 text-[11px]',
-  md: 'h-8 px-2 text-sm',
-  lg: 'h-10 px-3 text-base',
+  xs: 'h-5 pl-1.5 pr-5 text-[10px]',
+  sm: 'h-6 pl-2 pr-6 text-[11px]',
+  md: 'h-8 pl-2.5 pr-7 text-sm',
+  lg: 'h-10 pl-3 pr-8 text-base',
 };
 
 /**

@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
+import { BuiltInPluginPanel } from "./BuiltInPluginPanel";
 import { MIDIFXControls } from "./MIDIFXControls";
 import { useDAWStore } from "../store/useDAWStore";
 import { pluginAutomationParamId } from "../store/automationParams";
@@ -97,6 +98,7 @@ interface Plugin {
   hasARA?: boolean;
   snapshot?: string;
   pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin";
+  instrumentMode?: number;
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -202,6 +204,11 @@ export function FXChainPanel({
   const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<
     number | null
   >(null);
+  const [expandedBuiltInFX, setExpandedBuiltInFX] = useState<number | null>(
+    null,
+  );
+  const [expandedFallbackInstrument, setExpandedFallbackInstrument] =
+    useState(false);
   const [showPresetMenu, setShowPresetMenu] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [precisionUpdatingFx, setPrecisionUpdatingFx] = useState<number | null>(
@@ -323,10 +330,24 @@ export function FXChainPanel({
   const instrumentPluginPath =
     chainType === "track" ? currentTrack?.instrumentPlugin : undefined;
   const hasLoadedInstrument = Boolean(instrumentPluginPath);
+  const isOpenStudioBuiltInInstrument = (name: string) =>
+    name === "OpenStudio Piano" ||
+    name === "OpenStudio Drums" ||
+    name === "OpenStudio Basic Synth" ||
+    name === "Studio13 Piano" ||
+    name === "Studio13 Drums" ||
+    name === "Studio13 Basic Synth";
+
+  const hasBuiltInInstrumentFX =
+    chainType === "track" &&
+    fxSlots.some(
+      (fx) => fx.type === "builtin" && isOpenStudioBuiltInInstrument(fx.name),
+    );
   const hasFallbackInstrument =
     chainType === "track" &&
     currentTrack?.type === "instrument" &&
-    !instrumentPluginPath;
+    !instrumentPluginPath &&
+    !hasBuiltInInstrumentFX;
   const showMidiFxControls =
     chainType === "track" &&
     Boolean(
@@ -340,11 +361,19 @@ export function FXChainPanel({
     plugins,
   );
   const fallbackInstrumentDisplayName = currentTrack?.samplerSamplePath
-    ? "Studio13 Basic Sampler"
-    : "Studio13 Basic Synth";
+    ? "OpenStudio Basic Sampler"
+    : currentTrack?.builtInInstrument === "piano"
+      ? "OpenStudio Piano"
+      : currentTrack?.builtInInstrument === "drums"
+        ? "OpenStudio Drums"
+        : "OpenStudio Basic Synth";
   const fallbackInstrumentTitle = currentTrack?.samplerSamplePath
     ? currentTrack.samplerSamplePath
-    : "Built-in fallback synth used until an instrument plugin is loaded";
+    : currentTrack?.builtInInstrument === "drums"
+      ? "Built-in drum instrument with GM/Roland e-drum MIDI mapping"
+      : currentTrack?.builtInInstrument === "piano"
+        ? "Built-in piano instrument"
+        : "Built-in fallback synth used until an instrument plugin is loaded";
 
   const applyLoadedPlugins = useCallback(
     (loadedPlugins: FXSlot[]) => {
@@ -428,8 +457,10 @@ export function FXChainPanel({
           manufacturer: "OpenStudio",
           category: b.category || "Built-in",
           fileOrIdentifier: b.name,
-          isInstrument: false,
+          isInstrument: Boolean(b.isInstrument),
           pluginType: "builtin" as const,
+          instrumentMode:
+            typeof b.instrumentMode === "number" ? b.instrumentMode : undefined,
         }));
       } catch {
         // Built-in FX not available
@@ -475,7 +506,10 @@ export function FXChainPanel({
     try {
       let success = false;
       const expectedLength =
-        chainType === "master" || (plugin.isInstrument && chainType === "track")
+        chainType === "master" ||
+        (plugin.pluginType !== "builtin" &&
+          plugin.isInstrument &&
+          chainType === "track")
           ? null
           : (await getFXChainSlots(trackId, chainType)).length + 1;
 
@@ -489,6 +523,17 @@ export function FXChainPanel({
             plugin.name,
             isInputFX,
           );
+          if (success && plugin.isInstrument && chainType === "track") {
+            updateTrack(trackId, {
+              type: "instrument",
+              instrumentPlugin: undefined,
+            });
+            await nativeBridge.setTrackType(trackId, "instrument");
+            notifyInstrumentChanged({
+              trackId,
+              instrumentPlugin: undefined,
+            });
+          }
         }
       } else if (plugin.pluginType === "s13fx") {
         if (chainType === "master") {
@@ -638,14 +683,11 @@ export function FXChainPanel({
         }
 
         // Auto-open native editor for built-in plugins after add
-        if (
-          plugin.pluginType === "builtin" &&
-          chainType !== "master" &&
-          updatedFx.length > 0
-        ) {
+        if (plugin.pluginType === "builtin" && updatedFx.length > 0) {
           const lastFx = updatedFx[updatedFx.length - 1];
           if (lastFx) {
-            handleOpenEditor(lastFx.index);
+            setExpandedBuiltInFX(lastFx.index);
+            setExpandedPitchCorrector(null);
           }
         }
       }
@@ -1040,6 +1082,7 @@ export function FXChainPanel({
     ...Array.from(new Set(plugins.map((p) => p.category))),
   ];
   const filteredPlugins = plugins.filter((p) => {
+    if (p.isInstrument && chainType !== "track") return false;
     const term = searchTerm.toLowerCase();
     const matchesSearch =
       p.name.toLowerCase().includes(term) ||
@@ -1217,7 +1260,22 @@ export function FXChainPanel({
                 <>
                   {hasFallbackInstrument && (
                     <div>
-                      <div className="fx-slot-item border-l-2 border-l-purple-500/70">
+                      <div
+                        className="fx-slot-item border-l-2 border-l-purple-500/70"
+                        onClick={() =>
+                          setExpandedFallbackInstrument((expanded) => !expanded)
+                        }
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setExpandedFallbackInstrument(
+                              (expanded) => !expanded,
+                            );
+                          }
+                        }}
+                      >
                         <div
                           className="fx-drag-handle"
                           title="Built-in fallback instrument"
@@ -1252,6 +1310,17 @@ export function FXChainPanel({
                           <X size={14} />
                         </Button>
                       </div>
+                      {expandedFallbackInstrument && (
+                        <BuiltInPluginPanel
+                          address={{
+                            trackId,
+                            chain: "instrument",
+                            fxIndex: -1,
+                          }}
+                          fallbackName={fallbackInstrumentDisplayName}
+                          onClose={() => setExpandedFallbackInstrument(false)}
+                        />
+                      )}
                     </div>
                   )}
                   {hasLoadedInstrument && (
@@ -1330,16 +1399,22 @@ export function FXChainPanel({
                           onDrop={(e) => handleDrop(e, index)}
                           onClick={() => {
                             if (isS13FX) handleToggleS13FXSliders(fx.index);
-                            else if (
-                              isBuiltIn &&
-                              fx.name.includes("Pitch Correct")
-                            )
-                              setExpandedPitchCorrector(
-                                expandedPitchCorrector === fx.index
+                            else if (isBuiltIn) {
+                              setExpandedBuiltInFX(
+                                expandedBuiltInFX === fx.index
                                   ? null
                                   : fx.index,
                               );
-                            else handleOpenEditor(fx.index);
+                              if (fx.name.includes("Pitch Correct")) {
+                                setExpandedPitchCorrector(
+                                  expandedPitchCorrector === fx.index
+                                    ? null
+                                    : fx.index,
+                                );
+                              } else {
+                                setExpandedPitchCorrector(null);
+                              }
+                            } else handleOpenEditor(fx.index);
                           }}
                         >
                           <div
@@ -1393,7 +1468,9 @@ export function FXChainPanel({
                               title={
                                 isS13FX
                                   ? "Click to show sliders"
-                                  : "Click to open editor"
+                                  : isBuiltIn
+                                    ? "Click to edit built-in plugin"
+                                    : "Click to open editor"
                               }
                             >
                               {fx.name}
@@ -1479,7 +1556,7 @@ export function FXChainPanel({
                             </select>
                           )}
                           {/* Parameters button */}
-                          {!isS13FX && (
+                          {!isS13FX && !isBuiltIn && (
                             <button
                               className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors shrink-0 ${
                                 expandedParamsFx === fx.index
@@ -1567,6 +1644,19 @@ export function FXChainPanel({
                               )}
                             </div>
                           )}
+
+                        {/* React built-in editor panel */}
+                        {isBuiltIn && expandedBuiltInFX === fx.index && (
+                          <BuiltInPluginPanel
+                            address={{
+                              trackId,
+                              chain: chainType,
+                              fxIndex: fx.index,
+                            }}
+                            fallbackName={fx.name}
+                            onClose={() => setExpandedBuiltInFX(null)}
+                          />
+                        )}
 
                         {/* Plugin Parameter Automation List */}
                         {!isS13FX && expandedParamsFx === fx.index && (
@@ -1935,7 +2025,7 @@ export function FXChainPanel({
             </div>
 
             {/* Search and Filter */}
-            <div className="flex gap-2 p-2 bg-neutral-800">
+            <div className="flex gap-2 p-2 bg-neutral-800 items-center">
               <Input
                 type="text"
                 variant="default"
@@ -1943,7 +2033,8 @@ export function FXChainPanel({
                 placeholder="Search by name, manufacturer, or category..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="flex-1"
+                className="flex-1 mr-4"
+                inputClassName="bg-neutral-900"
                 fullWidth={true}
                 aria-label="Search available plugins"
               />
@@ -1953,7 +2044,7 @@ export function FXChainPanel({
                 value={categoryFilter}
                 onChange={(val) => setCategoryFilter(val as string)}
                 options={categories.map((cat) => ({ value: cat, label: cat }))}
-                className="min-w-[150px]"
+                className="min-w-[150px] bg-neutral-900"
                 aria-label="Filter plugins by category"
               />
               <Button

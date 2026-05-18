@@ -3,7 +3,7 @@ import { PIANO_ROLL_TOOL_BUTTONS } from "../utils/pianoRollTools";
 
 interface PianoRollStatusStripProps {
   readonly tool: PianoRollTool;
-  readonly snapBeats: number;
+  readonly snapLabel: string;
   readonly cursorSeconds?: number | null;
   readonly sourceSeconds: number;
   readonly laneLabel: string;
@@ -11,7 +11,7 @@ interface PianoRollStatusStripProps {
 
 export function PianoRollStatusStrip({
   tool,
-  snapBeats,
+  snapLabel,
   cursorSeconds,
   sourceSeconds,
   laneLabel,
@@ -21,7 +21,7 @@ export function PianoRollStatusStrip({
   return (
     <div className="piano-roll-status-strip">
       <span>Tool: {toolLabel}</span>
-      <span>Snap: {snapBeats} beat</span>
+      <span>Snap: {snapLabel}</span>
       <span>Cursor: {cursorSeconds?.toFixed(3) ?? "--"}s</span>
       <span>Source: {sourceSeconds.toFixed(2)}s</span>
       <span>Lane: {laneLabel}</span>

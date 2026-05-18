@@ -75,6 +75,12 @@ function quantizeRecordedMIDIEvents(events: any[], gridSeconds: number, strength
   }).sort((a, b) => a.timestamp - b.timestamp);
 }
 
+function asArray(value: any): any[] {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value.length === "number") return Array.from(value);
+  return [];
+}
+
 async function syncArmedTracksBeforeRecording(armedTracks: Array<{ track: any }>) {
   for (const { track } of armedTracks) {
     await nativeBridge.addTrack(track.id, track.type).catch(logBridgeError("sync"));
@@ -419,6 +425,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       } else {
         stopTime = playStartPosition;
       }
+      const intendedStopTime = stopTime;
 
       set((state) => ({
         transport: {
@@ -454,6 +461,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       const playingResult = await nativeBridge.setTransportPlaying(false);
       const recordingResult = await nativeBridge.setTransportRecording(false);
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} stop:native`, { playingResult, recordingResult });
+      await nativeBridge.setTransportPosition(intendedStopTime).catch(logBridgeError("stop:setTransportPositionEarly"));
       console.log("[useDAWStore] STOP Native transport stopped.");
       get().endAutomationWriteSession?.();
 
@@ -570,12 +578,37 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         }
 
         // Also fetch completed MIDI clips
-        const newMIDIClips = await nativeBridge.getLastCompletedMIDIClips();
-        console.log("[useDAWStore] Received MIDI clips:", newMIDIClips.length);
-        const completedMIDIClips = newMIDIClips.filter(
-          (midiClipInfo) =>
-            midiClipInfo.events.length > 0 && armedMIDITrackIds.has(midiClipInfo.trackId),
-        );
+        const newMIDIClips = asArray(await nativeBridge.getLastCompletedMIDIClips());
+        const tracksById = new Map(get().tracks.map((track) => [track.id, track]));
+        console.log("[useDAWStore] Received MIDI clips:", newMIDIClips.length, newMIDIClips.map((clipInfo) => ({
+          trackId: clipInfo?.trackId,
+          eventCount: asArray(clipInfo?.events).length,
+          armedMIDITrack: armedMIDITrackIds.has(clipInfo?.trackId),
+          trackExists: tracksById.has(clipInfo?.trackId),
+        })));
+        const completedMIDIClips = newMIDIClips.filter((midiClipInfo) => {
+          const events = asArray(midiClipInfo?.events);
+          const track = tracksById.get(midiClipInfo?.trackId);
+
+          if (events.length === 0 || !track) {
+            console.warn("[useDAWStore] Ignoring completed MIDI recording", {
+              trackId: midiClipInfo?.trackId,
+              eventCount: events.length,
+              trackExists: Boolean(track),
+            });
+            return false;
+          }
+
+          if (!armedMIDITrackIds.has(midiClipInfo.trackId)) {
+            console.warn("[useDAWStore] Accepting completed MIDI recording for a track outside the armed MIDI snapshot", {
+              trackId: midiClipInfo.trackId,
+              trackType: track.type,
+              eventCount: events.length,
+            });
+          }
+
+          return true;
+        });
 
         if (completedAudioClips.length === 0 && completedMIDIClips.length === 0) {
           get().showToast("Recording stopped, but no completed clip was returned", "error");
@@ -590,13 +623,14 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           const inputQuantizeGridSeconds = inputQuantizeGridBeats / Math.max(0.001, get().transport.tempo / 60);
 
           // Convert backend events to frontend MIDIEvent format
-          const recordedEvents: MIDIEvent[] = midiClipInfo.events.map((e) => ({
+          const recordedEvents: MIDIEvent[] = asArray(midiClipInfo.events).map((e) => ({
             timestamp: e.timestamp,
             type: e.type as MIDIEvent["type"],
             note: e.note,
             velocity: e.velocity,
             controller: e.controller,
             value: e.value,
+            channel: e.channel,
           }));
           const events = inputQuantizeEnabled
             ? quantizeRecordedMIDIEvents(recordedEvents, inputQuantizeGridSeconds, inputQuantizeStrength)
@@ -632,11 +666,23 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           console.log("[useDAWStore] Added MIDI clip to track", midiClipInfo.trackId,
             "with", events.length, "events, duration:", midiClipDuration.toFixed(3),
             "inputQuantize:", inputQuantizeEnabled ? `${inputQuantizeGridBeats} beats @ ${inputQuantizeStrength}` : "off");
+
+          await get().syncMIDITrackToBackend?.(midiClipInfo.trackId, { debounce: false });
         }
       }
 
       // Reset backend position to match frontend stop position
-      const finalStopTime = get().transport.currentTime;
+      const finalStopTime = intendedStopTime;
+      set((state) => ({
+        transport: {
+          ...state.transport,
+          isPlaying: false,
+          isPaused: false,
+          isRecording: false,
+          currentTime: finalStopTime,
+        },
+        scrollX: Math.max(0, finalStopTime * state.pixelsPerSecond - 100),
+      }));
       const positionResult = await nativeBridge.setTransportPosition(finalStopTime);
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} stop:setTransportPosition`, { finalStopTime, positionResult });
       const stopSnapshot = await nativeBridge.getAudioDebugSnapshot();

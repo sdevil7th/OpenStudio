@@ -317,7 +317,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
           )}
 
         {/* Main Content — single flex-wrap row, wraps when TCP is narrow */}
-        <div className="flex-1 flex flex-wrap items-center py-1 px-1.5 gap-x-1.5 gap-y-0.5 content-center">
+        <div className="flex-1 flex flex-wrap items-center py-1 px-2 gap-x-2 gap-y-1 content-center">
           {/* Record Arm Button */}
           <Button
             variant="danger"
@@ -707,7 +707,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
                   ? "MIDI"
                   : "Instrument"
             }
-            className="w-11 shrink-0"
+            className="w-[86px] shrink-0"
           />
 
           {/* Audio Input Controls */}
@@ -736,7 +736,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
                   { value: "mono", label: "Mono" },
                 ]}
                 title={inputType === "stereo" ? "Stereo" : "Mono"}
-                className="w-11 shrink-0"
+                className="w-[64px] shrink-0"
               />
               <Select
                 variant="accent"
@@ -754,7 +754,7 @@ export const TrackHeader = React.memo(function TrackHeader({ track, isSelected }
                   availableInputs.find((i) => i.value === currentInputValue)
                     ?.label ?? currentInputValue
                 }
-                className="w-11 shrink-0"
+                className="w-[112px] shrink-0"
               />
             </>
           )}

@@ -2,7 +2,12 @@ import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { nativeBridge, type AiFeatureId, type AiToolsStatus } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
-import { type GridSize } from "../utils/snapToGrid";
+import {
+  FACTORY_QUANTIZE_PRESETS,
+  type GridSize,
+  type QuantizePreset,
+  type SnapType,
+} from "../utils/snapToGrid";
 // automationToBackend moved to store/actions/automation.ts
 import { logBridgeError } from "../utils/bridgeErrorHandler";
 import { uiStateActions } from "./actions/uiState";
@@ -374,6 +379,8 @@ export interface MIDIEditRange {
 }
 
 export interface MIDIQuantizeSettings {
+  presetId?: string;
+  gridSize?: GridSize;
   gridSeconds: number;
   strength: number;
   mode?: "start" | "starts" | "end" | "ends" | "both" | "startsAndEnds" | "length" | "fixedLength";
@@ -590,6 +597,8 @@ export interface AudioClip {
   activeTakeIndex?: number; // Which take is active (undefined = main clip)
   sourceLength?: number; // Full duration of source audio file (for resize clamping after split)
   gainEnvelope?: Array<{ time: number; gain: number }>; // Per-clip gain envelope (time relative to clip start, gain 0.0-2.0)
+  importStatus?: "probing" | "preparingPlayback" | "ready" | "failed";
+  waveformStatus?: "preview" | "building" | "ready";
 }
 
 export interface TempoMarker {
@@ -649,6 +658,7 @@ export interface Track {
   midiPitchBendRangeDown?: number;
   midiPitchBendRangeLinked?: boolean;
   instrumentPlugin?: string;
+  builtInInstrument?: "synth" | "piano" | "drums";
   samplerSamplePath?: string;
   samplerRootNote?: number;
   samplerSourceType?: "audio" | "soundfont";
@@ -958,7 +968,10 @@ interface DAWState {
   trackHeight: number; // For Vertical Zoom
   tcpWidth: number; // Track Control Panel width (draggable)
   snapEnabled: boolean;
+  snapType: SnapType;
   gridSize: GridSize;
+  quantizePresetId: string;
+  quantizePresets: QuantizePreset[];
   toolMode: "select" | "split" | "mute" | "smart";
 
   // UI State
@@ -1436,6 +1449,7 @@ interface DAWActions {
   addTrackFXWithUndo: (trackId: string, pluginPath: string, chainType: "input" | "track") => Promise<boolean>;
   removeTrackFXWithUndo: (trackId: string, fxIndex: number, chainType: "input" | "track") => Promise<boolean>;
   loadInstrumentWithUndo: (trackId: string, pluginPath: string) => Promise<boolean>;
+  setBuiltInInstrumentWithUndo: (trackId: string, instrument: "synth" | "piano" | "drums") => Promise<boolean>;
   removeInstrumentWithUndo: (trackId: string) => Promise<boolean>;
   setTrackSamplerSampleWithUndo: (trackId: string, samplePath: string, rootNote?: number) => Promise<boolean>;
   clearTrackSamplerSampleWithUndo: (trackId: string) => Promise<boolean>;
@@ -1517,10 +1531,34 @@ interface DAWActions {
   setTcpWidth: (width: number) => void;
   toggleSnap: () => void;
   setGridSize: (size: GridSize) => void;
+  setSnapType: (type: SnapType) => void;
+  setQuantizePresetId: (presetId: string) => void;
+  saveQuantizePreset: (name: string, preset?: Partial<QuantizePreset>) => string;
+  renameQuantizePreset: (presetId: string, name: string) => void;
+  removeQuantizePreset: (presetId: string) => void;
+  restoreFactoryQuantizePresets: () => void;
 
   // Clips
   addClip: (trackId: string, clip: AudioClip) => void;
   removeClip: (trackId: string, clipId: string) => void;
+  importExternalMediaAtTimeline: (request: {
+    filePath: string;
+    name?: string;
+    trackId?: string;
+    insertIndex?: number;
+    startTime: number;
+    duration?: number;
+    sampleRate?: number;
+    waveformStatus?: "preview" | "building" | "ready";
+  }) => Promise<void>;
+  importExternalMIDIAtTimeline: (request: {
+    filePath: string;
+    name?: string;
+    targetTrackId?: string;
+    insertIndex?: number;
+    startTime: number;
+    parsedTracks?: Array<{ name?: string; channel?: number; events: any[] }>;
+  }) => Promise<void>;
   syncClipsWithBackend: () => Promise<void>;
   importMedia: (
     filePath: string,
@@ -1964,6 +2002,8 @@ interface DAWActions {
   selectMIDINotesByPitch: (clipId: string, noteNumber?: number) => void;
   selectMIDINotesInRange: (clipId: string, range: { startTime: number; endTime: number; minNote: number; maxNote: number }, mode?: "replace" | "add" | "toggle") => void;
   quantizeSelectedMIDINotes: (trackId: string, clipId: string, gridSeconds: number, strength?: number, options?: {
+    presetId?: string;
+    gridSize?: GridSize;
     mode?: "start" | "starts" | "end" | "ends" | "both" | "startsAndEnds" | "length" | "fixedLength";
     swing?: number;
     groovePreset?: "straight" | "swingLight" | "swingHeavy" | "laidBack16" | "push16";
@@ -2175,6 +2215,7 @@ export const createDefaultTrack = (
   midiPitchBendRangeDown: 2,
   midiPitchBendRangeLinked: true,
   instrumentPlugin: undefined,
+  builtInInstrument: undefined,
   samplerSamplePath: undefined,
   samplerRootNote: 60,
   samplerSourceType: undefined,
@@ -2605,7 +2646,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     defaultCrossfadeLength: 0.05,
     razorEdits: [],
     snapEnabled: true,
-    gridSize: "bar",
+    snapType: "grid",
+    gridSize: "use_quantize",
+    quantizePresetId: "factory-1/16",
+    quantizePresets: [...FACTORY_QUANTIZE_PRESETS],
     toolMode: "select" as const,
     showMixer: true,
     showMasterTrackInTCP: false,
@@ -2667,6 +2711,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     midiInputQuantizeGridBeats: 0.25,
     midiInputQuantizeStrength: 1,
     lastMIDIQuantizeSettings: {
+      presetId: "factory-1/16",
+      gridSize: "1/16",
       gridSeconds: 0.125,
       strength: 1,
       mode: "start",

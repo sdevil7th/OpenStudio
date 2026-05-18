@@ -262,6 +262,18 @@
   max-width: 150px;
 }
 
+.piano-roll-snap-type-select {
+  width: 120px;
+}
+
+.piano-roll-grid-select {
+  width: 98px;
+}
+
+.piano-roll-quantize-preset-select {
+  width: 116px;
+}
+
 .piano-roll-strip-slider {
   width: 92px;
   accent-color: #64c7e8;

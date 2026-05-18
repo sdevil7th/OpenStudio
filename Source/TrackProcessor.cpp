@@ -5,6 +5,20 @@
 static constexpr int kMaxFXChannels = 64;
 static constexpr int kMinimumHostedPluginBlockSize = 512;
 
+static bool isBuiltInInstrumentProcessor(const juce::AudioProcessor* processor)
+{
+    if (processor == nullptr)
+        return false;
+
+    const auto name = processor->getName();
+    return name == "OpenStudio Piano"
+        || name == "OpenStudio Drums"
+        || name == "OpenStudio Basic Synth"
+        || name == "Studio13 Piano"
+        || name == "Studio13 Drums"
+        || name == "Studio13 Basic Synth";
+}
+
 // Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
 {
@@ -20,6 +34,100 @@ static int getSafeHostedPluginBlockSize(int requestedBlockSize)
 {
     return juce::jmax(kMinimumHostedPluginBlockSize,
                       requestedBlockSize > 0 ? requestedBlockSize : kMinimumHostedPluginBlockSize);
+}
+
+static float polyBlep(float phase, float phaseDelta)
+{
+    if (phaseDelta <= 0.0f)
+        return 0.0f;
+
+    if (phase < phaseDelta)
+    {
+        const float t = phase / phaseDelta;
+        return t + t - t * t - 1.0f;
+    }
+
+    if (phase > 1.0f - phaseDelta)
+    {
+        const float t = (phase - 1.0f) / phaseDelta;
+        return t * t + t + t + 1.0f;
+    }
+
+    return 0.0f;
+}
+
+static float polyBlepSaw(float phase, float phaseDelta)
+{
+    return (2.0f * phase - 1.0f) - polyBlep(phase, phaseDelta);
+}
+
+static float polyBlepSquare(float phase, float phaseDelta, float pulseWidth)
+{
+    const float clampedPulseWidth = juce::jlimit(0.08f, 0.92f, pulseWidth);
+    float value = phase < clampedPulseWidth ? 1.0f : -1.0f;
+    value += polyBlep(phase, phaseDelta);
+
+    float fallingPhase = phase - clampedPulseWidth;
+    if (fallingPhase < 0.0f)
+        fallingPhase += 1.0f;
+    value -= polyBlep(fallingPhase, phaseDelta);
+    return value;
+}
+
+static float cubicInterpolate(float a, float b, float c, float d, float frac)
+{
+    const float p = (d - c) - (a - b);
+    const float q = (a - b) - p;
+    const float r = c - a;
+    return ((p * frac + q) * frac + r) * frac + b;
+}
+
+static float fastNoise(int sampleAge, int note)
+{
+    const float x = static_cast<float>(sampleAge * 1103515245u + note * 12345u);
+    return std::sin(x * 0.0000137f) * std::sin(x * 0.000091f);
+}
+
+static float getDrumBaseFrequency(int note)
+{
+    switch (note)
+    {
+        case 35:
+        case 36: return 52.0f;
+        case 37:
+        case 38:
+        case 40: return 190.0f;
+        case 41: return 82.0f;
+        case 43: return 98.0f;
+        case 45: return 123.0f;
+        case 47: return 146.0f;
+        case 48: return 164.0f;
+        case 50: return 196.0f;
+        default: return 440.0f;
+    }
+}
+
+static float getDrumDecaySeconds(int note)
+{
+    switch (note)
+    {
+        case 35:
+        case 36: return 0.42f;
+        case 37:
+        case 38:
+        case 40: return 0.24f;
+        case 42: return 0.055f;
+        case 44: return 0.09f;
+        case 46: return 0.62f;
+        case 49:
+        case 52:
+        case 55:
+        case 57: return 1.55f;
+        case 51:
+        case 53:
+        case 59: return 1.15f;
+        default: return note >= 41 && note <= 50 ? 0.42f : 0.28f;
+    }
 }
 
 static void computePanLawGains(PanLaw panLaw, float pan, float volumeGain,
@@ -851,6 +959,18 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     auto sendSnapshot = std::atomic_load_explicit(&realtimeSendSnapshot, std::memory_order_acquire);
     const bool instrumentForceFloat = instrumentForceFloatOverride.load(std::memory_order_acquire);
     const double blockTimeSeconds = this->blockStartTimeSeconds;
+    bool hasTrackBuiltInInstrument = false;
+    if (trackFXSnapshot)
+    {
+        for (const auto& plugin : *trackFXSnapshot)
+        {
+            if (isBuiltInInstrumentProcessor(plugin.get()))
+            {
+                hasTrackBuiltInInstrument = true;
+                break;
+            }
+        }
+    }
 
     if (araController != nullptr && araController->isActive())
         araController->updateTransportDebugState(araTransportPlayingDebugState.load(std::memory_order_acquire),
@@ -1237,7 +1357,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     {
         safeProcessFX(instrumentSnapshot.get(), instrumentForceFloat, false, -1);
     }
-    else if (currentTrackType == TrackType::Instrument)
+    else if (currentTrackType == TrackType::Instrument && !hasTrackBuiltInInstrument)
     {
         renderFallbackInstrument(buffer, midiMessages, numSamps, processingSampleRate);
     }
@@ -2431,10 +2551,18 @@ void TrackProcessor::clearFallbackInstrumentState()
         channelNotes.fill(false);
     for (auto& channelPhases : fallbackInstrumentPhase)
         channelPhases.fill(0.0f);
+    for (auto& channelPhases : fallbackInstrumentPhaseB)
+        channelPhases.fill(0.0f);
+    for (auto& channelPhases : fallbackInstrumentSubPhase)
+        channelPhases.fill(0.0f);
+    for (auto& channelFilters : fallbackInstrumentFilterState)
+        channelFilters.fill(0.0f);
     for (auto& channelVelocities : fallbackInstrumentVelocity)
         channelVelocities.fill(0.0f);
     for (auto& channelEnvelopes : fallbackInstrumentEnvelope)
         channelEnvelopes.fill(0.0f);
+    for (auto& channelAges : fallbackInstrumentVoiceAgeSamples)
+        channelAges.fill(0);
     for (auto& channelPositions : fallbackSamplerPosition)
         channelPositions.fill(0.0);
     for (auto& channelIncrements : fallbackSamplerIncrement)
@@ -2442,6 +2570,96 @@ void TrackProcessor::clearFallbackInstrumentState()
     fallbackInstrumentPitchBend.fill(0.0f);
     fallbackInstrumentModulation.fill(0.0f);
     fallbackInstrumentModPhase.fill(0.0f);
+}
+
+float TrackProcessor::getFallbackInstrumentParam(const juce::String& paramId) const
+{
+    if (paramId == "attackMs") return fallbackSynthAttackMs.load(std::memory_order_relaxed);
+    if (paramId == "releaseMs") return fallbackSynthReleaseMs.load(std::memory_order_relaxed);
+    if (paramId == "brightness") return fallbackSynthBrightness.load(std::memory_order_relaxed);
+    if (paramId == "detuneCents") return fallbackSynthDetuneCents.load(std::memory_order_relaxed);
+    if (paramId == "subLevel") return fallbackSynthSubLevel.load(std::memory_order_relaxed);
+    if (paramId == "noiseLevel") return fallbackSynthNoiseLevel.load(std::memory_order_relaxed);
+    if (paramId == "outputGainDb") return fallbackSynthOutputGainDb.load(std::memory_order_relaxed);
+    if (paramId == "instrumentMode") return fallbackInstrumentMode.load(std::memory_order_relaxed);
+    if (paramId == "pianoTone") return fallbackPianoTone.load(std::memory_order_relaxed);
+    if (paramId == "pianoBody") return fallbackPianoBody.load(std::memory_order_relaxed);
+    if (paramId == "drumKit") return fallbackDrumKit.load(std::memory_order_relaxed);
+    if (paramId == "drumTuning") return fallbackDrumTuning.load(std::memory_order_relaxed);
+    if (paramId == "drumAmbience") return fallbackDrumAmbience.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
+bool TrackProcessor::setFallbackInstrumentParam(const juce::String& paramId, float value)
+{
+    if (paramId == "attackMs")
+    {
+        fallbackSynthAttackMs.store(juce::jlimit(0.5f, 2000.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "releaseMs")
+    {
+        fallbackSynthReleaseMs.store(juce::jlimit(5.0f, 5000.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "brightness")
+    {
+        fallbackSynthBrightness.store(juce::jlimit(0.0f, 1.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "detuneCents")
+    {
+        fallbackSynthDetuneCents.store(juce::jlimit(0.0f, 35.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "subLevel")
+    {
+        fallbackSynthSubLevel.store(juce::jlimit(0.0f, 0.8f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "noiseLevel")
+    {
+        fallbackSynthNoiseLevel.store(juce::jlimit(0.0f, 0.25f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "outputGainDb")
+    {
+        fallbackSynthOutputGainDb.store(juce::jlimit(-36.0f, 0.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "instrumentMode")
+    {
+        fallbackInstrumentMode.store(juce::jlimit(0.0f, 2.0f, std::round(value)), std::memory_order_relaxed);
+        fallbackInstrumentResetRequested.store(true, std::memory_order_release);
+        return true;
+    }
+    if (paramId == "pianoTone")
+    {
+        fallbackPianoTone.store(juce::jlimit(0.0f, 1.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "pianoBody")
+    {
+        fallbackPianoBody.store(juce::jlimit(0.0f, 1.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "drumKit")
+    {
+        fallbackDrumKit.store(juce::jlimit(0.0f, 2.0f, std::round(value)), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "drumTuning")
+    {
+        fallbackDrumTuning.store(juce::jlimit(-12.0f, 12.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+    if (paramId == "drumAmbience")
+    {
+        fallbackDrumAmbience.store(juce::jlimit(0.0f, 1.0f, value), std::memory_order_relaxed);
+        return true;
+    }
+
+    return false;
 }
 
 bool TrackProcessor::hasActiveFallbackInstrumentVoices() const
@@ -2472,6 +2690,12 @@ void TrackProcessor::handleFallbackInstrumentMidi(const juce::MidiMessage& messa
         fallbackInstrumentVelocity[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)]
             = static_cast<float>(message.getVelocity()) / 127.0f;
         fallbackInstrumentPhase[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = 0.0f;
+        fallbackInstrumentPhaseB[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = 0.13f;
+        fallbackInstrumentSubPhase[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = 0.31f;
+        fallbackInstrumentFilterState[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = 0.0f;
+        fallbackInstrumentEnvelope[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)]
+            = fallbackInstrumentMode.load(std::memory_order_relaxed) >= 1.5f ? 1.0f : 0.0f;
+        fallbackInstrumentVoiceAgeSamples[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = 0;
         fallbackSamplerPosition[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = 0.0;
         fallbackSamplerIncrement[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)]
             = samplerSample != nullptr && sampleRate > 0.0
@@ -2538,14 +2762,29 @@ void TrackProcessor::renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
 
     const int bufferChannels = buffer.getNumChannels();
     auto samplerSample = std::atomic_load_explicit(&fallbackSamplerSample, std::memory_order_acquire);
-    const bool useSampler = samplerSample != nullptr
+    const int instrumentMode = juce::jlimit(0, 2, static_cast<int>(std::round(fallbackInstrumentMode.load(std::memory_order_relaxed))));
+    const bool useSampler = instrumentMode != 2
+        && samplerSample != nullptr
         && samplerSample->samples.getNumSamples() > 1
         && samplerSample->samples.getNumChannels() > 0;
-    const float attackStep = 1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate) * 0.004f);
-    const float releaseStep = 1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate) * 0.12f);
-    const float synthGain = useSampler ? 0.24f : 0.045f;
+    const float attackMs = juce::jlimit(0.5f, 2000.0f, fallbackSynthAttackMs.load(std::memory_order_relaxed));
+    const float releaseMs = juce::jlimit(5.0f, 5000.0f, fallbackSynthReleaseMs.load(std::memory_order_relaxed));
+    const float attackStep = 1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate) * attackMs * 0.001f);
+    const float releaseStep = 1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate) * releaseMs * 0.001f);
+    const float brightness = juce::jlimit(0.0f, 1.0f, fallbackSynthBrightness.load(std::memory_order_relaxed));
+    const float detuneCents = juce::jlimit(0.0f, 35.0f, fallbackSynthDetuneCents.load(std::memory_order_relaxed));
+    const float detuneFactor = std::pow(2.0f, detuneCents / 1200.0f);
+    const float subLevel = juce::jlimit(0.0f, 0.8f, fallbackSynthSubLevel.load(std::memory_order_relaxed));
+    const float noiseLevel = juce::jlimit(0.0f, 0.25f, fallbackSynthNoiseLevel.load(std::memory_order_relaxed));
+    const float pianoTone = juce::jlimit(0.0f, 1.0f, fallbackPianoTone.load(std::memory_order_relaxed));
+    const float pianoBody = juce::jlimit(0.0f, 1.0f, fallbackPianoBody.load(std::memory_order_relaxed));
+    const int drumKit = juce::jlimit(0, 2, static_cast<int>(std::round(fallbackDrumKit.load(std::memory_order_relaxed))));
+    const float drumTuningFactor = std::pow(2.0f, juce::jlimit(-12.0f, 12.0f, fallbackDrumTuning.load(std::memory_order_relaxed)) / 12.0f);
+    const float drumAmbience = juce::jlimit(0.0f, 1.0f, fallbackDrumAmbience.load(std::memory_order_relaxed));
+    const float synthGain = useSampler
+        ? 0.24f
+        : juce::Decibels::decibelsToGain(juce::jlimit(-36.0f, 0.0f, fallbackSynthOutputGainDb.load(std::memory_order_relaxed)));
     const float twoPi = juce::MathConstants<float>::twoPi;
-    const float inversePi = 1.0f / juce::MathConstants<float>::pi;
 
     auto renderSegment = [&] (int startSample, int endSample)
     {
@@ -2570,13 +2809,32 @@ void TrackProcessor::renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
                     const bool isActive = fallbackInstrumentNoteActive[channel][note];
                     const bool isReleasing = fallbackInstrumentNoteReleasing[channel][note];
                     float& envelope = fallbackInstrumentEnvelope[channel][note];
+                    int& voiceAge = fallbackInstrumentVoiceAgeSamples[channel][note];
                     if (!isActive && envelope <= 0.0f)
                         continue;
 
-                    if (isActive && !isReleasing)
+                    if (instrumentMode == 2)
+                    {
+                        const float ageSec = static_cast<float>(voiceAge) / static_cast<float>(sampleRate);
+                        envelope = std::exp(-ageSec / getDrumDecaySeconds(static_cast<int>(note)));
+                        if (envelope < 0.0002f)
+                            envelope = 0.0f;
+                    }
+                    else if (instrumentMode == 1)
+                    {
+                        if (isActive && !isReleasing)
+                            envelope = juce::jmin(1.0f, envelope + juce::jmax(attackStep, 1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate) * 0.003f)));
+                        else
+                            envelope = juce::jmax(0.0f, envelope - releaseStep * 0.55f);
+                    }
+                    else if (isActive && !isReleasing)
+                    {
                         envelope = juce::jmin(1.0f, envelope + attackStep);
+                    }
                     else
+                    {
                         envelope = juce::jmax(0.0f, envelope - releaseStep);
+                    }
 
                     if (envelope <= 0.0f)
                     {
@@ -2586,7 +2844,53 @@ void TrackProcessor::renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
                         continue;
                     }
 
-                    if (useSampler)
+                    if (instrumentMode == 2)
+                    {
+                        const int midiNote = static_cast<int>(note);
+                        const float ageSec = static_cast<float>(voiceAge) / static_cast<float>(sampleRate);
+                        float& phase = fallbackInstrumentPhase[channel][note];
+                        const float baseFreq = getDrumBaseFrequency(midiNote) * drumTuningFactor;
+                        const float sweep = (midiNote == 35 || midiNote == 36) ? std::exp(-ageSec / 0.035f) * 72.0f : 0.0f;
+                        const float freq = juce::jlimit(20.0f, 8000.0f, baseFreq + sweep);
+                        phase += freq / static_cast<float>(sampleRate);
+                        if (phase >= 1.0f)
+                            phase -= std::floor(phase);
+
+                        const float noise = fastNoise(voiceAge, midiNote);
+                        float drum = 0.0f;
+                        if (midiNote == 35 || midiNote == 36)
+                        {
+                            const float body = std::sin(twoPi * phase) * std::exp(-ageSec / (drumKit == 1 ? 0.52f : 0.36f));
+                            const float click = noise * std::exp(-ageSec / 0.012f) * (drumKit == 2 ? 0.38f : 0.18f);
+                            drum = body * 1.18f + click;
+                        }
+                        else if (midiNote == 37 || midiNote == 38 || midiNote == 40)
+                        {
+                            const float snap = noise * std::exp(-ageSec / (drumKit == 1 ? 0.22f : 0.16f));
+                            const float body = std::sin(twoPi * phase) * std::exp(-ageSec / 0.12f);
+                            drum = snap * (drumKit == 2 ? 0.95f : 0.72f) + body * 0.34f;
+                        }
+                        else if (midiNote == 42 || midiNote == 44 || midiNote == 46)
+                        {
+                            const float metal = std::sin(twoPi * phase * 7.1f) * 0.24f + std::sin(twoPi * phase * 11.7f) * 0.18f;
+                            drum = (noise * 0.78f + metal) * std::exp(-ageSec / getDrumDecaySeconds(midiNote));
+                        }
+                        else if (midiNote == 49 || midiNote == 51 || midiNote == 52 || midiNote == 53 || midiNote == 55 || midiNote == 57 || midiNote == 59)
+                        {
+                            const float shimmer = std::sin(twoPi * phase * 5.3f) * 0.15f + std::sin(twoPi * phase * 9.7f) * 0.12f;
+                            drum = (noise * 0.64f + shimmer) * std::exp(-ageSec / getDrumDecaySeconds(midiNote));
+                        }
+                        else
+                        {
+                            const float body = std::sin(twoPi * phase) * std::exp(-ageSec / getDrumDecaySeconds(midiNote));
+                            drum = body * 0.9f + noise * 0.08f * std::exp(-ageSec / 0.04f);
+                        }
+
+                        const float room = std::sin(twoPi * phase * 0.37f + static_cast<float>(midiNote)) * drumAmbience * 0.08f * std::exp(-ageSec / 0.9f);
+                        mixed += (drum + room) * fallbackInstrumentVelocity[channel][note] * 0.34f;
+                        ++voiceAge;
+                    }
+                    else if (useSampler)
                     {
                         double& samplePosition = fallbackSamplerPosition[channel][note];
                         const int sourceLength = samplerSample->samples.getNumSamples();
@@ -2605,27 +2909,80 @@ void TrackProcessor::renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
                         float sampleValue = 0.0f;
                         for (int sourceChannel = 0; sourceChannel < sourceChannels; ++sourceChannel)
                         {
-                            const float a = samplerSample->samples.getSample(sourceChannel, index);
-                            const float b = samplerSample->samples.getSample(sourceChannel, index + 1);
-                            sampleValue += a + (b - a) * frac;
+                            const int i0 = juce::jlimit(0, sourceLength - 1, index - 1);
+                            const int i1 = juce::jlimit(0, sourceLength - 1, index);
+                            const int i2 = juce::jlimit(0, sourceLength - 1, index + 1);
+                            const int i3 = juce::jlimit(0, sourceLength - 1, index + 2);
+                            sampleValue += cubicInterpolate(samplerSample->samples.getSample(sourceChannel, i0),
+                                                            samplerSample->samples.getSample(sourceChannel, i1),
+                                                            samplerSample->samples.getSample(sourceChannel, i2),
+                                                            samplerSample->samples.getSample(sourceChannel, i3),
+                                                            frac);
                         }
                         sampleValue /= static_cast<float>(sourceChannels);
                         mixed += sampleValue * envelope * fallbackInstrumentVelocity[channel][note] * synthGain;
                         samplePosition += fallbackSamplerIncrement[channel][note] * static_cast<double>(pitchBendFactor);
+                        ++voiceAge;
+                    }
+                    else if (instrumentMode == 1)
+                    {
+                        const float frequency = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note))) * pitchBendFactor;
+                        const float phaseDelta = juce::jlimit(0.0f, 0.49f, frequency / static_cast<float>(sampleRate));
+                        float& phase = fallbackInstrumentPhase[channel][note];
+                        const float ageSec = static_cast<float>(voiceAge) / static_cast<float>(sampleRate);
+                        const float noteBright = juce::jlimit(0.35f, 1.35f, 0.72f + (static_cast<float>(note) - 60.0f) * 0.008f);
+                        const float decay = std::exp(-ageSec / (0.85f + pianoBody * 2.6f + (1.0f - noteBright) * 0.4f));
+                        const float hammer = fastNoise(voiceAge, static_cast<int>(note)) * std::exp(-ageSec / 0.012f) * (0.03f + pianoTone * 0.05f);
+                        const float fundamental = std::sin(twoPi * phase) * (0.82f + pianoBody * 0.28f);
+                        const float partial2 = std::sin(twoPi * phase * 2.003f) * (0.24f + pianoTone * 0.20f) * std::exp(-ageSec / 1.1f);
+                        const float partial3 = std::sin(twoPi * phase * 3.011f) * (0.13f + pianoTone * 0.15f) * std::exp(-ageSec / 0.74f);
+                        const float partial5 = std::sin(twoPi * phase * 5.031f) * (0.04f + pianoTone * 0.08f) * std::exp(-ageSec / 0.42f);
+                        const float piano = (fundamental + partial2 + partial3 + partial5 + hammer) * decay;
+                        mixed += piano * envelope * fallbackInstrumentVelocity[channel][note] * synthGain * 0.92f;
+
+                        phase += phaseDelta;
+                        if (phase >= 1.0f)
+                            phase -= std::floor(phase);
+                        ++voiceAge;
                     }
                     else
                     {
                         const float frequency = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note))) * pitchBendFactor;
-                        float& phase = fallbackInstrumentPhase[channel][note];
-                        const float sine = std::sin(phase);
-                        const float triangle = 2.0f * inversePi * std::asin(sine);
-                        const float secondHarmonic = std::sin(phase * 2.0f) * 0.16f;
-                        const float thirdHarmonic = std::sin(phase * 3.0f) * 0.06f;
-                        const float tone = (sine * 0.62f + triangle * 0.28f + secondHarmonic + thirdHarmonic) / 1.12f;
+                        const float phaseDeltaA = juce::jlimit(0.0f, 0.49f, frequency / static_cast<float>(sampleRate));
+                        const float phaseDeltaB = juce::jlimit(0.0f, 0.49f, (frequency * detuneFactor) / static_cast<float>(sampleRate));
+                        const float subDelta = juce::jlimit(0.0f, 0.49f, (frequency * 0.5f) / static_cast<float>(sampleRate));
+                        float& phaseA = fallbackInstrumentPhase[channel][note];
+                        float& phaseB = fallbackInstrumentPhaseB[channel][note];
+                        float& subPhase = fallbackInstrumentSubPhase[channel][note];
+                        float& filterState = fallbackInstrumentFilterState[channel][note];
+
+                        const float sawA = polyBlepSaw(phaseA, phaseDeltaA);
+                        const float sawB = polyBlepSaw(phaseB, phaseDeltaB);
+                        const float pulseWidth = 0.48f + 0.12f * std::sin(modulationPhase + static_cast<float>(note) * 0.07f);
+                        const float square = polyBlepSquare(phaseA, phaseDeltaA, pulseWidth);
+                        const float sub = polyBlepSquare(subPhase, subDelta, 0.5f);
+                        const float air = std::sin((phaseA * 91.7f + phaseB * 53.1f + static_cast<float>(note)) * twoPi) * noiseLevel;
+
+                        float tone = (sawA * 0.42f + sawB * 0.32f + square * (0.10f + 0.16f * brightness)
+                                      + sub * subLevel + air) / (0.92f + subLevel + noiseLevel);
+                        const float cutoff = juce::jlimit(220.0f, 18000.0f,
+                                                          520.0f + brightness * 8600.0f
+                                                          + frequency * (1.2f + brightness * 5.0f)
+                                                          + envelope * 3200.0f);
+                        const float filterAlpha = juce::jlimit(0.001f, 0.98f,
+                                                               1.0f - std::exp(-twoPi * cutoff / static_cast<float>(sampleRate)));
+                        filterState += filterAlpha * (tone - filterState);
+                        tone = filterState;
+
                         mixed += tone * envelope * fallbackInstrumentVelocity[channel][note] * synthGain;
-                        phase += twoPi * frequency / static_cast<float>(sampleRate);
-                        if (phase >= twoPi)
-                            phase -= twoPi;
+
+                        phaseA += phaseDeltaA;
+                        phaseB += phaseDeltaB;
+                        subPhase += subDelta;
+                        if (phaseA >= 1.0f) phaseA -= std::floor(phaseA);
+                        if (phaseB >= 1.0f) phaseB -= std::floor(phaseB);
+                        if (subPhase >= 1.0f) subPhase -= std::floor(subPhase);
+                        ++voiceAge;
                     }
                 }
             }
@@ -3076,14 +3433,25 @@ bool TrackProcessor::needsProcessing(double blockTimeSeconds, int numSamples,
 {
     // Instrument tracks must always be processed so they can respond to
     // live MIDI input and produce sustain / reverb tails after note-off.
-    if (trackType.load(std::memory_order_acquire) == TrackType::Instrument
-        && std::atomic_load_explicit(&realtimeInstrumentSnapshot, std::memory_order_acquire) != nullptr)
-        return true;
+    if (trackType.load(std::memory_order_acquire) == TrackType::Instrument)
+    {
+        if (std::atomic_load_explicit(&realtimeInstrumentSnapshot, std::memory_order_acquire) != nullptr)
+            return true;
 
-    if (trackType.load(std::memory_order_acquire) == TrackType::Instrument
-        && (hasActiveFallbackInstrumentVoices()
-            || fallbackInstrumentResetRequested.load(std::memory_order_acquire)))
-        return true;
+        auto trackFXSnapshot = std::atomic_load_explicit(&realtimeTrackFXSnapshot, std::memory_order_acquire);
+        if (trackFXSnapshot)
+        {
+            for (const auto& plugin : *trackFXSnapshot)
+            {
+                if (isBuiltInInstrumentProcessor(plugin.get()))
+                    return true;
+            }
+        }
+
+        if (hasActiveFallbackInstrumentVoices()
+            || fallbackInstrumentResetRequested.load(std::memory_order_acquire))
+            return true;
+    }
 
     if (hasQueuedMIDI())
         return true;
