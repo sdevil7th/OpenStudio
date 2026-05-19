@@ -7,7 +7,7 @@
 import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
-import { syncTempoMarkersToBackend } from "./storeHelpers";
+import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
 import { createDefaultTrack } from "../useDAWStore";
 
@@ -579,28 +579,12 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       // Sync automation lanes to backend (all lanes, even empty ones, to sync modes)
       for (const track of tracks) {
         for (const lane of track.automationLanes) {
-          const parameterId = lane.param;
-          const converted = lane.points.map((p) => ({
-            time: p.time,
-            value: automationToBackend(lane.param, p.value),
-          }));
-          syncPromises.push(nativeBridge.setAutomationPoints(track.id, parameterId, converted).catch(logBridgeError("sync")));
-          if (lane.mode) {
-            syncPromises.push(nativeBridge.setAutomationMode(track.id, parameterId, lane.mode).catch(logBridgeError("sync")));
-          }
+          syncPromises.push(syncAutomationLaneToBackend(track.id, lane));
         }
       }
       // Sync master automation lanes
       for (const lane of get().masterAutomationLanes) {
-        const parameterId = lane.param;
-        const converted = lane.points.map((p) => ({
-          time: p.time,
-          value: automationToBackend(lane.param, p.value),
-        }));
-        syncPromises.push(nativeBridge.setAutomationPoints("master", parameterId, converted).catch(logBridgeError("sync")));
-        if (lane.mode) {
-          syncPromises.push(nativeBridge.setAutomationMode("master", parameterId, lane.mode).catch(logBridgeError("sync")));
-        }
+        syncPromises.push(syncAutomationLaneToBackend("master", lane));
       }
       // Also sync tempo markers to backend
       syncTempoMarkersToBackend(get().tempoMarkers);

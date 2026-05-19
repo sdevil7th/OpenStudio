@@ -14,8 +14,23 @@ export const _automationLatchedParams = new Set<string>();
 export const _automationWriteValues = new Map<string, number>();
 export const AUTO_RECORD_INTERVAL_MS = 50;
 
+export type AutomationBackendMode = "off" | "read" | "write" | "touch" | "latch";
+export type AutomationWriteBehaviorValue = "touch" | "latch" | "overwrite";
+
 export function automationTouchKey(trackId: string, param: string): string {
   return `${trackId}::${param}`;
+}
+
+export function automationWriteBehaviorToBackendMode(
+  behavior: AutomationWriteBehaviorValue,
+): AutomationBackendMode {
+  if (behavior === "latch") return "latch";
+  if (behavior === "overwrite") return "write";
+  return "touch";
+}
+
+export function automationLaneReadEnabled(lane: { readEnabled?: boolean; mode?: AutomationBackendMode }): boolean {
+  return lane.readEnabled ?? lane.mode !== "off";
 }
 
 export function getLinkedTrackIds(
@@ -34,17 +49,18 @@ export function getLinkedTrackIds(
 
 export function syncAutomationLaneToBackend(
   trackId: string,
-  lane: { param: string; points: { time: number; value: number }[]; mode?: "off" | "read" | "write" | "touch" | "latch" },
+  lane: { param: string; points: { time: number; value: number }[]; mode?: AutomationBackendMode; readEnabled?: boolean },
 ) {
   const parameterId = lane.param;
   const converted = lane.points.map((p) => ({
     time: p.time,
     value: automationToBackend(lane.param, p.value),
   }));
-  nativeBridge.setAutomationPoints(trackId, parameterId, converted).catch(logBridgeError("sync"));
-  if (lane.mode) {
-    nativeBridge.setAutomationMode(trackId, parameterId, lane.mode).catch(logBridgeError("sync"));
-  }
+  const mode = automationLaneReadEnabled(lane) ? (lane.mode ?? "read") : "off";
+  return Promise.all([
+    nativeBridge.setAutomationPoints(trackId, parameterId, converted).catch(logBridgeError("sync")),
+    nativeBridge.setAutomationMode(trackId, parameterId, mode).catch(logBridgeError("sync")),
+  ]);
 }
 
 export function syncTempoMarkersToBackend(markers: { time: number; tempo: number }[]) {

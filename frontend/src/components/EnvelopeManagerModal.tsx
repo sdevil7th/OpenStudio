@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
-import { useDAWStore, AutomationModeType } from "../store/useDAWStore";
+import { useDAWStore, type AutomationWriteBehavior } from "../store/useDAWStore";
 import { nativeBridge } from "../services/NativeBridge";
 import { Modal } from "./ui";
 import { getTrackAutomationParams, getMasterAutomationParams, pluginAutomationParamId } from "../store/automationParams";
@@ -25,16 +25,14 @@ interface EnvelopeRow {
   category: string;
   isActive: boolean;
   isVisible: boolean;
-  isArmed: boolean;
+  isReadEnabled: boolean;
   laneId: string | null;
 }
 
-const MODE_OPTIONS: { value: AutomationModeType; label: string }[] = [
-  { value: "off", label: "Off" },
-  { value: "read", label: "Read" },
+const WRITE_BEHAVIOR_OPTIONS: { value: AutomationWriteBehavior; label: string }[] = [
   { value: "touch", label: "Touch" },
   { value: "latch", label: "Latch" },
-  { value: "write", label: "Write" },
+  { value: "overwrite", label: "Overwrite" },
 ];
 
 export function EnvelopeManagerModal() {
@@ -43,25 +41,21 @@ export function EnvelopeManagerModal() {
     envelopeManagerTrackId,
     closeEnvelopeManager,
     tracks,
+    automationWriteBehavior,
+    setAutomationWriteBehavior,
     addAutomationLane,
     toggleAutomationLaneVisibility,
-    armAutomationLane,
-    setTrackAutomationMode,
+    setAutomationLaneRead,
     showAllActiveEnvelopes,
     hideAllEnvelopes,
-    armAllVisibleAutomationLanes,
-    disarmAllAutomationLanes,
     toggleTrackAutomation,
     // Master-specific
     masterAutomationLanes,
     addMasterAutomationLane,
     toggleMasterAutomationLaneVisibility,
-    armMasterAutomationLane,
-    setMasterTrackAutomationMode,
+    setMasterAutomationLaneRead,
     showAllActiveMasterEnvelopes,
     hideAllMasterEnvelopes,
-    armAllVisibleMasterAutomationLanes,
-    disarmAllMasterAutomationLanes,
     toggleMasterAutomation,
   } = useDAWStore(
     useShallow((s) => ({
@@ -69,25 +63,21 @@ export function EnvelopeManagerModal() {
       envelopeManagerTrackId: s.envelopeManagerTrackId,
       closeEnvelopeManager: s.closeEnvelopeManager,
       tracks: s.tracks,
+      automationWriteBehavior: s.automationWriteBehavior,
+      setAutomationWriteBehavior: s.setAutomationWriteBehavior,
       addAutomationLane: s.addAutomationLane,
       toggleAutomationLaneVisibility: s.toggleAutomationLaneVisibility,
-      armAutomationLane: s.armAutomationLane,
-      setTrackAutomationMode: s.setTrackAutomationMode,
+      setAutomationLaneRead: s.setAutomationLaneRead,
       showAllActiveEnvelopes: s.showAllActiveEnvelopes,
       hideAllEnvelopes: s.hideAllEnvelopes,
-      armAllVisibleAutomationLanes: s.armAllVisibleAutomationLanes,
-      disarmAllAutomationLanes: s.disarmAllAutomationLanes,
       toggleTrackAutomation: s.toggleTrackAutomation,
       // Master
       masterAutomationLanes: s.masterAutomationLanes,
       addMasterAutomationLane: s.addMasterAutomationLane,
       toggleMasterAutomationLaneVisibility: s.toggleMasterAutomationLaneVisibility,
-      armMasterAutomationLane: s.armMasterAutomationLane,
-      setMasterTrackAutomationMode: s.setMasterTrackAutomationMode,
+      setMasterAutomationLaneRead: s.setMasterAutomationLaneRead,
       showAllActiveMasterEnvelopes: s.showAllActiveMasterEnvelopes,
       hideAllMasterEnvelopes: s.hideAllMasterEnvelopes,
-      armAllVisibleMasterAutomationLanes: s.armAllVisibleMasterAutomationLanes,
-      disarmAllMasterAutomationLanes: s.disarmAllMasterAutomationLanes,
       toggleMasterAutomation: s.toggleMasterAutomation,
     })),
   );
@@ -182,7 +172,7 @@ export function EnvelopeManagerModal() {
         category: categoryLabel,
         isActive: lane ? lane.points.length > 0 : false,
         isVisible: lane ? lane.visible : false,
-        isArmed: lane ? lane.armed : false,
+        isReadEnabled: lane ? (lane.readEnabled ?? lane.mode !== "off") : false,
         laneId: lane?.id ?? null,
       });
     }
@@ -201,7 +191,7 @@ export function EnvelopeManagerModal() {
           category: fxCategory,
           isActive: lane ? lane.points.length > 0 : false,
           isVisible: lane ? lane.visible : false,
-          isArmed: lane ? lane.armed : false,
+          isReadEnabled: lane ? (lane.readEnabled ?? lane.mode !== "off") : false,
           laneId: lane?.id ?? null,
         });
       }
@@ -229,23 +219,8 @@ export function EnvelopeManagerModal() {
     return groups;
   }, [filteredRows]);
 
-  // Global automation mode (most common mode across lanes)
-  const globalMode: AutomationModeType = useMemo(() => {
-    if (automationLanes.length === 0) return "off";
-    const counts = new Map<AutomationModeType, number>();
-    for (const lane of automationLanes) {
-      counts.set(lane.mode, (counts.get(lane.mode) || 0) + 1);
-    }
-    let best: AutomationModeType = "off";
-    let bestCount = 0;
-    for (const [mode, count] of counts) {
-      if (count > bestCount) {
-        best = mode;
-        bestCount = count;
-      }
-    }
-    return best;
-  }, [automationLanes]);
+  // Global write behavior is selected once for the project.
+  const currentWriteBehavior = automationWriteBehavior ?? "touch";
 
   // Handlers — dispatch to master or track actions
   const trackId = envelopeManagerTrackId!;
@@ -274,16 +249,11 @@ export function EnvelopeManagerModal() {
     }
   };
 
-  const handleToggleArm = (row: EnvelopeRow) => {
+  const handleToggleRead = (row: EnvelopeRow) => {
     const laneId = ensureLane(row);
     if (!laneId) return;
-    if (isMaster) armMasterAutomationLane(laneId, !row.isArmed);
-    else armAutomationLane(trackId, laneId, !row.isArmed);
-  };
-
-  const handleSetMode = (mode: AutomationModeType) => {
-    if (isMaster) setMasterTrackAutomationMode(mode);
-    else setTrackAutomationMode(trackId, mode);
+    if (isMaster) setMasterAutomationLaneRead(laneId, !row.isReadEnabled);
+    else setAutomationLaneRead(trackId, laneId, !row.isReadEnabled);
   };
 
   const handleShowActive = () => {
@@ -294,16 +264,6 @@ export function EnvelopeManagerModal() {
   const handleHideAll = () => {
     if (isMaster) hideAllMasterEnvelopes();
     else hideAllEnvelopes(trackId);
-  };
-
-  const handleArmVisible = () => {
-    if (isMaster) armAllVisibleMasterAutomationLanes();
-    else armAllVisibleAutomationLanes(trackId);
-  };
-
-  const handleDisarmAll = () => {
-    if (isMaster) disarmAllMasterAutomationLanes();
-    else disarmAllAutomationLanes(trackId);
   };
 
   const handleToggleSection = (category: string) => {
@@ -325,13 +285,13 @@ export function EnvelopeManagerModal() {
     <Modal isOpen={showEnvelopeManager} onClose={closeEnvelopeManager} size="lg" title={title} fullHeight>
       {/* Top controls */}
       <div className="flex items-center gap-2 flex-wrap mb-3">
-        <label className="text-[11px] text-neutral-400">Mode:</label>
+        <label className="text-[11px] text-neutral-400">Write:</label>
         <select
           className="text-[11px] bg-neutral-700 text-neutral-200 rounded px-2 py-1 border border-neutral-600 cursor-pointer"
-          value={globalMode}
-          onChange={(e) => handleSetMode(e.target.value as AutomationModeType)}
+          value={currentWriteBehavior}
+          onChange={(e) => setAutomationWriteBehavior(e.target.value as AutomationWriteBehavior)}
         >
-          {MODE_OPTIONS.map((o) => (
+          {WRITE_BEHAVIOR_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
@@ -349,18 +309,6 @@ export function EnvelopeManagerModal() {
           onClick={handleHideAll}
         >
           Hide All
-        </button>
-        <button
-          className="text-[11px] px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-300 border border-neutral-600"
-          onClick={handleArmVisible}
-        >
-          Arm Visible
-        </button>
-        <button
-          className="text-[11px] px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-300 border border-neutral-600"
-          onClick={handleDisarmAll}
-        >
-          Disarm All
         </button>
       </div>
 
@@ -382,7 +330,7 @@ export function EnvelopeManagerModal() {
           <span className="flex-1">Name</span>
           <span className="w-14 text-center">Active</span>
           <span className="w-14 text-center">Visible</span>
-          <span className="w-14 text-center">Arm</span>
+          <span className="w-14 text-center">Read</span>
         </div>
 
         {loading ? (
@@ -438,18 +386,18 @@ export function EnvelopeManagerModal() {
                       </button>
                     </span>
 
-                    {/* Arm */}
+                    {/* Read */}
                     <span className="w-14 flex justify-center">
                       <button
-                        onClick={() => handleToggleArm(row)}
+                        onClick={() => handleToggleRead(row)}
                         className={`w-4 h-4 rounded-sm border flex items-center justify-center transition-colors ${
-                          row.isArmed
-                            ? "bg-red-600 border-red-500"
+                          row.isReadEnabled
+                            ? "bg-teal-600 border-teal-500"
                             : "border-neutral-600 hover:border-neutral-400"
                         }`}
-                        title={row.isArmed ? "Disarm" : "Arm for recording"}
+                        title={row.isReadEnabled ? "Disable read" : "Enable read"}
                       >
-                        {row.isArmed && (
+                        {row.isReadEnabled && (
                           <svg viewBox="0 0 10 10" width={8} height={8} className="text-white">
                             <path d="M1.5 5 L4 7.5 L8.5 2.5" stroke="currentColor" strokeWidth={1.5} fill="none" />
                           </svg>

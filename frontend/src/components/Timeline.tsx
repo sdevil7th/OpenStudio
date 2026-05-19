@@ -9,6 +9,7 @@ import {
   AudioClip,
   MIDIClip,
   MIDIEvent,
+  AutomationPoint,
   RecordingClip,
   getTrackGroupInfo,
   TRACK_GROUP_COLORS,
@@ -275,6 +276,21 @@ type TimelineGestureUndoSnapshot = {
   isModified: boolean;
 };
 
+type AutomationDrawState = {
+  trackId: string;
+  laneId: string;
+  laneParam: string;
+  trackIndex: number;
+  laneIndex: number;
+  originalPoints: AutomationPoint[];
+  points: AutomationPoint[];
+  oldTrackRead: boolean;
+  oldTrackWrite: boolean;
+  oldLaneRead: boolean;
+  oldLaneMode: Track["automationLanes"][number]["mode"];
+  lastPoint: AutomationPoint;
+};
+
 const createEmptyTimelineDragState = (): TimelineDragState => ({
   type: null,
   clipId: null,
@@ -334,6 +350,52 @@ const timelineGestureSignature = (tracks: Track[]) =>
     })),
   );
 
+const clampAutomationValue = (value: number) =>
+  Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+
+const cloneAutomationPoints = (points: AutomationPoint[] = []) =>
+  points.map((point) => ({ time: point.time, value: point.value }));
+
+const mergeAutomationDrawPoints = (
+  basePoints: AutomationPoint[],
+  additions: AutomationPoint[],
+  pixelsPerSecond: number,
+) => {
+  if (additions.length === 0) return basePoints;
+  const replaceRadiusSeconds = Math.max(0.004, 3 / Math.max(1, pixelsPerSecond));
+  let next = cloneAutomationPoints(basePoints);
+
+  for (const addition of additions) {
+    const normalized = {
+      time: Math.max(0, addition.time),
+      value: clampAutomationValue(addition.value),
+    };
+    next = next.filter((point) => Math.abs(point.time - normalized.time) > replaceRadiusSeconds);
+    next.push(normalized);
+  }
+
+  next.sort((a, b) => a.time - b.time);
+  return next;
+};
+
+const interpolateAutomationDrawSegment = (
+  from: AutomationPoint,
+  to: AutomationPoint,
+  pixelsPerSecond: number,
+) => {
+  const dxPixels = Math.abs(to.time - from.time) * Math.max(1, pixelsPerSecond);
+  const steps = Math.max(1, Math.ceil(dxPixels / 6));
+  const points: AutomationPoint[] = [];
+  for (let step = 1; step <= steps; step += 1) {
+    const t = step / steps;
+    points.push({
+      time: from.time + (to.time - from.time) * t,
+      value: clampAutomationValue(from.value + (to.value - from.value) * t),
+    });
+  }
+  return points;
+};
+
 export function Timeline({
   tracks,
   masterAutomation,
@@ -376,6 +438,7 @@ export function Timeline({
     screenX: number;
     screenY: number;
   } | null>(null);
+  const automationDrawRef = useRef<AutomationDrawState | null>(null);
 
   // Clip context menu state
   const [clipContextMenu, setClipContextMenu] =
@@ -1315,6 +1378,129 @@ export function Timeline({
   dimensionsWidthRef.current = dimensions.width;
   const setTrackWaveformZoomRef = useRef(setTrackWaveformZoom);
   setTrackWaveformZoomRef.current = setTrackWaveformZoom;
+
+  const getAutomationDrawHit = useCallback((stageY: number) => {
+    const absoluteY = stageY + scrollYRef.current;
+    const hit = getTrackAtY(
+      absoluteY,
+      tracksRef.current,
+      trackYsRef.current,
+      trackHeightRef.current,
+    );
+    if (!hit || hit.isInClipArea || hit.laneIndex < 0) return null;
+
+    const track = tracksRef.current[hit.trackIndex];
+    if (!track?.showAutomation) return null;
+
+    const visibleLanes = track.automationLanes.filter((lane) => lane.visible);
+    const lane = visibleLanes[hit.laneIndex];
+    if (!lane) return null;
+
+    return {
+      track,
+      lane,
+      trackIndex: hit.trackIndex,
+      laneIndex: hit.laneIndex,
+      laneTop: (trackYsRef.current[hit.trackIndex] ?? 0)
+        + trackHeightRef.current
+        + hit.laneIndex * AUTOMATION_LANE_HEIGHT,
+    };
+  }, []);
+
+  const automationPointFromStagePosition = useCallback((
+    stageX: number,
+    stageY: number,
+    laneTop: number,
+  ): AutomationPoint => {
+    const time = Math.max(0, (stageX + scrollXRef.current) / Math.max(1, pixelsPerSecondRef.current));
+    const absoluteY = stageY + scrollYRef.current;
+    const value = 1 - ((absoluteY - laneTop) / AUTOMATION_LANE_HEIGHT);
+    return { time, value: clampAutomationValue(value) };
+  }, []);
+
+  const beginAutomationLaneDraw = useCallback((stageX: number, stageY: number) => {
+    const hit = getAutomationDrawHit(stageY);
+    if (!hit) return false;
+
+    const firstPoint = automationPointFromStagePosition(stageX, stageY, hit.laneTop);
+    const originalPoints = cloneAutomationPoints(hit.lane.points);
+    const nextPoints = mergeAutomationDrawPoints(
+      originalPoints,
+      [firstPoint],
+      pixelsPerSecondRef.current,
+    );
+    const oldTrackRead = typeof hit.track.automationReadEnabled === "boolean"
+      ? hit.track.automationReadEnabled
+      : Boolean(hit.track.automationEnabled);
+    const oldLaneRead = hit.lane.readEnabled ?? hit.lane.mode !== "off";
+
+    automationDrawRef.current = {
+      trackId: hit.track.id,
+      laneId: hit.lane.id,
+      laneParam: hit.lane.param,
+      trackIndex: hit.trackIndex,
+      laneIndex: hit.laneIndex,
+      originalPoints,
+      points: nextPoints,
+      oldTrackRead,
+      oldTrackWrite: hit.track.automationWriteEnabled === true,
+      oldLaneRead,
+      oldLaneMode: hit.lane.mode,
+      lastPoint: firstPoint,
+    };
+
+    useDAWStore.getState().setAutomationLanePoints(hit.track.id, hit.lane.id, nextPoints);
+    return true;
+  }, [automationPointFromStagePosition, getAutomationDrawHit]);
+
+  const continueAutomationLaneDraw = useCallback((stageX: number, stageY: number) => {
+    const draw = automationDrawRef.current;
+    if (!draw) return false;
+
+    const laneTop = (trackYsRef.current[draw.trackIndex] ?? 0)
+      + trackHeightRef.current
+      + draw.laneIndex * AUTOMATION_LANE_HEIGHT;
+    const nextPoint = automationPointFromStagePosition(stageX, stageY, laneTop);
+    const additions = interpolateAutomationDrawSegment(
+      draw.lastPoint,
+      nextPoint,
+      pixelsPerSecondRef.current,
+    );
+    if (additions.length === 0) return true;
+
+    const nextPoints = mergeAutomationDrawPoints(
+      draw.points,
+      additions,
+      pixelsPerSecondRef.current,
+    );
+    draw.points = nextPoints;
+    draw.lastPoint = nextPoint;
+    useDAWStore.getState().setAutomationLanePoints(draw.trackId, draw.laneId, nextPoints);
+    return true;
+  }, [automationPointFromStagePosition]);
+
+  const finishAutomationLaneDraw = useCallback(() => {
+    const draw = automationDrawRef.current;
+    if (!draw) return false;
+
+    automationDrawRef.current = null;
+    const originalSignature = JSON.stringify(draw.originalPoints);
+    const nextSignature = JSON.stringify(draw.points);
+    if (originalSignature !== nextSignature) {
+      useDAWStore.getState().setAutomationLanePoints(draw.trackId, draw.laneId, draw.points, {
+        undoable: true,
+        description: `Draw ${getAutomationShortLabel(draw.laneParam)} automation`,
+        oldPoints: draw.originalPoints,
+        oldTrackRead: draw.oldTrackRead,
+        oldTrackWrite: draw.oldTrackWrite,
+        oldLaneRead: draw.oldLaneRead,
+        oldLaneMode: draw.oldLaneMode,
+      });
+    }
+    marqueeJustCompletedRef.current = true;
+    setHoveredAutoPoint(null);
+    return true;
+  }, []);
 
   const externalMediaPreviewRef = useRef<ExternalMediaDropPreview | null>(null);
   externalMediaPreviewRef.current = externalMediaPreview;
@@ -2512,6 +2698,13 @@ export function Timeline({
       }
     }
 
+    if (automationDrawRef.current) {
+      const stage = e.target.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      if (pointerPos) continueAutomationLaneDraw(pointerPos.x, pointerPos.y);
+      return;
+    }
+
     // Slip editing: Alt+drag adjusts clip offset in real-time
     if (slipEditRef.current) {
       const stage = e.target.getStage();
@@ -2627,6 +2820,8 @@ export function Timeline({
 
   // Handle mouse up to finalize time selection / razor edit / marquee / slip edit (on main stage)
   const handleStageMouseUp = () => {
+    if (finishAutomationLaneDraw()) return;
+
     // Finalize slip edit with undo support
     finalizeSlipTimelineGesture();
 
@@ -4504,7 +4699,6 @@ export function Timeline({
     const rowMetrics = getTimelineRowMetrics(
       track ?? {
         type: "audio",
-        automationEnabled: false,
         showAutomation: false,
         automationLanes: [],
       },
@@ -5284,7 +5478,7 @@ export function Timeline({
           <Text
             x={4}
             y={laneTop + 3}
-            text={`${laneLabel} [${lane.mode}]`}
+            text={laneLabel}
             fontSize={10}
             fill={color}
             opacity={0.6}
@@ -5466,7 +5660,7 @@ export function Timeline({
             <Group key={`master-auto-${lane.id}`}>
               <Line points={[0, laneTop, dimensions.width, laneTop]} stroke="#333" strokeWidth={0.5} listening={false} />
               <Rect x={0} y={laneTop} width={dimensions.width} height={laneH} fill={color} opacity={0.04} listening={false} />
-              <Text x={4} y={laneTop + 3} text={`${laneLabel} [${lane.mode}]`} fontSize={10} fill={color} opacity={0.6} listening={false} />
+              <Text x={4} y={laneTop + 3} text={laneLabel} fontSize={10} fill={color} opacity={0.6} listening={false} />
               {lane.points.length === 0 && (
                 <Line points={[0, defaultLineY, dimensions.width, defaultLineY]} stroke={color} strokeWidth={1} dash={[4, 4]} opacity={0.3} listening={false} />
               )}
@@ -6234,15 +6428,32 @@ export function Timeline({
         pixelRatio={window.devicePixelRatio || 1}
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
-        onMouseLeave={() => { if (showCrosshair) setCrosshairPos(null); }}
+        onMouseLeave={() => {
+          if (showCrosshair) setCrosshairPos(null);
+          finishAutomationLaneDraw();
+        }}
         onMouseDown={(e: KonvaEvent) => {
           setBackgroundContextMenu(null);
           const targetName = e.target.name?.() || e.target.attrs?.name || "";
+          const stage = e.target.getStage();
+          const pointerPos = stage?.getPointerPosition();
+          if (
+            targetName === "timeline-bg"
+            && pointerPos
+            && (e.evt?.button ?? 0) === 0
+            && !e.evt?.altKey
+            && !e.evt?.ctrlKey
+            && !e.evt?.metaKey
+            && toolModeRef.current !== "split"
+            && beginAutomationLaneDraw(pointerPos.x, pointerPos.y)
+          ) {
+            marqueeRef.current = null;
+            setMarqueeRect(null);
+            return;
+          }
           // Alt+drag on background starts razor edit
           if (e.evt?.altKey) {
             if (targetName === "timeline-bg") {
-              const stage = e.target.getStage();
-              const pointerPos = stage.getPointerPosition();
               if (pointerPos) {
                 const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
                 const trackHitResult = getTrackAtY(pointerPos.y + scrollY, tracks, trackYs, trackHeight);
@@ -6256,8 +6467,6 @@ export function Timeline({
           }
           // Marquee zoom: Ctrl+drag on background (not on a clip)
           else if (targetName === "timeline-bg" && (e.evt?.ctrlKey || e.evt?.metaKey) && toolModeRef.current !== "split") {
-            const stage = e.target.getStage();
-            const pointerPos = stage.getPointerPosition();
             if (pointerPos) {
               const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
               marqueeZoomRef.current = {
@@ -6270,8 +6479,6 @@ export function Timeline({
           }
           // Marquee selection: plain click+drag on background (no Alt, no Ctrl, select tool)
           else if (targetName === "timeline-bg" && toolModeRef.current !== "split") {
-            const stage = e.target.getStage();
-            const pointerPos = stage.getPointerPosition();
             if (pointerPos) {
               marqueeRef.current = {
                 startX: pointerPos.x + scrollX,

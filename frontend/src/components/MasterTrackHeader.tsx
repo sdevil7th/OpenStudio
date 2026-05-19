@@ -1,11 +1,12 @@
 import { useCallback, useState } from "react";
-import { useDAWStore, AUTOMATION_LANE_HEIGHT, AutomationModeType } from "../store/useDAWStore";
+import { useDAWStore, AUTOMATION_LANE_HEIGHT } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Knob } from "./ui";
-import { Volume2, VolumeX, Power } from "lucide-react";
+import { ChevronDown, Volume2, VolumeX, Power } from "lucide-react";
 import { FXChainPanel } from "./FXChainPanel";
 import { getAutomationColor, getAutomationShortLabel, getAutomationParamDef } from "../store/automationParams";
 import {
+  TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS,
   TCP_HEADER_BUTTON_PAIR_CLASS,
   TCP_HEADER_PRIMARY_BUTTON_CLASS,
   TCP_HEADER_TOGGLE_BUTTON_CLASS,
@@ -23,16 +24,20 @@ export function MasterTrackHeader() {
     masterMono,
     masterAutomationLanes,
     showMasterAutomation,
+    masterAutomationReadEnabled,
+    masterAutomationWriteEnabled,
     masterAutomationEnabled,
     setMasterVolume,
     toggleMasterMute,
     toggleMasterMono,
     toggleMasterAutomation,
-    toggleMasterAutomationEnabled,
+    toggleMasterAutomationRead,
+    toggleMasterAutomationWrite,
+    beginAutomationParamTouch,
+    endAutomationParamTouch,
     openEnvelopeManager,
     toggleMasterAutomationLaneVisibility,
-    setMasterAutomationLaneMode,
-    armMasterAutomationLane,
+    toggleMasterAutomationLaneRead,
   } = useDAWStore(useShallow((s) => ({
     masterVolume: s.masterVolume,
     isMasterMuted: s.isMasterMuted,
@@ -40,45 +45,52 @@ export function MasterTrackHeader() {
     masterMono: s.masterMono,
     masterAutomationLanes: s.masterAutomationLanes,
     showMasterAutomation: s.showMasterAutomation,
+    masterAutomationReadEnabled: s.masterAutomationReadEnabled,
+    masterAutomationWriteEnabled: s.masterAutomationWriteEnabled,
     masterAutomationEnabled: s.masterAutomationEnabled,
     setMasterVolume: s.setMasterVolume,
     toggleMasterMute: s.toggleMasterMute,
     toggleMasterMono: s.toggleMasterMono,
     toggleMasterAutomation: s.toggleMasterAutomation,
-    toggleMasterAutomationEnabled: s.toggleMasterAutomationEnabled,
+    toggleMasterAutomationRead: s.toggleMasterAutomationRead,
+    toggleMasterAutomationWrite: s.toggleMasterAutomationWrite,
+    beginAutomationParamTouch: s.beginAutomationParamTouch,
+    endAutomationParamTouch: s.endAutomationParamTouch,
     openEnvelopeManager: s.openEnvelopeManager,
     toggleMasterAutomationLaneVisibility: s.toggleMasterAutomationLaneVisibility,
-    setMasterAutomationLaneMode: s.setMasterAutomationLaneMode,
-    armMasterAutomationLane: s.armMasterAutomationLane,
+    toggleMasterAutomationLaneRead: s.toggleMasterAutomationLaneRead,
   })));
 
   const [showFXChain, setShowFXChain] = useState(false);
   const [fxBypassed, setFxBypassed] = useState(false);
 
   const hasFx = masterFxCount > 0;
+  const hasAutomationLane = masterAutomationLanes.length > 0;
   const hasAutomation =
     (showMasterAutomation &&
       masterAutomationLanes.some((lane) => lane.visible)) ||
-    masterAutomationLanes.some((lane) => lane.armed);
-
-  let autoButtonClass = "hover:text-green-500 hover:border-green-500";
-  if (hasAutomation && !masterAutomationEnabled)
-    autoButtonClass =
-      "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]";
-  else if (hasAutomation)
-    autoButtonClass =
-      "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]";
-
-  let autoPowerClass = "hover:text-green-500 hover:border-green-500";
-  if (hasAutomation && !masterAutomationEnabled)
-    autoPowerClass = "text-red-400! border-red-500!";
-  else if (hasAutomation) autoPowerClass = "text-green-400! border-green-500!";
-
-  const autoPowerTitle = hasAutomation
-    ? masterAutomationEnabled
-      ? "Suspend master automation"
-      : "Enable master automation"
-    : "No automation lanes";
+    masterAutomationLanes.some((lane) => lane.points.length > 0);
+  const automationReadActive =
+    typeof masterAutomationReadEnabled === "boolean"
+      ? masterAutomationReadEnabled
+      : typeof masterAutomationEnabled === "boolean"
+        ? masterAutomationEnabled
+        : hasAutomationLane;
+  const automationWriteActive = masterAutomationWriteEnabled === true;
+  const canToggleAutomationRead = hasAutomationLane || automationWriteActive;
+  const autoReadClass = !canToggleAutomationRead
+    ? automationReadActive
+      ? "text-teal-200! border-teal-600! bg-teal-500/15! disabled:opacity-100!"
+      : "text-neutral-600! border-neutral-700! bg-neutral-800/60!"
+    : automationReadActive
+    ? "text-teal-200! border-teal-500! bg-teal-500/15!"
+    : "hover:text-teal-300 hover:border-teal-500";
+  const autoWriteClass = automationWriteActive
+    ? "text-red-200! border-red-500! bg-red-500/15!"
+    : "hover:text-red-300 hover:border-red-500";
+  const autoMenuClass = hasAutomation
+    ? "text-teal-300! border-teal-500!"
+    : "hover:text-teal-300 hover:border-teal-500";
 
   const masterVolumeDB =
     masterVolume > 0 ? 20 * Math.log10(masterVolume) : -60;
@@ -90,9 +102,13 @@ export function MasterTrackHeader() {
   const formatVolume = (db: number) =>
     db <= -60 ? "-inf dB" : `${db.toFixed(1)} dB`;
 
-  const handleAutomationClick = useCallback(() => {
-    openEnvelopeManager("master");
-  }, [openEnvelopeManager]);
+  const handleMasterVolumeBeginEdit = useCallback(() => {
+    beginAutomationParamTouch("master", "volume");
+  }, [beginAutomationParamTouch]);
+
+  const handleMasterVolumeCommitEdit = useCallback(() => {
+    endAutomationParamTouch("master", "volume");
+  }, [endAutomationParamTouch]);
 
   const handleAutomationContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -176,29 +192,53 @@ export function MasterTrackHeader() {
           {/* Automation button */}
           <div
             data-tcp-pair="automation"
-            className={`${TCP_HEADER_BUTTON_PAIR_CLASS} self-center`}
+            className={`${TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS} gap-0.5 self-center`}
           >
             <Button
               variant="default"
               size="icon-sm"
               shape="square"
-              onClick={handleAutomationClick}
-              onContextMenu={handleAutomationContextMenu}
-              title="Master Automation (right-click to toggle lanes)"
-              className={`${autoButtonClass} ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`}
+              onClick={toggleMasterAutomationRead}
+              disabled={!canToggleAutomationRead}
+              title={
+                canToggleAutomationRead
+                  ? automationReadActive ? "Disable master automation read" : "Enable master automation read"
+                  : "Add a master automation lane or enable write first"
+              }
+              aria-label={
+                canToggleAutomationRead
+                  ? automationReadActive ? "Disable master automation read" : "Enable master automation read"
+                  : "Master automation read unavailable"
+              }
+              className={`${autoReadClass} rounded`}
             >
-              <span className="text-[9px] font-bold">A</span>
+              <span className="leading-none">R</span>
             </Button>
-            <Button
-              variant="default"
-              size="icon-xs"
-              shape="square"
-              onClick={toggleMasterAutomationEnabled}
-              title={autoPowerTitle}
-              className={`${autoPowerClass} ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`}
-            >
-              <Power size={10} strokeWidth={2.5} />
-            </Button>
+            <span className={TCP_HEADER_BUTTON_PAIR_CLASS}>
+              <Button
+                variant="default"
+                size="icon-sm"
+                shape="square"
+                onClick={toggleMasterAutomationWrite}
+                title={automationWriteActive ? "Disable master automation write" : "Enable master automation write"}
+                aria-label={automationWriteActive ? "Disable master automation write" : "Enable master automation write"}
+                className={`${autoWriteClass} ${TCP_HEADER_PRIMARY_BUTTON_CLASS}`}
+              >
+                <span className="leading-none">W</span>
+              </Button>
+              <Button
+                variant="default"
+                size="icon-xs"
+                shape="square"
+                onClick={() => openEnvelopeManager("master")}
+                onContextMenu={handleAutomationContextMenu}
+                title="Master automation panel"
+                aria-label="Open master automation panel"
+                className={`${autoMenuClass} ${TCP_HEADER_TOGGLE_BUTTON_CLASS}`}
+              >
+                <ChevronDown size={10} strokeWidth={2.5} />
+              </Button>
+            </span>
           </div>
 
           {/* Master Volume Knob */}
@@ -210,6 +250,8 @@ export function MasterTrackHeader() {
               max={12}
               value={masterVolumeDB}
               onChange={handleVolumeChange}
+              onBeginEdit={handleMasterVolumeBeginEdit}
+              onCommitEdit={handleMasterVolumeCommitEdit}
               defaultValue={0}
               formatValue={formatVolume}
               label="Master Volume"
@@ -243,23 +285,15 @@ export function MasterTrackHeader() {
               <span className="text-[8px] text-neutral-500 w-12 text-center truncate shrink-0">
                 {paramDef.formatNormalized(paramDef.defaultNormalized)}
               </span>
-              {/* Mode selector */}
-              <select
-                className="text-[9px] bg-neutral-700 text-neutral-300 rounded px-0.5 h-5 shrink-0 cursor-pointer"
-                value={lane.mode}
-                onChange={(e) => setMasterAutomationLaneMode(lane.id, e.target.value as AutomationModeType)}
-              >
-                <option value="off">Off</option>
-                <option value="read">Read</option>
-                <option value="touch">Touch</option>
-                <option value="latch">Latch</option>
-                <option value="write">Write</option>
-              </select>
-              {/* Arm toggle */}
+              {/* Lane read toggle */}
               <button
-                className={`text-[9px] w-4 h-4 rounded flex items-center justify-center shrink-0 cursor-pointer ${lane.armed ? "bg-red-600 text-white" : "bg-neutral-700 text-neutral-500 hover:text-neutral-300"}`}
-                onClick={() => armMasterAutomationLane(lane.id, !lane.armed)}
-                title={lane.armed ? "Disarm automation" : "Arm automation"}
+                className={`text-[9px] w-5 h-4 rounded flex items-center justify-center shrink-0 cursor-pointer ${
+                  (lane.readEnabled ?? lane.mode !== "off")
+                    ? "bg-teal-600/70 text-white border border-teal-400"
+                    : "bg-neutral-700 text-neutral-500 hover:text-neutral-300 border border-neutral-600"
+                }`}
+                onClick={() => toggleMasterAutomationLaneRead(lane.id)}
+                title={(lane.readEnabled ?? lane.mode !== "off") ? "Disable lane read" : "Enable lane read"}
               >
                 R
               </button>

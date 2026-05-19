@@ -194,6 +194,12 @@ async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: 
   }
 }
 
+function trackAutomationReadEnabled(track: any): boolean {
+  if (typeof track?.automationReadEnabled === "boolean") return track.automationReadEnabled;
+  if (typeof track?.automationEnabled === "boolean") return track.automationEnabled;
+  return (track?.automationLanes?.length ?? 0) > 0;
+}
+
 async function restoreTrackFxChain(sourceTrackId: string, newTrackId: string, isInputFX: boolean) {
   const getFx = isInputFX ? nativeBridge.getTrackInputFX.bind(nativeBridge) : nativeBridge.getTrackFX.bind(nativeBridge);
   const addFx = isInputFX ? nativeBridge.addTrackInputFX.bind(nativeBridge) : nativeBridge.addTrackFX.bind(nativeBridge);
@@ -284,7 +290,7 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
   for (const lane of newTrack.automationLanes) {
     syncAutomationLaneToBackend(newTrack.id, lane);
   }
-  if (!newTrack.automationEnabled) {
+  if (!trackAutomationReadEnabled(newTrack)) {
     for (const lane of newTrack.automationLanes) {
       await nativeBridge.setAutomationMode(newTrack.id, lane.param, "off").catch(() => false);
     }
@@ -711,6 +717,11 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         _linkingInProgress.add("vol_" + tid);
         nativeBridge.setTrackVolume(tid, volumeDB);
+        const linkedTrack = get().tracks.find((t) => t.id === tid);
+        if (trackAutomationReadEnabled(linkedTrack)
+            && linkedTrack?.automationWriteEnabled) {
+          get().setAutomationWriteValue?.(tid, "volume", Math.max(0, Math.min(1, ((volumeDB ?? 0) + 60) / 72)));
+        }
       }
       for (const tid of linkedIds) _linkingInProgress.delete("vol_" + tid);
 
@@ -730,6 +741,11 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         _linkingInProgress.add("pan_" + tid);
         nativeBridge.setTrackPan(tid, pan);
+        const linkedTrack = get().tracks.find((t) => t.id === tid);
+        if (trackAutomationReadEnabled(linkedTrack)
+            && linkedTrack?.automationWriteEnabled) {
+          get().setAutomationWriteValue?.(tid, "pan", Math.max(0, Math.min(1, ((pan ?? 0) + 1) / 2)));
+        }
       }
       for (const tid of linkedIds) _linkingInProgress.delete("pan_" + tid);
 
@@ -773,6 +789,15 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       };
 
       commandManager.execute(command);
+      for (const tid of linkedIds) {
+        const t = get().tracks.find((candidate) => candidate.id === tid);
+        if (t?.automationWriteEnabled) {
+          get().beginAutomationParamTouch?.(tid, "mute");
+          get().setAutomationWriteValue?.(tid, "mute", newMuted ? 1 : 0);
+          get().recordAutomationWriteTick?.(Date.now());
+          get().endAutomationParamTouch?.(tid, "mute");
+        }
+      }
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
@@ -944,15 +969,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         const t = state.tracks.find((tr) => tr.id === tid);
         if (t) _editSnapshots.set("vol_" + tid, t.volumeDB);
-        // Signal touch begin to backend for touch/latch automation
-        const volLane = t?.automationLanes.find((l) => l.param === "volume");
-        if (volLane && volLane.armed && (volLane.mode === "touch" || volLane.mode === "latch")) {
-          const key = automationTouchKey(tid, "volume");
-          _automationTouchedParams.add(key);
-          if (volLane.mode === "latch") _automationLatchedParams.add(key);
-          else _automationLatchedParams.delete(key);
-          nativeBridge.beginTouchAutomation(tid, "volume");
-        }
+        get().beginAutomationParamTouch?.(tid, "volume");
       }
     },
     commitTrackVolumeEdit: (id) => {
@@ -973,14 +990,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       const endTouched = () => {
         for (const tid of linkedIds) {
           const t = get().tracks.find((tr) => tr.id === tid);
-          const volLane = t?.automationLanes.find((l) => l.param === "volume");
-          if (volLane && volLane.armed && (volLane.mode === "touch" || volLane.mode === "latch")) {
-            const key = automationTouchKey(tid, "volume");
-            _automationTouchedParams.delete(key);
-            if (volLane.mode !== "latch") _automationLatchedParams.delete(key);
-            nativeBridge.endTouchAutomation(tid, "volume");
-            _autoRecordTimers.delete(key);
-          }
+          get().endAutomationParamTouch?.(tid, "volume");
         }
       };
 
@@ -1023,15 +1033,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         const t = state.tracks.find((tr) => tr.id === tid);
         if (t) _editSnapshots.set("pan_" + tid, t.pan);
-        // Signal touch begin to backend for touch/latch automation
-        const panLane = t?.automationLanes.find((l) => l.param === "pan");
-        if (panLane && panLane.armed && (panLane.mode === "touch" || panLane.mode === "latch")) {
-          const key = automationTouchKey(tid, "pan");
-          _automationTouchedParams.add(key);
-          if (panLane.mode === "latch") _automationLatchedParams.add(key);
-          else _automationLatchedParams.delete(key);
-          nativeBridge.beginTouchAutomation(tid, "pan");
-        }
+        get().beginAutomationParamTouch?.(tid, "pan");
       }
     },
     commitTrackPanEdit: (id) => {
@@ -1051,14 +1053,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       const endTouched = () => {
         for (const tid of linkedIds) {
           const t = get().tracks.find((tr) => tr.id === tid);
-          const panLane = t?.automationLanes.find((l) => l.param === "pan");
-          if (panLane && panLane.armed && (panLane.mode === "touch" || panLane.mode === "latch")) {
-            const key = automationTouchKey(tid, "pan");
-            _automationTouchedParams.delete(key);
-            if (panLane.mode !== "latch") _automationLatchedParams.delete(key);
-            nativeBridge.endTouchAutomation(tid, "pan");
-            _autoRecordTimers.delete(key);
-          }
+          get().endAutomationParamTouch?.(tid, "pan");
         }
       };
 

@@ -124,6 +124,88 @@ function persistRecentProjects(projects: string[]) {
   nativeBridge.setRecentProjects(sanitized).catch(logBridgeError("recent projects"));
 }
 
+function normalizeAutomationWriteBehavior(value: unknown) {
+  return value === "latch" || value === "overwrite" ? value : "touch";
+}
+
+function automationLaneReadFromLegacy(lane: any): boolean {
+  if (typeof lane?.readEnabled === "boolean") return lane.readEnabled;
+  if (Array.isArray(lane?.points) && lane.points.length > 0) return true;
+  return lane?.mode !== "off";
+}
+
+function isLegacyPlaceholderAutomationLane(lane: any): boolean {
+  return (
+    (lane?.id === "vol" && lane?.param === "volume") ||
+    (lane?.id === "pan" && lane?.param === "pan") ||
+    (lane?.id === "master-vol" && lane?.param === "volume") ||
+    (lane?.id === "master-pan" && lane?.param === "pan")
+  );
+}
+
+function hasMeaningfulAutomationLane(lane: any, ownerData: any = {}): boolean {
+  const hasPoints = Array.isArray(lane?.points) && lane.points.length > 0;
+  if (hasPoints) return true;
+  if (Boolean(ownerData?.showAutomation) && Boolean(lane?.visible)) return true;
+  return !isLegacyPlaceholderAutomationLane(lane);
+}
+
+function normalizeAutomationLane(lane: any) {
+  const readEnabled = automationLaneReadFromLegacy(lane);
+  const points = Array.isArray(lane?.points)
+    ? lane.points
+        .map((point: any) => ({
+          time: Math.max(0, Number(point?.time) || 0),
+          value: Math.max(0, Math.min(1, Number(point?.value) || 0)),
+        }))
+        .sort((a: any, b: any) => a.time - b.time)
+    : [];
+  return {
+    ...lane,
+    id: lane?.id || `lane_${lane?.param || "automation"}_${Date.now()}`,
+    param: lane?.param || "volume",
+    points,
+    visible: Boolean(lane?.visible),
+    mode: readEnabled ? "read" : "off",
+    armed: false,
+    readEnabled,
+  };
+}
+
+function normalizeAutomationLanes(lanes: any[], ownerData: any = {}) {
+  return (Array.isArray(lanes) ? lanes : [])
+    .filter((lane) => hasMeaningfulAutomationLane(lane, ownerData))
+    .map(normalizeAutomationLane);
+}
+
+function resolveLoadedAutomationLaneModes(lanes: any[], readEnabled: boolean) {
+  return lanes.map((lane) => ({
+    ...lane,
+    mode: readEnabled && lane.readEnabled ? "read" : "off",
+    armed: false,
+  }));
+}
+
+function deriveAutomationReadEnabled(data: any, lanes: any[]): boolean {
+  if (lanes.length === 0) return false;
+  if (typeof data?.automationReadEnabled === "boolean") return data.automationReadEnabled;
+  if (typeof data?.automationEnabled === "boolean") return data.automationEnabled;
+  if (lanes.some((lane) => lane.readEnabled || (lane.points || []).length > 0)) return true;
+  return false;
+}
+
+function serializeAutomationLanesForProject(lanes: any[]) {
+  return (Array.isArray(lanes) ? lanes : []).map((lane) => {
+    const readEnabled = automationLaneReadFromLegacy(lane);
+    return {
+      ...lane,
+      readEnabled,
+      mode: readEnabled ? "read" : "off",
+      armed: false,
+    };
+  });
+}
+
 function buildProjectResetState() {
   const freshProjectState = createFreshProjectDocumentState();
   return {
@@ -196,10 +278,25 @@ function buildSerializedProjectData(
     masterPan: state.masterPan,
     isMasterMuted: state.isMasterMuted,
     masterMono: state.masterMono,
-    masterAutomationLanes: state.masterAutomationLanes,
+    masterAutomationLanes: serializeAutomationLanesForProject(state.masterAutomationLanes),
     showMasterAutomation: state.showMasterAutomation,
-    masterAutomationEnabled: state.masterAutomationEnabled,
-    suspendedMasterAutomationState: state.suspendedMasterAutomationState,
+    masterAutomationReadEnabled: deriveAutomationReadEnabled(
+      {
+        automationReadEnabled: state.masterAutomationReadEnabled,
+        automationEnabled: state.masterAutomationEnabled,
+      },
+      state.masterAutomationLanes || [],
+    ),
+    masterAutomationWriteEnabled: false,
+    masterAutomationEnabled: deriveAutomationReadEnabled(
+      {
+        automationReadEnabled: state.masterAutomationReadEnabled,
+        automationEnabled: state.masterAutomationEnabled,
+      },
+      state.masterAutomationLanes || [],
+    ),
+    automationWriteBehavior: normalizeAutomationWriteBehavior(state.automationWriteBehavior),
+    suspendedMasterAutomationState: null,
     tracks: serializedTracks,
     masterFXPaths,
     masterFXStates,
@@ -491,6 +588,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           const instrumentState = track.instrumentPlugin
             ? await nativeBridge.getInstrumentState(track.id).catch(() => "")
             : "";
+          const trackAutomationReadEnabled = deriveAutomationReadEnabled(track, track.automationLanes || []);
 
           return {
             id: track.id,
@@ -529,6 +627,12 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             trackFXStates,
             instrumentPlugin: track.instrumentPlugin,
             instrumentState,
+            automationLanes: serializeAutomationLanesForProject(track.automationLanes),
+            showAutomation: Boolean(track.showAutomation),
+            automationReadEnabled: trackAutomationReadEnabled,
+            automationWriteEnabled: false,
+            automationEnabled: trackAutomationReadEnabled,
+            suspendedAutomationState: null,
           };
         }),
       );
@@ -666,10 +770,26 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           Array.isArray(data.metronomeAccentBeats) && data.metronomeAccentBeats.length > 0
             ? data.metronomeAccentBeats
             : freshProjectState.metronomeAccentBeats;
-        const loadedMasterAutomationLanes =
+        const loadedMasterAutomationLanesRaw =
           Array.isArray(data.masterAutomationLanes) && data.masterAutomationLanes.length > 0
             ? data.masterAutomationLanes
             : freshProjectState.masterAutomationLanes;
+        const loadedMasterAutomationLanesNormalized = normalizeAutomationLanes(
+          loadedMasterAutomationLanesRaw,
+          { showAutomation: Boolean(data.showMasterAutomation) },
+        );
+        const loadedMasterAutomationRead = deriveAutomationReadEnabled(
+          {
+            automationReadEnabled: data.masterAutomationReadEnabled,
+            automationEnabled: data.masterAutomationEnabled,
+          },
+          loadedMasterAutomationLanesNormalized,
+        );
+        const loadedMasterAutomationLanes = resolveLoadedAutomationLaneModes(
+          loadedMasterAutomationLanesNormalized,
+          loadedMasterAutomationRead,
+        );
+        const loadedAutomationWriteBehavior = normalizeAutomationWriteBehavior(data.automationWriteBehavior);
         const loadedRenderMetadata = {
           ...freshProjectState.renderMetadata,
           ...(data.renderMetadata || {}),
@@ -731,10 +851,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           masterMono: Boolean(data.masterMono),
           masterAutomationLanes: loadedMasterAutomationLanes,
           showMasterAutomation: Boolean(data.showMasterAutomation),
-          masterAutomationEnabled:
-            typeof data.masterAutomationEnabled === "boolean"
-              ? data.masterAutomationEnabled
-              : true,
+          masterAutomationReadEnabled: loadedMasterAutomationRead,
+          masterAutomationWriteEnabled: false,
+          masterAutomationEnabled: loadedMasterAutomationRead,
+          automationWriteBehavior: loadedAutomationWriteBehavior,
           suspendedMasterAutomationState: data.suspendedMasterAutomationState || null,
           mixerSnapshots: Array.isArray(data.mixerSnapshots) ? data.mixerSnapshots : [],
           trackGroups: Array.isArray(data.trackGroups) ? data.trackGroups : [],
@@ -898,6 +1018,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             const restoredMidiClips = (trackData.midiClips || []).map((clip: any) =>
               normalizeMIDIClipLoopLength(clip),
             );
+            const normalizedAutomationLanes = normalizeAutomationLanes(
+              trackData.automationLanes || [],
+              trackData,
+            );
+            const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
+            const restoredAutomationLanes = resolveLoadedAutomationLaneModes(
+              normalizedAutomationLanes,
+              automationReadEnabled,
+            );
 
             const frontendTrack: Track = {
               ...trackData,
@@ -1027,7 +1156,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               midiPitchBendRangeUp: trackData.midiPitchBendRangeUp ?? 2,
               midiPitchBendRangeDown: trackData.midiPitchBendRangeDown ?? trackData.midiPitchBendRangeUp ?? 2,
               midiPitchBendRangeLinked: trackData.midiPitchBendRangeLinked ?? true,
-              automationLanes: trackData.automationLanes || [],
+              automationLanes: restoredAutomationLanes,
+              showAutomation: Boolean(trackData.showAutomation),
+              automationReadEnabled,
+              automationWriteEnabled: false,
+              automationEnabled: automationReadEnabled,
               meterLevel: 0,
               peakLevel: 0,
               clipping: false,
@@ -1063,6 +1196,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             }
 
             set((state) => ({ tracks: [...state.tracks, frontendTrack] }));
+            for (const lane of frontendTrack.automationLanes) {
+              syncAutomationLaneToBackend(frontendTrack.id, lane);
+            }
           } catch (trackError) {
             console.error(`[DEBUG LOAD] Failed to load track "${trackData.name}"`, trackError);
           }
@@ -1158,6 +1294,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         clips: [],        // No clips in templates
         midiClips: [],     // No MIDI clips
         takes: [],         // No takes
+        automationLanes: serializeAutomationLanesForProject(t.automationLanes),
+        automationReadEnabled: deriveAutomationReadEnabled(t, t.automationLanes || []),
+        automationWriteEnabled: false,
+        automationEnabled: deriveAutomationReadEnabled(t, t.automationLanes || []),
         meterLevel: 0,
         peakLevel: 0,
         clipping: false,
@@ -1209,12 +1349,24 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           // Add template tracks (skip undo for individual tracks during template load)
           for (const trackData of template.tracks) {
             const newId = crypto.randomUUID();
+            const normalizedAutomationLanes = normalizeAutomationLanes(
+              trackData.automationLanes || [],
+              trackData,
+            );
+            const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
             const newTrack = {
               ...trackData,
               id: newId,
               clips: [],
               midiClips: [],
               takes: [],
+              automationLanes: resolveLoadedAutomationLaneModes(
+                normalizedAutomationLanes,
+                automationReadEnabled,
+              ),
+              automationReadEnabled,
+              automationWriteEnabled: false,
+              automationEnabled: automationReadEnabled,
               meterLevel: 0,
               peakLevel: 0,
               clipping: false,

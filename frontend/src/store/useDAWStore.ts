@@ -406,6 +406,7 @@ export interface MIDIRangeClipboard {
 // Supports built-in params plus plugin params like "plugin_0_3" (fxIndex_paramIndex)
 export type AutomationParam = "volume" | "pan" | "mute" | (string & {});
 export type AutomationModeType = "off" | "read" | "write" | "touch" | "latch";
+export type AutomationWriteBehavior = "touch" | "latch" | "overwrite";
 export const AUTOMATION_LANE_HEIGHT = 60; // px per visible automation lane
 export const DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT = 16;
 export const BOTTOM_INTERACTION_BUFFER = 32;
@@ -424,20 +425,21 @@ export interface AutomationLane {
   visible: boolean;
   mode: AutomationModeType;
   armed: boolean;
+  readEnabled: boolean;
 }
 
 export interface AutomationSuspendSnapshot {
   showAutomation: boolean;
-  lanes: Record<string, { visible: boolean; armed: boolean; mode: AutomationModeType }>;
+  lanes: Record<string, { visible: boolean; armed: boolean; mode: AutomationModeType; readEnabled?: boolean }>;
 }
 
 // ===== Automation Layout Helpers =====
 
 export function getEffectiveTrackHeight(
-  track: Pick<Track, "automationEnabled" | "showAutomation" | "automationLanes">,
+  track: Pick<Track, "showAutomation" | "automationLanes">,
   baseTrackHeight: number,
 ): number {
-  if (!track.automationEnabled || !track.showAutomation) return baseTrackHeight;
+  if (!track.showAutomation) return baseTrackHeight;
   const visibleLaneCount = track.automationLanes.filter((l) => l.visible).length;
   return baseTrackHeight + visibleLaneCount * AUTOMATION_LANE_HEIGHT;
 }
@@ -476,7 +478,7 @@ export function getTrackClipBodyHeight(
 }
 
 export function getTimelineRowMetrics(
-  track: Pick<Track, "type" | "automationEnabled" | "showAutomation" | "automationLanes">,
+  track: Pick<Track, "type" | "showAutomation" | "automationLanes">,
   baseTrackHeight: number,
 ) {
   const rowHeight = getEffectiveTrackHeight(track, baseTrackHeight);
@@ -672,6 +674,8 @@ export interface Track {
   // Automation
   automationLanes: AutomationLane[];
   showAutomation: boolean;
+  automationReadEnabled: boolean;
+  automationWriteEnabled: boolean;
   automationEnabled: boolean;
   suspendedAutomationState?: AutomationSuspendSnapshot | null;
 
@@ -936,8 +940,11 @@ interface DAWState {
   masterMono: boolean;
   masterAutomationLanes: AutomationLane[];
   showMasterAutomation: boolean;
+  masterAutomationReadEnabled: boolean;
+  masterAutomationWriteEnabled: boolean;
   masterAutomationEnabled: boolean;
   suspendedMasterAutomationState: AutomationSuspendSnapshot | null;
+  automationWriteBehavior: AutomationWriteBehavior;
 
   // Meter state — stored separately from `tracks` so that 10Hz meter updates
   // never give tracks a new array reference.  Only ChannelStrip / TrackHeader
@@ -1499,9 +1506,15 @@ interface DAWActions {
   toggleMasterMute: () => void;
   toggleMasterMono: () => void;
   toggleMasterAutomation: () => void;
+  setMasterAutomationRead: (enabled: boolean) => void;
+  toggleMasterAutomationRead: () => void;
+  setMasterAutomationWrite: (enabled: boolean) => void;
+  toggleMasterAutomationWrite: () => void;
   toggleMasterAutomationEnabled: () => void;
   addMasterAutomationLane: (param: string) => string | null;
   toggleMasterAutomationLaneVisibility: (laneId: string) => void;
+  setMasterAutomationLaneRead: (laneId: string, enabled: boolean) => void;
+  toggleMasterAutomationLaneRead: (laneId: string) => void;
   setMasterAutomationLaneMode: (laneId: string, mode: AutomationModeType) => void;
   armMasterAutomationLane: (laneId: string, armed: boolean) => void;
   setMasterTrackAutomationMode: (mode: AutomationModeType) => void;
@@ -1632,13 +1645,34 @@ interface DAWActions {
   deleteRazorEditContent: () => void;
 
   // Track Automation (Phase 5)
+  setAutomationWriteBehavior: (behavior: AutomationWriteBehavior) => void;
   toggleTrackAutomation: (trackId: string) => void;
+  setTrackAutomationRead: (trackId: string, enabled: boolean) => void;
+  toggleTrackAutomationRead: (trackId: string) => void;
+  setTrackAutomationWrite: (trackId: string, enabled: boolean) => void;
+  toggleTrackAutomationWrite: (trackId: string) => void;
   toggleTrackAutomationEnabled: (trackId: string) => void;
   addAutomationLane: (trackId: string, param: AutomationParam, label?: string) => string | null;
   addAutomationPoint: (trackId: string, laneId: string, time: number, value: number) => void;
   removeAutomationPoint: (trackId: string, laneId: string, pointIndex: number) => void;
   moveAutomationPoint: (trackId: string, laneId: string, pointIndex: number, time: number, value: number) => void;
+  setAutomationLanePoints: (
+    trackId: string,
+    laneId: string,
+    points: AutomationPoint[],
+    options?: {
+      undoable?: boolean;
+      description?: string;
+      oldPoints?: AutomationPoint[];
+      oldTrackRead?: boolean;
+      oldTrackWrite?: boolean;
+      oldLaneRead?: boolean;
+      oldLaneMode?: AutomationModeType;
+    },
+  ) => void;
   toggleAutomationLaneVisibility: (trackId: string, laneId: string) => void;
+  setAutomationLaneRead: (trackId: string, laneId: string, enabled: boolean) => void;
+  toggleAutomationLaneRead: (trackId: string, laneId: string) => void;
   clearAutomationLane: (trackId: string, laneId: string) => void;
   setAutomationLaneMode: (trackId: string, laneId: string, mode: AutomationModeType) => void;
   setTrackAutomationMode: (trackId: string, mode: AutomationModeType) => void;
@@ -2228,12 +2262,11 @@ export const createDefaultTrack = (
   meterLevel: 0,
   peakLevel: 0,
   clipping: false,
-  automationLanes: [
-    { id: "vol", param: "volume", points: [], visible: true, mode: "read", armed: false },
-    { id: "pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
-  ],
+  automationLanes: [],
   showAutomation: false,
-  automationEnabled: true,
+  automationReadEnabled: false,
+  automationWriteEnabled: false,
+  automationEnabled: false,
   suspendedAutomationState: null,
   frozen: false,
   takes: [],
@@ -2292,10 +2325,7 @@ export const initialTransport: TransportState = {
 };
 
 export function createDefaultMasterAutomationLanes(): AutomationLane[] {
-  return [
-    { id: "master-vol", param: "volume", points: [], visible: false, mode: "read", armed: false },
-    { id: "master-pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
-  ];
+  return [];
 }
 
 export function createDefaultRenderMetadata() {
@@ -2404,8 +2434,11 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     masterMono: false,
     masterAutomationLanes: createDefaultMasterAutomationLanes(),
     showMasterAutomation: false,
-    masterAutomationEnabled: true,
+    masterAutomationReadEnabled: false,
+    masterAutomationWriteEnabled: false,
+    masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
+    automationWriteBehavior: "touch",
     projectPath: null,
     isModified: false,
     projectName: "Untitled Project",
@@ -2628,8 +2661,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     masterMono: false,
     masterAutomationLanes: createDefaultMasterAutomationLanes(),
     showMasterAutomation: false,
-    masterAutomationEnabled: true,
+    masterAutomationReadEnabled: false,
+    masterAutomationWriteEnabled: false,
+    masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
+    automationWriteBehavior: "touch",
     meterLevels: {},
     peakLevels: {},
     clippingStates: {},

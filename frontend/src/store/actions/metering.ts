@@ -88,13 +88,35 @@ export const meteringActions = (set: SetFn, get: GetFn) => ({
     const next: Record<string, Record<string, number>> = {};
 
     for (const track of state.tracks) {
-      if (!track.automationEnabled) continue;
+      const readEnabled =
+        typeof track.automationReadEnabled === "boolean"
+          ? track.automationReadEnabled
+          : typeof track.automationEnabled === "boolean"
+            ? track.automationEnabled
+            : (track.automationLanes?.length ?? 0) > 0;
+      if (!readEnabled) continue;
       for (const lane of track.automationLanes) {
-        if (lane.mode === "off" || lane.points.length === 0) continue;
+        if (lane.readEnabled === false || lane.mode === "off" || lane.points.length === 0) continue;
         const normalized = interpolateAtTime(lane.points, time);
         const rounded = Math.round(normalized * 10000) / 10000;
         if (!next[track.id]) next[track.id] = {};
         next[track.id][lane.param] = rounded;
+      }
+    }
+
+    const masterReadEnabled =
+      typeof state.masterAutomationReadEnabled === "boolean"
+        ? state.masterAutomationReadEnabled
+        : typeof state.masterAutomationEnabled === "boolean"
+          ? state.masterAutomationEnabled
+          : (state.masterAutomationLanes?.length ?? 0) > 0;
+    if (masterReadEnabled) {
+      for (const lane of state.masterAutomationLanes || []) {
+        if (lane.readEnabled === false || lane.mode === "off" || lane.points.length === 0) continue;
+        const normalized = interpolateAtTime(lane.points, time);
+        const rounded = Math.round(normalized * 10000) / 10000;
+        if (!next.master) next.master = {};
+        next.master[lane.param] = rounded;
       }
     }
 
