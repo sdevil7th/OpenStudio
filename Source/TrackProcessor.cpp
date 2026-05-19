@@ -1,5 +1,7 @@
 #include "TrackProcessor.h"
 
+#include <algorithm>
+
 // Maximum channel count for the pre-allocated FX processing buffer.
 // Must be large enough for multi-output instruments (e.g. Komplete Kontrol = 32 out).
 static constexpr int kMaxFXChannels = 64;
@@ -2461,7 +2463,8 @@ bool TrackProcessor::loadFallbackSamplerSample(const juce::String& filePath, int
             : 44100.0;
         const auto availableSamples = static_cast<size_t>(selectedHeader->end - selectedHeader->start);
         const auto maxSamples = static_cast<size_t>(juce::jmax(1.0, sourceSampleRate) * 60.0);
-        const int samplesToRead = static_cast<int>(juce::jmax<size_t>(1, juce::jmin(availableSamples, maxSamples)));
+        const int samplesToRead = static_cast<int>(
+            std::max<size_t>(1, std::min(availableSamples, maxSamples)));
 
         auto sample = std::make_shared<FallbackSamplerSample>();
         sample->samples.setSize(1, samplesToRead);
@@ -2498,7 +2501,7 @@ bool TrackProcessor::loadFallbackSamplerSample(const juce::String& filePath, int
     const auto maxSamples = static_cast<juce::int64>(
         juce::jmax(1.0, reader->sampleRate) * 60.0);
     const int samplesToRead = static_cast<int>(
-        juce::jmin<juce::int64>(reader->lengthInSamples, maxSamples));
+        std::min<juce::int64>(reader->lengthInSamples, maxSamples));
     const int channelsToRead = juce::jlimit(1, 2, static_cast<int>(reader->numChannels));
 
     auto sample = std::make_shared<FallbackSamplerSample>();

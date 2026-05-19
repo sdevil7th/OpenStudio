@@ -2,6 +2,7 @@
 #include "ApplicationLaunchState.h"
 #include <set>
 #include <thread>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -335,7 +336,8 @@ static juce::var buildWaveformPreviewPayload(const juce::String& requestId,
 
     const int channels = juce::jlimit(1, 8, static_cast<int>(reader->numChannels));
     const int pointCount = juce::jlimit(64, 4096, juce::jmin(maxPoints, static_cast<int>(reader->lengthInSamples)));
-    const auto samplesPerPoint = juce::jmax<juce::int64>(1, (reader->lengthInSamples + pointCount - 1) / pointCount);
+    const auto samplesPerPoint = std::max<juce::int64>(
+        1, (reader->lengthInSamples + pointCount - 1) / pointCount);
     juce::Array<juce::var> peaks;
     peaks.ensureStorageAllocated(1 + pointCount * channels * 2);
     peaks.add(channels);
@@ -349,7 +351,8 @@ static juce::var buildWaveformPreviewPayload(const juce::String& requestId,
     juce::int64 samplePos = 0;
     while (samplePos < reader->lengthInSamples)
     {
-        const int samplesToRead = static_cast<int>(juce::jmin<juce::int64>(chunkSize, reader->lengthInSamples - samplePos));
+        const int samplesToRead = static_cast<int>(
+            std::min<juce::int64>(chunkSize, reader->lengthInSamples - samplePos));
         buffer.clear();
         if (! reader->read(&buffer, 0, samplesToRead, samplePos, true, true))
             break;
