@@ -79,17 +79,17 @@ export function getRegisteredActions(): ActionDef[] {
 
     // ===== Edit =====
     { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().undo() },
-    { id: "edit.redo", name: "Redo", category: "Edit", shortcut: "Ctrl+Shift+Z", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().redo() },
-    { id: "edit.cut", name: "Cut Selected Clips", category: "Edit", shortcut: "Ctrl+X", canHandleShortcut: () => s().selectedClipIds.length > 0, execute: () => s().cutSelectedClips() },
-    { id: "edit.copy", name: "Copy Selected Clips", category: "Edit", shortcut: "Ctrl+C", canHandleShortcut: () => s().selectedClipIds.length > 0, execute: () => s().copySelectedClips() },
-    { id: "edit.paste", name: "Paste Clips", category: "Edit", shortcut: "Ctrl+V", execute: () => s().pasteClips() },
-    { id: "edit.delete", name: "Delete Selected", category: "Edit", shortcut: "Delete", execute: () => {
+    { id: "edit.redo", name: "Redo", category: "Edit", shortcut: "Ctrl+Shift+Z", shortcutAliases: ["Ctrl+Y"], canHandleShortcut: () => !s().showPitchEditor, execute: () => s().redo() },
+    { id: "edit.cut", name: "Cut Selected Clips", category: "Edit", shortcut: "Ctrl+X", canHandleShortcut: () => !s().showPianoRoll && s().selectedClipIds.length > 0, execute: () => s().cutSelectedClips() },
+    { id: "edit.copy", name: "Copy Selected Clips", category: "Edit", shortcut: "Ctrl+C", canHandleShortcut: () => !s().showPianoRoll && s().selectedClipIds.length > 0, execute: () => s().copySelectedClips() },
+    { id: "edit.paste", name: "Paste Clips", category: "Edit", shortcut: "Ctrl+V", canHandleShortcut: () => !s().showPianoRoll, execute: () => s().pasteClips() },
+    { id: "edit.delete", name: "Delete Selected", category: "Edit", shortcut: "Delete", canHandleShortcut: () => !s().showPianoRoll, execute: () => {
       const state = s();
       if (state.selectedTrackIds.length > 0) state.deleteSelectedTracks();
       else if (state.selectedClipIds.length > 0) state.selectedClipIds.forEach((id) => state.deleteClip(id));
     }},
-    { id: "edit.selectAllTracks", name: "Select All Tracks", category: "Edit", shortcut: "Ctrl+A", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().selectAllTracks() },
-    { id: "edit.selectAllClips", name: "Select All Clips", category: "Edit", shortcut: "Ctrl+Shift+A", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().selectAllClips() },
+    { id: "edit.selectAllTracks", name: "Select All Tracks", category: "Edit", shortcut: "Ctrl+A", canHandleShortcut: () => !s().showPitchEditor && !s().showPianoRoll, execute: () => s().selectAllTracks() },
+    { id: "edit.selectAllClips", name: "Select All Clips", category: "Edit", shortcut: "Ctrl+Shift+A", canHandleShortcut: () => !s().showPitchEditor && !s().showPianoRoll, execute: () => s().selectAllClips() },
     { id: "edit.deselectAll", name: "Deselect All", category: "Edit", shortcut: "Esc", execute: () => s().deselectAllTracks() },
     { id: "edit.splitAtCursor", name: "Split at Cursor", category: "Edit", shortcut: "S", execute: () => s().splitClipAtPlayhead() },
     { id: "edit.splitAtSelection", name: "Split at Time Selection", category: "Edit", execute: () => s().splitAtTimeSelection() },
@@ -203,9 +203,13 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "options.recordNormal", name: "Record Mode: Normal", category: "Options", execute: () => s().setRecordMode("normal") },
     { id: "options.recordOverdub", name: "Record Mode: Overdub", category: "Options", execute: () => s().setRecordMode("overdub") },
     { id: "options.recordReplace", name: "Record Mode: Replace", category: "Options", execute: () => s().setRecordMode("replace") },
+    { id: "midi.panic", name: "MIDI Panic", category: "Options", shortcut: "Ctrl+Alt+P", execute: () => { void nativeBridge.panicMIDI(); } },
     { id: "options.rippleOff", name: "Ripple Editing: Off", category: "Options", execute: () => s().setRippleMode("off") },
     { id: "options.ripplePerTrack", name: "Ripple Editing: Per Track", category: "Options", execute: () => s().setRippleMode("per_track") },
     { id: "options.rippleAllTracks", name: "Ripple Editing: All Tracks", category: "Options", execute: () => s().setRippleMode("all_tracks") },
+    { id: "midi.quantizeLast", name: "MIDI Quantize Using Last Settings", category: "Edit", shortcut: "Q", execute: () => s().quantizeSelectedMIDINotesUsingLast() },
+    { id: "midi.resetQuantize", name: "Reset MIDI Quantize", category: "Edit", execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.resetMIDIQuantize(state.pianoRollTrackId, state.pianoRollClipId); } },
+    { id: "midi.freezeQuantize", name: "Freeze MIDI Quantize", category: "Edit", execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.freezeMIDIQuantize(state.pianoRollTrackId, state.pianoRollClipId); } },
 
     // ===== New Phase 8 Actions =====
     { id: "file.openSafeMode", name: "Open Project (Safe Mode)", category: "File", shortcut: "Ctrl+Shift+O", execute: () => { void s().requestOpenProject(undefined, { bypassFX: true }); } },
@@ -297,6 +301,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "edit.velocityDown", name: "Velocity -10%", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.scaleMIDINoteVelocity(st.pianoRollClipId, 0.9); } },
     { id: "edit.reverseNotes", name: "Reverse MIDI Notes", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.reverseMIDINotes(st.pianoRollClipId); } },
     { id: "edit.invertNotes", name: "Invert MIDI Note Pitches", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollClipId) st.invertMIDINotes(st.pianoRollClipId); } },
+    { id: "edit.snapNotesToScale", name: "Snap Selected Notes to Scale", category: "MIDI", execute: () => { const st = s(); if (st.pianoRollTrackId && st.pianoRollClipId) st.snapSelectedMIDINotesToScale(st.pianoRollTrackId, st.pianoRollClipId, st.pianoRollScaleRoot, st.pianoRollScaleType); } },
 
     // ===== Sprint 19: MIDI + Plugin + Mixing =====
     { id: "midi.transpose", name: "Transpose Notes...", category: "MIDI", execute: () => { /* PianoRoll modal */ } },

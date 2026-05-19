@@ -70,4 +70,34 @@ describe("getRulerClickSnapTime", () => {
       })
     ).toBe(0.37);
   });
+
+  it("uses cursor snap as the grid fallback candidate when requested", () => {
+    expect(
+      getRulerClickSnapTime({
+        time: 1.18,
+        pixelsPerSecond: 100,
+        tempo: 120,
+        timeSignature: TS_4_4,
+        gridSize: "minute",
+        snapType: "cursor",
+        cursorTime: 1.2,
+        snapEnabled: true,
+      })
+    ).toBe(1.2);
+  });
+
+  it("uses event snap as the grid fallback candidate when requested", () => {
+    expect(
+      getRulerClickSnapTime({
+        time: 1.18,
+        pixelsPerSecond: 100,
+        tempo: 120,
+        timeSignature: TS_4_4,
+        gridSize: "minute",
+        snapType: "events",
+        eventTimes: [1.21],
+        snapEnabled: true,
+      })
+    ).toBe(1.21);
+  });
 });

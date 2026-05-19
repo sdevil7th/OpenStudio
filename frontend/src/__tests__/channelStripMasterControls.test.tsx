@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ChannelStrip } from "../components/ChannelStrip";
 import channelStripSource from "../components/ChannelStrip.tsx?raw";
 import masterTrackHeaderSource from "../components/MasterTrackHeader.tsx?raw";
-import { type Track, useDAWStore } from "../store/useDAWStore";
+import { type AutomationLane, type Track, useDAWStore } from "../store/useDAWStore";
 
 const initialState = useDAWStore.getState();
 
@@ -32,7 +32,9 @@ const masterTrack: Track = {
   fxBypassed: false,
   automationLanes: [],
   showAutomation: false,
-  automationEnabled: true,
+  automationReadEnabled: false,
+  automationWriteEnabled: false,
+  automationEnabled: false,
   suspendedAutomationState: null,
   frozen: false,
   takes: [],
@@ -53,6 +55,23 @@ const masterTrack: Track = {
 afterEach(() => {
   useDAWStore.setState(initialState);
 });
+
+function getButtonTag(html: string, title: string) {
+  const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = html.match(new RegExp(`<button[^>]*title="${escapedTitle}"[^>]*>`));
+  expect(match, `Expected button with title "${title}" to be present`).not.toBeNull();
+  return match![0];
+}
+
+const masterVolumeLane: AutomationLane = {
+  id: "master-volume",
+  param: "volume",
+  points: [],
+  visible: true,
+  mode: "read",
+  armed: false,
+  readEnabled: true,
+};
 
 describe("master channel strip controls", () => {
   it("renders mute and mono in the top row without a solo button", () => {
@@ -84,5 +103,55 @@ describe("master channel strip controls", () => {
     expect(masterTrackHeaderSource).toContain(
       'title={isMasterMuted ? "Unmute Master" : "Mute Master"}',
     );
+  });
+
+  it("uses Cubase-style R/W automation controls on the master strip", () => {
+    useDAWStore.setState({
+      masterVolume: 1,
+      isMasterMuted: false,
+      masterMono: false,
+      masterFxCount: 1,
+      masterAutomationLanes: [],
+      showMasterAutomation: false,
+      masterAutomationReadEnabled: false,
+      masterAutomationWriteEnabled: false,
+      masterAutomationEnabled: false,
+    });
+
+    const htmlWithoutLanes = renderToStaticMarkup(
+      <ChannelStrip track={masterTrack} trackIndex={-1} isMaster />,
+    );
+
+    expect(htmlWithoutLanes).not.toContain('title="Master Automation"');
+    expect(getButtonTag(htmlWithoutLanes, "Add a master automation lane or enable write first")).toContain("disabled");
+    expect(getButtonTag(htmlWithoutLanes, "Enable master automation write")).not.toContain("disabled");
+    expect(getButtonTag(htmlWithoutLanes, "Master automation panel")).toContain("w-3");
+
+    useDAWStore.setState({
+      masterAutomationLanes: [masterVolumeLane],
+      showMasterAutomation: true,
+      masterAutomationReadEnabled: true,
+      masterAutomationWriteEnabled: true,
+      masterAutomationEnabled: true,
+    });
+
+    const htmlWithWrite = renderToStaticMarkup(
+      <ChannelStrip
+        track={{
+          ...masterTrack,
+          automationLanes: [masterVolumeLane],
+          showAutomation: true,
+          automationReadEnabled: true,
+          automationWriteEnabled: true,
+          automationEnabled: true,
+        }}
+        trackIndex={-1}
+        isMaster
+      />,
+    );
+
+    expect(getButtonTag(htmlWithWrite, "Disable master automation read")).toContain("text-teal-300");
+    expect(getButtonTag(htmlWithWrite, "Disable master automation write")).toContain("text-red-300");
+    expect(getButtonTag(htmlWithWrite, "Master automation panel")).toContain("text-teal-300");
   });
 });

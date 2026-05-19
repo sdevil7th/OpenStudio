@@ -4,6 +4,7 @@ import { Fragment } from 'react';
 import classNames from 'classnames';
 import { ModalProps, modalSizeStyles } from './Modal.types';
 import { Button } from '../Button';
+import { guardModalContextMenu } from '../../../utils/modalEventGuards';
 
 /**
  * Modal Component
@@ -78,8 +79,10 @@ export function Modal({
     <Transition show={isOpen} as={Fragment}>
       <Dialog
         as="div"
-        className="relative z-2000"
+        className="relative z-[10000]"
+        data-modal-root="true"
         onClose={handleClose}
+        onContextMenu={guardModalContextMenu}
         static={!closeOnEscape && !closeOnOverlayClick}
         aria-label={title ? undefined : 'Dialog'}
       >
@@ -94,13 +97,19 @@ export function Modal({
           leaveTo="opacity-0"
         >
           <div
+            data-modal-overlay="true"
             className="fixed inset-0 bg-black/50"
             aria-hidden="true"
+            onContextMenu={guardModalContextMenu}
           />
         </TransitionChild>
 
         {/* Modal container */}
-        <div className="fixed inset-0 flex items-center justify-center p-4">
+        <div
+          className="fixed inset-0 flex items-center justify-center p-4"
+          data-modal-overlay="true"
+          onContextMenu={guardModalContextMenu}
+        >
           <TransitionChild
             as={Fragment}
             enter="ease-out duration-300"
@@ -112,6 +121,7 @@ export function Modal({
           >
             <DialogPanel
               onKeyDown={(e) => e.stopPropagation()}
+              onContextMenu={guardModalContextMenu}
               className={classNames(
                 'bg-daw-panel border border-daw-border rounded-lg shadow-xl',
                 modalSizeStyles[size],

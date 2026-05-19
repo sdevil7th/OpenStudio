@@ -5,6 +5,7 @@ import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, NativeSelect } from "./ui";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -15,13 +16,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [config, setConfig] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [switching, setSwitching] = useState(false); // Track when switching audio types
+  const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { refreshAudioDeviceSetup } = useDAWStore(useShallow((s) => ({
+  const { refreshAudioDeviceSetup, stop } = useDAWStore(useShallow((s) => ({
     refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
+    stop: s.stop,
   })));
 
   // Combined loading state for disabling dropdowns
-  const isLoading = loading || switching;
+  const isLoading = loading || switching || applying;
 
   // Fetch initial config
   useEffect(() => {
@@ -51,23 +54,39 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   };
 
+  const buildBackendAudioDeviceConfig = (current: any) => ({
+    type: current.type || current.audioDeviceType || "",
+    inputDevice: current.inputDevice || "",
+    outputDevice: current.outputDevice || "",
+    sampleRate: Number(current.sampleRate) || 44100,
+    bufferSize: Number(current.bufferSize) || 512,
+  });
+
   const handleApply = async () => {
     if (!config || !config.current) return;
 
+    setApplying(true);
+    setError(null);
     try {
-      console.log("[SettingsModal] Applying config:", config.current);
-      await nativeBridge.setAudioDeviceSetup(config.current);
+      const backendConfig = buildBackendAudioDeviceConfig(config.current);
+      console.log("[SettingsModal] Applying config:", backendConfig);
+      await stop();
+      await nativeBridge.panicMIDI().catch(() => false);
+      const applied = await nativeBridge.setAudioDeviceSetup(backendConfig);
+      if (!applied) {
+        throw new Error("Audio device rejected the requested configuration");
+      }
 
       // Update the store so TrackHeader immediately gets new input list
       await refreshAudioDeviceSetup();
+      await nativeBridge.panicMIDI().catch(() => false);
 
       onClose();
     } catch (e) {
       console.error("[SettingsModal] Failed to set audio config:", e);
-      alert(
-        "Failed to apply settings: " +
-          (e instanceof Error ? e.message : "Unknown error"),
-      );
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -96,22 +115,29 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setSwitching(true);
     try {
       console.log("[SettingsModal] Switching to audio type:", newType);
+      await stop();
+      await nativeBridge.panicMIDI().catch(() => false);
       // Tell backend to switch audio device type
-      await nativeBridge.setAudioDeviceSetup({
+      const applied = await nativeBridge.setAudioDeviceSetup({
         type: newType,
         inputDevice: "", // Will use default
         outputDevice: "", // Will use default
         sampleRate: 44100,
         bufferSize: 512,
       });
+      if (!applied) {
+        throw new Error("Audio device rejected the selected audio system");
+      }
 
       // Wait a bit for backend to switch
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       // Refresh to get devices for new type
       await refreshConfig();
+      await nativeBridge.panicMIDI().catch(() => false);
     } catch (e) {
       console.error("[SettingsModal] Failed to switch audio type:", e);
+      setError(e instanceof Error ? e.message : "Failed to switch audio system");
     } finally {
       setSwitching(false);
     }
@@ -121,12 +147,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   return createPortal(
     <div
-      className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-2000 backdrop-blur-[2px]"
+      className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-[10000] backdrop-blur-[2px]"
+      data-modal-root="true"
       onClick={onClose}
+      onContextMenu={guardModalContextMenu}
     >
       <div
         className="bg-neutral-900 border border-neutral-700 w-[500px] max-w-[90vw] max-h-[85vh] flex flex-col rounded-lg shadow-2xl text-neutral-200"
         onClick={(e) => e.stopPropagation()}
+        onContextMenu={guardModalContextMenu}
       >
         <div className="flex justify-between items-center p-4 bg-neutral-800 rounded-t-lg border-b border-neutral-700">
           <h2 className="m-0 text-lg font-medium">Audio Settings</h2>
@@ -145,7 +174,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
               {switching
                 ? "Switching audio system..."
-                : "Loading audio devices..."}
+                : applying
+                  ? "Applying audio settings..."
+                  : "Loading audio devices..."}
             </div>
           )}
 
@@ -280,7 +311,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             variant="primary"
             size="md"
             onClick={handleApply}
-            disabled={!config || loading}
+            disabled={!config || isLoading}
           >
             Apply
           </Button>

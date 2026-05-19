@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useMemo } from "react";
 import classNames from "classnames";
-import { Power } from "lucide-react";
+import { ChevronDown, Power } from "lucide-react";
 import { PeakMeter } from "./PeakMeter";
 import { MasterPeakMeterCluster } from "./MasterPeakMeterCluster";
 import {
@@ -77,6 +77,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     commitTrackVolumeEdit,
     beginTrackPanEdit,
     commitTrackPanEdit,
+    beginAutomationParamTouch,
+    endAutomationParamTouch,
     selectedTrackIds,
     trackGroups,
     addTrackGroup,
@@ -85,9 +87,16 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     openTrackRouting,
     isMasterMuted,
     masterVolume,
+    masterAutomationLanes,
+    showMasterAutomation,
+    masterAutomationReadEnabled,
+    masterAutomationWriteEnabled,
+    masterAutomationEnabled,
     openChannelStripEQ,
     masterMono,
     toggleMasterMono,
+    toggleMasterAutomationRead,
+    toggleMasterAutomationWrite,
     openEnvelopeManager,
   } = useDAWStore(
     useShallow((s) => ({
@@ -104,6 +113,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
       commitTrackVolumeEdit: s.commitTrackVolumeEdit,
       beginTrackPanEdit: s.beginTrackPanEdit,
       commitTrackPanEdit: s.commitTrackPanEdit,
+      beginAutomationParamTouch: s.beginAutomationParamTouch,
+      endAutomationParamTouch: s.endAutomationParamTouch,
       selectedTrackIds: s.selectedTrackIds,
       trackGroups: s.trackGroups,
       addTrackGroup: s.addTrackGroup,
@@ -114,9 +125,16 @@ export const ChannelStrip = React.memo(function ChannelStrip({
       // NOTE: currentTime intentionally NOT selected here — it updates at 60fps
       // and would cause every ChannelStrip to re-render 60x/sec during playback.
       masterVolume: s.masterVolume,
+      masterAutomationLanes: s.masterAutomationLanes,
+      showMasterAutomation: s.showMasterAutomation,
+      masterAutomationReadEnabled: s.masterAutomationReadEnabled,
+      masterAutomationWriteEnabled: s.masterAutomationWriteEnabled,
+      masterAutomationEnabled: s.masterAutomationEnabled,
       openChannelStripEQ: s.openChannelStripEQ,
       masterMono: s.masterMono,
       toggleMasterMono: s.toggleMasterMono,
+      toggleMasterAutomationRead: s.toggleMasterAutomationRead,
+      toggleMasterAutomationWrite: s.toggleMasterAutomationWrite,
       openEnvelopeManager: s.openEnvelopeManager,
     })),
   );
@@ -129,7 +147,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
 
   const [showFXChain, setShowFXChain] = useState(false);
   const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
-  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin);
+  const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin) || (track.type === "instrument" && !track.instrumentPlugin);
 
   // Find the clip under the playhead for gain staging display.
   // Reads currentTime from a snapshot (not a selector) to avoid 60fps re-renders.
@@ -144,6 +162,37 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   }, [isMaster, track.clips]);
 
   const masterVolumeDB = masterVolume > 0 ? 20 * Math.log10(masterVolume) : -60;
+  const stripMasterAutomationLanes =
+    isMaster && track.automationLanes.length > 0
+      ? track.automationLanes
+      : masterAutomationLanes;
+  const stripMasterAutomationReadEnabled =
+    isMaster && typeof track.automationReadEnabled === "boolean"
+      ? track.automationReadEnabled
+      : masterAutomationReadEnabled;
+  const stripMasterAutomationWriteEnabled =
+    isMaster && typeof track.automationWriteEnabled === "boolean"
+      ? track.automationWriteEnabled
+      : masterAutomationWriteEnabled;
+  const stripMasterAutomationEnabled =
+    isMaster && typeof track.automationEnabled === "boolean"
+      ? track.automationEnabled
+      : masterAutomationEnabled;
+  const stripShowMasterAutomation =
+    isMaster ? track.showAutomation || showMasterAutomation : showMasterAutomation;
+  const hasMasterAutomationLane = stripMasterAutomationLanes.length > 0;
+  const hasMasterAutomation =
+    (stripShowMasterAutomation && stripMasterAutomationLanes.some((lane) => lane.visible)) ||
+    stripMasterAutomationLanes.some((lane) => lane.points.length > 0);
+  const masterAutomationReadActive =
+    typeof stripMasterAutomationReadEnabled === "boolean"
+      ? stripMasterAutomationReadEnabled
+      : typeof stripMasterAutomationEnabled === "boolean"
+        ? stripMasterAutomationEnabled
+        : hasMasterAutomationLane;
+  const masterAutomationWriteActive = stripMasterAutomationWriteEnabled === true;
+  const canToggleMasterAutomationRead =
+    hasMasterAutomationLane || masterAutomationWriteActive;
 
   const ALL_LINKED_PARAMS = [
     "volume",
@@ -254,24 +303,40 @@ export const ChannelStrip = React.memo(function ChannelStrip({
 
   // Undo/redo: capture starting value on pointer down, commit on pointer up
   const handleVolumePointerDown = useCallback(() => {
-    if (isMaster) return;
+    if (isMaster) {
+      beginAutomationParamTouch("master", "volume");
+      const endTouchOnUp = () => {
+        document.removeEventListener("pointerup", endTouchOnUp);
+        endAutomationParamTouch("master", "volume");
+      };
+      document.addEventListener("pointerup", endTouchOnUp);
+      return;
+    }
     beginTrackVolumeEdit(track.id);
     const commitOnUp = () => {
       document.removeEventListener("pointerup", commitOnUp);
       commitTrackVolumeEdit(track.id);
     };
     document.addEventListener("pointerup", commitOnUp);
-  }, [isMaster, track.id, beginTrackVolumeEdit, commitTrackVolumeEdit]);
+  }, [isMaster, track.id, beginTrackVolumeEdit, commitTrackVolumeEdit, beginAutomationParamTouch, endAutomationParamTouch]);
 
   const handlePanPointerDown = useCallback(() => {
-    if (isMaster) return;
+    if (isMaster) {
+      beginAutomationParamTouch("master", "pan");
+      const endTouchOnUp = () => {
+        document.removeEventListener("pointerup", endTouchOnUp);
+        endAutomationParamTouch("master", "pan");
+      };
+      document.addEventListener("pointerup", endTouchOnUp);
+      return;
+    }
     beginTrackPanEdit(track.id);
     const commitOnUp = () => {
       document.removeEventListener("pointerup", commitOnUp);
       commitTrackPanEdit(track.id);
     };
     document.addEventListener("pointerup", commitOnUp);
-  }, [isMaster, track.id, beginTrackPanEdit, commitTrackPanEdit]);
+  }, [isMaster, track.id, beginTrackPanEdit, commitTrackPanEdit, beginAutomationParamTouch, endAutomationParamTouch]);
 
   const formatVolume = (db: number) => {
     if (db <= -60) return "-∞";
@@ -483,14 +548,77 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               </button>
             )}
             {isMaster && (
-              <button
-                onClick={() => openEnvelopeManager("master")}
-                title="Master Automation"
-                aria-label="Open master automation envelopes"
-                className="h-4 px-1.5 shrink-0 rounded flex items-center justify-center text-[7px] font-bold transition-colors border border-neutral-600 text-neutral-500 bg-neutral-800 hover:border-daw-accent hover:text-daw-accent cursor-pointer"
-              >
-                A
-              </button>
+              <span className="flex shrink-0 gap-0.5">
+                <button
+                  type="button"
+                  onClick={toggleMasterAutomationRead}
+                  disabled={!canToggleMasterAutomationRead}
+                  title={
+                    canToggleMasterAutomationRead
+                      ? masterAutomationReadActive
+                        ? "Disable master automation read"
+                        : "Enable master automation read"
+                      : "Add a master automation lane or enable write first"
+                  }
+                  aria-label={
+                    canToggleMasterAutomationRead
+                      ? masterAutomationReadActive
+                        ? "Disable master automation read"
+                        : "Enable master automation read"
+                      : "Master automation read unavailable"
+                  }
+                  className={classNames(
+                    "h-4 w-4 rounded flex items-center justify-center text-[7px] font-bold transition-colors border bg-neutral-800",
+                    canToggleMasterAutomationRead
+                      ? masterAutomationReadActive
+                        ? "border-teal-500 text-teal-300"
+                        : "border-neutral-600 text-neutral-500 hover:border-teal-500 hover:text-teal-300 cursor-pointer"
+                      : masterAutomationReadActive
+                        ? "border-teal-600 text-teal-300 cursor-not-allowed"
+                        : "border-neutral-700 text-neutral-600 cursor-not-allowed opacity-60",
+                  )}
+                >
+                  R
+                </button>
+                <span className="flex shrink-0">
+                  <button
+                    type="button"
+                    onClick={toggleMasterAutomationWrite}
+                    title={
+                      masterAutomationWriteActive
+                        ? "Disable master automation write"
+                        : "Enable master automation write"
+                    }
+                    aria-label={
+                      masterAutomationWriteActive
+                        ? "Disable master automation write"
+                        : "Enable master automation write"
+                    }
+                    className={classNames(
+                      "h-4 w-4 rounded rounded-r-none flex items-center justify-center text-[7px] font-bold transition-colors border border-r-0 bg-neutral-800 cursor-pointer",
+                      masterAutomationWriteActive
+                        ? "border-red-500 text-red-300"
+                        : "border-neutral-600 text-neutral-500 hover:border-red-500 hover:text-red-300",
+                    )}
+                  >
+                    W
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openEnvelopeManager("master")}
+                    title="Master automation panel"
+                    aria-label="Open master automation envelopes"
+                    className={classNames(
+                      "h-4 w-3 rounded rounded-l-none flex items-center justify-center transition-colors border bg-neutral-800 cursor-pointer",
+                      hasMasterAutomation
+                        ? "border-teal-500 text-teal-300"
+                        : "border-neutral-600 text-neutral-500 hover:border-teal-500 hover:text-teal-300",
+                    )}
+                  >
+                    <ChevronDown size={8} strokeWidth={2.5} />
+                  </button>
+                </span>
+              </span>
             )}
           </div>
 

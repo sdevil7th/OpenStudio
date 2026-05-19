@@ -2,16 +2,21 @@ import { useState, useEffect } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { nativeBridge } from "../services/NativeBridge";
 import { NativeSelect } from "./ui";
+import { useShallow } from "zustand/react/shallow";
 
 interface MIDIDeviceSelectorProps {
   trackId: string;
 }
 
 export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
-  const [availableDevices, setAvailableDevices] = useState<string[]>([]);
+  const [availableInputDevices, setAvailableInputDevices] = useState<string[]>([]);
+  const [availableOutputDevices, setAvailableOutputDevices] = useState<string[]>([]);
   const [openDevices, setOpenDevices] = useState<string[]>([]);
-  const track = useDAWStore((state) =>
-    state.tracks.find((t) => t.id === trackId),
+  const { track, setTrackMIDIOutput } = useDAWStore(
+    useShallow((state) => ({
+      track: state.tracks.find((t) => t.id === trackId),
+      setTrackMIDIOutput: state.setTrackMIDIOutput,
+    })),
   );
 
   // Load MIDI devices on mount
@@ -22,8 +27,10 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
   const loadDevices = async () => {
     try {
       const devices = await nativeBridge.getMIDIInputDevices();
+      const outputs = await nativeBridge.getMIDIOutputDevices();
       const open = await nativeBridge.getOpenMIDIDevices();
-      setAvailableDevices(Array.isArray(devices) ? devices : []);
+      setAvailableInputDevices(Array.isArray(devices) ? devices : []);
+      setAvailableOutputDevices(Array.isArray(outputs) ? outputs : []);
       setOpenDevices(Array.isArray(open) ? open : []);
     } catch (error) {
       console.error("Failed to load MIDI devices:", error);
@@ -80,14 +87,29 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
     }
   };
 
+  const handleOutputChange = async (deviceName: string) => {
+    if (!track) return;
+
+    try {
+      await setTrackMIDIOutput(trackId, deviceName);
+    } catch (error) {
+      console.error("Failed to set MIDI output:", error);
+    }
+  };
+
   if (!track || (track.type !== "midi" && track.type !== "instrument")) {
     return null;
   }
 
-  // Build device options with "No Device" as first option
+  // Empty input is DAW-style omni input. The record path opens all available
+  // MIDI inputs for armed tracks in this mode.
   const deviceOptions = [
-    { value: "", label: "No Device" },
-    ...availableDevices.map((device) => ({ value: device, label: device })),
+    { value: "", label: "All Inputs" },
+    ...availableInputDevices.map((device) => ({ value: device, label: device })),
+  ];
+  const outputOptions = [
+    { value: "", label: "No Out" },
+    ...availableOutputDevices.map((device) => ({ value: device, label: device })),
   ];
 
   // Build channel options: 0 = "All", 1-16 = "Ch 1" through "Ch 16"
@@ -100,7 +122,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
   ];
 
   return (
-    <div className="flex items-center gap-1 px-1 py-0.5 bg-white/5 rounded text-[10px]">
+    <div className="flex min-w-0 items-center gap-1.5 rounded-md border border-neutral-700/70 bg-neutral-900/55 px-1.5 py-0.5 text-[10px]">
       {/* Device selector - compact */}
       <NativeSelect
         variant="compact"
@@ -108,8 +130,8 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         options={deviceOptions}
         value={track.midiInputDevice || ""}
         onChange={(val) => handleDeviceChange(String(val))}
-        title={track.midiInputDevice || "No Device"}
-        className="max-w-[80px] truncate"
+        title={track.midiInputDevice || "All MIDI inputs"}
+        className="w-[122px] max-w-[122px] truncate"
       />
 
       {/* Channel selector - compact */}
@@ -120,7 +142,17 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         value={track.midiChannel || 0}
         onChange={(val) => handleChannelChange(Number(val))}
         title={`Channel: ${track.midiChannel || "All"}`}
-        className="max-w-[55px]"
+        className="w-[68px]"
+      />
+
+      <NativeSelect
+        variant="compact"
+        size="xs"
+        options={outputOptions}
+        value={track.midiOutputDevice || ""}
+        onChange={(val) => handleOutputChange(String(val))}
+        title={track.midiOutputDevice ? `MIDI out: ${track.midiOutputDevice}` : "No MIDI output"}
+        className="w-[104px] max-w-[104px] truncate"
       />
     </div>
   );

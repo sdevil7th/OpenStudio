@@ -15,13 +15,55 @@ import { resetSyncCache } from "./clips";
 import { createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../../data/aiWorkflows";
+import { normalizeMIDIClipLoopLength, serializeMIDIClipsForBackend, syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
+import { FACTORY_QUANTIZE_PRESETS } from "../../utils/snapToGrid";
+
+const BUILT_IN_PLUGIN_NAMES = new Set([
+  "OpenStudio Piano",
+  "OpenStudio Drums",
+  "OpenStudio Basic Synth",
+  "Studio13 Piano",
+  "Studio13 Drums",
+  "Studio13 Basic Synth",
+  "OpenStudio EQ",
+  "OpenStudio Compressor",
+  "OpenStudio Gate",
+  "OpenStudio Limiter",
+  "OpenStudio Delay",
+  "OpenStudio Reverb",
+  "OpenStudio Chorus",
+  "OpenStudio Saturator",
+  "OpenStudio Pitch Correct",
+  "S13 EQ",
+  "S13 Compressor",
+  "S13 Gate",
+  "S13 Limiter",
+  "S13 Delay",
+  "S13 Reverb",
+  "S13 Chorus",
+  "S13 Saturator",
+  "S13 Pitch Correct",
+]);
+
+function isBuiltInPluginPath(pluginPath: string | undefined): boolean {
+  return Boolean(pluginPath && BUILT_IN_PLUGIN_NAMES.has(pluginPath));
+}
+
+function isBuiltInInstrumentPluginPath(pluginPath: string | undefined): boolean {
+  return pluginPath === "OpenStudio Piano" ||
+    pluginPath === "OpenStudio Drums" ||
+    pluginPath === "OpenStudio Basic Synth" ||
+    pluginPath === "Studio13 Piano" ||
+    pluginPath === "Studio13 Drums" ||
+    pluginPath === "Studio13 Basic Synth";
+}
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "meterLevels", "peakLevels", "masterLevel", "automatedParamValues",
   "recordingClips", "recordingMIDIPreviews", "playStartPosition",
   "selectedTrackId", "selectedTrackIds", "lastSelectedTrackId",
-  "selectedClipId", "selectedClipIds", "clipboard",
-  "selectedNoteIds", "selectedRegionIds", "razorEdits", "timeSelection",
+  "selectedClipId", "selectedClipIds", "clipboard", "midiNoteClipboard",
+  "selectedNoteIds", "pianoRollEditCursorTime", "selectedRegionIds", "razorEdits", "timeSelection",
   "showMixer", "showSettings", "showRenderModal", "showPluginBrowser", "pluginBrowserTrackId",
   "showVirtualKeyboard", "showUndoHistory", "showCommandPalette", "showRegionMarkerManager",
   "showClipProperties", "showBigClock", "showKeyboardShortcuts", "showContextualHelp",
@@ -46,6 +88,122 @@ function projectJsonReplacer(key: string, value: unknown): unknown {
   if (key && TRANSIENT_STATE_KEYS.has(key)) return undefined;
   if (key === "meterLevel" || key === "peakLevel" || key === "clipping") return undefined;
   return value;
+}
+
+function sanitizeRecentProjects(projects: unknown[]): string[] {
+  const seen = new Set<string>();
+  const sanitized: string[] = [];
+  for (const project of projects) {
+    if (typeof project !== "string") continue;
+    const path = project.trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    sanitized.push(path);
+    if (sanitized.length >= 10) break;
+  }
+  return sanitized;
+}
+
+function readBrowserRecentProjects(): string[] {
+  try {
+    const stored = localStorage.getItem("recentProjects");
+    const parsed = stored ? JSON.parse(stored) : [];
+    return Array.isArray(parsed) ? sanitizeRecentProjects(parsed) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistRecentProjects(projects: string[]) {
+  const sanitized = sanitizeRecentProjects(projects);
+  try {
+    localStorage.setItem("recentProjects", JSON.stringify(sanitized));
+  } catch {
+    // Native persistence below keeps the list available across WebView origins.
+  }
+  nativeBridge.setRecentProjects(sanitized).catch(logBridgeError("recent projects"));
+}
+
+function normalizeAutomationWriteBehavior(value: unknown) {
+  return value === "latch" || value === "overwrite" ? value : "touch";
+}
+
+function automationLaneReadFromLegacy(lane: any): boolean {
+  if (typeof lane?.readEnabled === "boolean") return lane.readEnabled;
+  if (Array.isArray(lane?.points) && lane.points.length > 0) return true;
+  return lane?.mode !== "off";
+}
+
+function isLegacyPlaceholderAutomationLane(lane: any): boolean {
+  return (
+    (lane?.id === "vol" && lane?.param === "volume") ||
+    (lane?.id === "pan" && lane?.param === "pan") ||
+    (lane?.id === "master-vol" && lane?.param === "volume") ||
+    (lane?.id === "master-pan" && lane?.param === "pan")
+  );
+}
+
+function hasMeaningfulAutomationLane(lane: any, ownerData: any = {}): boolean {
+  const hasPoints = Array.isArray(lane?.points) && lane.points.length > 0;
+  if (hasPoints) return true;
+  if (Boolean(ownerData?.showAutomation) && Boolean(lane?.visible)) return true;
+  return !isLegacyPlaceholderAutomationLane(lane);
+}
+
+function normalizeAutomationLane(lane: any) {
+  const readEnabled = automationLaneReadFromLegacy(lane);
+  const points = Array.isArray(lane?.points)
+    ? lane.points
+        .map((point: any) => ({
+          time: Math.max(0, Number(point?.time) || 0),
+          value: Math.max(0, Math.min(1, Number(point?.value) || 0)),
+        }))
+        .sort((a: any, b: any) => a.time - b.time)
+    : [];
+  return {
+    ...lane,
+    id: lane?.id || `lane_${lane?.param || "automation"}_${Date.now()}`,
+    param: lane?.param || "volume",
+    points,
+    visible: Boolean(lane?.visible),
+    mode: readEnabled ? "read" : "off",
+    armed: false,
+    readEnabled,
+  };
+}
+
+function normalizeAutomationLanes(lanes: any[], ownerData: any = {}) {
+  return (Array.isArray(lanes) ? lanes : [])
+    .filter((lane) => hasMeaningfulAutomationLane(lane, ownerData))
+    .map(normalizeAutomationLane);
+}
+
+function resolveLoadedAutomationLaneModes(lanes: any[], readEnabled: boolean) {
+  return lanes.map((lane) => ({
+    ...lane,
+    mode: readEnabled && lane.readEnabled ? "read" : "off",
+    armed: false,
+  }));
+}
+
+function deriveAutomationReadEnabled(data: any, lanes: any[]): boolean {
+  if (lanes.length === 0) return false;
+  if (typeof data?.automationReadEnabled === "boolean") return data.automationReadEnabled;
+  if (typeof data?.automationEnabled === "boolean") return data.automationEnabled;
+  if (lanes.some((lane) => lane.readEnabled || (lane.points || []).length > 0)) return true;
+  return false;
+}
+
+function serializeAutomationLanesForProject(lanes: any[]) {
+  return (Array.isArray(lanes) ? lanes : []).map((lane) => {
+    const readEnabled = automationLaneReadFromLegacy(lane);
+    return {
+      ...lane,
+      readEnabled,
+      mode: readEnabled ? "read" : "off",
+      armed: false,
+    };
+  });
 }
 
 function buildProjectResetState() {
@@ -108,6 +266,11 @@ function buildSerializedProjectData(
     metronomeAccentBeats: state.metronomeAccentBeats,
     metronomeTrackId: state.metronomeTrackId,
     projectRange: state.projectRange,
+    snapEnabled: state.snapEnabled,
+    snapType: state.snapType,
+    gridSize: state.gridSize,
+    quantizePresetId: state.quantizePresetId,
+    quantizePresets: state.quantizePresets,
     markers: state.markers,
     regions: state.regions,
     tempoMarkers: state.tempoMarkers,
@@ -115,10 +278,25 @@ function buildSerializedProjectData(
     masterPan: state.masterPan,
     isMasterMuted: state.isMasterMuted,
     masterMono: state.masterMono,
-    masterAutomationLanes: state.masterAutomationLanes,
+    masterAutomationLanes: serializeAutomationLanesForProject(state.masterAutomationLanes),
     showMasterAutomation: state.showMasterAutomation,
-    masterAutomationEnabled: state.masterAutomationEnabled,
-    suspendedMasterAutomationState: state.suspendedMasterAutomationState,
+    masterAutomationReadEnabled: deriveAutomationReadEnabled(
+      {
+        automationReadEnabled: state.masterAutomationReadEnabled,
+        automationEnabled: state.masterAutomationEnabled,
+      },
+      state.masterAutomationLanes || [],
+    ),
+    masterAutomationWriteEnabled: false,
+    masterAutomationEnabled: deriveAutomationReadEnabled(
+      {
+        automationReadEnabled: state.masterAutomationReadEnabled,
+        automationEnabled: state.masterAutomationEnabled,
+      },
+      state.masterAutomationLanes || [],
+    ),
+    automationWriteBehavior: normalizeAutomationWriteBehavior(state.automationWriteBehavior),
+    suspendedMasterAutomationState: null,
     tracks: serializedTracks,
     masterFXPaths,
     masterFXStates,
@@ -210,7 +388,54 @@ async function performPendingProjectAction(action: any, get: GetFn) {
   }
 }
 
+async function verifyAndRepairLoadedMIDISync(get: GetFn) {
+  const midiTracks = get().tracks.filter((track: any) =>
+    track.type === "midi" || track.type === "instrument" || (track.midiClips || []).length > 0,
+  );
+  if (midiTracks.length === 0) return;
+
+  const diagnostics = await nativeBridge.getMidiDiagnostics().catch(() => null);
+  const diagnosticTracks = new Map<string, any>();
+  for (const track of diagnostics?.tracks || []) {
+    if (track?.trackId) diagnosticTracks.set(track.trackId, track);
+  }
+
+  const mismatches: Array<{ trackId: string; expectedClips: number; expectedEvents: number; actualClips: number; actualEvents: number }> = [];
+  for (const track of midiTracks) {
+    const serialized = serializeMIDIClipsForBackend(track.midiClips || [], track.midiEffects || []);
+    const expectedClips = serialized.length;
+    const expectedEvents = serialized.reduce((sum: number, clip: any) => sum + (clip.events?.length || 0), 0);
+    const actual = diagnosticTracks.get(track.id);
+    const actualClips = Number(actual?.scheduledMIDIClipCount ?? 0);
+    const actualEvents = Number(actual?.scheduledMIDIEventCount ?? 0);
+
+    if (expectedClips !== actualClips || expectedEvents !== actualEvents) {
+      mismatches.push({ trackId: track.id, expectedClips, expectedEvents, actualClips, actualEvents });
+      await syncTrackMIDIClipsToBackend(track.id, track.midiClips || [], track.midiEffects || []).catch(logBridgeError("midi load repair"));
+    }
+  }
+
+  if (mismatches.length > 0) {
+    console.warn("[loadProject] MIDI backend schedule mismatch repaired", mismatches);
+    await nativeBridge.panicMIDI().catch(() => false);
+    get().showToast(`Re-synced ${mismatches.length} MIDI track${mismatches.length === 1 ? "" : "s"} after load`, "success");
+  }
+}
+
 export const projectActions = (set: SetFn, get: GetFn) => ({
+    hydrateRecentProjects: async () => {
+      const browserRecent = readBrowserRecentProjects();
+      const nativeRecent = await nativeBridge.getRecentProjects().catch(() => []);
+      const merged = sanitizeRecentProjects([...browserRecent, ...nativeRecent]);
+      if (merged.length === 0) return;
+
+      const current = sanitizeRecentProjects(get().recentProjects || []);
+      if (JSON.stringify(current) !== JSON.stringify(merged)) {
+        set({ recentProjects: merged });
+      }
+      persistRecentProjects(merged);
+    },
+
     newProject: async () => {
       await teardownCurrentProject(get, set);
     },
@@ -360,6 +585,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
           console.log(`[DEBUG SAVE] Track "${track.name}" RESULT: ${inputFXPaths.length} input FX paths, ${trackFXPaths.length} track FX paths`);
 
+          const instrumentState = track.instrumentPlugin
+            ? await nativeBridge.getInstrumentState(track.id).catch(() => "")
+            : "";
+          const trackAutomationReadEnabled = deriveAutomationReadEnabled(track, track.automationLanes || []);
+
           return {
             id: track.id,
             name: track.name,
@@ -377,6 +607,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             inputChannel: track.inputChannel,
             clips: track.clips,
             midiClips: track.midiClips,
+            midiEffects: track.midiEffects || [],
+            midiInputDevice: track.midiInputDevice,
+            midiChannel: track.midiChannel,
+            midiOutputDevice: track.midiOutputDevice,
+            midiPitchBendRangeUp: track.midiPitchBendRangeUp ?? 2,
+            midiPitchBendRangeDown: track.midiPitchBendRangeDown ?? track.midiPitchBendRangeUp ?? 2,
+            midiPitchBendRangeLinked: track.midiPitchBendRangeLinked ?? true,
+            samplerSamplePath: track.samplerSamplePath,
+            samplerRootNote: track.samplerRootNote ?? 60,
+            samplerSourceType: track.samplerSourceType,
+            builtInInstrument: track.builtInInstrument,
             icon: track.icon,
             aiWorkflow: track.aiWorkflow,
             aiWorkflowParams: track.aiWorkflowParams,
@@ -385,6 +626,13 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             trackFXPaths,
             trackFXStates,
             instrumentPlugin: track.instrumentPlugin,
+            instrumentState,
+            automationLanes: serializeAutomationLanesForProject(track.automationLanes),
+            showAutomation: Boolean(track.showAutomation),
+            automationReadEnabled: trackAutomationReadEnabled,
+            automationWriteEnabled: false,
+            automationEnabled: trackAutomationReadEnabled,
+            suspendedAutomationState: null,
           };
         }),
       );
@@ -430,10 +678,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             recentProjects: newRecent,
           };
         });
-        localStorage.setItem(
-          "recentProjects",
-          JSON.stringify(get().recentProjects),
-        );
+        persistRecentProjects(get().recentProjects);
       } else {
         console.error(`[DEBUG SAVE] Save FAILED for path: ${path}`);
         get().showToast("Failed to save project", "error");
@@ -481,10 +726,22 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         if (!path) return false;
       }
 
-      const json = await nativeBridge.loadProjectFromFile(path);
-      if (!json) return false;
+      set({ isProjectLoading: true, projectLoadingMessage: "Opening project..." });
+      await new Promise((resolve) => {
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => resolve(undefined));
+        } else {
+          setTimeout(resolve, 0);
+        }
+      });
 
-      set({ isProjectLoading: true, projectLoadingMessage: "Parsing project..." });
+      const json = await nativeBridge.loadProjectFromFile(path);
+      if (!json) {
+        set({ isProjectLoading: false, projectLoadingMessage: "" });
+        return false;
+      }
+
+      set({ projectLoadingMessage: "Parsing project..." });
       await new Promise((r) => setTimeout(r, 0));
 
       try {
@@ -513,10 +770,26 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           Array.isArray(data.metronomeAccentBeats) && data.metronomeAccentBeats.length > 0
             ? data.metronomeAccentBeats
             : freshProjectState.metronomeAccentBeats;
-        const loadedMasterAutomationLanes =
+        const loadedMasterAutomationLanesRaw =
           Array.isArray(data.masterAutomationLanes) && data.masterAutomationLanes.length > 0
             ? data.masterAutomationLanes
             : freshProjectState.masterAutomationLanes;
+        const loadedMasterAutomationLanesNormalized = normalizeAutomationLanes(
+          loadedMasterAutomationLanesRaw,
+          { showAutomation: Boolean(data.showMasterAutomation) },
+        );
+        const loadedMasterAutomationRead = deriveAutomationReadEnabled(
+          {
+            automationReadEnabled: data.masterAutomationReadEnabled,
+            automationEnabled: data.masterAutomationEnabled,
+          },
+          loadedMasterAutomationLanesNormalized,
+        );
+        const loadedMasterAutomationLanes = resolveLoadedAutomationLaneModes(
+          loadedMasterAutomationLanesNormalized,
+          loadedMasterAutomationRead,
+        );
+        const loadedAutomationWriteBehavior = normalizeAutomationWriteBehavior(data.automationWriteBehavior);
         const loadedRenderMetadata = {
           ...freshProjectState.renderMetadata,
           ...(data.renderMetadata || {}),
@@ -529,6 +802,12 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           ...freshProjectState.clipLauncher,
           ...(data.clipLauncher || {}),
         };
+        const loadedQuantizePresets = Array.isArray(data.quantizePresets) && data.quantizePresets.length > 0
+          ? data.quantizePresets
+          : [...FACTORY_QUANTIZE_PRESETS];
+        const loadedQuantizePresetId = loadedQuantizePresets.some((preset) => preset.id === data.quantizePresetId)
+          ? data.quantizePresetId
+          : "factory-1/16";
 
         await nativeBridge.setProcessingPrecision(loadedProcessingPrecision).catch(logBridgeError("sync"));
         await nativeBridge.setTempo(loadedTempo).catch(logBridgeError("sync"));
@@ -558,6 +837,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           metronomeAccentBeats: loadedMetronomeAccentBeats,
           metronomeTrackId: data.metronomeTrackId ?? null,
           projectRange: data.projectRange || freshProjectState.projectRange,
+          snapEnabled: data.snapEnabled ?? freshProjectState.snapEnabled,
+          snapType: data.snapType || freshProjectState.snapType,
+          gridSize: data.gridSize || freshProjectState.gridSize,
+          quantizePresetId: loadedQuantizePresetId,
+          quantizePresets: loadedQuantizePresets,
           markers: Array.isArray(data.markers) ? data.markers : freshProjectState.markers,
           regions: Array.isArray(data.regions) ? data.regions : freshProjectState.regions,
           tempoMarkers: Array.isArray(data.tempoMarkers) ? data.tempoMarkers : freshProjectState.tempoMarkers,
@@ -567,10 +851,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           masterMono: Boolean(data.masterMono),
           masterAutomationLanes: loadedMasterAutomationLanes,
           showMasterAutomation: Boolean(data.showMasterAutomation),
-          masterAutomationEnabled:
-            typeof data.masterAutomationEnabled === "boolean"
-              ? data.masterAutomationEnabled
-              : true,
+          masterAutomationReadEnabled: loadedMasterAutomationRead,
+          masterAutomationWriteEnabled: false,
+          masterAutomationEnabled: loadedMasterAutomationRead,
+          automationWriteBehavior: loadedAutomationWriteBehavior,
           suspendedMasterAutomationState: data.suspendedMasterAutomationState || null,
           mixerSnapshots: Array.isArray(data.mixerSnapshots) ? data.mixerSnapshots : [],
           trackGroups: Array.isArray(data.trackGroups) ? data.trackGroups : [],
@@ -601,7 +885,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           console.log("Loading track:", trackData.name, trackData.id);
 
           try {
-            await nativeBridge.addTrack(trackData.id);
+            const restoredTrackType = trackData.type || "audio";
+            await nativeBridge.addTrack(trackData.id, restoredTrackType);
+            await nativeBridge.setTrackType(trackData.id, restoredTrackType).catch(logBridgeError("sync"));
             await nativeBridge.setTrackVolume(trackData.id, trackData.volumeDB);
             await nativeBridge.setTrackPan(trackData.id, trackData.pan);
 
@@ -622,6 +908,27 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               inputChCount,
             );
 
+            if (
+              trackData.type === "midi" ||
+              trackData.type === "instrument" ||
+              trackData.inputType === "midi" ||
+              trackData.midiInputDevice
+            ) {
+              if (trackData.midiInputDevice)
+                await nativeBridge.openMIDIDevice(trackData.midiInputDevice).catch(logBridgeError("sync"));
+
+              await nativeBridge.setTrackMIDIInput(
+                trackData.id,
+                trackData.midiInputDevice || "",
+                trackData.midiChannel ?? 0,
+              ).catch(logBridgeError("sync"));
+            }
+
+            if (trackData.midiOutputDevice) {
+              await nativeBridge.setTrackMIDIOutput(trackData.id, trackData.midiOutputDevice)
+                .catch(logBridgeError("sync"));
+            }
+
             let restoredInstrumentPlugin: string | undefined;
             if (!bypassFX && trackData.instrumentPlugin) {
               set({ projectLoadingMessage: `Restoring instrument for ${trackData.name}...` });
@@ -629,6 +936,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               const success = await nativeBridge.loadInstrument(trackData.id, trackData.instrumentPlugin);
               console.log(`[DEBUG LOAD]   loadInstrument result: ${success}`);
               if (success) {
+                if (trackData.instrumentState) {
+                  await nativeBridge.setInstrumentState(trackData.id, trackData.instrumentState)
+                    .catch(logBridgeError("instrument state restore"));
+                }
                 restoredInstrumentPlugin = trackData.instrumentPlugin;
               }
             }
@@ -660,8 +971,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               await new Promise((r) => setTimeout(r, 0));
               for (let i = 0; i < trackData.inputFXPaths.length; i++) {
                 console.log(`[DEBUG LOAD]   Restoring input FX[${i}]: "${trackData.inputFXPaths[i]}"`);
-                const success = await nativeBridge.addTrackInputFX(trackData.id, trackData.inputFXPaths[i], false);
-                console.log(`[DEBUG LOAD]   addTrackInputFX result: ${success}`);
+                const fxPath = trackData.inputFXPaths[i];
+                const success = isBuiltInPluginPath(fxPath)
+                  ? await nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, true)
+                  : await nativeBridge.addTrackInputFX(trackData.id, fxPath, false);
+                console.log(`[DEBUG LOAD]   addInputFX result: ${success}`);
                 if (success) {
                   if (trackData.inputFXStates && trackData.inputFXStates[i]) {
                     const stateResult = await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
@@ -673,12 +987,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             }
 
             let trackFxRestored = 0;
+            let restoredBuiltInInstrumentFX = false;
             if (!bypassFX && trackData.trackFXPaths && trackData.trackFXPaths.length > 0) {
               set({ projectLoadingMessage: `Restoring track FX for ${trackData.name}...` });
               await new Promise((r) => setTimeout(r, 0));
               for (let i = 0; i < trackData.trackFXPaths.length; i++) {
                 console.log(`[DEBUG LOAD]   Restoring track FX[${i}]: "${trackData.trackFXPaths[i]}"`);
-                const success = await nativeBridge.addTrackFX(trackData.id, trackData.trackFXPaths[i], false);
+                const fxPath = trackData.trackFXPaths[i];
+                restoredBuiltInInstrumentFX = restoredBuiltInInstrumentFX || isBuiltInInstrumentPluginPath(fxPath);
+                const success = isBuiltInPluginPath(fxPath)
+                  ? await nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, false)
+                  : await nativeBridge.addTrackFX(trackData.id, fxPath, false);
                 console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
                 if (success) {
                   if (trackData.trackFXStates && trackData.trackFXStates[i]) {
@@ -690,11 +1009,28 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               }
             }
 
+            if (restoredBuiltInInstrumentFX) {
+              await nativeBridge.setTrackType(trackData.id, "instrument").catch(logBridgeError("built-in instrument type restore"));
+            }
+
             console.log(`[DEBUG LOAD] Track "${trackData.name}" restored ${inputFxRestored} input FX and ${trackFxRestored} track FX`);
+
+            const restoredMidiClips = (trackData.midiClips || []).map((clip: any) =>
+              normalizeMIDIClipLoopLength(clip),
+            );
+            const normalizedAutomationLanes = normalizeAutomationLanes(
+              trackData.automationLanes || [],
+              trackData,
+            );
+            const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
+            const restoredAutomationLanes = resolveLoadedAutomationLaneModes(
+              normalizedAutomationLanes,
+              automationReadEnabled,
+            );
 
             const frontendTrack: Track = {
               ...trackData,
-              type: restoredInstrumentPlugin ? "instrument" : trackData.type,
+              type: restoredInstrumentPlugin || restoredBuiltInInstrumentFX ? "instrument" : trackData.type,
               aiWorkflow:
                 trackData.type === "ai"
                   ? trackData.aiWorkflow || "text-to-music"
@@ -811,8 +1147,20 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                   ? 0
                   : trackData.aiGenerationLastProgressAgeMs,
               clips: trackData.clips || [],
-              midiClips: trackData.midiClips || [],
-              automationLanes: trackData.automationLanes || [],
+              midiClips: restoredMidiClips,
+              midiEffects: trackData.midiEffects || [],
+              samplerSamplePath: trackData.samplerSamplePath || undefined,
+              samplerRootNote: trackData.samplerRootNote ?? 60,
+              samplerSourceType: trackData.samplerSourceType || (String(trackData.samplerSamplePath || "").toLowerCase().endsWith(".sf2") ? "soundfont" : undefined),
+              builtInInstrument: trackData.builtInInstrument || undefined,
+              midiPitchBendRangeUp: trackData.midiPitchBendRangeUp ?? 2,
+              midiPitchBendRangeDown: trackData.midiPitchBendRangeDown ?? trackData.midiPitchBendRangeUp ?? 2,
+              midiPitchBendRangeLinked: trackData.midiPitchBendRangeLinked ?? true,
+              automationLanes: restoredAutomationLanes,
+              showAutomation: Boolean(trackData.showAutomation),
+              automationReadEnabled,
+              automationWriteEnabled: false,
+              automationEnabled: automationReadEnabled,
               meterLevel: 0,
               peakLevel: 0,
               clipping: false,
@@ -820,18 +1168,54 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               suspendedAutomationState: null,
             };
 
+            if (frontendTrack.samplerSamplePath) {
+              const samplerLoaded = await nativeBridge
+                .setTrackSamplerSample(frontendTrack.id, frontendTrack.samplerSamplePath, frontendTrack.samplerRootNote ?? 60)
+                .catch(logBridgeError("sampler load"));
+              if (samplerLoaded && !frontendTrack.instrumentPlugin) {
+                frontendTrack.type = "instrument";
+              }
+            } else if (frontendTrack.type === "instrument" && frontendTrack.builtInInstrument) {
+              const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
+              await nativeBridge
+                .setBuiltInPluginParam(
+                  { trackId: frontendTrack.id, chain: "instrument", fxIndex: -1 },
+                  "instrumentMode",
+                  modeMap[frontendTrack.builtInInstrument] ?? 0,
+                )
+                .catch(logBridgeError("built-in instrument load"));
+            }
+
+            if (
+              frontendTrack.type === "midi" ||
+              frontendTrack.type === "instrument" ||
+              (frontendTrack.midiClips || []).length > 0
+            ) {
+              await syncTrackMIDIClipsToBackend(frontendTrack.id, frontendTrack.midiClips || [], frontendTrack.midiEffects || [])
+                .catch(logBridgeError("midi load sync"));
+            }
+
             set((state) => ({ tracks: [...state.tracks, frontendTrack] }));
+            for (const lane of frontendTrack.automationLanes) {
+              syncAutomationLaneToBackend(frontendTrack.id, lane);
+            }
           } catch (trackError) {
             console.error(`[DEBUG LOAD] Failed to load track "${trackData.name}"`, trackError);
           }
         }
+
+        set({ projectLoadingMessage: "Verifying MIDI signal path..." });
+        await verifyAndRepairLoadedMIDISync(get);
 
         let restoredMasterFxCount = 0;
         if (!bypassFX && data.masterFXPaths && data.masterFXPaths.length > 0) {
           set({ projectLoadingMessage: "Restoring master FX..." });
           await new Promise((r) => setTimeout(r, 0));
           for (let i = 0; i < data.masterFXPaths.length; i++) {
-            const success = await nativeBridge.addMasterFX(data.masterFXPaths[i]);
+            const masterFxPath = data.masterFXPaths[i];
+            const success = isBuiltInPluginPath(masterFxPath)
+              ? await nativeBridge.addMasterBuiltInFX(masterFxPath)
+              : await nativeBridge.addMasterFX(masterFxPath);
             if (success && data.masterFXStates && data.masterFXStates[i]) {
               await nativeBridge.setMasterPluginState(i, data.masterFXStates[i]);
             }
@@ -863,7 +1247,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             recentProjects: newRecent,
           };
         });
-        localStorage.setItem("recentProjects", JSON.stringify(get().recentProjects));
+        persistRecentProjects(get().recentProjects);
 
         set({ projectLoadingMessage: "Checking media files..." });
         await new Promise((r) => setTimeout(r, 0));
@@ -910,6 +1294,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         clips: [],        // No clips in templates
         midiClips: [],     // No MIDI clips
         takes: [],         // No takes
+        automationLanes: serializeAutomationLanesForProject(t.automationLanes),
+        automationReadEnabled: deriveAutomationReadEnabled(t, t.automationLanes || []),
+        automationWriteEnabled: false,
+        automationEnabled: deriveAutomationReadEnabled(t, t.automationLanes || []),
         meterLevel: 0,
         peakLevel: 0,
         clipping: false,
@@ -961,18 +1349,30 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           // Add template tracks (skip undo for individual tracks during template load)
           for (const trackData of template.tracks) {
             const newId = crypto.randomUUID();
+            const normalizedAutomationLanes = normalizeAutomationLanes(
+              trackData.automationLanes || [],
+              trackData,
+            );
+            const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
             const newTrack = {
               ...trackData,
               id: newId,
               clips: [],
               midiClips: [],
               takes: [],
+              automationLanes: resolveLoadedAutomationLaneModes(
+                normalizedAutomationLanes,
+                automationReadEnabled,
+              ),
+              automationReadEnabled,
+              automationWriteEnabled: false,
+              automationEnabled: automationReadEnabled,
               meterLevel: 0,
               peakLevel: 0,
               clipping: false,
             };
             set((s) => ({ tracks: [...s.tracks, newTrack] }));
-            nativeBridge.addTrack(newId).catch(logBridgeError("sync"));
+            nativeBridge.addTrack(newId, newTrack.type).catch(logBridgeError("sync"));
             // Sync track properties to backend
             nativeBridge.setTrackVolume(newId, trackData.volumeDB).catch(logBridgeError("sync"));
             nativeBridge.setTrackPan(newId, trackData.pan).catch(logBridgeError("sync"));
@@ -1001,7 +1401,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
           // Sync old tracks to backend
           for (const t of oldTracks) {
-            await nativeBridge.addTrack(t.id).catch(logBridgeError("sync"));
+            await nativeBridge.addTrack(t.id, t.type).catch(logBridgeError("sync"));
             nativeBridge.setTrackVolume(t.id, t.volumeDB).catch(logBridgeError("sync"));
             nativeBridge.setTrackPan(t.id, t.pan).catch(logBridgeError("sync"));
           }

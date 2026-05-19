@@ -19,6 +19,7 @@ import {
 import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 interface GuideStep {
   icon: React.ReactNode;
@@ -248,10 +249,14 @@ export function GettingStartedGuide() {
   if (!showGettingStarted) return null;
 
   return (
-    <div className="fixed inset-0 z-2000 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60" onClick={handleClose} />
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
+      data-modal-root="true"
+      onContextMenu={guardModalContextMenu}
+    >
+      <div className="absolute inset-0 bg-black/60" onClick={handleClose} onContextMenu={guardModalContextMenu} />
 
-      <div className="relative w-[680px] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden">
+      <div className="relative w-[680px] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden" onContextMenu={guardModalContextMenu}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-daw-border">
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-daw-text">Getting Started</h2>

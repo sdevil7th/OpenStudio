@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
-import { X } from "lucide-react";
+import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { getGlobalShortcutConflicts } from "./store/actionRegistry";
 import {
@@ -12,9 +12,17 @@ import {
 } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import {
+  installModalContextMenuLeakGuard,
+  shouldSuppressWorkspaceContextMenu,
+} from "./utils/modalEventGuards";
+import {
   publishCurrentMixerUISnapshot,
   startMixerUISync,
 } from "./utils/mixerWindowSync";
+import {
+  publishMidiEditorSessionSnapshot,
+  startMidiEditorUISync,
+} from "./utils/midiEditorWindowSync";
 import { maybeRunPitchRegressionDriver } from "./utils/pitchRegressionDriver";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
@@ -89,6 +97,8 @@ import {
 } from "@dnd-kit/sortable";
 
 function App() {
+  const startupReadyReportedRef = useRef(false);
+
   // Use useShallow to prevent re-renders when unrelated state changes (like currentTime)
   const {
     tracks,
@@ -111,8 +121,13 @@ function App() {
     showPianoRoll,
     pianoRollTrackId,
     pianoRollClipId,
+    midiEditorSessions,
+    activeMidiEditorSessionId,
+    dockedMidiEditorSessionId,
     selectedClipIds,
     closePianoRoll,
+    lowerZoneHeight,
+    setLowerZoneHeight,
     showUndoHistory,
     showCommandPalette,
     showRegionMarkerManager,
@@ -158,6 +173,7 @@ function App() {
     showStemSeparation,
     showAiToolsSetup,
     closeAiToolsSetup,
+    hydrateRecentProjects,
   } = useDAWStore(
     useShallow((state) => ({
       tracks: state.tracks,
@@ -180,8 +196,13 @@ function App() {
       showPianoRoll: state.showPianoRoll,
       pianoRollTrackId: state.pianoRollTrackId,
       pianoRollClipId: state.pianoRollClipId,
+      midiEditorSessions: state.midiEditorSessions,
+      activeMidiEditorSessionId: state.activeMidiEditorSessionId,
+      dockedMidiEditorSessionId: state.dockedMidiEditorSessionId,
       selectedClipIds: state.selectedClipIds,
       closePianoRoll: state.closePianoRoll,
+      lowerZoneHeight: state.lowerZoneHeight,
+      setLowerZoneHeight: state.setLowerZoneHeight,
       showUndoHistory: state.showUndoHistory,
       showCommandPalette: state.showCommandPalette,
       showRegionMarkerManager: state.showRegionMarkerManager,
@@ -227,8 +248,36 @@ function App() {
       showStemSeparation: state.showStemSeparation,
       showAiToolsSetup: state.showAiToolsSetup,
       closeAiToolsSetup: state.closeAiToolsSetup,
+      hydrateRecentProjects: state.hydrateRecentProjects,
     }))
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const markAppReady = (detail: string) => {
+      if (cancelled || startupReadyReportedRef.current) {
+        return;
+      }
+
+      startupReadyReportedRef.current = true;
+      window.dispatchEvent(new CustomEvent("openstudio:app-ready", { detail }));
+    };
+
+    void (async () => {
+      try {
+        await hydrateRecentProjects();
+        markAppReady("main-app-hydrated");
+      } catch (error) {
+        console.error("[startup] Failed to hydrate recent projects:", error);
+        markAppReady("main-app-hydration-failed");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrateRecentProjects]);
 
   // Compute visible tracks — hides children of collapsed folder tracks
   const visibleTracks = useMemo(() => {
@@ -249,13 +298,71 @@ function App() {
     });
   }, [tracks]);
 
-  // Ref for workspace wheel handling
+  // Ref for workspace wheel handling and lower-zone sizing
   const workspaceRef = useRef<HTMLDivElement>(null);
+
+  const dockedMidiEditorSession = useMemo(
+    () => midiEditorSessions.find((session) => session.sessionId === dockedMidiEditorSessionId) ?? null,
+    [dockedMidiEditorSessionId, midiEditorSessions],
+  );
+  const activeMidiEditorSession = useMemo(
+    () => midiEditorSessions.find((session) => session.sessionId === activeMidiEditorSessionId) ?? null,
+    [activeMidiEditorSessionId, midiEditorSessions],
+  );
+  const dockedPianoRollTrackId = dockedMidiEditorSession?.trackId ?? pianoRollTrackId;
+  const dockedPianoRollClipId = dockedMidiEditorSession?.clipId ?? pianoRollClipId;
+  const dockedPianoRollTrack = useMemo(
+    () => tracks.find((track) => track.id === dockedPianoRollTrackId) ?? null,
+    [dockedPianoRollTrackId, tracks],
+  );
+  const dockedPianoRollClip = useMemo(
+    () => dockedPianoRollTrack?.midiClips.find((clip) => clip.id === dockedPianoRollClipId) ?? null,
+    [dockedPianoRollClipId, dockedPianoRollTrack],
+  );
+  const dockedMidiEditorTitle = useMemo(() => {
+    if (!dockedPianoRollTrack || !dockedPianoRollClip) return "MIDI Editor";
+    return `${dockedPianoRollTrack.name || "Track"} - ${dockedPianoRollClip.name || "MIDI Clip"}`;
+  }, [dockedPianoRollClip, dockedPianoRollTrack]);
+
+  const pianoRollAdditionalClipIds = useMemo(() => {
+    if (!dockedPianoRollTrackId || !dockedPianoRollClipId || selectedClipIds.length <= 1) return [];
+    const pianoTrack = tracks.find((track) => track.id === dockedPianoRollTrackId);
+    if (!pianoTrack) return [];
+    const midiClipIds = new Set(pianoTrack.midiClips.map((clip) => clip.id));
+    return selectedClipIds.filter((id) => id !== dockedPianoRollClipId && midiClipIds.has(id));
+  }, [dockedPianoRollClipId, dockedPianoRollTrackId, selectedClipIds, tracks]);
+
+  const beginLowerZoneResize = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = lowerZoneHeight;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const workspaceHeight = workspaceRef.current?.getBoundingClientRect().height ?? window.innerHeight;
+      const availableHeight = Math.max(window.innerHeight, workspaceHeight + startHeight);
+      const maxHeight = Math.max(180, Math.round(availableHeight * 0.85));
+      const nextHeight = Math.max(180, Math.min(maxHeight, startHeight - (moveEvent.clientY - startY)));
+      setLowerZoneHeight(nextHeight);
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [lowerZoneHeight, setLowerZoneHeight]);
 
   // OS file drag-drop visual indicator
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const dragCounterRef = useRef(0);
   const hideMixerOnCloseRef = useRef(false);
+  const openedMidiEditorWindowsRef = useRef<Set<string>>(new Set());
+  const prewarmedMidiEditorSessionRef = useRef<string | null>(null);
   const isMixerDetached = detachedPanels.includes("mixer");
 
   // Project loading state (separate selector to avoid unnecessary re-renders)
@@ -292,6 +399,8 @@ function App() {
     && hasNativeMusicProfile,
   ));
   const [aiToolsInstallStatusStale, setAiToolsInstallStatusStale] = useState(false);
+  const [showAiToolsBackgroundInstallPopup, setShowAiToolsBackgroundInstallPopup] = useState(false);
+  const previousAiToolsInstallForPopupRef = useRef(aiToolsStatus.installInProgress);
   const aiToolsHasByteProgress = (aiToolsStatus.bytesTotal ?? 0) > 0 && (aiToolsStatus.bytesDownloaded ?? 0) >= 0;
   const aiToolsVisualProgressRatio = aiToolsHasByteProgress
     ? Math.max(0, Math.min((aiToolsStatus.bytesDownloaded ?? 0) / Math.max(aiToolsStatus.bytesTotal ?? 1, 1), 1))
@@ -299,6 +408,7 @@ function App() {
   const aiToolsVisualProgressPercent = Math.round(aiToolsVisualProgressRatio * 100);
 
   useEffect(() => startMixerUISync(), []);
+  useEffect(() => startMidiEditorUISync(), []);
 
   useEffect(() => {
     void refreshAiToolsStatus(true);
@@ -345,6 +455,18 @@ function App() {
   }, [aiToolsStatus.installInProgress, aiToolsStatusLastUpdatedAt, refreshAiToolsStatus]);
 
   useEffect(() => {
+    const wasInstalling = previousAiToolsInstallForPopupRef.current;
+
+    if (!aiToolsStatus.installInProgress) {
+      setShowAiToolsBackgroundInstallPopup(false);
+    } else if (!wasInstalling && showAiToolsSetup) {
+      setShowAiToolsBackgroundInstallPopup(true);
+    }
+
+    previousAiToolsInstallForPopupRef.current = aiToolsStatus.installInProgress;
+  }, [aiToolsStatus.installInProgress, showAiToolsSetup]);
+
+  useEffect(() => {
     const previousState = previousAiToolsStateRef.current;
     const previousInstallInProgress = previousAiToolsInstallInProgressRef.current;
     const previousFullReady = previousAiToolsFullReadyRef.current;
@@ -366,7 +488,6 @@ function App() {
       ),
     );
     const installAttemptStates = new Set([
-      "checking",
       "fetching_runtime_manifest",
       "downloading_runtime",
       "verifying_runtime_archive",
@@ -381,12 +502,10 @@ function App() {
     const readyStateChanged = previousState !== currentState;
     const fullReadyChanged = previousFullReady !== currentFullReady;
 
-    if (readyStateChanged || fullReadyChanged) {
+    if (wasInstallAttempt && (readyStateChanged || fullReadyChanged)) {
       if (currentFullReady && (readyStateChanged || !previousFullReady)) {
         showToast("AI tools are ready", "success");
-        if (wasInstallAttempt) {
-          closeAiToolsSetup();
-        }
+        closeAiToolsSetup();
       } else if (currentPartialReady && readyStateChanged) {
         showToast(
           (!hasNativeMusicProfile
@@ -397,19 +516,13 @@ function App() {
             || "Stem separation is ready, but music generation is not fully ready yet.",
           "info",
         );
-        if (wasInstallAttempt) {
-          openAiToolsSetup();
-        }
+        openAiToolsSetup();
       } else if (currentState === "error" && aiToolsStatus.error) {
         showToast(aiToolsStatus.error, "error");
-        if (wasInstallAttempt) {
-          openAiToolsSetup();
-        }
+        openAiToolsSetup();
       } else if (currentState === "cancelled") {
         showToast("AI tools installation cancelled", "info");
-        if (wasInstallAttempt) {
-          openAiToolsSetup();
-        }
+        openAiToolsSetup();
       } else if (currentState === "pythonMissing" && wasInstallAttempt) {
         openAiToolsSetup();
       }
@@ -468,8 +581,187 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const unsubscribe = nativeBridge.subscribe("midiEditorWindowClosed", (payload) => {
+      const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+      const reason = typeof payload?.reason === "string" ? payload.reason : "close";
+      if (sessionId) {
+        openedMidiEditorWindowsRef.current.delete(sessionId);
+        if (prewarmedMidiEditorSessionRef.current === sessionId && reason !== "dock") {
+          prewarmedMidiEditorSessionRef.current = null;
+        }
+      }
+
+      if (reason === "dock" || reason === "warmDispose" || reason === "appQuit") {
+        useDAWStore.setState((current) => ({
+          detachedPanels: current.midiEditorSessions.some((candidate) => candidate.mode === "windowed")
+            ? current.detachedPanels
+            : current.detachedPanels.filter((id) => id !== "midiEditor"),
+        }));
+        return;
+      }
+
+      const state = useDAWStore.getState();
+      const session = sessionId
+        ? state.midiEditorSessions.find((candidate) => candidate.sessionId === sessionId)
+        : null;
+      if (session && session.mode === "windowed") {
+        state.closeMidiEditorSession(sessionId);
+        return;
+      }
+
+      useDAWStore.setState((current) => ({
+        detachedPanels: current.midiEditorSessions.some((candidate) => candidate.mode === "windowed")
+          ? current.detachedPanels
+          : current.detachedPanels.filter((id) => id !== "midiEditor"),
+      }));
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const previousSessionId = prewarmedMidiEditorSessionRef.current;
+    const previousSession = previousSessionId
+      ? midiEditorSessions.find((session) => session.sessionId === previousSessionId)
+      : null;
+
+    if (previousSessionId && previousSessionId !== dockedMidiEditorSessionId) {
+      prewarmedMidiEditorSessionRef.current = null;
+      if (!previousSession || previousSession.mode !== "windowed") {
+        void nativeBridge.closeMidiEditorWindow(previousSessionId, "warmDispose");
+      }
+    }
+
+    if (!dockedMidiEditorSessionId || previousSessionId === dockedMidiEditorSessionId) {
+      return;
+    }
+
+    prewarmedMidiEditorSessionRef.current = dockedMidiEditorSessionId;
+    void (async () => {
+      await publishMidiEditorSessionSnapshot(dockedMidiEditorSessionId);
+      await nativeBridge.prewarmMidiEditorWindow(dockedMidiEditorSessionId, {
+        x: 120,
+        y: 80,
+        width: 1400,
+        height: 850,
+      });
+    })();
+  }, [dockedMidiEditorSessionId, midiEditorSessions]);
+
+  useEffect(() => {
+    midiEditorSessions
+      .filter((session) => session.mode === "windowed")
+      .forEach((session) => {
+        if (openedMidiEditorWindowsRef.current.has(session.sessionId)) {
+          return;
+        }
+        openedMidiEditorWindowsRef.current.add(session.sessionId);
+        void (async () => {
+          await publishMidiEditorSessionSnapshot(session.sessionId);
+          const opened = await nativeBridge.openMidiEditorWindow(session.sessionId, {
+            x: 120,
+            y: 80,
+            width: 1400,
+            height: 850,
+          });
+          if (!opened) {
+            openedMidiEditorWindowsRef.current.delete(session.sessionId);
+            useDAWStore.getState().showToast("Unable to open the detached MIDI editor window.", "error");
+          }
+        })();
+      });
+  }, [midiEditorSessions]);
+
+  useEffect(() => {
+    if (!activeMidiEditorSession || activeMidiEditorSession.mode !== "windowed") {
+      return;
+    }
+    void nativeBridge.focusMidiEditorWindow(activeMidiEditorSession.sessionId);
+  }, [activeMidiEditorSession]);
+
+  useEffect(() => {
     const unsubscribe = nativeBridge.onAppCloseRequested(() => {
       void useDAWStore.getState().requestQuit();
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const stopNativeRuntimeSurfaces = () => {
+      void nativeBridge.setTransportRecording(false);
+      void nativeBridge.setTransportPlaying(false);
+      void nativeBridge.closeAllPluginWindows();
+    };
+
+    stopNativeRuntimeSurfaces();
+    window.addEventListener("pagehide", stopNativeRuntimeSurfaces);
+    window.addEventListener("beforeunload", stopNativeRuntimeSurfaces);
+    return () => {
+      window.removeEventListener("pagehide", stopNativeRuntimeSurfaces);
+      window.removeEventListener("beforeunload", stopNativeRuntimeSurfaces);
+      stopNativeRuntimeSurfaces();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = nativeBridge.subscribe("appCommand", (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+
+      const state = useDAWStore.getState();
+      const command = typeof payload.command === "string" ? payload.command : "";
+      const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
+      const session = sessionId
+        ? state.midiEditorSessions.find((candidate) => candidate.sessionId === sessionId)
+        : null;
+
+      if (command === "transport.toggle") {
+        if (state.transport.isRecording || state.transport.isPlaying) void state.stop();
+        else void state.play();
+        return;
+      }
+
+      if (command === "transport.stop") {
+        void state.stop();
+        return;
+      }
+
+      if (command === "transport.record") {
+        void state.record();
+        return;
+      }
+
+      if (command === "transport.seek") {
+        const time = typeof payload.time === "number" ? payload.time : state.transport.currentTime;
+        void state.seekTo(Math.max(0, time));
+        return;
+      }
+
+      if (command === "transport.seekPreview") {
+        const time = typeof payload.time === "number" ? payload.time : state.transport.currentTime;
+        const clampedTime = Math.max(0, time);
+        state.setCurrentTime(clampedTime);
+        void nativeBridge.setTransportPosition(clampedTime);
+        return;
+      }
+
+      if (command === "edit.undo") {
+        state.undo();
+        return;
+      }
+
+      if (command === "edit.redo") {
+        state.redo();
+        return;
+      }
+
+      if (command === "midi.quantize") {
+        const targetTrackId = session?.trackId || state.pianoRollTrackId || undefined;
+        const targetClipId = session?.clipId || state.pianoRollClipId || undefined;
+        state.quantizeSelectedMIDINotesUsingLast(targetTrackId, targetClipId);
+      }
     });
 
     return unsubscribe;
@@ -517,6 +809,17 @@ function App() {
     toggleMixer();
   }, [isMixerDetached, toggleMixer]);
 
+  const handleDetachMidiEditor = useCallback(async () => {
+    const state = useDAWStore.getState();
+    const sessionId = state.dockedMidiEditorSessionId || state.activeMidiEditorSessionId;
+    if (!sessionId) {
+      state.showToast("Open a MIDI clip before detaching the editor.", "error");
+      return;
+    }
+
+    state.popOutMidiEditorSession(sessionId);
+  }, []);
+
   // Accessibility: UI font scale — apply to root element
   const uiFontScale = useDAWStore((state) => state.uiFontScale);
   useEffect(() => {
@@ -560,6 +863,7 @@ function App() {
         // Update automation display values at ~30fps (every ~33ms)
         if (now - lastAutoUpdate > 33) {
           lastAutoUpdate = now;
+          currentState.recordAutomationWriteTick(now);
           currentState.updateAutomatedValues();
         }
 
@@ -603,7 +907,12 @@ function App() {
         return;
       }
 
-      if (!frontendPlaying) return;
+      if (!frontendPlaying) {
+        if (drift > 0.001) {
+          state.setCurrentTime(backendPos);
+        }
+        return;
+      }
 
       // Only correct if drift exceeds 30ms — avoids jitter from minor timing differences
       if (drift > 0.03) {
@@ -739,13 +1048,15 @@ function App() {
         targetIsEditable:
           !!target &&
           (target instanceof HTMLInputElement ||
+            target instanceof HTMLSelectElement ||
             target instanceof HTMLTextAreaElement ||
             target.isContentEditable),
         preventDefault: () => e.preventDefault(),
+        stopPropagation: () => e.stopPropagation(),
       });
     };
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     const unsubscribeNativeShortcuts = nativeBridge.onNativeGlobalShortcut(
       (event: NativeGlobalShortcutEvent) => {
         void dispatchGlobalShortcut({ ...event, source: "pluginWindow" });
@@ -753,10 +1064,12 @@ function App() {
     );
 
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
       unsubscribeNativeShortcuts();
     };
   }, []);
+
+  useEffect(() => installModalContextMenuLeakGuard(), []);
 
   // Handle audio files dropped from OS file explorer via HTML5 drag-and-drop.
   // WebView2 intercepts OLE drag-drop before JUCE can see it, so we handle it
@@ -826,6 +1139,10 @@ function App() {
       }
 
       if (mediaFiles.length === 0) return;
+      if (nativeBridge.usesNativeExternalMediaDrop()) {
+        console.warn("[App] Ignoring HTML5 file drop in native mode; native path-based timeline drop handles external media.");
+        return;
+      }
       console.log(`[App] ${mediaFiles.length} media file(s) dropped from OS`);
 
       for (const file of mediaFiles) {
@@ -852,7 +1169,7 @@ function App() {
 
           // Create a new track for this file (MIDI track for .mid/.midi, audio track otherwise)
           const { tracks, transport, importMedia } = useDAWStore.getState();
-          const result = await nativeBridge.addTrack();
+          const result = await nativeBridge.addTrack(undefined, isMidi ? "midi" : "audio");
           const trackId = typeof result === "string" ? result : `${Date.now()}`;
           const trackName = file.name.replace(/\.[^.]+$/, "");
 
@@ -966,6 +1283,9 @@ function App() {
   const openTcpContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (shouldSuppressWorkspaceContextMenu(event.target)) {
+      return;
+    }
     setTcpContextMenu({
       x: event.clientX,
       y: event.clientY,
@@ -1272,6 +1592,63 @@ function App() {
         </Suspense>
       )}
 
+      {showPianoRoll && dockedMidiEditorSession && dockedPianoRollTrackId && dockedPianoRollClipId && (
+        <section
+          className="shrink-0 min-h-0 bg-neutral-950 border-t border-neutral-700 flex flex-col"
+          style={{ height: lowerZoneHeight }}
+          aria-label="Docked Piano Roll editor"
+          data-qa="docked-piano-roll"
+        >
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize Piano Roll editor"
+            className="h-2 shrink-0 cursor-row-resize bg-neutral-900 hover:bg-daw-accent/40 flex items-center justify-center text-neutral-500"
+            onMouseDown={beginLowerZoneResize}
+            title="Resize Piano Roll editor"
+            data-qa="piano-roll-resize-handle"
+          >
+            <GripHorizontal size={16} />
+          </div>
+          <div className="h-9 shrink-0 flex items-center justify-between px-3 bg-neutral-850 border-b border-neutral-700">
+            <h2 className="text-xs font-semibold text-neutral-100 truncate" data-qa="docked-midi-editor-title">{dockedMidiEditorTitle}</h2>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleDetachMidiEditor}
+                title="Pop out this MIDI clip to a separate editor window"
+                aria-label="Pop out this MIDI clip to a separate editor window"
+                data-qa="docked-midi-editor-pop-out"
+              >
+                <ExternalLink size={14} />
+                Pop Out
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={closePianoRoll}
+                title="Close (Esc)"
+                aria-label="Close MIDI editor"
+              >
+                <X size={16} />
+              </Button>
+            </div>
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <Suspense fallback={<div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading...</div>}>
+              <PianoRoll
+                sessionId={dockedMidiEditorSession.sessionId}
+                trackId={dockedPianoRollTrackId}
+                clipId={dockedPianoRollClipId}
+                additionalClipIds={pianoRollAdditionalClipIds}
+                onDetach={handleDetachMidiEditor}
+              />
+            </Suspense>
+          </div>
+        </section>
+      )}
+
       <UnsavedChangesDialog />
 
       {/* Transport Bar (above Mixer like Reaper) */}
@@ -1284,48 +1661,6 @@ function App() {
         <Suspense fallback={null}>
           <VirtualPianoKeyboard />
         </Suspense>
-      )}
-
-      {/* Piano Roll Editor Modal */}
-      {showPianoRoll && pianoRollTrackId && pianoRollClipId && (
-        <div className="fixed inset-0 z-2000 flex items-center justify-center bg-black/60">
-          <div className="relative w-[90vw] h-[80vh] bg-neutral-900 rounded-lg shadow-2xl border border-neutral-700 flex flex-col overflow-hidden">
-            {/* Header */}
-            <div className="flex items-center justify-between px-4 py-2 bg-neutral-800 border-b border-neutral-700">
-              <h2 className="text-sm font-semibold text-white">Piano Roll Editor</h2>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={closePianoRoll}
-                title="Close (Esc)"
-                aria-label="Close Piano Roll editor"
-              >
-                <X size={16} />
-              </Button>
-            </div>
-            {/* Piano Roll Content */}
-            <div className="flex-1 overflow-hidden">
-              <Suspense fallback={<div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading...</div>}>
-                <PianoRoll
-                  trackId={pianoRollTrackId}
-                  clipId={pianoRollClipId}
-                  additionalClipIds={
-                    selectedClipIds.length > 1
-                      ? (() => {
-                          const prTrack = tracks.find((t) => t.id === pianoRollTrackId);
-                          if (!prTrack) return [];
-                          const midiClipIdSet = new Set(prTrack.midiClips.map((c) => c.id));
-                          return selectedClipIds.filter(
-                            (id) => id !== pianoRollClipId && midiClipIdSet.has(id),
-                          );
-                        })()
-                      : []
-                  }
-                />
-              </Suspense>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Pitch editor kept for standalone/modal use if needed in future */}
@@ -1669,7 +2004,7 @@ function App() {
 
       {/* Project Loading Overlay */}
       {isProjectLoading && (
-        <div className="fixed inset-0 z-10000 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-4">
             <div className="w-10 h-10 border-3 border-daw-accent border-t-transparent rounded-full animate-spin" />
             <p className="text-sm text-neutral-300 font-medium">
@@ -1681,7 +2016,7 @@ function App() {
 
       {/* File Drop Overlay — shown when dragging files from OS file explorer */}
       {isDraggingFiles && (
-        <div className="fixed inset-0 z-9999 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
           <div className="flex flex-col items-center gap-3 px-8 py-6 rounded-xl border-2 border-dashed border-daw-accent bg-neutral-900/90 shadow-2xl">
             <svg
               className="text-daw-accent"
@@ -1706,7 +2041,9 @@ function App() {
 
       {/* AI Tools Background Install Popup */}
       {!showStemSeparation &&
-        (aiToolsStatus.installInProgress || aiToolsStatus.state === "checking") && (
+        !showAiToolsSetup &&
+        showAiToolsBackgroundInstallPopup &&
+        aiToolsStatus.installInProgress && (
           <div className="fixed bottom-32 right-6 z-[10001] w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-daw-accent/40 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur-md">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1773,7 +2110,7 @@ function App() {
 
       {/* Toast Notification */}
       {toastVisible && (
-        <div className={`fixed bottom-20 left-1/2 -translate-x-1/2 z-10000 px-4 py-2 rounded-lg shadow-lg text-sm font-medium transition-all animate-in fade-in slide-in-from-bottom-2 duration-200 ${
+        <div className={`fixed bottom-20 left-1/2 -translate-x-1/2 z-[10000] px-4 py-2 rounded-lg shadow-lg text-sm font-medium transition-all animate-in fade-in slide-in-from-bottom-2 duration-200 ${
           toastType === "success" ? "bg-green-600 text-white" :
           toastType === "error" ? "bg-red-600 text-white" :
           "bg-neutral-700 text-white"

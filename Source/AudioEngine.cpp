@@ -6,6 +6,8 @@
 #include "PitchAnalyzer.h"
 #include "PitchResynthesizer.h"
 #include "CrashDiagnostics.h"
+#include <algorithm>
+#include <initializer_list>
 
 namespace
 {
@@ -3644,7 +3646,10 @@ void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
         float leftGain  = cachedMasterPanL.load (std::memory_order_relaxed);
         float rightGain = cachedMasterPanR.load (std::memory_order_relaxed);
 
-        if (masterPanAutomation.shouldPlayback())
+        const bool forceAutomationRead = isRendering.load(std::memory_order_relaxed);
+        if ((forceAutomationRead ? masterPanAutomation.shouldPlaybackForRead()
+                                 : masterPanAutomation.shouldPlayback())
+            && masterPanAutomation.getNumPoints() > 0)
         {
             float autoPan = masterPanAutomation.eval (currentTimeSeconds);
             computePanLawGains (currentPanLaw, autoPan, 1.0f, leftGain, rightGain);
@@ -3662,7 +3667,10 @@ void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
     // Master Volume (with automation)
     {
         float effectiveMasterVol = masterVolume;
-        if (masterVolumeAutomation.shouldPlayback())
+        const bool forceAutomationRead = isRendering.load(std::memory_order_relaxed);
+        if ((forceAutomationRead ? masterVolumeAutomation.shouldPlaybackForRead()
+                                 : masterVolumeAutomation.shouldPlayback())
+            && masterVolumeAutomation.getNumPoints() > 0)
         {
             float autoDb = masterVolumeAutomation.eval (currentTimeSeconds);
             effectiveMasterVol = (autoDb <= -60.0f) ? 0.0f : std::pow (10.0f, autoDb / 20.0f);
@@ -3923,8 +3931,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
         const bool isMidiTrack = track->getTrackType() == TrackType::MIDI
                               || track->getTrackType() == TrackType::Instrument;
+        const bool muteAutomationCanUnmuteLive = track->getMuteAutomation().shouldPlayback()
+                                              && track->getMuteAutomation().getNumPoints() > 0;
+        const bool staticMuteBlocksInput = track->getMute() && !muteAutomationCanUnmuteLive;
         const bool shouldReadHardwareInput = !isMidiTrack
-                                          && !track->getMute()
+                                          && !staticMuteBlocksInput
                                           && (track->getRecordArmed()
                                               || track->getInputMonitoring()
                                               || audioRecorder.isRecording(trackId));
@@ -4180,7 +4191,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
         // ========== MIDI OUTPUT: route MIDI to hardware output ==========
         if (!midiMessages.isEmpty() && track->getMIDIOutputDeviceName().isNotEmpty())
-            track->sendMIDIToOutput(midiMessages);
+            track->sendMIDIToOutput(midiMessages, currentSampleRate, track->getMute());
 
         // Mix track output to device outputs (only if master send is enabled)
         if (track->getMasterSendEnabled())
@@ -4386,7 +4397,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         audioCallbackDeadlineMissCount.fetch_add (1, std::memory_order_relaxed);
 }
 
-juce::String AudioEngine::addTrack(const juce::String& explicitId)
+juce::String AudioEngine::addTrack(const juce::String& explicitId, const juce::String& initialType)
 {
     logToDisk("AudioEngine: Adding Track...");
 
@@ -4408,6 +4419,11 @@ juce::String AudioEngine::addTrack(const juce::String& explicitId)
 
     auto newTrack = std::make_unique<TrackProcessor>();
     auto* rawTrackPtr = newTrack.get(); // Keep raw pointer for metering (owned by graph)
+    if (initialType == "midi")
+        rawTrackPtr->setTrackType(TrackType::MIDI);
+    else if (initialType == "instrument")
+        rawTrackPtr->setTrackType(TrackType::Instrument);
+
     rawTrackPtr->setARAPlaybackRequestHandlers({
         [this]()
         {
@@ -4458,11 +4474,13 @@ juce::String AudioEngine::addTrack(const juce::String& explicitId)
         int scBlockSize = getSafeHostedPluginBlockSize(currentBlockSize);
         auto sidechainBuffer = std::make_shared<juce::AudioBuffer<float>>();
         sidechainBuffer->setSize(2, scBlockSize);
+        sidechainBuffer->clear();
         sidechainOutputBuffers[trackId] = sidechainBuffer;
 
         // Pre-allocate send accumulation buffer for this track
         auto sendBuffer = std::make_shared<juce::AudioBuffer<float>>();
         sendBuffer->setSize(2, scBlockSize);
+        sendBuffer->clear();
         sendAccumBuffers[trackId] = sendBuffer;
 
         rebuildRealtimeProcessingSnapshots();
@@ -4685,7 +4703,8 @@ juce::var AudioEngine::getOpenMIDIDevices()
 
 void AudioEngine::setTrackType(const juce::String& trackId, const juce::String& type)
 {
-    if (trackMap.find(trackId) == trackMap.end())
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || it->second == nullptr)
         return;
     
     TrackType trackType = TrackType::Audio;
@@ -4695,7 +4714,8 @@ void AudioEngine::setTrackType(const juce::String& trackId, const juce::String& 
     else if (type == "instrument")
         trackType = TrackType::Instrument;
     
-    trackMap[trackId]->setTrackType(trackType);
+    queueAllNotesOffForTrack(*it->second);
+    it->second->setTrackType(trackType);
     juce::Logger::writeToLog("AudioEngine: Track " + trackId + " type set to: " + type);
 }
 
@@ -4752,15 +4772,21 @@ void AudioEngine::setTrackMIDIClips(const juce::String& trackId, const juce::Str
                     juce::MidiMessage message;
                     if (eventType == "noteOn")
                     {
-                        const int note = static_cast<int>(eventObj->getProperty("note"));
+                        const int note = juce::jlimit(0, 127, static_cast<int>(eventObj->getProperty("note")));
                         const int velocity = static_cast<int>(eventObj->getProperty("velocity"));
                         message = juce::MidiMessage::noteOn(channel, note,
                                                             static_cast<juce::uint8>(juce::jlimit(0, 127, velocity)));
                     }
                     else if (eventType == "noteOff")
                     {
-                        const int note = static_cast<int>(eventObj->getProperty("note"));
-                        message = juce::MidiMessage::noteOff(channel, note);
+                        const int note = juce::jlimit(0, 127, static_cast<int>(eventObj->getProperty("note")));
+                        const int velocity = eventObj->hasProperty("releaseVelocity")
+                            ? static_cast<int>(eventObj->getProperty("releaseVelocity"))
+                            : (eventObj->hasProperty("velocity")
+                                ? static_cast<int>(eventObj->getProperty("velocity"))
+                                : 0);
+                        message = juce::MidiMessage::noteOff(channel, note,
+                                                             static_cast<juce::uint8>(juce::jlimit(0, 127, velocity)));
                     }
                     else if (eventType == "cc")
                     {
@@ -4775,6 +4801,32 @@ void AudioEngine::setTrackMIDIClips(const juce::String& trackId, const juce::Str
                             ? static_cast<int>(eventObj->getProperty("value"))
                             : 8192;
                         message = juce::MidiMessage::pitchWheel(channel, juce::jlimit(0, 16383, value));
+                    }
+                    else if (eventType == "programChange")
+                    {
+                        const int program = eventObj->hasProperty("value")
+                            ? static_cast<int>(eventObj->getProperty("value"))
+                            : 0;
+                        message = juce::MidiMessage::programChange(channel, juce::jlimit(0, 127, program));
+                    }
+                    else if (eventType == "channelPressure")
+                    {
+                        const int pressure = eventObj->hasProperty("value")
+                            ? static_cast<int>(eventObj->getProperty("value"))
+                            : 0;
+                        message = juce::MidiMessage::channelPressureChange(channel, juce::jlimit(0, 127, pressure));
+                    }
+                    else if (eventType == "polyPressure")
+                    {
+                        const int note = eventObj->hasProperty("note")
+                            ? static_cast<int>(eventObj->getProperty("note"))
+                            : 60;
+                        const int pressure = eventObj->hasProperty("value")
+                            ? static_cast<int>(eventObj->getProperty("value"))
+                            : 0;
+                        message = juce::MidiMessage::aftertouchChange(channel,
+                                                                      juce::jlimit(0, 127, note),
+                                                                      juce::jlimit(0, 127, pressure));
                     }
                     else
                     {
@@ -4794,6 +4846,7 @@ void AudioEngine::setTrackMIDIClips(const juce::String& trackId, const juce::Str
         }
     }
 
+    queueAllNotesOffForTrack(*it->second);
     it->second->setScheduledMIDIClips(std::move(clips));
 }
 
@@ -4840,6 +4893,35 @@ bool AudioEngine::sendMidiNote(const juce::String& trackId, int note, int veloci
     return queued;
 }
 
+juce::var AudioEngine::getTrackMIDINoteActivity(const juce::String& trackId, int maxAgeMs) const
+{
+    juce::Array<juce::var> result;
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return result;
+
+    const auto activities = it->second->getRecentMIDINoteActivity(
+        static_cast<juce::uint32>(juce::jlimit(1, 5000, maxAgeMs)));
+    for (const auto& activity : activities)
+    {
+        auto* object = new juce::DynamicObject();
+        object->setProperty("note", activity.note);
+        object->setProperty("channel", activity.channel);
+        object->setProperty("velocity", activity.velocity);
+        object->setProperty("active", activity.active);
+        object->setProperty("ageMs", static_cast<int>(activity.ageMs));
+        result.add(juce::var(object));
+    }
+    return result;
+}
+
+bool AudioEngine::panicMIDI()
+{
+    queueAllNotesOffForAllTracks(false);
+    juce::Logger::writeToLog("AudioEngine: MIDI panic queued for all MIDI/instrument tracks");
+    return true;
+}
+
 bool AudioEngine::loadInstrument(const juce::String& trackId, const juce::String& vstPath)
 {
     if (trackMap.find(trackId) == trackMap.end())
@@ -4881,6 +4963,94 @@ bool AudioEngine::loadInstrument(const juce::String& trackId, const juce::String
     OpenStudioCrashDiagnostics::recordBreadcrumb("load_instrument_success",
         "trackId=" + trackId + " path=" + vstPath + " block=" + juce::String(bs));
     juce::Logger::writeToLog("AudioEngine: Loaded instrument on track " + trackId + ": " + vstPath);
+    return true;
+}
+
+bool AudioEngine::removeInstrument(const juce::String& trackId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || it->second == nullptr)
+        return false;
+
+    auto* track = it->second;
+    if (auto* instrument = track->getInstrument())
+        pluginWindowManager.closeEditorSync(instrument);
+
+    queueAllNotesOffForTrack(*track);
+    track->clearInstrument();
+    track->setTrackType(track->hasFallbackSamplerSample() ? TrackType::Instrument : TrackType::MIDI);
+
+    juce::Logger::writeToLog("AudioEngine: Removed instrument from track " + trackId);
+    return true;
+}
+
+bool AudioEngine::setTrackSamplerSample(const juce::String& trackId, const juce::String& samplePath, int rootNote)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || it->second == nullptr)
+        return false;
+
+    auto* track = it->second;
+    if (!track->loadFallbackSamplerSample(samplePath, rootNote))
+        return false;
+
+    track->setTrackType(TrackType::Instrument);
+    juce::Logger::writeToLog("AudioEngine: Loaded fallback sampler sample on track " + trackId + ": " + samplePath);
+    return true;
+}
+
+bool AudioEngine::clearTrackSamplerSample(const juce::String& trackId)
+{
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || it->second == nullptr)
+        return false;
+
+    it->second->clearFallbackSamplerSample();
+    juce::Logger::writeToLog("AudioEngine: Cleared fallback sampler sample on track " + trackId);
+    return true;
+}
+
+juce::String AudioEngine::getInstrumentState(const juce::String& trackId)
+{
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || it->second == nullptr)
+        return {};
+
+    auto* processor = it->second->getInstrument();
+    if (processor == nullptr)
+        return {};
+
+    juce::MemoryBlock stateData;
+    {
+        const juce::ScopedLock processorLock(processor->getCallbackLock());
+        processor->getStateInformation(stateData);
+    }
+
+    return stateData.toBase64Encoding();
+}
+
+bool AudioEngine::setInstrumentState(const juce::String& trackId, const juce::String& base64State)
+{
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || it->second == nullptr)
+        return false;
+
+    auto* processor = it->second->getInstrument();
+    if (processor == nullptr)
+        return false;
+
+    juce::MemoryBlock stateData;
+    if (!stateData.fromBase64Encoding(base64State))
+        return false;
+
+    {
+        const juce::ScopedLock processorLock(processor->getCallbackLock());
+        processor->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
+    }
+
+    juce::Logger::writeToLog("AudioEngine: Restored instrument state for track " + trackId);
     return true;
 }
 
@@ -5054,19 +5224,19 @@ juce::MidiBuffer AudioEngine::buildTrackMidiBlock(const juce::String& trackId, d
     return midiMessages;
 }
 
-void AudioEngine::queueAllNotesOffForTrack(TrackProcessor& track)
+void AudioEngine::queueAllNotesOffForTrack(TrackProcessor& track, bool requestChase)
 {
     if (track.getTrackType() == TrackType::MIDI || track.getTrackType() == TrackType::Instrument)
-        track.queueAllNotesOff();
+        track.queueAllNotesOff(requestChase);
 }
 
-void AudioEngine::queueAllNotesOffForAllTracks()
+void AudioEngine::queueAllNotesOffForAllTracks(bool requestChase)
 {
     for (const auto& [trackId, track] : trackMap)
     {
         juce::ignoreUnused(trackId);
         if (track)
-            queueAllNotesOffForTrack(*track);
+            queueAllNotesOffForTrack(*track, requestChase);
     }
 }
 
@@ -5514,6 +5684,14 @@ void AudioEngine::setTransportPlaying(bool playing)
         logToDisk("Transport STOP at position: " + juce::String(currentSamplePosition / currentSampleRate) + "s");
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
         queueAllNotesOffForAllTracks();
+        masterVolumeAutomation.resetTouchAndLatch();
+        masterPanAutomation.resetTouchAndLatch();
+        for (auto const& [trackId, track] : trackMap)
+        {
+            juce::ignoreUnused(trackId);
+            if (track != nullptr)
+                track->resetAutomationTouchState();
+        }
         playbackEngine.commitAllDeferredClipAudioFiles();
         // Don't reset position here - let the stop() action control that
     }
@@ -5607,9 +5785,27 @@ void AudioEngine::setTransportRecording(bool recording)
 
                 if (trackType == TrackType::MIDI || trackType == TrackType::Instrument)
                 {
+                    if (midiManager)
+                    {
+                        const auto midiInputDevice = track->getMIDIInputDevice();
+                        if (midiInputDevice.isNotEmpty())
+                        {
+                            midiManager->openDevice(midiInputDevice);
+                        }
+                        else
+                        {
+                            const auto availableMidiInputs = midiManager->getAvailableDevices();
+                            for (const auto& inputDevice : availableMidiInputs)
+                                midiManager->openDevice(inputDevice);
+                        }
+                    }
+
                     // MIDI recording — in-memory accumulation
                     logToDisk("Track " + trackId + " IS ARMED (MIDI). Starting MIDI record...");
                     midiRecorder.startRecording(trackId, currentSampleRate);
+                    midiRecorder.setRecordingStartTime(
+                        trackId,
+                        currentSampleRate > 0.0 ? currentSamplePosition / currentSampleRate : 0.0);
                     anyAudioStarted = true;  // Reuse flag for pending start capture
                 }
                 else
@@ -6247,6 +6443,13 @@ juce::var AudioEngine::runReleaseGuardrails()
     return juce::var(root);
 }
 
+static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
+                                          const juce::String& chainType,
+                                          int fxIndex);
+static bool setBuiltInProcessorParam(juce::AudioProcessor* processor,
+                                     const juce::String& paramId,
+                                     float value);
+
 juce::var AudioEngine::runAutomatedRegressionSuite()
 {
     auto releaseGuardrails = runReleaseGuardrails();
@@ -6364,6 +6567,1659 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         addSuite("precision_benchmark_matrix", false, "Guardrail payload missing");
         addSuite("plugin_capability_matrix", false, "Guardrail payload missing");
     }
+
+    auto bufferFiniteAndBounded = [] (const juce::AudioBuffer<float>& buffer, float peakLimit)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            const auto* samples = buffer.getReadPointer(ch);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                if (!std::isfinite(samples[sample]) || std::abs(samples[sample]) > peakLimit)
+                    return false;
+            }
+        }
+        return true;
+    };
+
+    auto fillDspFixture = [] (juce::AudioBuffer<float>& buffer, double sampleRate)
+    {
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            const float t = static_cast<float>(sample / sampleRate);
+            const float sine = std::sin(juce::MathConstants<float>::twoPi * 220.0f * t) * 0.24f;
+            const float high = std::sin(juce::MathConstants<float>::twoPi * 2200.0f * t) * 0.08f;
+            const float impulse = sample == 0 ? 0.55f : 0.0f;
+            buffer.setSample(0, sample, sine + high + impulse);
+            if (buffer.getNumChannels() > 1)
+                buffer.setSample(1, sample, sine * 0.82f - high * 0.35f - impulse * 0.4f);
+        }
+    };
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        bool builtInSmokePass = true;
+        juce::StringArray builtInSmokeDetails;
+
+        auto runEffectSmoke = [&] (const juce::String& name, juce::AudioProcessor& processor)
+        {
+            juce::AudioBuffer<float> fixtureBuffer(2, fixtureBlockSize);
+            fillDspFixture(fixtureBuffer, fixtureSampleRate);
+            juce::MidiBuffer fixtureMidi;
+            processor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            processor.processBlock(fixtureBuffer, fixtureMidi);
+            const float peak = peakFromFloatBuffer(fixtureBuffer, fixtureBuffer.getNumSamples());
+            const bool pass = bufferFiniteAndBounded(fixtureBuffer, 3.0f) && peak <= 3.0f;
+            builtInSmokePass = builtInSmokePass && pass;
+            builtInSmokeDetails.add(name + ": pass=" + juce::String(pass ? "true" : "false")
+                                    + ", peak=" + juce::String(peak, 6));
+            processor.releaseResources();
+        };
+
+        auto runInstrumentSmoke = [&] (const juce::String& name, juce::AudioProcessor& processor, int noteNumber)
+        {
+            juce::AudioBuffer<float> fixtureBuffer(2, fixtureBlockSize);
+            fixtureBuffer.clear();
+            juce::MidiBuffer fixtureMidi;
+            fixtureMidi.addEvent(juce::MidiMessage::noteOn(1, noteNumber, static_cast<juce::uint8>(108)), 0);
+            processor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            processor.processBlock(fixtureBuffer, fixtureMidi);
+            const float peak = peakFromFloatBuffer(fixtureBuffer, fixtureBuffer.getNumSamples());
+            const bool pass = bufferFiniteAndBounded(fixtureBuffer, 2.0f) && peak > 1.0e-5f && peak <= 2.0f;
+            builtInSmokePass = builtInSmokePass && pass;
+            builtInSmokeDetails.add(name + ": pass=" + juce::String(pass ? "true" : "false")
+                                    + ", peak=" + juce::String(peak, 6));
+            processor.releaseResources();
+        };
+
+        S13EQ eq;
+        eq.bands[2].dynamicEnabled.store(1.0f);
+        eq.bands[2].dynamicRange.store(-4.0f);
+        eq.bands[2].dynamicThreshold.store(-36.0f);
+        eq.stereoMode.store(1.0f);
+        runEffectSmoke("eq_dynamic_mid", eq);
+
+        S13Compressor compressor;
+        compressor.threshold.store(-24.0f);
+        compressor.ratio.store(4.0f);
+        compressor.detectorMode.store(2.0f);
+        runEffectSmoke("compressor", compressor);
+
+        S13Gate gate;
+        gate.threshold.store(-42.0f);
+        runEffectSmoke("gate", gate);
+
+        S13Limiter limiter;
+        limiter.threshold.store(-6.0f);
+        limiter.ceiling.store(-0.5f);
+        runEffectSmoke("limiter", limiter);
+
+        S13Delay delay;
+        delay.feedback.store(0.32f);
+        delay.ducking.store(0.25f);
+        runEffectSmoke("delay", delay);
+
+        S13Reverb reverb;
+        reverb.algorithm.store(2.0f);
+        reverb.decayTime.store(2.4f);
+        runEffectSmoke("reverb", reverb);
+
+        S13Chorus chorus;
+        chorus.characterMode.store(1.0f);
+        runEffectSmoke("chorus_ensemble", chorus);
+
+        S13Saturator saturator;
+        saturator.satType.store(6.0f);
+        saturator.oversampleMode.store(2.0f);
+        runEffectSmoke("saturator", saturator);
+
+        S13BasicSynthInstrument synth;
+        runInstrumentSmoke("basic_synth", synth, 60);
+
+        S13PianoInstrument piano;
+        runInstrumentSmoke("piano", piano, 64);
+
+        S13DrumInstrument drums;
+        drums.mapPreset.store(1.0f);
+        juce::AudioBuffer<float> drumBuffer(2, fixtureBlockSize);
+        drumBuffer.clear();
+        juce::MidiBuffer drumMidi;
+        drumMidi.addEvent(juce::MidiMessage::controllerEvent(1, 4, 96), 0);
+        drumMidi.addEvent(juce::MidiMessage::noteOn(1, 22, static_cast<juce::uint8>(112)), 0);
+        drums.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        drums.processBlock(drumBuffer, drumMidi);
+        const float drumPeak = peakFromFloatBuffer(drumBuffer, drumBuffer.getNumSamples());
+        const bool drumPass = bufferFiniteAndBounded(drumBuffer, 2.0f) && drumPeak > 1.0e-5f && drumPeak <= 2.0f;
+        builtInSmokePass = builtInSmokePass && drumPass;
+        builtInSmokeDetails.add("drums_roland_td_hat: pass=" + juce::String(drumPass ? "true" : "false")
+                                + ", peak=" + juce::String(drumPeak, 6));
+        drums.releaseResources();
+
+        addSuite("built_in_plugin_dsp_smoke_fixture", builtInSmokePass, builtInSmokeDetails.joinIntoString("; "));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        constexpr int fixtureBlockSize = 64;
+        const std::array<int, 7> chordNotes { 36, 43, 48, 52, 55, 60, 64 };
+
+        S13PianoInstrument piano;
+        piano.outputGain.store(-15.0f);
+        piano.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+
+        bool finite = true;
+        float peak = 0.0f;
+        const double startMs = juce::Time::getMillisecondCounterHiRes();
+        for (int block = 0; block < 48; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            juce::MidiBuffer midi;
+            if (block == 0)
+            {
+                for (const int note : chordNotes)
+                    midi.addEvent(juce::MidiMessage::noteOn(1, note, static_cast<juce::uint8>(127)), 0);
+            }
+            else if (block == 24)
+            {
+                for (const int note : chordNotes)
+                    midi.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+            }
+
+            piano.processBlock(buffer, midi);
+            finite = finite && bufferFiniteAndBounded(buffer, 1.05f);
+            peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+        piano.releaseResources();
+
+        const bool pianoHighVelocityPass = finite && peak > 1.0e-5f && peak <= 1.05f;
+        addSuite("piano_high_velocity_headroom_fixture", pianoHighVelocityPass,
+                 "peak=" + juce::String(peak, 6)
+                     + ", avg64SampleBlockMs=" + juce::String(elapsedMs / 48.0, 4));
+
+        TrackProcessor track;
+        track.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        track.setTrackType(TrackType::Instrument);
+        const bool fxAdded = track.addTrackFX(std::make_unique<S13PianoInstrument>(),
+                                              fixtureSampleRate,
+                                              fixtureBlockSize);
+        const bool livenessPass = fxAdded
+                               && track.needsProcessing(0.0, fixtureBlockSize, fixtureSampleRate, false);
+        track.releaseResources();
+        addSuite("built_in_fx_instrument_liveness_fixture", livenessPass,
+                 "fxAdded=" + juce::String(fxAdded ? "true" : "false")
+                     + ", needsProcessingWhenStopped="
+                     + juce::String(livenessPass ? "true" : "false"));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        auto runCompressorHPFProbe = [&] (float hpfFreq)
+        {
+            S13Compressor compressor;
+            compressor.threshold.store(-28.0f);
+            compressor.ratio.store(8.0f);
+            compressor.attack.store(1.0f);
+            compressor.release.store(90.0f);
+            compressor.sidechainHPF.store(hpfFreq);
+            compressor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            juce::MidiBuffer midi;
+            juce::AudioBuffer<float> probe(2, fixtureBlockSize);
+            for (int block = 0; block < 8; ++block)
+            {
+                for (int sample = 0; sample < fixtureBlockSize; ++sample)
+                {
+                    const double absoluteSample = static_cast<double>(block * fixtureBlockSize + sample);
+                    const float t = static_cast<float>(absoluteSample / fixtureSampleRate);
+                    const float value = std::sin(juce::MathConstants<float>::twoPi * 60.0f * t) * 0.75f;
+                    probe.setSample(0, sample, value);
+                    probe.setSample(1, sample, value);
+                }
+                compressor.processBlock(probe, midi);
+            }
+            const float gr = compressor.getCurrentGainReduction();
+            compressor.releaseResources();
+            return gr;
+        };
+
+        const float lowHpfGR = runCompressorHPFProbe(20.0f);
+        const float highHpfGR = runCompressorHPFProbe(500.0f);
+        const bool hpfPass = std::isfinite(lowHpfGR)
+                          && std::isfinite(highHpfGR)
+                          && lowHpfGR < -1.0f
+                          && highHpfGR > lowHpfGR + 1.0f;
+        addSuite("compressor_sidechain_hpf_fixture", hpfPass,
+                 "gr20Hz=" + juce::String(lowHpfGR, 4)
+                     + ", gr500Hz=" + juce::String(highHpfGR, 4));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+
+        S13EQ eq;
+        eq.bands[1].enabled.store(1.0f);
+        eq.bands[1].type.store(static_cast<float>(S13EQ::FilterType::Bell));
+        eq.bands[1].freq.store(1000.0f);
+        eq.bands[1].gain.store(6.0f);
+        eq.bands[1].q.store(1.0f);
+        eq.outputGain.store(0.0f);
+        eq.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        const std::vector<float> frequencies { 100.0f, 1000.0f, 10000.0f };
+        const auto response = eq.getMagnitudeResponse(frequencies);
+        const bool eqCurvePass = response.size() == frequencies.size()
+                              && response[1] > 4.5f
+                              && response[1] < 7.5f
+                              && std::abs(response[0]) < 2.0f
+                              && std::abs(response[2]) < 2.5f;
+        addSuite("built_in_eq_curve_fixture", eqCurvePass,
+                 "100Hz=" + juce::String(response.size() > 0 ? response[0] : -999.0f, 4)
+                     + ", 1kHz=" + juce::String(response.size() > 1 ? response[1] : -999.0f, 4)
+                     + ", 10kHz=" + juce::String(response.size() > 2 ? response[2] : -999.0f, 4));
+        eq.releaseResources();
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        juce::MidiBuffer midi;
+
+        auto fillSine = [] (juce::AudioBuffer<float>& buffer, double sampleRate, double frequency, float gain, int blockIndex)
+        {
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                const double absoluteSample = static_cast<double>(blockIndex * buffer.getNumSamples() + sample);
+                const float value = std::sin(juce::MathConstants<float>::twoPi * static_cast<float>(frequency * absoluteSample / sampleRate)) * gain;
+                for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                    buffer.setSample(ch, sample, value);
+            }
+        };
+
+        S13Compressor compressor;
+        compressor.threshold.store(-24.0f);
+        compressor.ratio.store(6.0f);
+        compressor.attack.store(1.0f);
+        compressor.release.store(120.0f);
+        compressor.detectorMode.store(2.0f);
+        compressor.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        float compressorPeak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            fillSine(buffer, fixtureSampleRate, 440.0, 0.82f, block);
+            compressor.processBlock(buffer, midi);
+            compressorPeak = juce::jmax(compressorPeak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        const float compressorGR = compressor.getCurrentGainReduction();
+        compressor.releaseResources();
+
+        S13Gate gate;
+        gate.threshold.store(-26.0f);
+        gate.range.store(-60.0f);
+        gate.attackMs.store(0.1f);
+        gate.releaseMs.store(35.0f);
+        gate.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::AudioBuffer<float> gateBuffer(2, fixtureBlockSize);
+        fillSine(gateBuffer, fixtureSampleRate, 440.0, 0.01f, 0);
+        gate.processBlock(gateBuffer, midi);
+        const float gatePeak = peakFromFloatBuffer(gateBuffer, gateBuffer.getNumSamples());
+        const float gateGR = gate.getGainReductionDB();
+        gate.releaseResources();
+
+        S13Limiter limiter;
+        limiter.threshold.store(-6.0f);
+        limiter.ceiling.store(-1.0f);
+        limiter.lookaheadMs.store(5.0f);
+        limiter.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        float limiterPeak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            fillSine(buffer, fixtureSampleRate, 1000.0, 1.35f, block);
+            limiter.processBlock(buffer, midi);
+            limiterPeak = juce::jmax(limiterPeak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        const float limiterGR = limiter.getGainReductionDB();
+        limiter.releaseResources();
+
+        const bool dynamicsPass = std::isfinite(compressorGR)
+                               && std::isfinite(gateGR)
+                               && std::isfinite(limiterGR)
+                               && compressorGR < -1.0f
+                               && compressorPeak < 0.82f
+                               && gatePeak < 0.006f
+                               && gateGR < -6.0f
+                               && limiterPeak <= 0.94f
+                               && limiterGR < -1.0f;
+        addSuite("built_in_dynamics_gain_fixture", dynamicsPass,
+                 "compressorGR=" + juce::String(compressorGR, 4)
+                     + ", compressorPeak=" + juce::String(compressorPeak, 4)
+                     + ", gateGR=" + juce::String(gateGR, 4)
+                     + ", gatePeak=" + juce::String(gatePeak, 4)
+                     + ", limiterGR=" + juce::String(limiterGR, 4)
+                     + ", limiterPeak=" + juce::String(limiterPeak, 4));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Limiter limiter;
+        limiter.threshold.store(-3.0f);
+        limiter.ceiling.store(-1.0f);
+        limiter.lookaheadMs.store(5.0f);
+        limiter.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        float peak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float sign = (sample & 1) == 0 ? 1.0f : -1.0f;
+                buffer.setSample(0, sample, sign * 1.22f);
+                buffer.setSample(1, sample, -sign * 1.18f);
+            }
+            limiter.processBlock(buffer, midi);
+            peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+        }
+        limiter.releaseResources();
+        const bool limiterPass = peak <= 0.94f && std::isfinite(peak);
+        addSuite("limiter_true_peak_ceiling_fixture", limiterPass,
+                 "peak=" + juce::String(peak, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Delay delay;
+        delay.tempoSync.store(1.0f);
+        delay.syncNoteL.store(4.0f); // 1/16 at default 120 BPM = 125 ms target
+        delay.syncNoteR.store(4.0f);
+        delay.mix.store(1.0f);
+        delay.feedback.store(0.0f);
+        delay.delayMode.store(0.0f);
+        delay.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        int peakSample = -1;
+        float peak = 0.0f;
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 0.45 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            if (block == 0)
+            {
+                buffer.setSample(0, 0, 1.0f);
+                buffer.setSample(1, 0, 1.0f);
+            }
+            delay.processBlock(buffer, midi);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float value = std::abs(buffer.getSample(0, sample));
+                if (value > peak)
+                {
+                    peak = value;
+                    peakSample = block * fixtureBlockSize + sample;
+                }
+            }
+        }
+        delay.releaseResources();
+        const double peakMs = peakSample >= 0 ? (static_cast<double>(peakSample) / fixtureSampleRate) * 1000.0 : -1.0;
+        const bool delayPass = peak > 0.2f && peakMs >= 100.0 && peakMs <= 300.0;
+        addSuite("delay_tempo_timing_fixture", delayPass,
+                 "peak=" + juce::String(peak, 6) + ", peakMs=" + juce::String(peakMs, 3));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Reverb reverb;
+        reverb.dryLevel.store(0.0f);
+        reverb.wetLevel.store(1.0f);
+        reverb.earlyLevel.store(0.4f);
+        reverb.decayTime.store(1.5f);
+        reverb.roomSize.store(0.6f);
+        reverb.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        double firstHalfEnergy = 0.0;
+        double secondHalfEnergy = 0.0;
+        float peakAfter100ms = 0.0f;
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 2.0 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            if (block == 0)
+            {
+                buffer.setSample(0, 0, 1.0f);
+                buffer.setSample(1, 0, 1.0f);
+            }
+            reverb.processBlock(buffer, midi);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const int absoluteSample = block * fixtureBlockSize + sample;
+                const float value = (std::abs(buffer.getSample(0, sample)) + std::abs(buffer.getSample(1, sample))) * 0.5f;
+                if (absoluteSample > static_cast<int>(fixtureSampleRate * 0.1))
+                    peakAfter100ms = juce::jmax(peakAfter100ms, value);
+                const double square = static_cast<double>(value) * static_cast<double>(value);
+                if (absoluteSample < static_cast<int>(fixtureSampleRate))
+                    firstHalfEnergy += square;
+                else
+                    secondHalfEnergy += square;
+            }
+        }
+        reverb.releaseResources();
+        const bool reverbPass = std::isfinite(firstHalfEnergy)
+                             && std::isfinite(secondHalfEnergy)
+                             && peakAfter100ms > 1.0e-5f
+                             && secondHalfEnergy < firstHalfEnergy * 1.15;
+        addSuite("reverb_tail_decay_fixture", reverbPass,
+                 "peakAfter100ms=" + juce::String(peakAfter100ms, 8)
+                     + ", firstHalfEnergy=" + juce::String(firstHalfEnergy, 8)
+                     + ", secondHalfEnergy=" + juce::String(secondHalfEnergy, 8));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Limiter limiter;
+        limiter.threshold.store(0.0f);
+        limiter.ceiling.store(0.0f);
+        limiter.lookaheadMs.store(6.0f);
+        limiter.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        int firstNonZeroSample = -1;
+        float peak = 0.0f;
+        const int expectedLatencySamples = static_cast<int>(std::round(fixtureSampleRate * 0.006));
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 0.08 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            if (block == 0)
+            {
+                buffer.setSample(0, 0, 0.35f);
+                buffer.setSample(1, 0, 0.35f);
+            }
+            limiter.processBlock(buffer, midi);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float value = std::abs(buffer.getSample(0, sample));
+                peak = juce::jmax(peak, value);
+                if (firstNonZeroSample < 0 && value > 1.0e-5f)
+                    firstNonZeroSample = block * fixtureBlockSize + sample;
+            }
+        }
+        limiter.releaseResources();
+
+        const bool latencyPass = firstNonZeroSample >= 0
+                              && std::abs(firstNonZeroSample - expectedLatencySamples) <= 2
+                              && peak > 0.25f
+                              && peak <= 0.36f;
+        addSuite("built_in_latency_tail_fixture", latencyPass,
+                 "limiterFirstNonZero=" + juce::String(firstNonZeroSample)
+                     + ", expectedLatencySamples=" + juce::String(expectedLatencySamples)
+                     + ", peak=" + juce::String(peak, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13Delay delay;
+        delay.tempoSync.store(0.0f);
+        delay.delayTimeL.store(85.0f);
+        delay.delayTimeR.store(85.0f);
+        delay.feedback.store(0.18f);
+        delay.mix.store(1.0f);
+        delay.lpfFreq.store(18000.0f);
+        delay.hpfFreq.store(20.0f);
+        delay.delayMode.store(0.0f);
+        delay.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        bool finite = true;
+        bool hasSignal = false;
+        float peak = 0.0f;
+        float maxAdjacentStep = 0.0f;
+        float previousSample = 0.0f;
+        bool hasPreviousSample = false;
+        const int blocksToRender = static_cast<int>(std::ceil(fixtureSampleRate * 0.55 / static_cast<double>(fixtureBlockSize)));
+        for (int block = 0; block < blocksToRender; ++block)
+        {
+            if (block == 12)
+            {
+                delay.delayTimeL.store(620.0f);
+                delay.delayTimeR.store(620.0f);
+            }
+
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const double absoluteSample = static_cast<double>(block * fixtureBlockSize + sample);
+                const float value = std::sin(juce::MathConstants<float>::twoPi * static_cast<float>(330.0 * absoluteSample / fixtureSampleRate)) * 0.28f;
+                buffer.setSample(0, sample, value);
+                buffer.setSample(1, sample, value);
+            }
+
+            delay.processBlock(buffer, midi);
+            finite = finite && bufferFiniteAndBounded(buffer, 1.5f);
+            peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+            hasSignal = hasSignal || peak > 1.0e-5f;
+            for (int sample = 0; sample < fixtureBlockSize; ++sample)
+            {
+                const float currentSampleValue = buffer.getSample(0, sample);
+                if (hasPreviousSample)
+                    maxAdjacentStep = juce::jmax(maxAdjacentStep, std::abs(currentSampleValue - previousSample));
+                previousSample = currentSampleValue;
+                hasPreviousSample = true;
+            }
+        }
+        delay.releaseResources();
+
+        const bool smoothingPass = finite
+                                && hasSignal
+                                && peak <= 1.2f
+                                && maxAdjacentStep < 0.72f;
+        addSuite("built_in_parameter_smoothing_fixture", smoothingPass,
+                 "finite=" + juce::String(finite ? "true" : "false")
+                     + ", peak=" + juce::String(peak, 6)
+                     + ", maxAdjacentStep=" + juce::String(maxAdjacentStep, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13PianoInstrument piano;
+        piano.releaseMs.store(160.0f);
+        piano.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::MidiBuffer midi;
+        juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+
+        midi.addEvent(juce::MidiMessage::controllerEvent(1, 64, 127), 0);
+        midi.addEvent(juce::MidiMessage::noteOn(1, 60, static_cast<juce::uint8>(112)), 0);
+        buffer.clear();
+        piano.processBlock(buffer, midi);
+        const float attackPeak = peakFromFloatBuffer(buffer, buffer.getNumSamples());
+
+        midi.clear();
+        midi.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+        buffer.clear();
+        piano.processBlock(buffer, midi);
+        const float sustainedPeak = peakFromFloatBuffer(buffer, buffer.getNumSamples());
+
+        midi.clear();
+        midi.addEvent(juce::MidiMessage::controllerEvent(1, 64, 0), 0);
+        float releaseTailPeak = 0.0f;
+        for (int block = 0; block < 40; ++block)
+        {
+            buffer.clear();
+            piano.processBlock(buffer, midi);
+            midi.clear();
+            releaseTailPeak = peakFromFloatBuffer(buffer, buffer.getNumSamples());
+        }
+        piano.releaseResources();
+
+        const bool pianoPass = attackPeak > 1.0e-5f
+                            && sustainedPeak > 1.0e-5f
+                            && releaseTailPeak < sustainedPeak * 0.6f;
+        addSuite("piano_sustain_voice_cleanup_fixture", pianoPass,
+                 "attackPeak=" + juce::String(attackPeak, 6)
+                     + ", sustainedPeak=" + juce::String(sustainedPeak, 6)
+                     + ", releaseTailPeak=" + juce::String(releaseTailPeak, 6));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        S13PitchCorrector pitch;
+        const bool setOk = setBuiltInProcessorParam(&pitch, "mix", 0.42f)
+                         && setBuiltInProcessorParam(&pitch, "key", 7.0f)
+                         && setBuiltInProcessorParam(&pitch, "scale", 1.0f)
+                         && setBuiltInProcessorParam(&pitch, "retuneSpeed", 23.0f)
+                         && setBuiltInProcessorParam(&pitch, "transpose", 2.0f)
+                         && setBuiltInProcessorParam(&pitch, "midiOutputEnabled", 1.0f)
+                         && setBuiltInProcessorParam(&pitch, "midiOutputChannel", 2.0f);
+
+        auto schema = describeBuiltInProcessor(&pitch, "track", 3);
+        bool schemaOk = false;
+        int parameterCount = 0;
+        if (auto* schemaObj = schema.getDynamicObject())
+        {
+            const auto params = schemaObj->getProperty("parameters");
+            bool hasMix = false;
+            bool hasScale = false;
+            bool hasRetune = false;
+            bool hasMidiOut = false;
+            if (params.isArray())
+            {
+                parameterCount = params.getArray()->size();
+                for (const auto& param : *params.getArray())
+                {
+                    if (auto* paramObj = param.getDynamicObject())
+                    {
+                        const auto id = paramObj->getProperty("id").toString();
+                        hasMix = hasMix || id == "mix";
+                        hasScale = hasScale || id == "scale";
+                        hasRetune = hasRetune || id == "retuneSpeed";
+                        hasMidiOut = hasMidiOut || id == "midiOutputEnabled";
+                    }
+                }
+            }
+            schemaOk = schemaObj->getProperty("category").toString() == "Pitch"
+                    && schemaObj->getProperty("chain").toString() == "track"
+                    && static_cast<int>(schemaObj->getProperty("fxIndex")) == 3
+                    && hasMix
+                    && hasScale
+                    && hasRetune
+                    && hasMidiOut;
+        }
+
+        pitch.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        pitch.bypass.store(1.0f);
+        juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+        for (int sample = 0; sample < fixtureBlockSize; ++sample)
+        {
+            const float t = static_cast<float>(static_cast<double>(sample) / fixtureSampleRate);
+            const float left = std::sin(juce::MathConstants<float>::twoPi * 220.0f * t) * 0.25f;
+            const float right = std::sin(juce::MathConstants<float>::twoPi * 330.0f * t) * 0.18f;
+            buffer.setSample(0, sample, left);
+            buffer.setSample(1, sample, right);
+        }
+        juce::AudioBuffer<float> original;
+        original.makeCopyOf(buffer);
+        juce::MidiBuffer midi;
+        pitch.processBlock(buffer, midi);
+        float maxDiff = 0.0f;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                maxDiff = juce::jmax(maxDiff, std::abs(buffer.getSample(ch, sample) - original.getSample(ch, sample)));
+        pitch.releaseResources();
+
+        const bool pitchPass = setOk
+                            && schemaOk
+                            && maxDiff <= 1.0e-7f
+                            && pitch.getMapper().getKey() == 7
+                            && pitch.getMapper().getScale() == PitchMapper::Scale::Major
+                            && pitch.getMapper().getTranspose() == 2
+                            && pitch.midiOutputEnabled.load() >= 0.5f
+                            && std::abs(pitch.midiOutputChannel.load() - 2.0f) <= 0.01f;
+        addSuite("pitch_correct_schema_bypass_fixture", pitchPass,
+                 "setOk=" + juce::String(setOk ? "true" : "false")
+                     + ", schemaOk=" + juce::String(schemaOk ? "true" : "false")
+                     + ", parameterCount=" + juce::String(parameterCount)
+                     + ", maxBypassDiff=" + juce::String(maxDiff, 9));
+    }
+
+    {
+        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+
+        struct SynthProbe
+        {
+            float peak = 0.0f;
+            float estimatedHz = 0.0f;
+            float releaseTailPeak = 0.0f;
+            bool finite = true;
+        };
+
+        auto estimatePositiveCrossingHz = [] (const std::vector<float>& samples, double sampleRate, double startSec, double endSec)
+        {
+            const int start = juce::jlimit(1, static_cast<int>(samples.size()) - 1, static_cast<int>(startSec * sampleRate));
+            const int end = juce::jlimit(start + 1, static_cast<int>(samples.size()), static_cast<int>(endSec * sampleRate));
+            int crossings = 0;
+            for (int i = start; i < end; ++i)
+                if (samples[static_cast<size_t>(i - 1)] <= 0.0f && samples[static_cast<size_t>(i)] > 0.0f)
+                    ++crossings;
+            const double duration = static_cast<double>(end - start) / sampleRate;
+            return duration > 0.0 ? static_cast<float>(static_cast<double>(crossings) / duration) : 0.0f;
+        };
+
+        auto renderSynthProbe = [&] (int pitchWheelValue, int modWheelValue, bool releaseNote)
+        {
+            S13BasicSynthInstrument synth;
+            synth.detuneCents.store(0.0f);
+            synth.subLevel.store(0.0f);
+            synth.noiseLevel.store(0.0f);
+            synth.releaseMs.store(95.0f);
+            synth.outputGain.store(-12.0f);
+            synth.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+
+            SynthProbe probe;
+            std::vector<float> captured;
+            const int totalBlocks = static_cast<int>(std::ceil(fixtureSampleRate * 0.45 / static_cast<double>(fixtureBlockSize)));
+            captured.reserve(static_cast<size_t>(totalBlocks * fixtureBlockSize));
+            const int noteOffSample = static_cast<int>(fixtureSampleRate * 0.18);
+            juce::MidiBuffer midi;
+            for (int block = 0; block < totalBlocks; ++block)
+            {
+                juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+                buffer.clear();
+                midi.clear();
+                if (block == 0)
+                {
+                    midi.addEvent(juce::MidiMessage::pitchWheel(1, pitchWheelValue), 0);
+                    midi.addEvent(juce::MidiMessage::controllerEvent(1, 1, modWheelValue), 0);
+                    midi.addEvent(juce::MidiMessage::noteOn(1, 69, static_cast<juce::uint8>(112)), 0);
+                }
+                if (releaseNote)
+                {
+                    const int blockStart = block * fixtureBlockSize;
+                    if (noteOffSample >= blockStart && noteOffSample < blockStart + fixtureBlockSize)
+                        midi.addEvent(juce::MidiMessage::noteOff(1, 69), noteOffSample - blockStart);
+                }
+
+                synth.processBlock(buffer, midi);
+                probe.peak = juce::jmax(probe.peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
+                for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                {
+                    const float value = buffer.getSample(0, sample);
+                    probe.finite = probe.finite && std::isfinite(value);
+                    captured.push_back(value);
+                }
+            }
+            synth.releaseResources();
+            probe.estimatedHz = estimatePositiveCrossingHz(captured, fixtureSampleRate, 0.08, 0.16);
+            const int tailStart = juce::jlimit(0, static_cast<int>(captured.size()), static_cast<int>(fixtureSampleRate * 0.36));
+            for (int i = tailStart; i < static_cast<int>(captured.size()); ++i)
+                probe.releaseTailPeak = juce::jmax(probe.releaseTailPeak, std::abs(captured[static_cast<size_t>(i)]));
+            return probe;
+        };
+
+        const auto normal = renderSynthProbe(8192, 0, true);
+        const auto bent = renderSynthProbe(16383, 0, false);
+        const auto modulated = renderSynthProbe(8192, 127, false);
+        const bool synthPass = normal.finite
+                            && bent.finite
+                            && modulated.finite
+                            && normal.peak > 1.0e-5f
+                            && normal.estimatedHz > 400.0f
+                            && normal.estimatedHz < 480.0f
+                            && bent.estimatedHz > normal.estimatedHz * 1.08f
+                            && bent.estimatedHz < normal.estimatedHz * 1.17f
+                            && modulated.peak > 1.0e-5f
+                            && normal.releaseTailPeak < normal.peak * 0.35f;
+        addSuite("basic_synth_midi_pitch_fixture", synthPass,
+                 "normalHz=" + juce::String(normal.estimatedHz, 3)
+                     + ", bentHz=" + juce::String(bent.estimatedHz, 3)
+                     + ", normalPeak=" + juce::String(normal.peak, 6)
+                     + ", modPeak=" + juce::String(modulated.peak, 6)
+                     + ", releaseTailPeak=" + juce::String(normal.releaseTailPeak, 6));
+    }
+
+    const juce::String midiFixtureTrackId = "midi_scheduler_regression_" + juce::Uuid().toString();
+    bool midiFixturePass = false;
+    juce::String midiFixtureDetail;
+    if (addTrack(midiFixtureTrackId, "midi").isNotEmpty())
+    {
+        setTrackMIDIClips(midiFixtureTrackId,
+            R"json([{"id":"midi-regression-clip","startTime":0.0,"duration":1.0,"events":[{"type":"noteOn","timestamp":0.0,"note":60,"velocity":100,"channel":1},{"type":"cc","timestamp":0.01,"controller":1,"value":96,"channel":1},{"type":"pitchBend","timestamp":0.02,"value":12288,"channel":1},{"type":"programChange","timestamp":0.03,"value":5,"channel":1},{"type":"channelPressure","timestamp":0.04,"value":42,"channel":1},{"type":"polyPressure","timestamp":0.05,"note":60,"value":55,"channel":1},{"type":"noteOff","timestamp":0.25,"note":60,"velocity":0,"channel":1}]}])json");
+
+        auto it = trackMap.find(midiFixtureTrackId);
+        if (it != trackMap.end() && it->second != nullptr)
+        {
+            auto* track = it->second;
+            const int blockSize = juce::jmax(512, currentBlockSize);
+            const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+            juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
+            fixtureBuffer.clear();
+            juce::MidiBuffer fixtureMidi;
+            track->buildMidiBuffer(fixtureMidi, 0.0, blockSize, sampleRate, true);
+            track->processBlock(fixtureBuffer, fixtureMidi);
+
+            const float outputPeak = fixtureBuffer.getMagnitude(0, fixtureBuffer.getNumSamples());
+            bool finite = true;
+            for (int channel = 0; channel < fixtureBuffer.getNumChannels(); ++channel)
+            {
+                auto* samples = fixtureBuffer.getReadPointer(channel);
+                for (int sample = 0; sample < fixtureBuffer.getNumSamples(); ++sample)
+                {
+                    if (!std::isfinite(samples[sample]))
+                    {
+                        finite = false;
+                        break;
+                    }
+                }
+                if (!finite)
+                    break;
+            }
+
+            const int scheduledClips = track->getScheduledMIDIClipCount();
+            const int scheduledEvents = track->getScheduledMIDIEventCount();
+            const int builtEvents = track->getLastBuiltMidiEventCount();
+            midiFixturePass = scheduledClips == 1
+                && scheduledEvents == 7
+                && builtEvents > 0
+                && finite
+                && outputPeak <= 1.0e-6f;
+            midiFixtureDetail = "scheduledClips=" + juce::String(scheduledClips)
+                + ", scheduledEvents=" + juce::String(scheduledEvents)
+                + ", builtEvents=" + juce::String(builtEvents)
+                + ", finite=" + juce::String(finite ? "true" : "false")
+                + ", outputPeak=" + juce::String(outputPeak, 8);
+        }
+        else
+        {
+            midiFixtureDetail = "Temporary MIDI regression track missing after addTrack";
+        }
+
+        removeTrack(midiFixtureTrackId);
+    }
+    else
+    {
+        midiFixtureDetail = "Failed to create temporary MIDI regression track";
+    }
+    addSuite("midi_scheduler_fixture", midiFixturePass, midiFixtureDetail);
+
+    const juce::String midiChaseTrackId = "midi_chase_regression_" + juce::Uuid().toString();
+    bool midiChasePass = false;
+    juce::String midiChaseDetail;
+    if (addTrack(midiChaseTrackId, "midi").isNotEmpty())
+    {
+        setTrackMIDIClips(midiChaseTrackId,
+            R"json([{"id":"midi-chase-regression-clip","startTime":0.0,"duration":2.0,"events":[{"type":"programChange","timestamp":0.02,"value":5,"channel":1},{"type":"cc","timestamp":0.08,"controller":0,"value":4,"channel":1},{"type":"cc","timestamp":0.09,"controller":32,"value":64,"channel":1},{"type":"noteOn","timestamp":0.10,"note":60,"velocity":100,"channel":1},{"type":"cc","timestamp":0.20,"controller":1,"value":96,"channel":1},{"type":"pitchBend","timestamp":0.25,"value":12288,"channel":1},{"type":"channelPressure","timestamp":0.30,"value":42,"channel":1},{"type":"noteOff","timestamp":1.50,"note":60,"velocity":0,"channel":1}]}])json");
+
+        auto it = trackMap.find(midiChaseTrackId);
+        if (it != trackMap.end() && it->second != nullptr)
+        {
+            auto* track = it->second;
+            const int blockSize = juce::jmax(512, currentBlockSize);
+            const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+            juce::MidiBuffer drainQueuedResetMidi;
+            track->buildMidiBuffer(drainQueuedResetMidi, 0.0, blockSize, sampleRate, false);
+            juce::MidiBuffer chaseMidi;
+            track->requestMIDIChase();
+            track->buildMidiBuffer(chaseMidi, 0.75, blockSize, sampleRate, true);
+
+            bool allAtSampleZero = chaseMidi.getNumEvents() > 0;
+            bool hasProgram = false;
+            bool hasPitchBend = false;
+            bool hasBankMSB = false;
+            bool hasBankLSB = false;
+            bool hasController = false;
+            bool hasChannelPressure = false;
+            bool hasActiveNote = false;
+            int pitchBendValue = -1;
+            int builtEventCount = track->getLastBuiltMidiEventCount();
+
+            for (const auto metadata : chaseMidi)
+            {
+                allAtSampleZero = allAtSampleZero && metadata.samplePosition == 0;
+                const auto message = metadata.getMessage();
+                if (message.isProgramChange() && message.getChannel() == 1 && message.getProgramChangeNumber() == 5)
+                    hasProgram = true;
+                else if (message.isPitchWheel() && message.getChannel() == 1)
+                {
+                    pitchBendValue = message.getPitchWheelValue();
+                    hasPitchBend = pitchBendValue == 12288;
+                }
+                else if (message.isController() && message.getChannel() == 1
+                         && message.getControllerNumber() == 0 && message.getControllerValue() == 4)
+                {
+                    hasBankMSB = true;
+                }
+                else if (message.isController() && message.getChannel() == 1
+                         && message.getControllerNumber() == 32 && message.getControllerValue() == 64)
+                {
+                    hasBankLSB = true;
+                }
+                else if (message.isController() && message.getChannel() == 1
+                         && message.getControllerNumber() == 1 && message.getControllerValue() == 96)
+                {
+                    hasController = true;
+                }
+                else if (message.isChannelPressure() && message.getChannel() == 1
+                         && message.getChannelPressureValue() == 42)
+                {
+                    hasChannelPressure = true;
+                }
+                else if (message.isNoteOn() && message.getChannel() == 1
+                         && message.getNoteNumber() == 60 && message.getVelocity() > 0.0f)
+                {
+                    hasActiveNote = true;
+                }
+            }
+
+            midiChasePass = allAtSampleZero
+                && hasProgram
+                && hasPitchBend
+                && hasBankMSB
+                && hasBankLSB
+                && hasController
+                && hasChannelPressure
+                && hasActiveNote
+                && chaseMidi.getNumEvents() >= 7
+                && builtEventCount >= 7;
+            midiChaseDetail = "events=" + juce::String(chaseMidi.getNumEvents())
+                + ", builtEvents=" + juce::String(builtEventCount)
+                + ", allAtSampleZero=" + juce::String(allAtSampleZero ? "true" : "false")
+                + ", program=" + juce::String(hasProgram ? "true" : "false")
+                + ", pitchBendValue=" + juce::String(pitchBendValue)
+                + ", bankMSB=" + juce::String(hasBankMSB ? "true" : "false")
+                + ", bankLSB=" + juce::String(hasBankLSB ? "true" : "false")
+                + ", cc1=" + juce::String(hasController ? "true" : "false")
+                + ", channelPressure=" + juce::String(hasChannelPressure ? "true" : "false")
+                + ", activeNote=" + juce::String(hasActiveNote ? "true" : "false");
+        }
+        else
+        {
+            midiChaseDetail = "Temporary MIDI chase regression track missing after addTrack";
+        }
+
+        removeTrack(midiChaseTrackId);
+    }
+    else
+    {
+        midiChaseDetail = "Failed to create temporary MIDI chase regression track";
+    }
+    addSuite("midi_pitchbend_chase_fixture", midiChasePass, midiChaseDetail);
+
+    const juce::String fallbackInstrumentTrackId = "instrument_fallback_regression_" + juce::Uuid().toString();
+    bool fallbackInstrumentPass = false;
+    juce::String fallbackInstrumentDetail;
+    if (addTrack(fallbackInstrumentTrackId, "instrument").isNotEmpty())
+    {
+        setTrackMIDIClips(fallbackInstrumentTrackId,
+            R"json([{"id":"instrument-fallback-clip","startTime":0.0,"duration":1.0,"events":[{"type":"noteOn","timestamp":0.0,"note":60,"velocity":127,"channel":1},{"type":"noteOff","timestamp":0.4,"note":60,"velocity":0,"channel":1}]}])json");
+
+        auto it = trackMap.find(fallbackInstrumentTrackId);
+        if (it != trackMap.end() && it->second != nullptr)
+        {
+            auto* track = it->second;
+            const int blockSize = juce::jmax(512, currentBlockSize);
+            const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+            juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
+            fixtureBuffer.clear();
+            juce::MidiBuffer fixtureMidi;
+            track->buildMidiBuffer(fixtureMidi, 0.0, blockSize, sampleRate, true);
+            track->processBlock(fixtureBuffer, fixtureMidi);
+
+            float outputPeak = 0.0f;
+            bool finite = true;
+            for (int channel = 0; channel < fixtureBuffer.getNumChannels(); ++channel)
+            {
+                outputPeak = juce::jmax(outputPeak, fixtureBuffer.getMagnitude(channel, 0, fixtureBuffer.getNumSamples()));
+                auto* samples = fixtureBuffer.getReadPointer(channel);
+                for (int sample = 0; sample < fixtureBuffer.getNumSamples(); ++sample)
+                {
+                    if (!std::isfinite(samples[sample]))
+                    {
+                        finite = false;
+                        break;
+                    }
+                }
+                if (!finite)
+                    break;
+            }
+
+            fallbackInstrumentPass = track->isUsingFallbackInstrument()
+                && track->getInstrument() == nullptr
+                && finite
+                && outputPeak > 1.0e-5f
+                && outputPeak < 0.75f;
+            fallbackInstrumentDetail = "fallbackActive=" + juce::String(track->isUsingFallbackInstrument() ? "true" : "false")
+                + ", finite=" + juce::String(finite ? "true" : "false")
+                + ", outputPeak=" + juce::String(outputPeak, 8)
+                + ", builtEvents=" + juce::String(track->getLastBuiltMidiEventCount());
+        }
+        else
+        {
+            fallbackInstrumentDetail = "Temporary instrument fallback regression track missing after addTrack";
+        }
+
+        removeTrack(fallbackInstrumentTrackId);
+    }
+    else
+    {
+        fallbackInstrumentDetail = "Failed to create temporary instrument fallback regression track";
+    }
+    addSuite("instrument_fallback_synth_fixture", fallbackInstrumentPass, fallbackInstrumentDetail);
+
+    const juce::String samplerTrackId = "instrument_sampler_regression_" + juce::Uuid().toString();
+    bool samplerPass = false;
+    juce::String samplerDetail;
+    const double samplerFixtureRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+    juce::File samplerFixtureFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("studio13_sampler_fixture_" + juce::Uuid().toString() + ".wav");
+    {
+        juce::AudioBuffer<float> sampleBuffer(1, static_cast<int>(samplerFixtureRate * 0.1));
+        for (int sample = 0; sample < sampleBuffer.getNumSamples(); ++sample)
+        {
+            const float t = static_cast<float>(sample) / static_cast<float>(samplerFixtureRate);
+            sampleBuffer.setSample(0, sample, std::sin(juce::MathConstants<float>::twoPi * 440.0f * t) * 0.5f);
+        }
+
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::FileOutputStream> stream(samplerFixtureFile.createOutputStream());
+        if (stream)
+        {
+            std::unique_ptr<juce::AudioFormatWriter> writer(
+                wavFormat.createWriterFor(stream.get(), samplerFixtureRate, 1, 16, {}, 0));
+            if (writer)
+            {
+                stream.release();
+                writer->writeFromAudioSampleBuffer(sampleBuffer, 0, sampleBuffer.getNumSamples());
+            }
+        }
+    }
+
+    if (samplerFixtureFile.existsAsFile() && addTrack(samplerTrackId, "instrument").isNotEmpty())
+    {
+        const bool sampleLoaded = setTrackSamplerSample(samplerTrackId, samplerFixtureFile.getFullPathName(), 69);
+        setTrackMIDIClips(samplerTrackId,
+            R"json([{"id":"instrument-sampler-clip","startTime":0.0,"duration":1.0,"events":[{"type":"noteOn","timestamp":0.0,"note":69,"velocity":127,"channel":1},{"type":"noteOff","timestamp":0.25,"note":69,"velocity":0,"channel":1}]}])json");
+
+        auto it = trackMap.find(samplerTrackId);
+        if (it != trackMap.end() && it->second != nullptr)
+        {
+            auto* track = it->second;
+            const int blockSize = juce::jmax(512, currentBlockSize);
+            juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
+            fixtureBuffer.clear();
+            juce::MidiBuffer fixtureMidi;
+            track->buildMidiBuffer(fixtureMidi, 0.0, blockSize, samplerFixtureRate, true);
+            track->processBlock(fixtureBuffer, fixtureMidi);
+
+            float outputPeak = 0.0f;
+            bool finite = true;
+            for (int channel = 0; channel < fixtureBuffer.getNumChannels(); ++channel)
+            {
+                outputPeak = juce::jmax(outputPeak, fixtureBuffer.getMagnitude(channel, 0, fixtureBuffer.getNumSamples()));
+                auto* samples = fixtureBuffer.getReadPointer(channel);
+                for (int sample = 0; sample < fixtureBuffer.getNumSamples(); ++sample)
+                {
+                    if (!std::isfinite(samples[sample]))
+                    {
+                        finite = false;
+                        break;
+                    }
+                }
+                if (!finite)
+                    break;
+            }
+
+            samplerPass = sampleLoaded
+                && track->hasFallbackSamplerSample()
+                && finite
+                && outputPeak > 1.0e-5f
+                && outputPeak < 0.75f;
+            samplerDetail = "sampleLoaded=" + juce::String(sampleLoaded ? "true" : "false")
+                + ", samplerActive=" + juce::String(track->hasFallbackSamplerSample() ? "true" : "false")
+                + ", finite=" + juce::String(finite ? "true" : "false")
+                + ", outputPeak=" + juce::String(outputPeak, 8)
+                + ", builtEvents=" + juce::String(track->getLastBuiltMidiEventCount());
+        }
+        else
+        {
+            samplerDetail = "Temporary sampler regression track missing after addTrack";
+        }
+
+        removeTrack(samplerTrackId);
+    }
+    else
+    {
+        samplerDetail = "Failed to create temporary sampler regression track or fixture file";
+    }
+    samplerFixtureFile.deleteFile();
+    addSuite("instrument_basic_sampler_fixture", samplerPass, samplerDetail);
+
+    const juce::String savedReloadTrackId = "saved_reload_midi_regression_" + juce::Uuid().toString();
+    bool savedReloadPass = false;
+    juce::String savedReloadDetail;
+    if (addTrack(savedReloadTrackId, "instrument").isNotEmpty())
+    {
+        setTrackType(savedReloadTrackId, "instrument");
+        setTrackMIDIClips(savedReloadTrackId,
+            R"json([{"id":"saved-reload-midi-clip","startTime":0.0,"duration":1.0,"events":[{"type":"programChange","timestamp":0.0,"value":0,"channel":1},{"type":"noteOn","timestamp":0.0,"note":64,"velocity":110,"channel":1},{"type":"cc","timestamp":0.02,"controller":1,"value":96,"channel":1},{"type":"pitchBend","timestamp":0.025,"value":12288,"channel":1},{"type":"channelPressure","timestamp":0.03,"value":42,"channel":1},{"type":"noteOff","timestamp":0.45,"note":64,"velocity":0,"channel":1}]}])json");
+
+        auto it = trackMap.find(savedReloadTrackId);
+        if (it != trackMap.end() && it->second != nullptr)
+        {
+            auto* track = it->second;
+            const int blockSize = juce::jmax(512, currentBlockSize);
+            const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+            juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
+            fixtureBuffer.clear();
+            juce::MidiBuffer drainQueuedResetMidi;
+            track->buildMidiBuffer(drainQueuedResetMidi, 0.0, blockSize, sampleRate, false);
+            juce::MidiBuffer fixtureMidi;
+            track->buildMidiBuffer(fixtureMidi, 0.0, blockSize, sampleRate, true);
+            const int fixtureMidiEvents = fixtureMidi.getNumEvents();
+            track->processBlock(fixtureBuffer, fixtureMidi);
+
+            int nonFiniteCount = 0;
+            for (int channel = 0; channel < fixtureBuffer.getNumChannels(); ++channel)
+            {
+                const auto* samples = fixtureBuffer.getReadPointer(channel);
+                for (int sample = 0; sample < fixtureBuffer.getNumSamples(); ++sample)
+                {
+                    if (!std::isfinite(samples[sample]))
+                        ++nonFiniteCount;
+                }
+            }
+
+            const float outputPeak = peakFromFloatBuffer(fixtureBuffer, fixtureBuffer.getNumSamples());
+            const int scheduledClips = track->getScheduledMIDIClipCount();
+            const int scheduledEvents = track->getScheduledMIDIEventCount();
+            const int builtEvents = juce::jmax(track->getLastBuiltMidiEventCount(), fixtureMidiEvents);
+            savedReloadPass = track->getTrackType() == TrackType::Instrument
+                && track->isUsingFallbackInstrument()
+                && scheduledClips == 1
+                && scheduledEvents == 6
+                && builtEvents > 0
+                && nonFiniteCount == 0
+                && outputPeak > 1.0e-5f
+                && outputPeak < 0.75f;
+            savedReloadDetail = "typeOk=" + juce::String(track->getTrackType() == TrackType::Instrument ? "true" : "false")
+                + ", fallbackActive=" + juce::String(track->isUsingFallbackInstrument() ? "true" : "false")
+                + ", scheduledClips=" + juce::String(scheduledClips)
+                + ", scheduledEvents=" + juce::String(scheduledEvents)
+                + ", midiBufferEvents=" + juce::String(fixtureMidiEvents)
+                + ", builtEvents=" + juce::String(builtEvents)
+                + ", nonFinite=" + juce::String(nonFiniteCount)
+                + ", outputPeak=" + juce::String(outputPeak, 8);
+        }
+        else
+        {
+            savedReloadDetail = "Temporary saved-reload regression track missing after addTrack";
+        }
+
+        removeTrack(savedReloadTrackId);
+    }
+    else
+    {
+        savedReloadDetail = "Failed to create temporary saved-reload regression track";
+    }
+    addSuite("saved_project_midi_reload_playback_fixture", savedReloadPass, savedReloadDetail);
+
+    bool addTrackFirstBlockPass = true;
+    juce::StringArray addTrackFirstBlockDetails;
+    auto runAddTrackFirstBlockFixture = [this, &addTrackFirstBlockPass, &addTrackFirstBlockDetails] (const juce::String& type)
+    {
+        const juce::String trackId = "add_track_first_block_" + type + "_" + juce::Uuid().toString();
+        const juce::String createdId = addTrack(trackId, type);
+        bool pass = false;
+        juce::String detail;
+
+        if (createdId.isNotEmpty())
+        {
+            auto it = trackMap.find(trackId);
+            if (it != trackMap.end() && it->second != nullptr)
+            {
+                auto* track = it->second;
+                const int blockSize = juce::jmax(512, currentBlockSize);
+                const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+                juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
+                fixtureBuffer.clear();
+                juce::MidiBuffer fixtureMidi;
+                track->prepareToPlay(sampleRate, blockSize);
+                track->processBlock(fixtureBuffer, fixtureMidi);
+
+                int nonFiniteCount = 0;
+                for (int channel = 0; channel < fixtureBuffer.getNumChannels(); ++channel)
+                {
+                    const auto* samples = fixtureBuffer.getReadPointer(channel);
+                    for (int sample = 0; sample < fixtureBuffer.getNumSamples(); ++sample)
+                    {
+                        if (!std::isfinite(samples[sample]))
+                            ++nonFiniteCount;
+                    }
+                }
+
+                const float outputPeak = peakFromFloatBuffer(fixtureBuffer, fixtureBuffer.getNumSamples());
+                const TrackType expectedType = type == "instrument" ? TrackType::Instrument : TrackType::MIDI;
+                pass = track->getTrackType() == expectedType
+                    && track->getScheduledMIDIClipCount() == 0
+                    && nonFiniteCount == 0
+                    && outputPeak <= 1.0e-6f;
+                detail = type
+                    + ": typeOk=" + juce::String(track->getTrackType() == expectedType ? "true" : "false")
+                    + ", scheduledClips=" + juce::String(track->getScheduledMIDIClipCount())
+                    + ", nonFinite=" + juce::String(nonFiniteCount)
+                    + ", outputPeak=" + juce::String(outputPeak, 8);
+            }
+            else
+            {
+                detail = type + ": Temporary track missing after addTrack";
+            }
+
+            removeTrack(trackId);
+        }
+        else
+        {
+            detail = type + ": Failed to create temporary track";
+        }
+
+        addTrackFirstBlockPass = addTrackFirstBlockPass && pass;
+        addTrackFirstBlockDetails.add(detail);
+    };
+
+    runAddTrackFirstBlockFixture("midi");
+    runAddTrackFirstBlockFixture("instrument");
+    addSuite("add_track_first_block_silence_fixture",
+             addTrackFirstBlockPass,
+             addTrackFirstBlockDetails.joinIntoString("; "));
+
+    bool addTrackCallbackPass = true;
+    juce::StringArray addTrackCallbackDetails;
+    auto runAddTrackCallbackFixture = [this, &addTrackCallbackPass, &addTrackCallbackDetails] (const juce::String& type)
+    {
+        const juce::String trackId = "add_track_callback_" + type + "_" + juce::Uuid().toString();
+        const juce::String createdId = addTrack(trackId, type);
+        bool pass = false;
+        juce::String detail;
+
+        if (createdId.isNotEmpty())
+        {
+            const int blockSize = juce::jmax(512, currentBlockSize);
+            juce::AudioBuffer<float> callbackBuffer(2, blockSize);
+            callbackBuffer.clear();
+            float* outputChannels[2] = {
+                callbackBuffer.getWritePointer(0),
+                callbackBuffer.getWritePointer(1),
+            };
+            juce::AudioIODeviceCallbackContext callbackContext;
+            const bool previousPlaying = isPlaying.load(std::memory_order_acquire);
+            const bool previousRecording = isRecordMode.load(std::memory_order_acquire);
+            isPlaying.store(false, std::memory_order_release);
+            isRecordMode.store(false, std::memory_order_release);
+            audioDeviceIOCallbackWithContext(nullptr, 0, outputChannels, 2, blockSize, callbackContext);
+            isPlaying.store(previousPlaying, std::memory_order_release);
+            isRecordMode.store(previousRecording, std::memory_order_release);
+
+            int nonFiniteCount = 0;
+            for (int channel = 0; channel < callbackBuffer.getNumChannels(); ++channel)
+            {
+                const auto* samples = callbackBuffer.getReadPointer(channel);
+                for (int sample = 0; sample < callbackBuffer.getNumSamples(); ++sample)
+                {
+                    if (!std::isfinite(samples[sample]))
+                        ++nonFiniteCount;
+                }
+            }
+
+            auto it = trackMap.find(trackId);
+            const bool trackPresent = it != trackMap.end() && it->second != nullptr;
+            const TrackType expectedType = type == "instrument" ? TrackType::Instrument : TrackType::MIDI;
+            const bool typeOk = trackPresent && it->second->getTrackType() == expectedType;
+            const float outputPeak = peakFromFloatBuffer(callbackBuffer, callbackBuffer.getNumSamples());
+            pass = trackPresent
+                && typeOk
+                && nonFiniteCount == 0
+                && outputPeak <= 1.0e-6f;
+            detail = type
+                + ": trackPresent=" + juce::String(trackPresent ? "true" : "false")
+                + ", typeOk=" + juce::String(typeOk ? "true" : "false")
+                + ", nonFinite=" + juce::String(nonFiniteCount)
+                + ", outputPeak=" + juce::String(outputPeak, 8);
+
+            removeTrack(trackId);
+        }
+        else
+        {
+            detail = type + ": Failed to create temporary track";
+        }
+
+        addTrackCallbackPass = addTrackCallbackPass && pass;
+        addTrackCallbackDetails.add(detail);
+    };
+
+    runAddTrackCallbackFixture("midi");
+    runAddTrackCallbackFixture("instrument");
+    addSuite("add_track_audio_callback_spike_fixture",
+             addTrackCallbackPass,
+             addTrackCallbackDetails.joinIntoString("; "));
+
+    const juce::String renderFreezeTrackId = "midi_render_freeze_regression_" + juce::Uuid().toString();
+    bool renderFreezePass = false;
+    juce::String renderFreezeDetail;
+    if (addTrack(renderFreezeTrackId, "instrument").isNotEmpty())
+    {
+        setTrackType(renderFreezeTrackId, "instrument");
+        setTrackSolo(renderFreezeTrackId, true);
+        setTrackMIDIClips(renderFreezeTrackId,
+            R"json([{"id":"render-freeze-midi-clip","startTime":0.0,"duration":1.0,"events":[{"type":"noteOn","timestamp":0.0,"note":67,"velocity":118,"channel":1},{"type":"cc","timestamp":0.02,"controller":11,"value":100,"channel":1},{"type":"pitchBend","timestamp":0.04,"value":12288,"channel":1},{"type":"channelPressure","timestamp":0.06,"value":48,"channel":1},{"type":"noteOff","timestamp":0.5,"note":67,"velocity":0,"channel":1}]}])json");
+
+        const juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
+        const juce::File renderFile = tempDir.getChildFile("studio13_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
+        const bool renderOk = renderProject("master", 0.0, 1.0, renderFile.getFullPathName(),
+                                            "wav", currentSampleRate, 24, 2,
+                                            false, false, 0.0, false);
+        juce::AudioBuffer<float> renderBuffer;
+        double renderSampleRate = 0.0;
+        const bool renderReadable = renderOk && readAudioFileForParity(renderFile, renderBuffer, renderSampleRate);
+        const float renderPeak = renderReadable
+            ? peakFromFloatBuffer(renderBuffer, renderBuffer.getNumSamples())
+            : 0.0f;
+
+        const juce::var freezeResult = freezeTrack(renderFreezeTrackId);
+        bool freezeOk = false;
+        juce::File freezeFile;
+        if (auto* freezeObj = freezeResult.getDynamicObject())
+        {
+            freezeOk = static_cast<bool>(freezeObj->getProperty("success"));
+            freezeFile = juce::File(freezeObj->getProperty("filePath").toString());
+        }
+
+        juce::AudioBuffer<float> freezeBuffer;
+        double freezeSampleRate = 0.0;
+        const bool freezeReadable = freezeOk && readAudioFileForParity(freezeFile, freezeBuffer, freezeSampleRate);
+        const float freezePeak = freezeReadable
+            ? peakFromFloatBuffer(freezeBuffer, freezeBuffer.getNumSamples())
+            : 0.0f;
+
+        renderFreezePass = renderOk
+            && renderReadable
+            && renderPeak > 1.0e-5f
+            && renderPeak < 0.75f
+            && freezeOk
+            && freezeReadable
+            && freezePeak > 1.0e-5f
+            && freezePeak < 0.75f;
+        renderFreezeDetail = "renderOk=" + juce::String(renderOk ? "true" : "false")
+            + ", renderReadable=" + juce::String(renderReadable ? "true" : "false")
+            + ", renderPeak=" + juce::String(renderPeak, 8)
+            + ", freezeOk=" + juce::String(freezeOk ? "true" : "false")
+            + ", freezeReadable=" + juce::String(freezeReadable ? "true" : "false")
+            + ", freezePeak=" + juce::String(freezePeak, 8)
+            + ", pitchBendValue=12288"
+            + ", renderSampleRate=" + juce::String(renderSampleRate, 2)
+            + ", freezeSampleRate=" + juce::String(freezeSampleRate, 2);
+
+        renderFile.deleteFile();
+        if (freezeFile.existsAsFile())
+            freezeFile.deleteFile();
+        removeTrack(renderFreezeTrackId);
+    }
+    else
+    {
+        renderFreezeDetail = "Failed to create temporary render/freeze regression track";
+    }
+    addSuite("midi_render_freeze_fixture", renderFreezePass, renderFreezeDetail);
+
+    bool midiExportPass = false;
+    juce::String midiExportDetail;
+    const juce::File midiExportFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("studio13_midi_export_fixture_" + juce::Uuid().toString() + ".mid");
+    auto midiExportTracks = juce::JSON::parse(
+        R"json([{"name":"Export Fixture","clips":[{"startTime":0.5,"duration":1.0,"events":[{"type":"programChange","timestamp":0.0,"value":7,"channel":3},{"type":"cc","timestamp":0.04,"controller":0,"value":3,"channel":3},{"type":"cc","timestamp":0.05,"controller":32,"value":45,"channel":3},{"type":"noteOn","timestamp":0.1,"note":60,"velocity":101,"channel":3},{"type":"cc","timestamp":0.12,"controller":1,"value":96,"channel":3},{"type":"cc","timestamp":0.12,"controller":33,"value":12,"channel":3},{"type":"pitchBend","timestamp":0.15,"value":12288,"channel":3},{"type":"channelPressure","timestamp":0.18,"value":55,"channel":3},{"type":"polyPressure","timestamp":0.2,"note":60,"value":66,"channel":3},{"type":"noteOn","timestamp":0.25,"note":64,"velocity":0.8,"channel":3},{"type":"noteOff","timestamp":0.35,"note":64,"velocity":0,"channel":3},{"type":"noteOff","timestamp":0.45,"note":60,"releaseVelocity":40,"channel":3}]}]}])json");
+    const bool midiExportOk = exportProjectMIDI(midiExportFile.getFullPathName(), midiExportTracks, 120.0);
+    bool midiReadable = false;
+    bool hasExportNote = false;
+    bool hasExportBankMSB = false;
+    bool hasExportBankLSB = false;
+    bool hasExportCC1 = false;
+    bool hasExportCC33 = false;
+    bool hasExportPitch = false;
+    bool hasExportProgram = false;
+    bool hasExportChannelPressure = false;
+    bool hasExportPolyPressure = false;
+    bool hasExportNoteOff = false;
+    bool hasExportScaledVelocity = false;
+    bool roundTripImportOk = false;
+    bool roundTripHasNote = false;
+    int midiTrackCount = 0;
+    if (midiExportOk && midiExportFile.existsAsFile())
+    {
+        juce::FileInputStream stream(midiExportFile);
+        juce::MidiFile midiFile;
+        midiReadable = ! stream.failedToOpen() && midiFile.readFrom(stream);
+        if (midiReadable)
+        {
+            midiTrackCount = midiFile.getNumTracks();
+            for (int trackIndex = 0; trackIndex < midiFile.getNumTracks(); ++trackIndex)
+            {
+                const auto* midiTrack = midiFile.getTrack(trackIndex);
+                if (midiTrack == nullptr)
+                    continue;
+
+                for (int eventIndex = 0; eventIndex < midiTrack->getNumEvents(); ++eventIndex)
+                {
+                    const auto* holder = midiTrack->getEventPointer(eventIndex);
+                    if (holder == nullptr)
+                        continue;
+
+                    const auto& message = holder->message;
+                    if (message.isNoteOn() && message.getChannel() == 3 && message.getNoteNumber() == 60)
+                        hasExportNote = true;
+                    else if (message.isNoteOn() && message.getChannel() == 3 && message.getNoteNumber() == 64
+                             && message.getVelocity() >= 101 && message.getVelocity() <= 103)
+                        hasExportScaledVelocity = true;
+                    else if (message.isNoteOff() && message.getChannel() == 3 && message.getNoteNumber() == 60)
+                        hasExportNoteOff = true;
+                    else if (message.isController() && message.getChannel() == 3 && message.getControllerNumber() == 0 && message.getControllerValue() == 3)
+                        hasExportBankMSB = true;
+                    else if (message.isController() && message.getChannel() == 3 && message.getControllerNumber() == 32 && message.getControllerValue() == 45)
+                        hasExportBankLSB = true;
+                    else if (message.isController() && message.getChannel() == 3 && message.getControllerNumber() == 1 && message.getControllerValue() == 96)
+                        hasExportCC1 = true;
+                    else if (message.isController() && message.getChannel() == 3 && message.getControllerNumber() == 33 && message.getControllerValue() == 12)
+                        hasExportCC33 = true;
+                    else if (message.isPitchWheel() && message.getChannel() == 3 && message.getPitchWheelValue() == 12288)
+                        hasExportPitch = true;
+                    else if (message.isProgramChange() && message.getChannel() == 3 && message.getProgramChangeNumber() == 7)
+                        hasExportProgram = true;
+                    else if (message.isChannelPressure() && message.getChannel() == 3 && message.getChannelPressureValue() == 55)
+                        hasExportChannelPressure = true;
+                    else if (message.isAftertouch() && message.getChannel() == 3
+                             && message.getNoteNumber() == 60 && message.getAfterTouchValue() == 66)
+                        hasExportPolyPressure = true;
+                }
+            }
+        }
+
+        const auto roundTrip = importMIDIFile(midiExportFile.getFullPathName());
+        if (auto* roundTripObj = roundTrip.getDynamicObject())
+        {
+            if (auto* importedTracks = roundTripObj->getProperty("tracks").getArray())
+            {
+                roundTripImportOk = static_cast<bool>(roundTripObj->getProperty("success")) && importedTracks->size() > 0;
+                for (const auto& importedTrackVar : *importedTracks)
+                {
+                    auto* importedTrackObj = importedTrackVar.getDynamicObject();
+                    if (importedTrackObj == nullptr)
+                        continue;
+
+                    if (auto* importedEvents = importedTrackObj->getProperty("events").getArray())
+                    {
+                        for (const auto& importedEventVar : *importedEvents)
+                        {
+                            auto* importedEventObj = importedEventVar.getDynamicObject();
+                            if (importedEventObj == nullptr)
+                                continue;
+
+                            if (importedEventObj->getProperty("type").toString() == "noteOn"
+                                && static_cast<int>(importedEventObj->getProperty("note")) == 60)
+                            {
+                                roundTripHasNote = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    midiExportPass = midiExportOk
+        && midiReadable
+        && midiTrackCount > 0
+        && hasExportNote
+        && hasExportNoteOff
+        && hasExportBankMSB
+        && hasExportBankLSB
+        && hasExportCC1
+        && hasExportCC33
+        && hasExportPitch
+        && hasExportProgram
+        && hasExportChannelPressure
+        && hasExportPolyPressure
+        && hasExportScaledVelocity
+        && roundTripImportOk
+        && roundTripHasNote;
+    midiExportDetail = "exportOk=" + juce::String(midiExportOk ? "true" : "false")
+        + ", readable=" + juce::String(midiReadable ? "true" : "false")
+        + ", tracks=" + juce::String(midiTrackCount)
+        + ", note=" + juce::String(hasExportNote ? "true" : "false")
+        + ", noteOff=" + juce::String(hasExportNoteOff ? "true" : "false")
+        + ", bankMSB=" + juce::String(hasExportBankMSB ? "true" : "false")
+        + ", bankLSB=" + juce::String(hasExportBankLSB ? "true" : "false")
+        + ", cc1=" + juce::String(hasExportCC1 ? "true" : "false")
+        + ", cc33=" + juce::String(hasExportCC33 ? "true" : "false")
+        + ", pitchBend=" + juce::String(hasExportPitch ? "true" : "false")
+        + ", program=" + juce::String(hasExportProgram ? "true" : "false")
+        + ", channelPressure=" + juce::String(hasExportChannelPressure ? "true" : "false")
+        + ", polyPressure=" + juce::String(hasExportPolyPressure ? "true" : "false")
+        + ", scaledVelocity=" + juce::String(hasExportScaledVelocity ? "true" : "false")
+        + ", roundTripImport=" + juce::String(roundTripImportOk ? "true" : "false")
+        + ", roundTripNote=" + juce::String(roundTripHasNote ? "true" : "false");
+    midiExportFile.deleteFile();
+    addSuite("midi_export_fixture", midiExportPass, midiExportDetail);
+
+    const juce::String combinedInstrumentTrackId = "combined_midi_render_instrument_" + juce::Uuid().toString();
+    const juce::String combinedExternalTrackId = "combined_midi_render_external_" + juce::Uuid().toString();
+    bool combinedRenderPass = false;
+    juce::String combinedRenderDetail;
+    const bool combinedInstrumentAdded = addTrack(combinedInstrumentTrackId, "instrument").isNotEmpty();
+    const bool combinedExternalAdded = addTrack(combinedExternalTrackId, "midi").isNotEmpty();
+    if (combinedInstrumentAdded && combinedExternalAdded)
+    {
+        setTrackType(combinedInstrumentTrackId, "instrument");
+        setTrackSolo(combinedInstrumentTrackId, true);
+        setTrackMute(combinedExternalTrackId, true);
+        setTrackMIDIClips(combinedInstrumentTrackId,
+            R"json([{"id":"combined-render-a","startTime":0.0,"duration":0.75,"events":[{"type":"programChange","timestamp":0.0,"value":11,"channel":2},{"type":"cc","timestamp":0.01,"controller":1,"value":90,"channel":2},{"type":"cc","timestamp":0.015,"controller":33,"value":23,"channel":2},{"type":"pitchBend","timestamp":0.02,"value":12345,"channel":2},{"type":"channelPressure","timestamp":0.025,"value":57,"channel":2},{"type":"polyPressure","timestamp":0.03,"note":62,"value":61,"channel":2},{"type":"noteOn","timestamp":0.04,"note":62,"velocity":104,"channel":2},{"type":"noteOff","timestamp":0.45,"note":62,"releaseVelocity":45,"channel":2}]},{"id":"combined-render-b","startTime":0.8,"duration":0.45,"events":[{"type":"noteOn","timestamp":0.0,"note":67,"velocity":88,"channel":2},{"type":"pitchBend","timestamp":0.02,"value":8192,"channel":2},{"type":"noteOff","timestamp":0.30,"note":67,"releaseVelocity":32,"channel":2}]}])json");
+        setTrackMIDIClips(combinedExternalTrackId,
+            R"json([{"id":"combined-muted-external","startTime":0.0,"duration":0.5,"events":[{"type":"noteOn","timestamp":0.0,"note":72,"velocity":127,"channel":1},{"type":"noteOff","timestamp":0.25,"note":72,"releaseVelocity":12,"channel":1}]}])json");
+
+        auto instrumentIt = trackMap.find(combinedInstrumentTrackId);
+        auto externalIt = trackMap.find(combinedExternalTrackId);
+        if (instrumentIt != trackMap.end() && instrumentIt->second != nullptr
+            && externalIt != trackMap.end() && externalIt->second != nullptr)
+        {
+            auto* instrumentTrack = instrumentIt->second;
+            auto* externalTrack = externalIt->second;
+            const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+            const int schedulerBlockSize = juce::jmax(32768, static_cast<int>(std::ceil(sampleRate * 0.7)));
+            juce::MidiBuffer drainQueuedResetMidi;
+            instrumentTrack->buildMidiBuffer(drainQueuedResetMidi, 0.0, schedulerBlockSize, sampleRate, false);
+            juce::MidiBuffer combinedMidi;
+            instrumentTrack->buildMidiBuffer(combinedMidi, 0.0, schedulerBlockSize, sampleRate, true);
+
+            bool hasCombinedProgram = false;
+            bool hasCombinedCC1 = false;
+            bool hasCombinedCC33 = false;
+            bool hasCombinedPitchBend = false;
+            bool hasCombinedChannelPressure = false;
+            bool hasCombinedPolyPressure = false;
+            bool hasCombinedNoteOn = false;
+            bool hasCombinedNoteOffRelease = false;
+            for (const auto metadata : combinedMidi)
+            {
+                const auto message = metadata.getMessage();
+                if (message.isProgramChange() && message.getChannel() == 2 && message.getProgramChangeNumber() == 11)
+                    hasCombinedProgram = true;
+                else if (message.isController() && message.getChannel() == 2 && message.getControllerNumber() == 1 && message.getControllerValue() == 90)
+                    hasCombinedCC1 = true;
+                else if (message.isController() && message.getChannel() == 2 && message.getControllerNumber() == 33 && message.getControllerValue() == 23)
+                    hasCombinedCC33 = true;
+                else if (message.isPitchWheel() && message.getChannel() == 2 && message.getPitchWheelValue() == 12345)
+                    hasCombinedPitchBend = true;
+                else if (message.isChannelPressure() && message.getChannel() == 2 && message.getChannelPressureValue() == 57)
+                    hasCombinedChannelPressure = true;
+                else if (message.isAftertouch() && message.getChannel() == 2
+                         && message.getNoteNumber() == 62 && message.getAfterTouchValue() == 61)
+                    hasCombinedPolyPressure = true;
+                else if (message.isNoteOn() && message.getChannel() == 2
+                         && message.getNoteNumber() == 62 && message.getVelocity() > 0.0f)
+                    hasCombinedNoteOn = true;
+                else if (message.isNoteOff() && message.getChannel() == 2
+                         && message.getNoteNumber() == 62 && message.getVelocity() > 0.0f)
+                    hasCombinedNoteOffRelease = true;
+            }
+
+            const juce::File combinedRenderFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                .getChildFile("studio13_combined_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
+            const bool renderOk = renderProject("master", 0.0, 1.35, combinedRenderFile.getFullPathName(),
+                                                "wav", currentSampleRate, 24, 2,
+                                                false, false, 0.0, false);
+            juce::AudioBuffer<float> renderBuffer;
+            double renderSampleRate = 0.0;
+            const bool renderReadable = renderOk && readAudioFileForParity(combinedRenderFile, renderBuffer, renderSampleRate);
+            int nonFiniteCount = 0;
+            if (renderReadable)
+            {
+                for (int channel = 0; channel < renderBuffer.getNumChannels(); ++channel)
+                {
+                    const auto* samples = renderBuffer.getReadPointer(channel);
+                    for (int sample = 0; sample < renderBuffer.getNumSamples(); ++sample)
+                    {
+                        if (!std::isfinite(samples[sample]))
+                            ++nonFiniteCount;
+                    }
+                }
+            }
+
+            const float renderPeak = renderReadable
+                ? peakFromFloatBuffer(renderBuffer, renderBuffer.getNumSamples())
+                : 0.0f;
+            const int scheduledInstrumentClips = instrumentTrack->getScheduledMIDIClipCount();
+            const int scheduledInstrumentEvents = instrumentTrack->getScheduledMIDIEventCount();
+            const int scheduledExternalEvents = externalTrack->getScheduledMIDIEventCount();
+            const int maxBuiltEvents = instrumentTrack->getMaxBuiltMidiEventCount();
+            const bool schedulerOk = scheduledInstrumentClips == 2
+                && scheduledInstrumentEvents == 11
+                && scheduledExternalEvents == 2
+                && combinedMidi.getNumEvents() >= 8
+                && hasCombinedProgram
+                && hasCombinedCC1
+                && hasCombinedCC33
+                && hasCombinedPitchBend
+                && hasCombinedChannelPressure
+                && hasCombinedPolyPressure
+                && hasCombinedNoteOn
+                && hasCombinedNoteOffRelease;
+            combinedRenderPass = schedulerOk
+                && renderOk
+                && renderReadable
+                && nonFiniteCount == 0
+                && renderPeak > 1.0e-5f
+                && renderPeak < 0.75f
+                && maxBuiltEvents > 0;
+            combinedRenderDetail = "schedulerOk=" + juce::String(schedulerOk ? "true" : "false")
+                + ", renderOk=" + juce::String(renderOk ? "true" : "false")
+                + ", renderReadable=" + juce::String(renderReadable ? "true" : "false")
+                + ", renderPeak=" + juce::String(renderPeak, 8)
+                + ", nonFinite=" + juce::String(nonFiniteCount)
+                + ", instrumentClips=" + juce::String(scheduledInstrumentClips)
+                + ", instrumentEvents=" + juce::String(scheduledInstrumentEvents)
+                + ", externalEvents=" + juce::String(scheduledExternalEvents)
+                + ", directMidiEvents=" + juce::String(combinedMidi.getNumEvents())
+                + ", maxBuiltEvents=" + juce::String(maxBuiltEvents)
+                + ", program=" + juce::String(hasCombinedProgram ? "true" : "false")
+                + ", cc14=" + juce::String((hasCombinedCC1 && hasCombinedCC33) ? "true" : "false")
+                + ", pitchBend=" + juce::String(hasCombinedPitchBend ? "true" : "false")
+                + ", channelPressure=" + juce::String(hasCombinedChannelPressure ? "true" : "false")
+                + ", polyPressure=" + juce::String(hasCombinedPolyPressure ? "true" : "false")
+                + ", releaseVelocity=" + juce::String(hasCombinedNoteOffRelease ? "true" : "false")
+                + ", renderSampleRate=" + juce::String(renderSampleRate, 2);
+            combinedRenderFile.deleteFile();
+        }
+        else
+        {
+            combinedRenderDetail = "Temporary combined render tracks missing after addTrack";
+        }
+    }
+    else
+    {
+        combinedRenderDetail = "Failed to create temporary combined render tracks";
+    }
+
+    if (combinedInstrumentAdded)
+        removeTrack(combinedInstrumentTrackId);
+    if (combinedExternalAdded)
+        removeTrack(combinedExternalTrackId);
+    addSuite("midi_combined_project_render_fixture", combinedRenderPass, combinedRenderDetail);
 
     root->setProperty("overallPass", overallPass);
     root->setProperty("processingPrecision", getProcessingPrecision());
@@ -6535,6 +8391,9 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
 
 static std::unique_ptr<juce::AudioProcessor> createBuiltInEffect(const juce::String& name)
 {
+    if (name == "Studio13 Basic Synth" || name == "OpenStudio Basic Synth") return std::make_unique<S13BasicSynthInstrument>();
+    if (name == "Studio13 Piano" || name == "OpenStudio Piano")        return std::make_unique<S13PianoInstrument>();
+    if (name == "Studio13 Drums" || name == "OpenStudio Drums")        return std::make_unique<S13DrumInstrument>();
     if (name == "S13 EQ" || name == "OpenStudio EQ")                   return std::make_unique<S13EQ>();
     if (name == "S13 Compressor" || name == "OpenStudio Compressor")   return std::make_unique<S13Compressor>();
     if (name == "S13 Gate" || name == "OpenStudio Gate")               return std::make_unique<S13Gate>();
@@ -6545,6 +8404,662 @@ static std::unique_ptr<juce::AudioProcessor> createBuiltInEffect(const juce::Str
     if (name == "S13 Saturator" || name == "OpenStudio Saturator")     return std::make_unique<S13Saturator>();
     if (name == "S13 Pitch Correct" || name == "OpenStudio Pitch Correct") return std::make_unique<S13PitchCorrector>();
     return nullptr;
+}
+
+static juce::var makeBuiltInParam(const juce::String& id,
+                                  const juce::String& label,
+                                  const juce::String& type,
+                                  float value,
+                                  float minValue,
+                                  float maxValue,
+                                  float defaultValue,
+                                  const juce::String& unit = {},
+                                  const juce::String& graphRole = {},
+                                  juce::Array<juce::var> enumOptions = {})
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("id", id);
+    obj->setProperty("label", label);
+    obj->setProperty("type", type);
+    obj->setProperty("value", value);
+    obj->setProperty("min", minValue);
+    obj->setProperty("max", maxValue);
+    obj->setProperty("defaultValue", defaultValue);
+    obj->setProperty("unit", unit);
+    obj->setProperty("automatable", true);
+    if (graphRole.isNotEmpty())
+        obj->setProperty("graphRole", graphRole);
+    if (!enumOptions.isEmpty())
+        obj->setProperty("enumOptions", enumOptions);
+    return juce::var(obj);
+}
+
+static juce::Array<juce::var> makeEnumOptions(std::initializer_list<const char*> names)
+{
+    juce::Array<juce::var> options;
+    int index = 0;
+    for (auto* name : names)
+    {
+        auto* option = new juce::DynamicObject();
+        option->setProperty("value", static_cast<float>(index));
+        option->setProperty("label", juce::String(name));
+        options.add(juce::var(option));
+        ++index;
+    }
+    return options;
+}
+
+static juce::Array<juce::var> makeFloatVarArray(const std::vector<float>& values)
+{
+    juce::Array<juce::var> result;
+    for (float value : values)
+        result.add(value);
+    return result;
+}
+
+static juce::var makeBuiltInSchemaObject(const juce::String& name,
+                                         const juce::String& category,
+                                         const juce::String& chainType,
+                                         int fxIndex,
+                                         const juce::Array<juce::var>& params)
+{
+    auto* root = new juce::DynamicObject();
+    root->setProperty("schemaVersion", 1);
+    root->setProperty("name", name);
+    root->setProperty("category", category);
+    root->setProperty("chain", chainType);
+    root->setProperty("fxIndex", fxIndex);
+    root->setProperty("parameters", params);
+    return juce::var(root);
+}
+
+static void addToggleParam(juce::Array<juce::var>& params,
+                           const juce::String& id,
+                           const juce::String& label,
+                           float value,
+                           float defaultValue,
+                           const juce::String& graphRole = {})
+{
+    params.add(makeBuiltInParam(id, label, "toggle", value, 0.0f, 1.0f, defaultValue, {}, graphRole));
+}
+
+static void addContinuousParam(juce::Array<juce::var>& params,
+                               const juce::String& id,
+                               const juce::String& label,
+                               float value,
+                               float minValue,
+                               float maxValue,
+                               float defaultValue,
+                               const juce::String& unit = {},
+                               const juce::String& graphRole = {})
+{
+    params.add(makeBuiltInParam(id, label, "continuous", value, minValue, maxValue, defaultValue, unit, graphRole));
+}
+
+static void addEnumParam(juce::Array<juce::var>& params,
+                         const juce::String& id,
+                         const juce::String& label,
+                         float value,
+                         float defaultValue,
+                         const juce::Array<juce::var>& enumOptions,
+                         const juce::String& graphRole = {})
+{
+    params.add(makeBuiltInParam(id, label, "enum", value, 0.0f,
+                                static_cast<float>(juce::jmax(0, enumOptions.size() - 1)),
+                                defaultValue, {}, graphRole, enumOptions));
+}
+
+static bool storeClamped(std::atomic<float>& target, float value, float minValue, float maxValue)
+{
+    target.store(juce::jlimit(minValue, maxValue, value), std::memory_order_relaxed);
+    return true;
+}
+
+static juce::var describeFallbackInstrument(TrackProcessor* track, const juce::String& chainType, int fxIndex)
+{
+    juce::Array<juce::var> params;
+    if (track == nullptr)
+        return makeBuiltInSchemaObject("OpenStudio Basic Synth", "Instrument", chainType, fxIndex, params);
+
+    const auto instrumentModes = makeEnumOptions({ "Basic Synth", "Piano", "Drums" });
+    const auto drumKits = makeEnumOptions({ "Studio", "Rock", "Electronic" });
+    const int mode = juce::jlimit(0, 2, static_cast<int>(std::round(track->getFallbackInstrumentParam("instrumentMode"))));
+    addEnumParam(params, "instrumentMode", "Instrument", static_cast<float>(mode), 0.0f, instrumentModes, "instrument");
+    addContinuousParam(params, "attackMs", "Attack", track->getFallbackInstrumentParam("attackMs"), 0.5f, 2000.0f, 8.0f, "ms", "envelope");
+    addContinuousParam(params, "releaseMs", "Release", track->getFallbackInstrumentParam("releaseMs"), 5.0f, 5000.0f, 180.0f, "ms", "envelope");
+    addContinuousParam(params, "brightness", "Brightness", track->getFallbackInstrumentParam("brightness"), 0.0f, 1.0f, 0.62f, {}, "tone");
+    addContinuousParam(params, "detuneCents", "Detune", track->getFallbackInstrumentParam("detuneCents"), 0.0f, 35.0f, 7.0f, "ct", "oscillator");
+    addContinuousParam(params, "subLevel", "Sub", track->getFallbackInstrumentParam("subLevel"), 0.0f, 0.8f, 0.18f, {}, "oscillator");
+    addContinuousParam(params, "noiseLevel", "Air", track->getFallbackInstrumentParam("noiseLevel"), 0.0f, 0.25f, 0.015f, {}, "oscillator");
+    addContinuousParam(params, "pianoTone", "Piano Tone", track->getFallbackInstrumentParam("pianoTone"), 0.0f, 1.0f, 0.58f, {}, "piano");
+    addContinuousParam(params, "pianoBody", "Piano Body", track->getFallbackInstrumentParam("pianoBody"), 0.0f, 1.0f, 0.72f, {}, "piano");
+    addEnumParam(params, "drumKit", "Drum Kit", track->getFallbackInstrumentParam("drumKit"), 0.0f, drumKits, "drums");
+    addContinuousParam(params, "drumTuning", "Drum Tuning", track->getFallbackInstrumentParam("drumTuning"), -12.0f, 12.0f, 0.0f, "st", "drums");
+    addContinuousParam(params, "drumAmbience", "Drum Room", track->getFallbackInstrumentParam("drumAmbience"), 0.0f, 1.0f, 0.18f, {}, "drums");
+    addContinuousParam(params, "outputGainDb", "Output", track->getFallbackInstrumentParam("outputGainDb"), -36.0f, 0.0f, -15.0f, "dB", "output");
+
+    const juce::String name = track->hasFallbackSamplerSample()
+        ? "OpenStudio Basic Sampler"
+        : (mode == 1 ? "OpenStudio Piano" : (mode == 2 ? "OpenStudio Drums" : "OpenStudio Basic Synth"));
+    return makeBuiltInSchemaObject(name,
+                                   "Instrument", chainType, fxIndex, params);
+}
+
+static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
+                                          const juce::String& chainType,
+                                          int fxIndex)
+{
+    juce::Array<juce::var> params;
+    if (processor == nullptr)
+        return makeBuiltInSchemaObject({}, {}, chainType, fxIndex, params);
+
+    if (auto* synth = dynamic_cast<S13BasicSynthInstrument*>(processor))
+    {
+        addContinuousParam(params, "attackMs", "Attack", synth->attackMs.load(), 0.5f, 2000.0f, 8.0f, "ms", "envelope");
+        addContinuousParam(params, "releaseMs", "Release", synth->releaseMs.load(), 5.0f, 5000.0f, 180.0f, "ms", "envelope");
+        addContinuousParam(params, "brightness", "Brightness", synth->brightness.load(), 0.0f, 1.0f, 0.62f, {}, "tone");
+        addContinuousParam(params, "detuneCents", "Detune", synth->detuneCents.load(), 0.0f, 35.0f, 7.0f, "ct", "oscillator");
+        addContinuousParam(params, "subLevel", "Sub", synth->subLevel.load(), 0.0f, 0.8f, 0.18f, {}, "oscillator");
+        addContinuousParam(params, "noiseLevel", "Air", synth->noiseLevel.load(), 0.0f, 0.25f, 0.015f, {}, "oscillator");
+        addContinuousParam(params, "outputGain", "Output", synth->outputGain.load(), -36.0f, 0.0f, -15.0f, "dB", "output");
+        return makeBuiltInSchemaObject(synth->getName(), "Instrument", chainType, fxIndex, params);
+    }
+
+    if (auto* piano = dynamic_cast<S13PianoInstrument*>(processor))
+    {
+        addEnumParam(params, "model", "Model", piano->model.load(), 0.0f, makeEnumOptions({ "Studio Grand", "Bright Upright", "Soft Felt" }), "character");
+        addContinuousParam(params, "tone", "Tone", piano->tone.load(), 0.0f, 1.0f, 0.58f, {}, "tone");
+        addContinuousParam(params, "body", "Body", piano->body.load(), 0.0f, 1.0f, 0.72f, {}, "body");
+        addContinuousParam(params, "hammer", "Hammer", piano->hammer.load(), 0.0f, 1.0f, 0.42f, {}, "character");
+        addContinuousParam(params, "resonance", "Resonance", piano->resonance.load(), 0.0f, 1.0f, 0.38f, {}, "body");
+        addContinuousParam(params, "stereoWidth", "Width", piano->stereoWidth.load(), 0.0f, 1.0f, 0.62f, {}, "width");
+        addContinuousParam(params, "releaseMs", "Release", piano->releaseMs.load(), 80.0f, 5000.0f, 950.0f, "ms", "envelope");
+        addContinuousParam(params, "outputGain", "Output", piano->outputGain.load(), -36.0f, 0.0f, -15.0f, "dB", "output");
+        return makeBuiltInSchemaObject(piano->getName(), "Instrument", chainType, fxIndex, params);
+    }
+
+    if (auto* drums = dynamic_cast<S13DrumInstrument*>(processor))
+    {
+        addEnumParam(params, "kit", "Kit", drums->kit.load(), 0.0f, makeEnumOptions({ "Studio", "Rock", "Electronic" }), "drums");
+        addEnumParam(params, "mapPreset", "MIDI Map", drums->mapPreset.load(), 0.0f, makeEnumOptions({ "GM", "Roland TD" }), "drums");
+        addContinuousParam(params, "tuning", "Tuning", drums->tuning.load(), -12.0f, 12.0f, 0.0f, "st", "drums");
+        addContinuousParam(params, "ambience", "Room", drums->ambience.load(), 0.0f, 1.0f, 0.18f, {}, "space");
+        addContinuousParam(params, "hihatTightness", "Hat Tightness", drums->hihatTightness.load(), 0.0f, 1.0f, 0.65f, {}, "drums");
+        addContinuousParam(params, "punch", "Punch", drums->punch.load(), 0.0f, 1.0f, 0.55f, {}, "character");
+        addContinuousParam(params, "stereoWidth", "Width", drums->stereoWidth.load(), 0.0f, 1.0f, 0.7f, {}, "width");
+        addContinuousParam(params, "velocityCurve", "Velocity Curve", drums->velocityCurve.load(), -1.0f, 1.0f, 0.0f, {}, "drums");
+        addContinuousParam(params, "outputGain", "Output", drums->outputGain.load(), -36.0f, 0.0f, -10.0f, "dB", "output");
+        return makeBuiltInSchemaObject(drums->getName(), "Instrument", chainType, fxIndex, params);
+    }
+
+    if (auto* eq = dynamic_cast<S13EQ*>(processor))
+    {
+        const auto types = makeEnumOptions({ "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Notch", "Band Pass" });
+        const auto slopes = makeEnumOptions({ "6 dB/oct", "12 dB/oct", "24 dB/oct", "48 dB/oct" });
+        for (int band = 0; band < S13EQ::numBands; ++band)
+        {
+            const auto prefix = "band" + juce::String(band) + ".";
+            const auto bandLabel = "Band " + juce::String(band + 1) + " ";
+            addToggleParam(params, prefix + "enabled", bandLabel + "On", eq->bands[band].enabled.load(), band == 0 || band == S13EQ::numBands - 1 ? 0.0f : 1.0f, "eqBand");
+            addEnumParam(params, prefix + "type", bandLabel + "Type", eq->bands[band].type.load(), 0.0f, types, "eqBand");
+            addContinuousParam(params, prefix + "freq", bandLabel + "Freq", eq->bands[band].freq.load(), 20.0f, 20000.0f, 1000.0f, "Hz", "eqBand");
+            addContinuousParam(params, prefix + "gain", bandLabel + "Gain", eq->bands[band].gain.load(), -30.0f, 30.0f, 0.0f, "dB", "eqBand");
+            addContinuousParam(params, prefix + "q", bandLabel + "Q", eq->bands[band].q.load(), 0.1f, 30.0f, 1.0f, {}, "eqBand");
+            addEnumParam(params, prefix + "slope", bandLabel + "Slope", eq->bands[band].slope.load(), 1.0f, slopes, "eqBand");
+            addToggleParam(params, prefix + "dynamicEnabled", bandLabel + "Dyn", eq->bands[band].dynamicEnabled.load(), 0.0f, "dynamic");
+            addContinuousParam(params, prefix + "dynamicThreshold", bandLabel + "Dyn Thresh", eq->bands[band].dynamicThreshold.load(), -80.0f, 0.0f, -24.0f, "dB", "dynamic");
+            addContinuousParam(params, prefix + "dynamicRange", bandLabel + "Dyn Range", eq->bands[band].dynamicRange.load(), -24.0f, 24.0f, 0.0f, "dB", "dynamic");
+            addContinuousParam(params, prefix + "dynamicAttack", bandLabel + "Dyn Attack", eq->bands[band].dynamicAttack.load(), 0.2f, 250.0f, 10.0f, "ms", "dynamic");
+            addContinuousParam(params, prefix + "dynamicRelease", bandLabel + "Dyn Release", eq->bands[band].dynamicRelease.load(), 5.0f, 2000.0f, 150.0f, "ms", "dynamic");
+        }
+        addContinuousParam(params, "outputGain", "Output", eq->outputGain.load(), -12.0f, 12.0f, 0.0f, "dB", "output");
+        addToggleParam(params, "autoGain", "Auto Gain", eq->autoGain.load(), 0.0f, "output");
+        addEnumParam(params, "auditionBand", "Audition", eq->auditionBand.load(), 0.0f,
+                     makeEnumOptions({ "Off", "Band 1", "Band 2", "Band 3", "Band 4", "Band 5", "Band 6", "Band 7", "Band 8" }), "eqBand");
+        addEnumParam(params, "stereoMode", "Processing", eq->stereoMode.load(), 0.0f, makeEnumOptions({ "Stereo", "Mid", "Side" }), "routing");
+
+        auto schema = makeBuiltInSchemaObject(eq->getName(), "EQ", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            std::vector<float> frequencies;
+            frequencies.reserve(96);
+            for (int i = 0; i < 96; ++i)
+            {
+                const float t = static_cast<float>(i) / 95.0f;
+                frequencies.push_back(20.0f * std::pow(1000.0f, t));
+            }
+
+            auto response = eq->getMagnitudeResponse(frequencies);
+            auto spectrum = eq->getSpectrumData();
+            std::vector<float> dynamicGains;
+            dynamicGains.reserve(S13EQ::numBands);
+            for (int band = 0; band < S13EQ::numBands; ++band)
+                dynamicGains.push_back(eq->getBandDynamicGainDB(band));
+            const double sr = eq->getSampleRate() > 0.0 ? eq->getSampleRate() : 44100.0;
+            std::vector<float> preSpectrum;
+            std::vector<float> postSpectrum;
+            preSpectrum.reserve(frequencies.size());
+            postSpectrum.reserve(frequencies.size());
+            for (float freq : frequencies)
+            {
+                const int bin = juce::jlimit(0, S13EQ::fftSize / 2 - 1,
+                                             static_cast<int>(std::round((static_cast<double>(freq) / (sr * 0.5)) * static_cast<double>(S13EQ::fftSize / 2 - 1))));
+                preSpectrum.push_back(spectrum.ready ? spectrum.preEQ[static_cast<size_t>(bin)] : -100.0f);
+                postSpectrum.push_back(spectrum.ready ? spectrum.postEQ[static_cast<size_t>(bin)] : -100.0f);
+            }
+
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("frequencies", makeFloatVarArray(frequencies));
+            viz->setProperty("responseDb", makeFloatVarArray(response));
+            viz->setProperty("spectrumPreDb", makeFloatVarArray(preSpectrum));
+            viz->setProperty("spectrumPostDb", makeFloatVarArray(postSpectrum));
+            viz->setProperty("dynamicGainDb", makeFloatVarArray(dynamicGains));
+            viz->setProperty("spectrumReady", spectrum.ready);
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* compressor = dynamic_cast<S13Compressor*>(processor))
+    {
+        addContinuousParam(params, "threshold", "Threshold", compressor->threshold.load(), -60.0f, 0.0f, 0.0f, "dB", "dynamics");
+        addContinuousParam(params, "ratio", "Ratio", compressor->ratio.load(), 1.0f, 20.0f, 1.0f, ":1", "dynamics");
+        addContinuousParam(params, "attack", "Attack", compressor->attack.load(), 0.1f, 100.0f, 10.0f, "ms", "dynamics");
+        addContinuousParam(params, "release", "Release", compressor->release.load(), 10.0f, 2000.0f, 100.0f, "ms", "dynamics");
+        addContinuousParam(params, "knee", "Knee", compressor->knee.load(), 0.0f, 24.0f, 0.0f, "dB", "dynamics");
+        addContinuousParam(params, "makeupGain", "Makeup", compressor->makeupGain.load(), 0.0f, 36.0f, 0.0f, "dB", "output");
+        addContinuousParam(params, "mix", "Mix", compressor->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addEnumParam(params, "style", "Style", compressor->style.load(), 0.0f, makeEnumOptions({ "Clean", "Punch", "Opto", "FET", "VCA" }), "character");
+        addToggleParam(params, "autoMakeup", "Auto Makeup", compressor->autoMakeup.load(), 0.0f, "output");
+        addToggleParam(params, "autoRelease", "Auto Release", compressor->autoRelease.load(), 0.0f, "dynamics");
+        addContinuousParam(params, "sidechainHPF", "SC HPF", compressor->sidechainHPF.load(), 20.0f, 500.0f, 20.0f, "Hz", "sidechain");
+        addContinuousParam(params, "lookaheadMs", "Lookahead", compressor->lookaheadMs.load(), 0.0f, 20.0f, 0.0f, "ms", "dynamics");
+        addEnumParam(params, "detectorMode", "Detector", compressor->detectorMode.load(), 0.0f, makeEnumOptions({ "Peak", "RMS", "Auto" }), "detection");
+        addContinuousParam(params, "stereoLink", "Stereo Link", compressor->stereoLink.load(), 0.0f, 1.0f, 1.0f, {}, "detection");
+        auto schema = makeBuiltInSchemaObject(compressor->getName(), "Dynamics", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("gainReductionDb", compressor->getCurrentGainReduction());
+            viz->setProperty("inputLevelDb", compressor->getInputLevel());
+            viz->setProperty("outputLevelDb", compressor->getOutputLevel());
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* gate = dynamic_cast<S13Gate*>(processor))
+    {
+        addContinuousParam(params, "threshold", "Threshold", gate->threshold.load(), -80.0f, 0.0f, -40.0f, "dB", "dynamics");
+        addContinuousParam(params, "attackMs", "Attack", gate->attackMs.load(), 0.01f, 50.0f, 1.0f, "ms", "dynamics");
+        addContinuousParam(params, "holdMs", "Hold", gate->holdMs.load(), 0.0f, 500.0f, 50.0f, "ms", "dynamics");
+        addContinuousParam(params, "releaseMs", "Release", gate->releaseMs.load(), 5.0f, 2000.0f, 50.0f, "ms", "dynamics");
+        addContinuousParam(params, "range", "Range", gate->range.load(), -80.0f, 0.0f, -80.0f, "dB", "dynamics");
+        addContinuousParam(params, "hysteresis", "Hysteresis", gate->hysteresis.load(), 0.0f, 20.0f, 0.0f, "dB", "dynamics");
+        addContinuousParam(params, "sidechainHPF", "SC HPF", gate->sidechainHPF.load(), 20.0f, 2000.0f, 20.0f, "Hz", "sidechain");
+        addContinuousParam(params, "sidechainLPF", "SC LPF", gate->sidechainLPF.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "sidechain");
+        addContinuousParam(params, "mix", "Mix", gate->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addEnumParam(params, "detectorMode", "Detector", gate->detectorMode.load(), 0.0f, makeEnumOptions({ "Peak", "RMS", "Auto" }), "detection");
+        auto schema = makeBuiltInSchemaObject(gate->getName(), "Dynamics", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("gainReductionDb", gate->getGainReductionDB());
+            viz->setProperty("gateOpen", gate->isGateOpen());
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* limiter = dynamic_cast<S13Limiter*>(processor))
+    {
+        addContinuousParam(params, "threshold", "Threshold", limiter->threshold.load(), -20.0f, 0.0f, -1.0f, "dB", "dynamics");
+        addContinuousParam(params, "releaseMs", "Release", limiter->releaseMs.load(), 10.0f, 500.0f, 100.0f, "ms", "dynamics");
+        addContinuousParam(params, "ceiling", "Ceiling", limiter->ceiling.load(), -3.0f, 0.0f, 0.0f, "dB", "output");
+        addContinuousParam(params, "lookaheadMs", "Lookahead", limiter->lookaheadMs.load(), 0.0f, 20.0f, 5.0f, "ms", "dynamics");
+        auto schema = makeBuiltInSchemaObject(limiter->getName(), "Dynamics", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("gainReductionDb", limiter->getGainReductionDB());
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    if (auto* delay = dynamic_cast<S13Delay*>(processor))
+    {
+        addContinuousParam(params, "delayTimeL", "Delay L", delay->delayTimeL.load(), 1.0f, 2000.0f, 250.0f, "ms", "time");
+        addContinuousParam(params, "delayTimeR", "Delay R", delay->delayTimeR.load(), 1.0f, 2000.0f, 250.0f, "ms", "time");
+        addContinuousParam(params, "feedback", "Feedback", delay->feedback.load(), 0.0f, 0.95f, 0.4f, {}, "feedback");
+        addContinuousParam(params, "crossFeed", "Crossfeed", delay->crossFeed.load(), 0.0f, 0.95f, 0.0f, {}, "feedback");
+        addContinuousParam(params, "mix", "Mix", delay->mix.load(), 0.0f, 1.0f, 0.5f, {}, "mix");
+        addToggleParam(params, "pingPong", "Ping Pong", delay->pingPong.load(), 0.0f, "time");
+        addToggleParam(params, "tempoSync", "Sync", delay->tempoSync.load(), 0.0f, "time");
+        addEnumParam(params, "syncNoteL", "Note L", delay->syncNoteL.load(), 0.0f, makeEnumOptions({ "1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/4D", "1/8D" }), "time");
+        addEnumParam(params, "syncNoteR", "Note R", delay->syncNoteR.load(), 0.0f, makeEnumOptions({ "1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/4D", "1/8D" }), "time");
+        addContinuousParam(params, "lpfFreq", "LPF", delay->lpfFreq.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "hpfFreq", "HPF", delay->hpfFreq.load(), 20.0f, 2000.0f, 20.0f, "Hz", "tone");
+        addContinuousParam(params, "fbSaturation", "Saturation", delay->fbSaturation.load(), 0.0f, 1.0f, 0.0f, {}, "character");
+        addContinuousParam(params, "stereoWidth", "Width", delay->stereoWidth.load(), 0.0f, 2.0f, 1.0f, {}, "width");
+        addEnumParam(params, "delayMode", "Mode", delay->delayMode.load(), 0.0f, makeEnumOptions({ "Digital", "Tape", "Analog" }), "character");
+        addContinuousParam(params, "ducking", "Ducking", delay->ducking.load(), 0.0f, 1.0f, 0.0f, {}, "dynamics");
+        return makeBuiltInSchemaObject(delay->getName(), "Delay", chainType, fxIndex, params);
+    }
+
+    if (auto* reverb = dynamic_cast<S13Reverb*>(processor))
+    {
+        addEnumParam(params, "algorithm", "Algorithm", reverb->algorithm.load(), 0.0f, makeEnumOptions({ "Room", "Hall", "Plate", "Chamber", "Shimmer" }), "space");
+        addContinuousParam(params, "roomSize", "Size", reverb->roomSize.load(), 0.0f, 1.0f, 0.5f, {}, "space");
+        addContinuousParam(params, "damping", "Damping", reverb->damping.load(), 0.0f, 1.0f, 0.5f, {}, "tone");
+        addContinuousParam(params, "wetLevel", "Wet", reverb->wetLevel.load(), 0.0f, 1.0f, 0.33f, {}, "mix");
+        addContinuousParam(params, "dryLevel", "Dry", reverb->dryLevel.load(), 0.0f, 1.0f, 0.7f, {}, "mix");
+        addContinuousParam(params, "width", "Width", reverb->width.load(), 0.0f, 1.0f, 1.0f, {}, "width");
+        addToggleParam(params, "freezeMode", "Freeze", reverb->freezeMode.load(), 0.0f, "space");
+        addContinuousParam(params, "preDelay", "Pre-delay", reverb->preDelay.load(), 0.0f, 500.0f, 0.0f, "ms", "time");
+        addContinuousParam(params, "diffusion", "Diffusion", reverb->diffusion.load(), 0.0f, 1.0f, 0.5f, {}, "space");
+        addContinuousParam(params, "lowCut", "Low Cut", reverb->lowCut.load(), 20.0f, 500.0f, 20.0f, "Hz", "tone");
+        addContinuousParam(params, "highCut", "High Cut", reverb->highCut.load(), 1000.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "earlyLevel", "Early", reverb->earlyLevel.load(), 0.0f, 1.0f, 0.5f, {}, "space");
+        addContinuousParam(params, "decayTime", "Decay", reverb->decayTime.load(), 0.1f, 20.0f, 2.0f, "s", "space");
+        return makeBuiltInSchemaObject(reverb->getName(), "Reverb", chainType, fxIndex, params);
+    }
+
+    if (auto* chorus = dynamic_cast<S13Chorus*>(processor))
+    {
+        addEnumParam(params, "mode", "Mode", chorus->mode.load(), 0.0f, makeEnumOptions({ "Chorus", "Flanger", "Phaser" }), "modulation");
+        addContinuousParam(params, "rate", "Rate", chorus->rate.load(), 0.01f, 20.0f, 1.0f, "Hz", "modulation");
+        addContinuousParam(params, "depth", "Depth", chorus->depth.load(), 0.0f, 1.0f, 0.5f, {}, "modulation");
+        addContinuousParam(params, "fbAmount", "Feedback", chorus->fbAmount.load(), -1.0f, 1.0f, 0.0f, {}, "feedback");
+        addContinuousParam(params, "mix", "Mix", chorus->mix.load(), 0.0f, 1.0f, 0.5f, {}, "mix");
+        addContinuousParam(params, "voices", "Voices", chorus->voices.load(), 1.0f, 6.0f, 2.0f, {}, "modulation");
+        addEnumParam(params, "lfoShape", "LFO", chorus->lfoShape.load(), 0.0f, makeEnumOptions({ "Sine", "Triangle", "Square", "S&H" }), "modulation");
+        addContinuousParam(params, "spread", "Spread", chorus->spread.load(), 0.0f, 1.0f, 0.5f, {}, "width");
+        addEnumParam(params, "characterMode", "Character", chorus->characterMode.load(), 0.0f, makeEnumOptions({ "Clean", "Ensemble", "BBD" }), "character");
+        addContinuousParam(params, "highCut", "High Cut", chorus->highCut.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "lowCut", "Low Cut", chorus->lowCut.load(), 20.0f, 2000.0f, 20.0f, "Hz", "tone");
+        addToggleParam(params, "tempoSync", "Sync", chorus->tempoSync.load(), 0.0f, "modulation");
+        return makeBuiltInSchemaObject(chorus->getName(), "Modulation", chainType, fxIndex, params);
+    }
+
+    if (auto* saturator = dynamic_cast<S13Saturator*>(processor))
+    {
+        addEnumParam(params, "satType", "Type", saturator->satType.load(), 0.0f, makeEnumOptions({ "Tape", "Tube", "Transistor", "Clip", "Crush", "Console", "Transformer", "Foldback" }), "character");
+        addContinuousParam(params, "drive", "Drive", saturator->drive.load(), 0.0f, 30.0f, 6.0f, "dB", "drive");
+        addContinuousParam(params, "mix", "Mix", saturator->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addContinuousParam(params, "toneFreq", "Tone", saturator->toneFreq.load(), 200.0f, 20000.0f, 20000.0f, "Hz", "tone");
+        addContinuousParam(params, "lowCutFreq", "Low Cut", saturator->lowCutFreq.load(), 20.0f, 1000.0f, 20.0f, "Hz", "tone");
+        addContinuousParam(params, "outputGain", "Output", saturator->outputGain.load(), -12.0f, 0.0f, 0.0f, "dB", "output");
+        addContinuousParam(params, "asymmetry", "Bias", saturator->asymmetry.load(), -1.0f, 1.0f, 0.0f, {}, "character");
+        addEnumParam(params, "oversampleMode", "Oversampling", saturator->oversampleMode.load(), 1.0f, makeEnumOptions({ "Off", "2x", "4x" }), "quality");
+        return makeBuiltInSchemaObject(saturator->getName(), "Saturation", chainType, fxIndex, params);
+    }
+
+    if (auto* pitch = dynamic_cast<S13PitchCorrector*>(processor))
+    {
+        auto& mapper = pitch->getMapper();
+        addToggleParam(params, "bypass", "Bypass", pitch->bypass.load(), 0.0f, "mix");
+        addContinuousParam(params, "mix", "Mix", pitch->mix.load(), 0.0f, 1.0f, 1.0f, {}, "mix");
+        addContinuousParam(params, "sensitivity", "Sensitivity", pitch->sensitivity.load(), 0.02f, 0.35f, 0.15f, {}, "detection");
+        addContinuousParam(params, "minFreqParam", "Min Freq", pitch->minFreqParam.load(), 40.0f, 400.0f, 80.0f, "Hz", "detection");
+        addContinuousParam(params, "maxFreqParam", "Max Freq", pitch->maxFreqParam.load(), 400.0f, 4000.0f, 1000.0f, "Hz", "detection");
+        addEnumParam(params, "key", "Key", static_cast<float>(mapper.getKey()), 0.0f, makeEnumOptions({ "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }), "scale");
+        addEnumParam(params, "scale", "Scale", static_cast<float>(mapper.getScale()), 0.0f,
+                     makeEnumOptions({ "Chromatic", "Major", "Natural Minor", "Harmonic Minor", "Melodic Minor", "Pentatonic Major", "Pentatonic Minor", "Blues", "Dorian", "Mixolydian", "Lydian", "Phrygian", "Locrian", "Whole Tone", "Diminished", "Custom" }), "scale");
+        addContinuousParam(params, "retuneSpeed", "Retune", mapper.getRetuneSpeed(), 0.0f, 400.0f, 50.0f, "ms", "correction");
+        addContinuousParam(params, "humanize", "Humanize", mapper.getHumanize(), 0.0f, 100.0f, 0.0f, "%", "correction");
+        addContinuousParam(params, "transpose", "Transpose", static_cast<float>(mapper.getTranspose()), -24.0f, 24.0f, 0.0f, "st", "correction");
+        addContinuousParam(params, "correctionStrength", "Strength", mapper.getCorrectionStrength(), 0.0f, 1.0f, 1.0f, {}, "correction");
+        addToggleParam(params, "formantCorrection", "Formants", mapper.getFormantCorrection() ? 1.0f : 0.0f, 0.0f, "formant");
+        addContinuousParam(params, "formantShift", "Formant Shift", mapper.getFormantShift(), -12.0f, 12.0f, 0.0f, "st", "formant");
+        addToggleParam(params, "midiOutputEnabled", "MIDI Out", pitch->midiOutputEnabled.load(), 0.0f, "midi");
+        addContinuousParam(params, "midiOutputChannel", "MIDI Ch", pitch->midiOutputChannel.load(), 1.0f, 16.0f, 1.0f, {}, "midi");
+        auto schema = makeBuiltInSchemaObject(pitch->getName(), "Pitch", chainType, fxIndex, params);
+        if (auto* schemaObject = schema.getDynamicObject())
+        {
+            const auto pitchData = pitch->getCurrentPitchData();
+            const auto history = pitch->getPitchHistory(96);
+            std::vector<float> detectedMidi;
+            std::vector<float> correctedMidi;
+            std::vector<float> confidence;
+            detectedMidi.reserve(history.size());
+            correctedMidi.reserve(history.size());
+            confidence.reserve(history.size());
+            for (const auto& frame : history)
+            {
+                detectedMidi.push_back(frame.detectedMidi);
+                correctedMidi.push_back(frame.correctedMidi);
+                confidence.push_back(frame.confidence);
+            }
+
+            juce::DynamicObject::Ptr viz = new juce::DynamicObject();
+            viz->setProperty("detectedHz", pitchData.detectedHz);
+            viz->setProperty("correctedHz", pitchData.correctedHz);
+            viz->setProperty("confidence", pitchData.confidence);
+            viz->setProperty("centsDeviation", pitchData.centsDeviation);
+            viz->setProperty("noteName", pitchData.noteName);
+            viz->setProperty("historyDetectedMidi", makeFloatVarArray(detectedMidi));
+            viz->setProperty("historyCorrectedMidi", makeFloatVarArray(correctedMidi));
+            viz->setProperty("historyConfidence", makeFloatVarArray(confidence));
+            schemaObject->setProperty("visualization", viz.get());
+        }
+        return schema;
+    }
+
+    return makeBuiltInSchemaObject(processor->getName(), "Built-in", chainType, fxIndex, params);
+}
+
+static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce::String& paramId, float value)
+{
+    if (processor == nullptr)
+        return false;
+
+    if (auto* synth = dynamic_cast<S13BasicSynthInstrument*>(processor))
+    {
+        if (paramId == "attackMs") return storeClamped(synth->attackMs, value, 0.5f, 2000.0f);
+        if (paramId == "releaseMs") return storeClamped(synth->releaseMs, value, 5.0f, 5000.0f);
+        if (paramId == "brightness") return storeClamped(synth->brightness, value, 0.0f, 1.0f);
+        if (paramId == "detuneCents") return storeClamped(synth->detuneCents, value, 0.0f, 35.0f);
+        if (paramId == "subLevel") return storeClamped(synth->subLevel, value, 0.0f, 0.8f);
+        if (paramId == "noiseLevel") return storeClamped(synth->noiseLevel, value, 0.0f, 0.25f);
+        if (paramId == "outputGain") return storeClamped(synth->outputGain, value, -36.0f, 0.0f);
+        return false;
+    }
+
+    if (auto* piano = dynamic_cast<S13PianoInstrument*>(processor))
+    {
+        if (paramId == "model") return storeClamped(piano->model, value, 0.0f, 2.0f);
+        if (paramId == "tone") return storeClamped(piano->tone, value, 0.0f, 1.0f);
+        if (paramId == "body") return storeClamped(piano->body, value, 0.0f, 1.0f);
+        if (paramId == "hammer") return storeClamped(piano->hammer, value, 0.0f, 1.0f);
+        if (paramId == "resonance") return storeClamped(piano->resonance, value, 0.0f, 1.0f);
+        if (paramId == "stereoWidth") return storeClamped(piano->stereoWidth, value, 0.0f, 1.0f);
+        if (paramId == "releaseMs") return storeClamped(piano->releaseMs, value, 80.0f, 5000.0f);
+        if (paramId == "outputGain") return storeClamped(piano->outputGain, value, -36.0f, 0.0f);
+        return false;
+    }
+
+    if (auto* drums = dynamic_cast<S13DrumInstrument*>(processor))
+    {
+        if (paramId == "kit") return storeClamped(drums->kit, value, 0.0f, 2.0f);
+        if (paramId == "mapPreset") return storeClamped(drums->mapPreset, value, 0.0f, 1.0f);
+        if (paramId == "tuning") return storeClamped(drums->tuning, value, -12.0f, 12.0f);
+        if (paramId == "ambience") return storeClamped(drums->ambience, value, 0.0f, 1.0f);
+        if (paramId == "hihatTightness") return storeClamped(drums->hihatTightness, value, 0.0f, 1.0f);
+        if (paramId == "punch") return storeClamped(drums->punch, value, 0.0f, 1.0f);
+        if (paramId == "stereoWidth") return storeClamped(drums->stereoWidth, value, 0.0f, 1.0f);
+        if (paramId == "velocityCurve") return storeClamped(drums->velocityCurve, value, -1.0f, 1.0f);
+        if (paramId == "outputGain") return storeClamped(drums->outputGain, value, -36.0f, 0.0f);
+        return false;
+    }
+
+    if (auto* eq = dynamic_cast<S13EQ*>(processor))
+    {
+        if (paramId == "outputGain") return storeClamped(eq->outputGain, value, -12.0f, 12.0f);
+        if (paramId == "autoGain") return storeClamped(eq->autoGain, value, 0.0f, 1.0f);
+        if (paramId == "auditionBand") return storeClamped(eq->auditionBand, value, 0.0f, 8.0f);
+        if (paramId == "stereoMode") return storeClamped(eq->stereoMode, value, 0.0f, 2.0f);
+        if (paramId.startsWith("band"))
+        {
+            const int dot = paramId.indexOfChar('.');
+            const int band = paramId.substring(4, dot).getIntValue();
+            if (band < 0 || band >= S13EQ::numBands || dot < 0)
+                return false;
+            const auto field = paramId.substring(dot + 1);
+            auto& params = eq->bands[band];
+            if (field == "enabled") return storeClamped(params.enabled, value, 0.0f, 1.0f);
+            if (field == "type") return storeClamped(params.type, value, 0.0f, 6.0f);
+            if (field == "freq") return storeClamped(params.freq, value, 20.0f, 20000.0f);
+            if (field == "gain") return storeClamped(params.gain, value, -30.0f, 30.0f);
+            if (field == "q") return storeClamped(params.q, value, 0.1f, 30.0f);
+            if (field == "slope") return storeClamped(params.slope, value, 0.0f, 3.0f);
+            if (field == "dynamicEnabled") return storeClamped(params.dynamicEnabled, value, 0.0f, 1.0f);
+            if (field == "dynamicThreshold") return storeClamped(params.dynamicThreshold, value, -80.0f, 0.0f);
+            if (field == "dynamicRange") return storeClamped(params.dynamicRange, value, -24.0f, 24.0f);
+            if (field == "dynamicAttack") return storeClamped(params.dynamicAttack, value, 0.2f, 250.0f);
+            if (field == "dynamicRelease") return storeClamped(params.dynamicRelease, value, 5.0f, 2000.0f);
+        }
+        return false;
+    }
+
+    if (auto* compressor = dynamic_cast<S13Compressor*>(processor))
+    {
+        if (paramId == "threshold") return storeClamped(compressor->threshold, value, -60.0f, 0.0f);
+        if (paramId == "ratio") return storeClamped(compressor->ratio, value, 1.0f, 20.0f);
+        if (paramId == "attack") return storeClamped(compressor->attack, value, 0.1f, 100.0f);
+        if (paramId == "release") return storeClamped(compressor->release, value, 10.0f, 2000.0f);
+        if (paramId == "knee") return storeClamped(compressor->knee, value, 0.0f, 24.0f);
+        if (paramId == "makeupGain") return storeClamped(compressor->makeupGain, value, 0.0f, 36.0f);
+        if (paramId == "mix") return storeClamped(compressor->mix, value, 0.0f, 1.0f);
+        if (paramId == "style") return storeClamped(compressor->style, value, 0.0f, 4.0f);
+        if (paramId == "autoMakeup") return storeClamped(compressor->autoMakeup, value, 0.0f, 1.0f);
+        if (paramId == "autoRelease") return storeClamped(compressor->autoRelease, value, 0.0f, 1.0f);
+        if (paramId == "sidechainHPF") return storeClamped(compressor->sidechainHPF, value, 20.0f, 500.0f);
+        if (paramId == "lookaheadMs") return storeClamped(compressor->lookaheadMs, value, 0.0f, 20.0f);
+        if (paramId == "detectorMode") return storeClamped(compressor->detectorMode, value, 0.0f, 2.0f);
+        if (paramId == "stereoLink") return storeClamped(compressor->stereoLink, value, 0.0f, 1.0f);
+        return false;
+    }
+
+    if (auto* gate = dynamic_cast<S13Gate*>(processor))
+    {
+        if (paramId == "threshold") return storeClamped(gate->threshold, value, -80.0f, 0.0f);
+        if (paramId == "attackMs") return storeClamped(gate->attackMs, value, 0.01f, 50.0f);
+        if (paramId == "holdMs") return storeClamped(gate->holdMs, value, 0.0f, 500.0f);
+        if (paramId == "releaseMs") return storeClamped(gate->releaseMs, value, 5.0f, 2000.0f);
+        if (paramId == "range") return storeClamped(gate->range, value, -80.0f, 0.0f);
+        if (paramId == "hysteresis") return storeClamped(gate->hysteresis, value, 0.0f, 20.0f);
+        if (paramId == "sidechainHPF") return storeClamped(gate->sidechainHPF, value, 20.0f, 2000.0f);
+        if (paramId == "sidechainLPF") return storeClamped(gate->sidechainLPF, value, 200.0f, 20000.0f);
+        if (paramId == "mix") return storeClamped(gate->mix, value, 0.0f, 1.0f);
+        if (paramId == "detectorMode") return storeClamped(gate->detectorMode, value, 0.0f, 2.0f);
+        return false;
+    }
+
+    if (auto* limiter = dynamic_cast<S13Limiter*>(processor))
+    {
+        if (paramId == "threshold") return storeClamped(limiter->threshold, value, -20.0f, 0.0f);
+        if (paramId == "releaseMs") return storeClamped(limiter->releaseMs, value, 10.0f, 500.0f);
+        if (paramId == "ceiling") return storeClamped(limiter->ceiling, value, -3.0f, 0.0f);
+        if (paramId == "lookaheadMs") return storeClamped(limiter->lookaheadMs, value, 0.0f, 20.0f);
+        return false;
+    }
+
+    if (auto* delay = dynamic_cast<S13Delay*>(processor))
+    {
+        if (paramId == "delayTimeL") return storeClamped(delay->delayTimeL, value, 1.0f, 2000.0f);
+        if (paramId == "delayTimeR") return storeClamped(delay->delayTimeR, value, 1.0f, 2000.0f);
+        if (paramId == "feedback") return storeClamped(delay->feedback, value, 0.0f, 0.95f);
+        if (paramId == "crossFeed") return storeClamped(delay->crossFeed, value, 0.0f, 0.95f);
+        if (paramId == "mix") return storeClamped(delay->mix, value, 0.0f, 1.0f);
+        if (paramId == "pingPong") return storeClamped(delay->pingPong, value, 0.0f, 1.0f);
+        if (paramId == "tempoSync") return storeClamped(delay->tempoSync, value, 0.0f, 1.0f);
+        if (paramId == "syncNoteL") return storeClamped(delay->syncNoteL, value, 0.0f, 8.0f);
+        if (paramId == "syncNoteR") return storeClamped(delay->syncNoteR, value, 0.0f, 8.0f);
+        if (paramId == "lpfFreq") return storeClamped(delay->lpfFreq, value, 200.0f, 20000.0f);
+        if (paramId == "hpfFreq") return storeClamped(delay->hpfFreq, value, 20.0f, 2000.0f);
+        if (paramId == "fbSaturation") return storeClamped(delay->fbSaturation, value, 0.0f, 1.0f);
+        if (paramId == "stereoWidth") return storeClamped(delay->stereoWidth, value, 0.0f, 2.0f);
+        if (paramId == "delayMode") return storeClamped(delay->delayMode, value, 0.0f, 2.0f);
+        if (paramId == "ducking") return storeClamped(delay->ducking, value, 0.0f, 1.0f);
+        return false;
+    }
+
+    if (auto* reverb = dynamic_cast<S13Reverb*>(processor))
+    {
+        if (paramId == "algorithm") return storeClamped(reverb->algorithm, value, 0.0f, 4.0f);
+        if (paramId == "roomSize") return storeClamped(reverb->roomSize, value, 0.0f, 1.0f);
+        if (paramId == "damping") return storeClamped(reverb->damping, value, 0.0f, 1.0f);
+        if (paramId == "wetLevel") return storeClamped(reverb->wetLevel, value, 0.0f, 1.0f);
+        if (paramId == "dryLevel") return storeClamped(reverb->dryLevel, value, 0.0f, 1.0f);
+        if (paramId == "width") return storeClamped(reverb->width, value, 0.0f, 1.0f);
+        if (paramId == "freezeMode") return storeClamped(reverb->freezeMode, value, 0.0f, 1.0f);
+        if (paramId == "preDelay") return storeClamped(reverb->preDelay, value, 0.0f, 500.0f);
+        if (paramId == "diffusion") return storeClamped(reverb->diffusion, value, 0.0f, 1.0f);
+        if (paramId == "lowCut") return storeClamped(reverb->lowCut, value, 20.0f, 500.0f);
+        if (paramId == "highCut") return storeClamped(reverb->highCut, value, 1000.0f, 20000.0f);
+        if (paramId == "earlyLevel") return storeClamped(reverb->earlyLevel, value, 0.0f, 1.0f);
+        if (paramId == "decayTime") return storeClamped(reverb->decayTime, value, 0.1f, 20.0f);
+        return false;
+    }
+
+    if (auto* chorus = dynamic_cast<S13Chorus*>(processor))
+    {
+        if (paramId == "mode") return storeClamped(chorus->mode, value, 0.0f, 2.0f);
+        if (paramId == "rate") return storeClamped(chorus->rate, value, 0.01f, 20.0f);
+        if (paramId == "depth") return storeClamped(chorus->depth, value, 0.0f, 1.0f);
+        if (paramId == "fbAmount") return storeClamped(chorus->fbAmount, value, -1.0f, 1.0f);
+        if (paramId == "mix") return storeClamped(chorus->mix, value, 0.0f, 1.0f);
+        if (paramId == "voices") return storeClamped(chorus->voices, value, 1.0f, 6.0f);
+        if (paramId == "lfoShape") return storeClamped(chorus->lfoShape, value, 0.0f, 3.0f);
+        if (paramId == "spread") return storeClamped(chorus->spread, value, 0.0f, 1.0f);
+        if (paramId == "characterMode") return storeClamped(chorus->characterMode, value, 0.0f, 2.0f);
+        if (paramId == "highCut") return storeClamped(chorus->highCut, value, 200.0f, 20000.0f);
+        if (paramId == "lowCut") return storeClamped(chorus->lowCut, value, 20.0f, 2000.0f);
+        if (paramId == "tempoSync") return storeClamped(chorus->tempoSync, value, 0.0f, 1.0f);
+        return false;
+    }
+
+    if (auto* saturator = dynamic_cast<S13Saturator*>(processor))
+    {
+        if (paramId == "satType") return storeClamped(saturator->satType, value, 0.0f, 7.0f);
+        if (paramId == "drive") return storeClamped(saturator->drive, value, 0.0f, 30.0f);
+        if (paramId == "mix") return storeClamped(saturator->mix, value, 0.0f, 1.0f);
+        if (paramId == "toneFreq") return storeClamped(saturator->toneFreq, value, 200.0f, 20000.0f);
+        if (paramId == "lowCutFreq") return storeClamped(saturator->lowCutFreq, value, 20.0f, 1000.0f);
+        if (paramId == "outputGain") return storeClamped(saturator->outputGain, value, -12.0f, 0.0f);
+        if (paramId == "asymmetry") return storeClamped(saturator->asymmetry, value, -1.0f, 1.0f);
+        if (paramId == "oversampleMode")
+        {
+            const bool ok = storeClamped(saturator->oversampleMode, value, 0.0f, 2.0f);
+            saturator->setOversamplingEnabled(value >= 0.5f);
+            return ok;
+        }
+        return false;
+    }
+
+    if (auto* pitch = dynamic_cast<S13PitchCorrector*>(processor))
+    {
+        auto& mapper = pitch->getMapper();
+        if (paramId == "bypass") return storeClamped(pitch->bypass, value, 0.0f, 1.0f);
+        if (paramId == "mix") return storeClamped(pitch->mix, value, 0.0f, 1.0f);
+        if (paramId == "sensitivity") return storeClamped(pitch->sensitivity, value, 0.02f, 0.35f);
+        if (paramId == "minFreqParam") return storeClamped(pitch->minFreqParam, value, 40.0f, 400.0f);
+        if (paramId == "maxFreqParam") return storeClamped(pitch->maxFreqParam, value, 400.0f, 4000.0f);
+        if (paramId == "key") { mapper.setKey(juce::jlimit(0, 11, static_cast<int>(std::round(value)))); return true; }
+        if (paramId == "scale") { mapper.setScale(static_cast<PitchMapper::Scale>(juce::jlimit(0, 15, static_cast<int>(std::round(value))))); return true; }
+        if (paramId == "retuneSpeed") { mapper.setRetuneSpeed(juce::jlimit(0.0f, 400.0f, value)); return true; }
+        if (paramId == "humanize") { mapper.setHumanize(juce::jlimit(0.0f, 100.0f, value)); return true; }
+        if (paramId == "transpose") { mapper.setTranspose(juce::jlimit(-24, 24, static_cast<int>(std::round(value)))); return true; }
+        if (paramId == "correctionStrength") { mapper.setCorrectionStrength(juce::jlimit(0.0f, 1.0f, value)); return true; }
+        if (paramId == "formantCorrection") { mapper.setFormantCorrection(value >= 0.5f); return true; }
+        if (paramId == "formantShift") { mapper.setFormantShift(juce::jlimit(-12.0f, 12.0f, value)); return true; }
+        if (paramId == "midiOutputEnabled") return storeClamped(pitch->midiOutputEnabled, value, 0.0f, 1.0f);
+        if (paramId == "midiOutputChannel") return storeClamped(pitch->midiOutputChannel, value, 1.0f, 16.0f);
+        return false;
+    }
+
+    return false;
 }
 
 bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::String& effectName, bool isInputFX)
@@ -6612,6 +9127,7 @@ bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
     slot.slotId = nextMasterStageSlotId++;
     slot.name = plugin->getName();
     slot.type = "builtin";
+    slot.pluginPath = plugin->getName();
     slot.pluginFormat = "Built-in";
     slot.serializedState = serialiseProcessorStateToBase64(plugin.get());
     specCopy.slots.push_back(std::move(slot));
@@ -6626,14 +9142,35 @@ bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
 juce::var AudioEngine::getAvailableBuiltInFX()
 {
     juce::Array<juce::var> list;
-    const char* names[] = { "OpenStudio EQ", "OpenStudio Compressor", "OpenStudio Gate", "OpenStudio Limiter",
-                            "OpenStudio Delay", "OpenStudio Reverb", "OpenStudio Chorus", "OpenStudio Saturator",
-                            "OpenStudio Pitch Correct" };
-    for (auto& n : names)
+    struct BuiltInDescriptor
+    {
+        const char* name;
+        const char* category;
+        bool isInstrument;
+        int instrumentMode;
+    };
+    const BuiltInDescriptor descriptors[] = {
+        { "OpenStudio Basic Synth", "Built-in Instrument", true, 0 },
+        { "OpenStudio Piano", "Built-in Instrument", true, 1 },
+        { "OpenStudio Drums", "Built-in Instrument", true, 2 },
+        { "OpenStudio EQ", "Built-in", false, -1 },
+        { "OpenStudio Compressor", "Built-in", false, -1 },
+        { "OpenStudio Gate", "Built-in", false, -1 },
+        { "OpenStudio Limiter", "Built-in", false, -1 },
+        { "OpenStudio Delay", "Built-in", false, -1 },
+        { "OpenStudio Reverb", "Built-in", false, -1 },
+        { "OpenStudio Chorus", "Built-in", false, -1 },
+        { "OpenStudio Saturator", "Built-in", false, -1 },
+        { "OpenStudio Pitch Correct", "Built-in", false, -1 }
+    };
+    for (const auto& descriptor : descriptors)
     {
         juce::DynamicObject::Ptr obj = new juce::DynamicObject();
-        obj->setProperty("name", juce::String(n));
-        obj->setProperty("category", "Built-in");
+        obj->setProperty("name", juce::String(descriptor.name));
+        obj->setProperty("category", juce::String(descriptor.category));
+        obj->setProperty("isInstrument", descriptor.isInstrument);
+        if (descriptor.isInstrument)
+            obj->setProperty("instrumentMode", descriptor.instrumentMode);
         list.add(juce::var(obj.get()));
     }
     return juce::var(list);
@@ -7191,9 +9728,13 @@ juce::var AudioEngine::getTrackInputFX(const juce::String& trackId)
                 || dynamic_cast<S13Reverb*>(processorPtr)
                 || dynamic_cast<S13Chorus*>(processorPtr)
                 || dynamic_cast<S13Saturator*>(processorPtr)
-                || dynamic_cast<S13PitchCorrector*>(processorPtr))
+                || dynamic_cast<S13PitchCorrector*>(processorPtr)
+                || dynamic_cast<S13BasicSynthInstrument*>(processorPtr)
+                || dynamic_cast<S13PianoInstrument*>(processorPtr)
+                || dynamic_cast<S13DrumInstrument*>(processorPtr))
             {
                 fxInfo->setProperty("type", "builtin");
+                fxInfo->setProperty("pluginPath", processor->getName());
             }
             else if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processorPtr))
             {
@@ -7250,9 +9791,13 @@ juce::var AudioEngine::getTrackFX(const juce::String& trackId)
                 || dynamic_cast<S13Reverb*>(processorPtr)
                 || dynamic_cast<S13Chorus*>(processorPtr)
                 || dynamic_cast<S13Saturator*>(processorPtr)
-                || dynamic_cast<S13PitchCorrector*>(processorPtr))
+                || dynamic_cast<S13PitchCorrector*>(processorPtr)
+                || dynamic_cast<S13BasicSynthInstrument*>(processorPtr)
+                || dynamic_cast<S13PianoInstrument*>(processorPtr)
+                || dynamic_cast<S13DrumInstrument*>(processorPtr))
             {
                 fxInfo->setProperty("type", "builtin");
+                fxInfo->setProperty("pluginPath", processor->getName());
             }
             else if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processorPtr))
             {
@@ -7322,6 +9867,209 @@ juce::var AudioEngine::getPluginParameters(const juce::String& trackId, int fxIn
     }
 
     return paramList;
+}
+
+juce::var AudioEngine::getBuiltInPluginSchema(const juce::String& trackId, const juce::String& chainType, int fxIndex)
+{
+    if (chainType == "instrument")
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        return describeFallbackInstrument(it != trackMap.end() ? it->second : nullptr, chainType, fxIndex);
+    }
+
+    if (chainType == "master")
+    {
+        int slotId = 0;
+        {
+            const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+                slotId = slot->slotId;
+        }
+
+        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        if (const auto* activeSlot = findActiveStageSlot(activeStage, slotId))
+            return describeBuiltInProcessor(activeSlot->processor.get(), chainType, fxIndex);
+
+        return describeBuiltInProcessor(nullptr, chainType, fxIndex);
+    }
+
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return describeBuiltInProcessor(nullptr, chainType, fxIndex);
+
+    auto* processor = chainType == "input"
+        ? it->second->getInputFXProcessor(fxIndex)
+        : it->second->getTrackFXProcessor(fxIndex);
+    return describeBuiltInProcessor(processor, chainType, fxIndex);
+}
+
+juce::var AudioEngine::getBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex)
+{
+    const auto schema = getBuiltInPluginSchema(trackId, chainType, fxIndex);
+    auto* root = new juce::DynamicObject();
+    root->setProperty("schemaVersion", 1);
+    root->setProperty("chain", chainType);
+    root->setProperty("fxIndex", fxIndex);
+
+    juce::DynamicObject* schemaObject = schema.getDynamicObject();
+    if (schemaObject != nullptr)
+    {
+        root->setProperty("name", schemaObject->getProperty("name"));
+        juce::DynamicObject::Ptr values = new juce::DynamicObject();
+        const auto paramsVar = schemaObject->getProperty("parameters");
+        if (auto* params = paramsVar.getArray())
+        {
+            for (const auto& paramVar : *params)
+            {
+                if (auto* param = paramVar.getDynamicObject())
+                    values->setProperty(param->getProperty("id").toString(), param->getProperty("value"));
+            }
+        }
+        root->setProperty("values", values.get());
+    }
+
+    return juce::var(root);
+}
+
+bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                                        const juce::String& paramId, float value)
+{
+    if (chainType == "instrument")
+    {
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        auto it = trackMap.find(trackId);
+        return it != trackMap.end() && it->second != nullptr
+            ? it->second->setFallbackInstrumentParam(paramId, value)
+            : false;
+    }
+
+    if (chainType == "master")
+    {
+        int slotId = 0;
+        {
+            const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+                slotId = slot->slotId;
+        }
+
+        if (slotId == 0)
+            return false;
+
+        juce::String serializedState;
+        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        if (const auto* activeSlot = findActiveStageSlot(activeStage, slotId))
+        {
+            if (!activeSlot->processor)
+                return false;
+
+            {
+                const juce::ScopedLock processorLock(activeSlot->processor->getCallbackLock());
+                if (!setBuiltInProcessorParam(activeSlot->processor.get(), paramId, value))
+                    return false;
+                serializedState = serialiseProcessorStateToBase64(activeSlot->processor.get());
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+        if (auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            slot->serializedState = serializedState;
+        return true;
+    }
+
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return false;
+
+    auto* processor = chainType == "input"
+        ? it->second->getInputFXProcessor(fxIndex)
+        : it->second->getTrackFXProcessor(fxIndex);
+    if (processor == nullptr)
+        return false;
+
+    const juce::ScopedLock processorLock(processor->getCallbackLock());
+    return setBuiltInProcessorParam(processor, paramId, value);
+}
+
+bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                                        const juce::String& stateJSON)
+{
+    const auto parsed = juce::JSON::parse(stateJSON);
+    if (parsed.isVoid())
+        return false;
+
+    bool anyApplied = false;
+    if (auto* stateObject = parsed.getDynamicObject())
+    {
+        const auto valuesVar = stateObject->getProperty("values");
+        if (auto* valuesObject = valuesVar.getDynamicObject())
+        {
+            const auto& properties = valuesObject->getProperties();
+            for (int i = 0; i < properties.size(); ++i)
+            {
+                const auto name = properties.getName(i).toString();
+                const auto value = static_cast<float>(static_cast<double>(properties.getValueAt(i)));
+                anyApplied = setBuiltInPluginParam(trackId, chainType, fxIndex, name, value) || anyApplied;
+            }
+        }
+
+        const auto parametersVar = stateObject->getProperty("parameters");
+        if (auto* parameters = parametersVar.getArray())
+        {
+            for (const auto& paramVar : *parameters)
+            {
+                if (auto* param = paramVar.getDynamicObject())
+                {
+                    const auto id = param->getProperty("id").toString();
+                    const auto value = static_cast<float>(static_cast<double>(param->getProperty("value")));
+                    if (id.isNotEmpty())
+                        anyApplied = setBuiltInPluginParam(trackId, chainType, fxIndex, id, value) || anyApplied;
+                }
+            }
+        }
+    }
+
+    return anyApplied;
+}
+
+bool AudioEngine::setPluginParameter(const juce::String& trackId, int fxIndex, bool isInputFX, int paramIndex, float value)
+{
+    const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+
+    auto it = trackMap.find(trackId);
+    if (it == trackMap.end() || !it->second)
+        return false;
+
+    auto* track = it->second;
+    juce::AudioProcessor* processor = nullptr;
+
+    if (isInputFX)
+    {
+        if (fxIndex >= 0 && fxIndex < track->getNumInputFX())
+            processor = track->getInputFXProcessor(fxIndex);
+    }
+    else
+    {
+        if (fxIndex >= 0 && fxIndex < track->getNumTrackFX())
+            processor = track->getTrackFXProcessor(fxIndex);
+    }
+
+    if (processor == nullptr)
+        return false;
+
+    const juce::ScopedLock processorLock(processor->getCallbackLock());
+    auto& params = processor->getParameters();
+    if (paramIndex < 0 || paramIndex >= params.size() || params[paramIndex] == nullptr)
+        return false;
+
+    params[paramIndex]->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, value));
+    return true;
 }
 
 void AudioEngine::removeTrackInputFX(const juce::String& trackId, int fxIndex)
@@ -8437,27 +11185,93 @@ juce::var AudioEngine::getTrackRoutingInfo(const juce::String& trackId)
 juce::var AudioEngine::getMidiDiagnostics() const
 {
     juce::Array<juce::var> tracksArray;
+    int midiTrackCount = 0;
+    int instrumentTrackCount = 0;
+    int scheduledTrackCount = 0;
+    int scheduledClipCount = 0;
+    int scheduledEventCount = 0;
+    int tracksWithMidiOutput = 0;
+
     for (const auto& [trackId, track] : trackMap)
     {
         if (!track)
             continue;
 
+        const auto type = track->getTrackType();
+        const int trackScheduledClips = track->getScheduledMIDIClipCount();
+        const int trackScheduledEvents = track->getScheduledMIDIEventCount();
+        if (type == TrackType::MIDI)
+            ++midiTrackCount;
+        else if (type == TrackType::Instrument)
+            ++instrumentTrackCount;
+        if (trackScheduledClips > 0 || trackScheduledEvents > 0)
+            ++scheduledTrackCount;
+        scheduledClipCount += trackScheduledClips;
+        scheduledEventCount += trackScheduledEvents;
+        if (track->getMIDIOutputDeviceName().isNotEmpty())
+            ++tracksWithMidiOutput;
+
         auto* trackObj = new juce::DynamicObject();
         trackObj->setProperty("trackId", trackId);
-        trackObj->setProperty("trackType", track->getTrackType() == TrackType::Instrument
+        trackObj->setProperty("trackType", type == TrackType::Instrument
             ? "instrument"
-            : (track->getTrackType() == TrackType::MIDI ? "midi" : "audio"));
+            : (type == TrackType::MIDI ? "midi" : "audio"));
         trackObj->setProperty("midiOverflowCount", track->getMidiOverflowCount());
         trackObj->setProperty("lastBuiltMidiEventCount", track->getLastBuiltMidiEventCount());
         trackObj->setProperty("maxBuiltMidiEventCount", track->getMaxBuiltMidiEventCount());
+        trackObj->setProperty("scheduledMIDIClipCount", trackScheduledClips);
+        trackObj->setProperty("scheduledMIDIEventCount", trackScheduledEvents);
+        trackObj->setProperty("hasInstrument", track->getInstrument() != nullptr);
+        trackObj->setProperty("instrumentName", track->getInstrument() != nullptr ? track->getInstrument()->getName() : juce::String());
+        trackObj->setProperty("fallbackInstrumentActive", track->isUsingFallbackInstrument());
+        const auto fallbackSamplerPath = track->getFallbackSamplerSamplePath();
+        trackObj->setProperty("fallbackSamplerActive", track->hasFallbackSamplerSample());
+        trackObj->setProperty("fallbackSamplerSamplePath", fallbackSamplerPath);
+        trackObj->setProperty("fallbackSamplerSourceType", fallbackSamplerPath.endsWithIgnoreCase(".sf2")
+            ? "soundfont"
+            : (fallbackSamplerPath.isNotEmpty() ? "audio" : ""));
+        trackObj->setProperty("midiInputDevice", track->getMIDIInputDevice());
+        trackObj->setProperty("midiChannel", track->getMIDIChannel());
+        trackObj->setProperty("midiOutputDevice", track->getMIDIOutputDeviceName());
+        trackObj->setProperty("muted", track->getMute());
+        trackObj->setProperty("midiOutputMutedSuppressed",
+                              track->getMute() && track->getMIDIOutputDeviceName().isNotEmpty());
+        trackObj->setProperty("acceptsMidi", track->acceptsMidi());
+        trackObj->setProperty("producesMidi", track->producesMidi());
+        trackObj->setProperty("inputFXCount", track->getNumInputFX());
+        trackObj->setProperty("trackFXCount", track->getNumTrackFX());
         trackObj->setProperty("realtimeFallbackReuseCount", track->getRealtimeFallbackReuseCount());
         trackObj->setProperty("monitoring", track->getInputMonitoring());
         trackObj->setProperty("recordArmed", track->getRecordArmed());
         tracksArray.add(juce::var(trackObj));
     }
 
+    juce::Array<juce::var> inputDevicesArray;
+    juce::Array<juce::var> openDevicesArray;
+    if (midiManager)
+    {
+        for (const auto& device : midiManager->getAvailableDevices())
+            inputDevicesArray.add(device);
+        for (const auto& device : midiManager->getOpenDevices())
+            openDevicesArray.add(device);
+    }
+
+    juce::Array<juce::var> outputDevicesArray;
+    for (const auto& device : juce::MidiOutput::getAvailableDevices())
+        outputDevicesArray.add(device.name);
+
     auto* root = new juce::DynamicObject();
     root->setProperty("tracks", tracksArray);
+    root->setProperty("inputDevices", inputDevicesArray);
+    root->setProperty("outputDevices", outputDevicesArray);
+    root->setProperty("openDevices", openDevicesArray);
+    root->setProperty("trackCount", static_cast<int>(trackMap.size()));
+    root->setProperty("midiTrackCount", midiTrackCount);
+    root->setProperty("instrumentTrackCount", instrumentTrackCount);
+    root->setProperty("scheduledMIDITrackCount", scheduledTrackCount);
+    root->setProperty("scheduledMIDIClipCount", scheduledClipCount);
+    root->setProperty("scheduledMIDIEventCount", scheduledEventCount);
+    root->setProperty("tracksWithMidiOutput", tracksWithMidiOutput);
     root->setProperty("bufferSize", currentBlockSize);
     root->setProperty("sampleRate", currentSampleRate);
     root->setProperty("lateEventCount", midiLateEventCount.load(std::memory_order_relaxed));
@@ -8491,9 +11305,20 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
             trackObj->setProperty("midiOverflowCount", track->getMidiOverflowCount());
             trackObj->setProperty("lastBuiltMidiEventCount", track->getLastBuiltMidiEventCount());
             trackObj->setProperty("maxBuiltMidiEventCount", track->getMaxBuiltMidiEventCount());
+            trackObj->setProperty("scheduledMIDIClipCount", track->getScheduledMIDIClipCount());
+            trackObj->setProperty("scheduledMIDIEventCount", track->getScheduledMIDIEventCount());
             trackObj->setProperty("inputFXCount", track->getNumInputFX());
             trackObj->setProperty("trackFXCount", track->getNumTrackFX());
             trackObj->setProperty("isInstrument", track->getTrackType() == TrackType::Instrument);
+            trackObj->setProperty("hasInstrument", track->getInstrument() != nullptr);
+            trackObj->setProperty("instrumentName", track->getInstrument() != nullptr ? track->getInstrument()->getName() : juce::String());
+            trackObj->setProperty("fallbackInstrumentActive", track->isUsingFallbackInstrument());
+            const auto fallbackSamplerPath = track->getFallbackSamplerSamplePath();
+            trackObj->setProperty("fallbackSamplerActive", track->hasFallbackSamplerSample());
+            trackObj->setProperty("fallbackSamplerSamplePath", fallbackSamplerPath);
+            trackObj->setProperty("fallbackSamplerSourceType", fallbackSamplerPath.endsWithIgnoreCase(".sf2")
+                ? "soundfont"
+                : (fallbackSamplerPath.isNotEmpty() ? "audio" : ""));
             trackObj->setProperty("recordArmed", track->getRecordArmed());
             trackObj->setProperty("inputMonitoring", track->getInputMonitoring());
         }
@@ -8974,6 +11799,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         int trackFxCount = 0;
         int sendCount = 0;
         int sidechainSourceCount = 0;
+        bool isInstrumentTrack = false;
         bool hasInstrument = false;
         bool hasARA = false;
         bool masterSendEnabled = true;
@@ -8985,7 +11811,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     bool anySoloed = false;
     auto automationIsActive = [] (const AutomationList& automation)
     {
-        return automation.shouldPlayback() && automation.getNumPoints() > 0;
+        return automation.shouldPlaybackForRead() && automation.getNumPoints() > 0;
     };
     {
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
@@ -9002,6 +11828,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             snap.soloed = track->getSolo();
             snap.inputFxCount = track->getNumInputFX();
             snap.trackFxCount = track->getNumTrackFX();
+            snap.isInstrumentTrack = track->getTrackType() == TrackType::Instrument;
             snap.hasInstrument = track->getInstrument() != nullptr;
             snap.hasARA = track->hasActiveARA();
             snap.masterSendEnabled = track->getMasterSendEnabled();
@@ -9015,10 +11842,13 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 || automationIsActive(track->getPreFXPanAutomation())
                 || automationIsActive(track->getPreFXWidthAutomation())
                 || automationIsActive(track->getTrimVolumeAutomation())
-                || automationIsActive(track->getMuteAutomation());
+                || automationIsActive(track->getMuteAutomation())
+                || track->hasPluginAutomation()
+                || track->hasMIDIAutomation();
             snap.requiresFullRender =
                 snap.inputFxCount > 0
                 || snap.trackFxCount > 0
+                || snap.isInstrumentTrack
                 || snap.hasInstrument
                 || snap.hasARA
                 || snap.sendCount > 0
@@ -9032,6 +11862,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                       "dB pan=" + juce::String(snap.pan) +
                       " mute=" + juce::String(snap.muted ? "true" : "false") +
                       " solo=" + juce::String(snap.soloed ? "true" : "false") +
+                      " instrumentTrack=" + juce::String(snap.isInstrumentTrack ? "true" : "false") +
                       " fx=" + juce::String(snap.inputFxCount + snap.trackFxCount) +
                       " sends=" + juce::String(snap.sendCount) +
                       " sidechains=" + juce::String(snap.sidechainSourceCount) +
@@ -9200,30 +12031,69 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         juce::MemoryBlock savedState;
     };
     std::vector<PluginStateBackup> pluginBackups;
+    std::vector<TrackProcessor*> renderPreparedTracks;
 
-    // Lambda to save state, prepare, and reset a processor for render
-    auto prepareProcessorForRender = [&](juce::AudioProcessor* proc) {
+    auto backupProcessorForRender = [&](juce::AudioProcessor* proc) {
         if (!proc) return;
+        const auto alreadyBackedUp = std::find_if(pluginBackups.begin(), pluginBackups.end(),
+            [proc](const PluginStateBackup& backup) { return backup.processor == proc; });
+        if (alreadyBackedUp != pluginBackups.end())
+            return;
+
         // Save current state
         PluginStateBackup backup;
         backup.processor = proc;
         proc->getStateInformation(backup.savedState);
         pluginBackups.push_back(std::move(backup));
-        // Re-prepare for render block size
+    };
+
+    // Lambda to save state, prepare, and reset a processor for render.
+    auto prepareProcessorForRender = [&](juce::AudioProcessor* proc) {
+        backupProcessorForRender(proc);
+        if (!proc) return;
         prepareHostedProcessorForPrecision(proc, actualSampleRate, blockSize, processingPrecisionMode);
         proc->reset();
     };
 
-    // Prepare track FX plugins
+    auto restorePreparedTracksForRealtime = [&]()
+    {
+        const double realtimeSampleRate = currentSampleRate > 0.0 ? currentSampleRate : actualSampleRate;
+        const int realtimeBlockSize = currentBlockSize > 0 ? currentBlockSize : 512;
+        for (auto* track : renderPreparedTracks)
+        {
+            if (track != nullptr)
+                track->prepareToPlay(realtimeSampleRate, realtimeBlockSize);
+        }
+
+        for (auto& backup : pluginBackups)
+        {
+            if (backup.processor)
+            {
+                backup.processor->prepareToPlay(realtimeSampleRate, juce::jmax(realtimeBlockSize, 512));
+                backup.processor->setStateInformation(backup.savedState.getData(),
+                                                       (int)backup.savedState.getSize());
+                backup.processor->reset();
+            }
+        }
+    };
+
+    // Prepare complete track processors for the offline block size. This is not
+    // just plugin sample-rate setup: TrackProcessor owns expanded FX buffers,
+    // fallback-instrument state, channel strip EQ, PDC, and send buffers. If it
+    // remains sized for the realtime block while render uses 2048 samples, stem
+    // renders can turn into crackle/low garbage.
     for (const auto& snap : trackSnapshots)
     {
         auto it = trackMap.find(snap.id);
         if (it == trackMap.end() || !it->second) continue;
         auto* track = it->second;
         for (int fx = 0; fx < track->getNumInputFX(); ++fx)
-            prepareProcessorForRender(track->getInputFXProcessor(fx));
+            backupProcessorForRender(track->getInputFXProcessor(fx));
         for (int fx = 0; fx < track->getNumTrackFX(); ++fx)
-            prepareProcessorForRender(track->getTrackFXProcessor(fx));
+            backupProcessorForRender(track->getTrackFXProcessor(fx));
+        backupProcessorForRender(track->getInstrument());
+        track->prepareToPlay(actualSampleRate, blockSize);
+        renderPreparedTracks.push_back(track);
     }
 
     DesiredFXStageSpec renderMasterSpec;
@@ -9238,6 +12108,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     if (!renderMasterStage && !renderMasterSpec.slots.empty())
     {
         logToDisk("renderProject: FAIL - could not build master stage: " + renderStageError);
+        restorePreparedTracksForRealtime();
         isRendering = false;
         return false;
     }
@@ -9304,6 +12175,27 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     bool renderMetronomeAudio = includeMetronome && metronome.isEnabled();
     const bool useRenderLagrangeSrc = getPitchEnvFlag("OPENSTUDIO_RENDER_USE_LAGRANGE_SRC", false);
     auto rtTracks = std::atomic_load_explicit(&realtimeTrackSnapshot, std::memory_order_acquire);
+
+    struct ScopedAutomationReadOverride
+    {
+        std::vector<TrackProcessor*> tracks;
+        ~ScopedAutomationReadOverride()
+        {
+            for (auto* track : tracks)
+                if (track != nullptr)
+                    track->setForceAutomationReadForProcessing(false);
+        }
+    } scopedAutomationReadOverride;
+
+    for (auto const& [trackId, track] : trackMap)
+    {
+        juce::ignoreUnused(trackId);
+        if (track != nullptr)
+        {
+            track->setForceAutomationReadForProcessing(true);
+            scopedAutomationReadOverride.tracks.push_back(track);
+        }
+    }
 
     auto writeRenderRouteReport = [&]()
     {
@@ -9381,6 +12273,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             obj->setProperty("soloed", snap.soloed);
             obj->setProperty("inputFxCount", snap.inputFxCount);
             obj->setProperty("trackFxCount", snap.trackFxCount);
+            obj->setProperty("isInstrumentTrack", snap.isInstrumentTrack);
             obj->setProperty("hasInstrument", snap.hasInstrument);
             obj->setProperty("hasARA", snap.hasARA);
             obj->setProperty("sendCount", snap.sendCount);
@@ -10082,17 +12975,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         if (!ffmpegOk)
         {
             logToDisk("renderProject: FAIL - FFmpeg post-processing failed");
-            // Restore plugins before returning (clamp max-block to at least 512)
-            for (auto& backup : pluginBackups)
-            {
-                if (backup.processor)
-                {
-                    backup.processor->prepareToPlay(currentSampleRate, juce::jmax(currentBlockSize, 512));
-                    backup.processor->setStateInformation(backup.savedState.getData(),
-                                                           (int)backup.savedState.getSize());
-                    backup.processor->reset();
-                }
-            }
+            restorePreparedTracksForRealtime();
             isRendering = false;
             return false;
         }
@@ -10102,16 +12985,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     // Re-prepare all FX plugins for the device's buffer size and restore their
     // saved state so real-time playback continues as if render never happened.
     // Clamp max-block to at least 512 (same rationale as track FX preparation).
-    for (auto& backup : pluginBackups)
-    {
-        if (backup.processor)
-        {
-            backup.processor->prepareToPlay(currentSampleRate, juce::jmax(currentBlockSize, 512));
-            backup.processor->setStateInformation(backup.savedState.getData(),
-                                                   (int)backup.savedState.getSize());
-            backup.processor->reset();
-        }
-    }
+    restorePreparedTracksForRealtime();
     logToDisk("renderProject: Restored " + juce::String((int)pluginBackups.size()) + " FX plugins for real-time");
 
     // Re-enable audio callback
@@ -10339,6 +13213,46 @@ void AudioEngine::setAutomationPoints(const juce::String& trackId, const juce::S
 
     juce::Logger::writeToLog("AudioEngine: Set " + juce::String(static_cast<int>(points.size())) +
                              " automation points for track " + trackId + " param " + parameterId);
+}
+
+void AudioEngine::replaceAutomationPointsInRange(const juce::String& trackId, const juce::String& parameterId,
+                                                 double startTimeSeconds, double endTimeSeconds,
+                                                 const juce::String& pointsJSON)
+{
+    AutomationList* list = nullptr;
+    if (trackId == "master")
+    {
+        if (parameterId == "volume") list = &masterVolumeAutomation;
+        else if (parameterId == "pan") list = &masterPanAutomation;
+        if (!list)
+            return;
+    }
+    else
+    {
+        auto it = trackMap.find(trackId);
+        if (it == trackMap.end() || !it->second)
+            return;
+        auto target = it->second->resolveAutomationTarget(parameterId, true);
+        if (!target.has_value() || target->list == nullptr)
+            return;
+        list = target->list;
+    }
+
+    auto parsed = juce::JSON::parse(pointsJSON);
+    if (!parsed.isArray())
+        return;
+
+    auto* arr = parsed.getArray();
+    std::vector<AutomationPoint> points;
+    points.reserve(static_cast<size_t>(arr->size()));
+    for (const auto& item : *arr)
+    {
+        const double timeSec = item.getProperty("time", 0.0);
+        const float value = static_cast<float>(static_cast<double>(item.getProperty("value", 0.0)));
+        points.push_back({ timeSec, value });
+    }
+
+    list->replacePointsInRange(startTimeSeconds, endTimeSeconds, std::move(points));
 }
 
 void AudioEngine::setAutomationMode(const juce::String& trackId, const juce::String& parameterId,
@@ -10701,18 +13615,32 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
             clipList.push_back(c);
     if (clipList.empty())
     {
-        resultObj->setProperty("success", false);
-        resultObj->setProperty("error", "No clips on track");
-        return juce::var(resultObj);
-    }
+        const auto midiClips = track->getScheduledMIDIClipSnapshot();
+        if (midiClips.empty())
+        {
+            resultObj->setProperty("success", false);
+            resultObj->setProperty("error", "No clips on track");
+            return juce::var(resultObj);
+        }
 
-    // Find the time range of all clips on this track
-    startTime = std::numeric_limits<double>::max();
-    endTime = 0.0;
-    for (const auto& clip : clipList)
+        startTime = std::numeric_limits<double>::max();
+        endTime = 0.0;
+        for (const auto& clip : midiClips)
+        {
+            startTime = std::min(startTime, clip.startTime);
+            endTime = std::max(endTime, clip.startTime + clip.duration);
+        }
+    }
+    else
     {
-        startTime = std::min(startTime, clip.startTime);
-        endTime = std::max(endTime, clip.startTime + clip.duration);
+        // Find the time range of all audio clips on this track
+        startTime = std::numeric_limits<double>::max();
+        endTime = 0.0;
+        for (const auto& clip : clipList)
+        {
+            startTime = std::min(startTime, clip.startTime);
+            endTime = std::max(endTime, clip.startTime + clip.duration);
+        }
     }
 
     // Add tail for FX (reverb, delay)
@@ -10768,6 +13696,17 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
     juce::AudioBuffer<float> trackBuffer(2, renderBlockSize);
     juce::int64 samplesRendered = 0;
     double samplePos = startTime * renderRate;
+    struct ScopedTrackAutomationReadOverride
+    {
+        TrackProcessor* track = nullptr;
+        ~ScopedTrackAutomationReadOverride()
+        {
+            if (track != nullptr)
+                track->setForceAutomationReadForProcessing(false);
+        }
+    } scopedAutomationRead;
+    track->setForceAutomationReadForProcessing(true);
+    scopedAutomationRead.track = track;
 
     while (samplesRendered < totalSamples)
     {
@@ -10931,6 +13870,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
     midiFile.convertTimestampTicksToSeconds();
 
     auto* result = new juce::DynamicObject();
+    result->setProperty("success", true);
     result->setProperty("numTracks", midiFile.getNumTracks());
     result->setProperty("ticksPerQuarterNote", midiFile.getTimeFormat());
 
@@ -10943,17 +13883,26 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
 
         auto* trackObj = new juce::DynamicObject();
         juce::Array<juce::var> eventsArray;
+        juce::String trackName;
+        int channelCounts[17] {};
 
         for (int i = 0; i < midiTrack->getNumEvents(); ++i)
         {
             const auto* holder = midiTrack->getEventPointer(i);
             const auto& msg = holder->message;
 
+            if (msg.isTrackNameEvent())
+            {
+                trackName = msg.getTextFromTextMetaEvent();
+                continue;
+            }
+
             auto* evtObj = new juce::DynamicObject();
             evtObj->setProperty("timestamp", msg.getTimeStamp());
 
             if (msg.isNoteOn())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "noteOn");
                 evtObj->setProperty("note", msg.getNoteNumber());
                 evtObj->setProperty("velocity", msg.getVelocity());
@@ -10961,6 +13910,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             }
             else if (msg.isNoteOff())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "noteOff");
                 evtObj->setProperty("note", msg.getNoteNumber());
                 evtObj->setProperty("velocity", 0);
@@ -10968,6 +13918,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             }
             else if (msg.isController())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "cc");
                 evtObj->setProperty("controller", msg.getControllerNumber());
                 evtObj->setProperty("value", msg.getControllerValue());
@@ -10975,6 +13926,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             }
             else if (msg.isPitchWheel())
             {
+                ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "pitchBend");
                 evtObj->setProperty("value", msg.getPitchWheelValue());
                 evtObj->setProperty("channel", msg.getChannel());
@@ -10992,14 +13944,178 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             eventsArray.add(juce::var(evtObj));
         }
 
+        int dominantChannel = 0;
+        for (int channel = 1; channel <= 16; ++channel)
+            if (channelCounts[channel] > channelCounts[dominantChannel])
+                dominantChannel = channel;
+
+        trackObj->setProperty("name", trackName.isNotEmpty() ? trackName : "MIDI Track " + juce::String(t + 1));
+        trackObj->setProperty("channel", dominantChannel);
         trackObj->setProperty("events", eventsArray);
         tracksArray.add(juce::var(trackObj));
     }
 
     result->setProperty("tracks", tracksArray);
-    juce::Logger::writeToLog("importMIDIFile: " + filePath + " - " +
-                             juce::String(midiFile.getNumTracks()) + " tracks");
     return juce::var(result);
+}
+
+bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm)
+{
+    auto tracksVar = midiTracks;
+    if (tracksVar.isString())
+        tracksVar = juce::JSON::parse(tracksVar.toString());
+
+    auto* tracksArray = tracksVar.getArray();
+    if (tracksArray == nullptr)
+        return false;
+
+    if (bpm <= 0.0)
+        bpm = 120.0;
+
+    auto getDoubleProperty = [] (juce::DynamicObject* obj, const char* name, double fallback)
+    {
+        if (obj == nullptr || ! obj->hasProperty(name))
+            return fallback;
+
+        return static_cast<double>(obj->getProperty(name));
+    };
+
+    auto getIntProperty = [] (juce::DynamicObject* obj, const char* name, int fallback, int minValue, int maxValue)
+    {
+        if (obj == nullptr || ! obj->hasProperty(name))
+            return fallback;
+
+        return juce::jlimit(minValue, maxValue, juce::roundToInt(static_cast<double>(obj->getProperty(name))));
+    };
+
+    auto getVelocityProperty = [&] (juce::DynamicObject* obj, const char* name, int fallback, int minValue)
+    {
+        auto value = getDoubleProperty(obj, name, static_cast<double>(fallback));
+        if (value > 0.0 && value <= 1.0)
+            value *= 127.0;
+
+        return juce::jlimit(minValue, 127, juce::roundToInt(value));
+    };
+
+    auto addEventToSequence = [&] (juce::MidiMessageSequence& sequence,
+                                   juce::DynamicObject* eventObj,
+                                   double absoluteTimeSeconds)
+    {
+        if (eventObj == nullptr)
+            return;
+
+        const juce::String eventType = eventObj->getProperty("type").toString();
+        const double ticks = juce::jmax(0.0, absoluteTimeSeconds) * (bpm / 60.0) * 480.0;
+        const int channel = getIntProperty(eventObj, "channel", 1, 1, 16);
+
+        if (eventType == "noteOn")
+        {
+            const int note = getIntProperty(eventObj, "note", 60, 0, 127);
+            const int velocity = getVelocityProperty(eventObj, "velocity", 100, 1);
+            sequence.addEvent(juce::MidiMessage::noteOn(channel, note, static_cast<juce::uint8>(velocity)), ticks);
+        }
+        else if (eventType == "noteOff")
+        {
+            const int note = getIntProperty(eventObj, "note", 60, 0, 127);
+            const int velocity = getVelocityProperty(eventObj,
+                                                     eventObj->hasProperty("releaseVelocity") ? "releaseVelocity" : "velocity",
+                                                     0, 0);
+            sequence.addEvent(juce::MidiMessage::noteOff(channel, note, static_cast<juce::uint8>(velocity)), ticks);
+        }
+        else if (eventType == "cc")
+        {
+            const int controller = getIntProperty(eventObj, "controller", 0, 0, 127);
+            const int value = getIntProperty(eventObj, "value", 0, 0, 127);
+            sequence.addEvent(juce::MidiMessage::controllerEvent(channel, controller, value), ticks);
+        }
+        else if (eventType == "pitchBend")
+        {
+            const int value = getIntProperty(eventObj, "value", 8192, 0, 16383);
+            sequence.addEvent(juce::MidiMessage::pitchWheel(channel, value), ticks);
+        }
+        else if (eventType == "programChange")
+        {
+            const int program = getIntProperty(eventObj, "value", 0, 0, 127);
+            sequence.addEvent(juce::MidiMessage::programChange(channel, program), ticks);
+        }
+        else if (eventType == "channelPressure")
+        {
+            const int pressure = getIntProperty(eventObj, "value", 0, 0, 127);
+            sequence.addEvent(juce::MidiMessage::channelPressureChange(channel, pressure), ticks);
+        }
+        else if (eventType == "polyPressure")
+        {
+            const int note = getIntProperty(eventObj, "note", 60, 0, 127);
+            const int pressure = getIntProperty(eventObj, "value", 0, 0, 127);
+            sequence.addEvent(juce::MidiMessage::aftertouchChange(channel, note, pressure), ticks);
+        }
+    };
+
+    juce::MidiFile midiFile;
+    midiFile.setTicksPerQuarterNote(480);
+    int exportedTrackCount = 0;
+
+    for (const auto& trackVar : *tracksArray)
+    {
+        auto* trackObj = trackVar.getDynamicObject();
+        if (trackObj == nullptr)
+            continue;
+
+        juce::MidiMessageSequence sequence;
+        sequence.addEvent(juce::MidiMessage::tempoMetaEvent(static_cast<int>(60000000.0 / bpm)), 0.0);
+        const juce::String trackName = trackObj->getProperty("name").toString();
+        if (trackName.isNotEmpty())
+            sequence.addEvent(juce::MidiMessage::textMetaEvent(0x03, trackName), 0.0);
+
+        int eventCount = 0;
+
+        if (auto* clips = trackObj->getProperty("clips").getArray())
+        {
+            for (const auto& clipVar : *clips)
+            {
+                auto* clipObj = clipVar.getDynamicObject();
+                if (clipObj == nullptr)
+                    continue;
+
+                const double clipStart = static_cast<double>(clipObj->getProperty("startTime"));
+                if (auto* events = clipObj->getProperty("events").getArray())
+                {
+                    for (const auto& eventVar : *events)
+                    {
+                        auto* eventObj = eventVar.getDynamicObject();
+                        if (eventObj == nullptr)
+                            continue;
+
+                        const double timestamp = static_cast<double>(eventObj->getProperty("timestamp"));
+                        addEventToSequence(sequence, eventObj, clipStart + timestamp);
+                        ++eventCount;
+                    }
+                }
+            }
+        }
+
+        if (eventCount > 0)
+        {
+            sequence.updateMatchedPairs();
+            midiFile.addTrack(sequence);
+            ++exportedTrackCount;
+        }
+    }
+
+    if (exportedTrackCount == 0)
+        return false;
+
+    juce::File outFile(outputPath);
+    if (! outFile.hasFileExtension(".mid") && ! outFile.hasFileExtension(".midi"))
+        outFile = outFile.withFileExtension(".mid");
+
+    outFile.getParentDirectory().createDirectory();
+    outFile.deleteFile();
+    std::unique_ptr<juce::FileOutputStream> outputStream(outFile.createOutputStream());
+    if (! outputStream)
+        return false;
+
+    return midiFile.writeTo(*outputStream);
 }
 
 bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String& clipId,
@@ -11009,6 +14125,28 @@ bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String
     juce::ignoreUnused(trackId, clipId);
 
     if (clipTempo <= 0.0) clipTempo = 120.0;
+
+    auto getDoubleProperty = [] (juce::DynamicObject* obj, const char* name, double fallback)
+    {
+        if (obj == nullptr || ! obj->hasProperty(name))
+            return fallback;
+
+        return static_cast<double>(obj->getProperty(name));
+    };
+
+    auto getIntProperty = [&] (juce::DynamicObject* obj, const char* name, int fallback, int minValue, int maxValue)
+    {
+        return juce::jlimit(minValue, maxValue, juce::roundToInt(getDoubleProperty(obj, name, static_cast<double>(fallback))));
+    };
+
+    auto getVelocityProperty = [&] (juce::DynamicObject* obj, const char* name, int fallback, int minValue)
+    {
+        auto value = getDoubleProperty(obj, name, static_cast<double>(fallback));
+        if (value > 0.0 && value <= 1.0)
+            value *= 127.0;
+
+        return juce::jlimit(minValue, 127, juce::roundToInt(value));
+    };
 
     juce::MidiFile midiFile;
     midiFile.setTicksPerQuarterNote(480);
@@ -11035,23 +14173,51 @@ bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String
 
             if (eventType == "noteOn")
             {
-                int note = static_cast<int>(obj->getProperty("note"));
-                int velocity = static_cast<int>(obj->getProperty("velocity"));
-                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                const int note = getIntProperty(obj, "note", 60, 0, 127);
+                const int velocity = getVelocityProperty(obj, "velocity", 100, 1);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
                 sequence.addEvent(juce::MidiMessage::noteOn(channel, note, static_cast<juce::uint8>(velocity)), ticks);
             }
             else if (eventType == "noteOff")
             {
-                int note = static_cast<int>(obj->getProperty("note"));
-                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
-                sequence.addEvent(juce::MidiMessage::noteOff(channel, note), ticks);
+                const int note = getIntProperty(obj, "note", 60, 0, 127);
+                const int velocity = getVelocityProperty(obj,
+                                                         obj->hasProperty("releaseVelocity") ? "releaseVelocity" : "velocity",
+                                                         0, 0);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::noteOff(channel, note, static_cast<juce::uint8>(velocity)), ticks);
             }
             else if (eventType == "cc")
             {
-                int controller = static_cast<int>(obj->getProperty("controller"));
-                int value = static_cast<int>(obj->getProperty("value"));
-                int channel = obj->hasProperty("channel") ? static_cast<int>(obj->getProperty("channel")) : 1;
+                const int controller = getIntProperty(obj, "controller", 0, 0, 127);
+                const int value = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
                 sequence.addEvent(juce::MidiMessage::controllerEvent(channel, controller, value), ticks);
+            }
+            else if (eventType == "pitchBend")
+            {
+                const int value = getIntProperty(obj, "value", 8192, 0, 16383);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::pitchWheel(channel, value), ticks);
+            }
+            else if (eventType == "programChange")
+            {
+                const int program = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::programChange(channel, program), ticks);
+            }
+            else if (eventType == "channelPressure")
+            {
+                const int pressure = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::channelPressureChange(channel, pressure), ticks);
+            }
+            else if (eventType == "polyPressure")
+            {
+                const int note = getIntProperty(obj, "note", 60, 0, 127);
+                const int pressure = getIntProperty(obj, "value", 0, 0, 127);
+                const int channel = getIntProperty(obj, "channel", 1, 1, 16);
+                sequence.addEvent(juce::MidiMessage::aftertouchChange(channel, note, pressure), ticks);
             }
         }
     }
@@ -11060,14 +14226,16 @@ bool AudioEngine::exportMIDIFile(const juce::String& trackId, const juce::String
     midiFile.addTrack(sequence);
 
     juce::File outFile(outputPath);
+    if (! outFile.hasFileExtension(".mid") && ! outFile.hasFileExtension(".midi"))
+        outFile = outFile.withFileExtension(".mid");
+
+    outFile.getParentDirectory().createDirectory();
     outFile.deleteFile();
     std::unique_ptr<juce::FileOutputStream> outputStream(outFile.createOutputStream());
     if (!outputStream)
         return false;
 
-    bool success = midiFile.writeTo(*outputStream);
-    juce::Logger::writeToLog("exportMIDIFile: " + outputPath + " success=" + juce::String(success ? "true" : "false"));
-    return success;
+    return midiFile.writeTo(*outputStream);
 }
 
 // =============================================================================
@@ -13654,6 +16822,11 @@ juce::var AudioEngine::refreshAiToolsStatus()
 juce::var AudioEngine::installAiTools(bool userConfirmedDownload)
 {
     return stemSeparator.installAiTools(userConfirmedDownload);
+}
+
+juce::var AudioEngine::installAiTools(const juce::String& optionsJSON)
+{
+    return stemSeparator.installAiTools(optionsJSON);
 }
 
 juce::var AudioEngine::resetAiTools()

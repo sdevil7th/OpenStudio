@@ -4,6 +4,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 interface NativeScript {
   name: string;
@@ -97,7 +98,11 @@ export function ScriptEditor() {
   if (!showScriptEditor) return null;
 
   return (
-    <div className="fixed inset-8 z-2000 bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl flex flex-col overflow-hidden">
+    <div
+      className="fixed inset-8 z-[10000] bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl flex flex-col overflow-hidden"
+      data-modal-root="true"
+      onContextMenu={guardModalContextMenu}
+    >
       {/* Header */}
       <div className="h-7 bg-neutral-800 border-b border-neutral-700 flex items-center justify-between px-3 shrink-0">
         <span className="text-[10px] font-semibold text-neutral-300 uppercase tracking-wider">

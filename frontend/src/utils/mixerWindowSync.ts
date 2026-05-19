@@ -30,7 +30,10 @@ export interface MixerUISnapshot {
   masterMono: boolean;
   masterAutomationLanes: AutomationLane[];
   showMasterAutomation: boolean;
+  masterAutomationReadEnabled: boolean;
+  masterAutomationWriteEnabled: boolean;
   masterAutomationEnabled: boolean;
+  automationWriteBehavior: "touch" | "latch" | "overwrite";
   mixerSnapshots: MixerSnapshot[];
   showMixer: boolean;
   detachedPanels: string[];
@@ -102,7 +105,10 @@ export function extractMixerUISnapshot(state = useDAWStore.getState()): MixerUIS
     masterMono: state.masterMono,
     masterAutomationLanes: state.masterAutomationLanes,
     showMasterAutomation: state.showMasterAutomation,
+    masterAutomationReadEnabled: state.masterAutomationReadEnabled,
+    masterAutomationWriteEnabled: state.masterAutomationWriteEnabled,
     masterAutomationEnabled: state.masterAutomationEnabled,
+    automationWriteBehavior: state.automationWriteBehavior,
     mixerSnapshots: state.mixerSnapshots,
     showMixer: state.showMixer,
     detachedPanels: state.detachedPanels,
@@ -159,7 +165,12 @@ export function applyMixerUISnapshot(snapshot: MixerUISnapshot): void {
       masterMono: snapshot.masterMono,
       masterAutomationLanes: snapshot.masterAutomationLanes,
       showMasterAutomation: snapshot.showMasterAutomation,
-      masterAutomationEnabled: snapshot.masterAutomationEnabled,
+      masterAutomationReadEnabled:
+        snapshot.masterAutomationReadEnabled ?? snapshot.masterAutomationEnabled,
+      masterAutomationWriteEnabled: snapshot.masterAutomationWriteEnabled ?? false,
+      masterAutomationEnabled:
+        snapshot.masterAutomationReadEnabled ?? snapshot.masterAutomationEnabled,
+      automationWriteBehavior: snapshot.automationWriteBehavior ?? state.automationWriteBehavior,
       mixerSnapshots: snapshot.mixerSnapshots,
       showMixer: snapshot.showMixer,
       detachedPanels: snapshot.detachedPanels,

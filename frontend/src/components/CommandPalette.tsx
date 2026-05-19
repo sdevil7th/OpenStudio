@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { getRegisteredActions, ActionDef } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -109,7 +110,9 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   return createPortal(
     <div
       className="fixed inset-0 z-[10000] flex items-start justify-center pt-[15vh]"
+      data-modal-root="true"
       onClick={onClose}
+      onContextMenu={guardModalContextMenu}
     >
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50" />
@@ -118,6 +121,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       <div
         className="relative w-[520px] max-h-[60vh] bg-neutral-900 border border-neutral-600 rounded-lg shadow-2xl flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
+        onContextMenu={guardModalContextMenu}
       >
         {/* Search input */}
         <div className="p-3 border-b border-neutral-700">

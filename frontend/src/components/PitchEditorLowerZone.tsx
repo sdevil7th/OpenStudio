@@ -437,11 +437,13 @@ export function PitchEditorLowerZone() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = canvasSize.width * dpr;
-    canvas.height = canvasSize.height * dpr;
-    canvas.style.width = `${canvasSize.width}px`;
-    canvas.style.height = `${canvasSize.height}px`;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const safeCanvasWidth = Math.max(1, Math.round(canvasSize.width));
+    const safeCanvasHeight = Math.max(1, Math.round(canvasSize.height));
+    canvas.width = Math.max(1, Math.round(safeCanvasWidth * dpr));
+    canvas.height = Math.max(1, Math.round(safeCanvasHeight * dpr));
+    canvas.style.width = `${safeCanvasWidth}px`;
+    canvas.style.height = `${safeCanvasHeight}px`;
 
     const renderState: PitchEditorRenderState = {
       notes, contour, selectedNoteIds,
@@ -451,7 +453,7 @@ export function PitchEditorLowerZone() {
       scaleNotes, scaleKey,
       renderCoverage,
     };
-    renderPitchEditor(ctx, canvasSize.width, canvasSize.height, viewport, renderState);
+    renderPitchEditor(ctx, safeCanvasWidth, safeCanvasHeight, viewport, renderState);
 
     // Cache to offscreen canvas for playback RAF overlay
     const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
@@ -485,7 +487,9 @@ export function PitchEditorLowerZone() {
           clipStartTime: clipStart,
           clipDuration: clipDur,
         };
-        renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+        const safeCanvasWidth = Math.max(1, Math.round(canvasSize.width));
+        const safeCanvasHeight = Math.max(1, Math.round(canvasSize.height));
+        renderPitchEditor(ctx, safeCanvasWidth, safeCanvasHeight, vp, buildRenderState(st, daw));
         // Update cache
         const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
         const offCtx = offscreen.getContext("2d");
@@ -515,7 +519,9 @@ export function PitchEditorLowerZone() {
 
       // If viewport scrolled (auto-scroll during playback), invalidate static cache
       if (Math.abs(currentScrollX - staticCacheScrollXRef.current) > 0.5) {
-        renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+        const safeCanvasWidth = Math.max(1, Math.round(canvasSize.width));
+        const safeCanvasHeight = Math.max(1, Math.round(canvasSize.height));
+        renderPitchEditor(ctx, safeCanvasWidth, safeCanvasHeight, vp, buildRenderState(st, daw));
         const offscreen = new OffscreenCanvas(cvs.width, cvs.height);
         const offCtx = offscreen.getContext("2d");
         if (offCtx) offCtx.drawImage(cvs, 0, 0);
@@ -523,11 +529,11 @@ export function PitchEditorLowerZone() {
         staticCacheScrollXRef.current = currentScrollX;
       } else if (staticCanvasRef.current) {
         // Fast path: blit cached content + playhead only
-        renderPlayheadOverlay(ctx, canvasSize.width, canvasSize.height,
+        renderPlayheadOverlay(ctx, Math.max(1, Math.round(canvasSize.width)), Math.max(1, Math.round(canvasSize.height)),
           staticCanvasRef.current, daw.transport.currentTime, vp);
       } else {
         // Fallback: full render
-        renderPitchEditor(ctx, canvasSize.width, canvasSize.height, vp, buildRenderState(st, daw));
+        renderPitchEditor(ctx, Math.max(1, Math.round(canvasSize.width)), Math.max(1, Math.round(canvasSize.height)), vp, buildRenderState(st, daw));
       }
 
       rafRef.current = requestAnimationFrame(animate);

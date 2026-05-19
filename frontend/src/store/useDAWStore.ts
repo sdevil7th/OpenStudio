@@ -1,8 +1,13 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiToolsStatus } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
-import { type GridSize } from "../utils/snapToGrid";
+import {
+  FACTORY_QUANTIZE_PRESETS,
+  type GridSize,
+  type QuantizePreset,
+  type SnapType,
+} from "../utils/snapToGrid";
 // automationToBackend moved to store/actions/automation.ts
 import { logBridgeError } from "../utils/bridgeErrorHandler";
 import { uiStateActions } from "./actions/uiState";
@@ -28,6 +33,8 @@ import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../data/aiWor
 
 export interface InstallAiToolsOptions {
   userConfirmedDownload?: boolean;
+  selectedFeatures?: AiFeatureId[];
+  requestedFeature?: AiFeatureId;
 }
 
 
@@ -99,6 +106,14 @@ function isMusicGenerationFullyReady(
   );
 }
 
+function isAiFeatureReady(status: AiToolsStatus, featureId: AiFeatureId): boolean {
+  if (featureId === "stemSeparation") {
+    return Boolean(status.features?.stemSeparation?.ready ?? status.available);
+  }
+
+  return Boolean(status.features?.audioGeneration?.ready ?? isMusicGenerationFullyReady(status));
+}
+
 function getAiToolsReadyMessage(status: AiToolsStatus): string {
   if (isMusicGenerationFullyReady(status)) {
     return status.message || "AI tools are ready.";
@@ -147,6 +162,49 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   lastPhase: "checking",
   fallbackAttempted: false,
   restartRequired: false,
+  selectedFeatures: ["stemSeparation"],
+  requestedFeatures: ["stemSeparation"],
+  installedFeatures: [],
+  hardware: {
+    schemaVersion: 1,
+    gpuBackend: "none",
+    systemRamMb: 0,
+    systemRamGb: 0,
+    gpuMemoryMb: 0,
+    gpuMemoryGb: 0,
+    gpuMemoryDetected: false,
+    audioGenerationGpuSupported: false,
+    requirements: {
+      stemSeparation: { minSystemRamMb: 8192 },
+      audioGeneration: { minSystemRamMb: 16384, minGpuMemoryMb: 8192, supportedGpuBackends: ["cuda", "rocm"] },
+    },
+  },
+  features: {
+    stemSeparation: {
+      id: "stemSeparation",
+      label: "Stem Separation",
+      selected: true,
+      installed: false,
+      ready: false,
+      compatible: false,
+      blocked: false,
+      requiresGpu: false,
+      minSystemRamMb: 8192,
+    },
+    audioGeneration: {
+      id: "audioGeneration",
+      label: "Audio Generation",
+      installed: false,
+      ready: false,
+      compatible: false,
+      blocked: true,
+      blockReason: "supported GPU with at least 8 GB memory was not detected",
+      requiresGpu: true,
+      minSystemRamMb: 16384,
+      minGpuMemoryMb: 8192,
+      supportedGpuBackends: ["cuda", "rocm"],
+    },
+  },
 };
 
 // ============================================
@@ -156,18 +214,87 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
 export type TrackType = "audio" | "midi" | "instrument" | "bus" | "ai";
 export type InputType = "mono" | "stereo" | "midi";
 export type AITrackGenerationState = "idle" | "loading" | "generating" | "error";
+export type PianoRollTool =
+  | "select"
+  | "draw"
+  | "erase"
+  | "range"
+  | "trim"
+  | "split"
+  | "glue"
+  | "mute"
+  | "velocity"
+  | "line"
+  | "zoom"
+  | "pan";
+export type PianoRollLaneKind =
+  | "velocity"
+  | "noteOffVelocity"
+  | "chance"
+  | "velocityVariance"
+  | "pitchBend"
+  | "programBank"
+  | "channelPressure"
+  | "polyPressure"
+  | "cc7"
+  | "cc14";
+export type PianoRollLaneInterpolation = "step" | "linear" | "curve" | "parabola";
+
+export interface PianoRollVisibleLane {
+  id: string;
+  kind: PianoRollLaneKind;
+  label: string;
+  height: number;
+  cc?: number;
+  interpolation?: PianoRollLaneInterpolation;
+  preset?: string;
+}
+
+export const DEFAULT_PIANO_ROLL_VISIBLE_LANES: PianoRollVisibleLane[] = [
+  { id: "velocity", kind: "velocity", label: "Velocity", height: 72, interpolation: "step" },
+  { id: "pitch-bend", kind: "pitchBend", label: "Pitch Bend", height: 96, interpolation: "linear" },
+  { id: "cc-1", kind: "cc7", label: "CC#1 Modulation", height: 88, cc: 1, interpolation: "linear", preset: "modulation" },
+];
+
+export type MidiEditorSessionMode = "docked" | "windowed";
+
+export interface MidiEditorSession {
+  sessionId: string;
+  trackId: string;
+  clipId: string;
+  mode: MidiEditorSessionMode;
+  selectedNoteIds: string[];
+  midiEditRange: MIDIEditRange | null;
+  editCursorTime: number | null;
+  activeTool: PianoRollTool;
+  visibleLanes: PianoRollVisibleLane[];
+  activeLaneId: string;
+  scrollY: number;
+  windowPixelsPerSecond: number;
+  windowScrollX: number;
+  openedAt: number;
+  updatedAt: number;
+}
 
 // MIDI Event structure
 export interface MIDIEvent {
   timestamp: number; // Time in seconds from clip start
-  type: "noteOn" | "noteOff" | "cc" | "pitchBend";
+  type: "noteOn" | "noteOff" | "cc" | "pitchBend" | "programChange" | "channelPressure" | "polyPressure";
+  channel?: number; // 1-16 for serialized/scheduled MIDI, undefined = track/default channel
   note?: number; // 0-127 for note events
   velocity?: number; // 0-127 for note events
+  releaseVelocity?: number; // 0-127 note-off velocity when available
   controller?: number; // CC number
   value?: number; // CC value or pitch bend
   pitchBend?: number; // Per-note pitch bend, -1.0 to +1.0
   pressure?: number; // Per-note pressure/aftertouch, 0.0 to 1.0
   slide?: number; // Per-note slide (CC74), 0.0 to 1.0
+  probability?: number; // 0.0-1.0 deterministic playback chance
+  chance?: number; // Alias for probability; accepts 0.0-1.0 or 0-100 project data
+  playCount?: number; // Maximum loop iteration count, 1 = first visible pass only
+  velocityVariance?: number; // +/- velocity randomization, deterministic per rendered event
+  centOffset?: number; // Per-note detune metadata in cents
+  muted?: boolean;
 }
 
 // CC Event for MIDI CC lane editing
@@ -175,6 +302,11 @@ export interface MIDICCEvent {
   cc: number;       // CC number (e.g. 1=Mod, 7=Vol, 10=Pan, 11=Expr, 64=Sustain)
   time: number;     // Time in seconds from clip start
   value: number;    // 0-127
+  channel?: number; // 1-16, undefined = track/default channel
+  probability?: number;
+  chance?: number;
+  playCount?: number;
+  interpolation?: "step" | "linear" | "curve" | "parabola";
 }
 
 // MIDI Clip structure
@@ -183,9 +315,21 @@ export interface MIDIClip {
   name: string;
   startTime: number; // Position on timeline in seconds
   duration: number; // Duration in seconds
+  offset?: number; // Non-destructive trim offset into the MIDI source, in seconds
+  sourceStart?: number; // Start inside the editable MIDI source, in seconds
+  sourceLength?: number; // Editable MIDI source length, in seconds
+  loopEnabled?: boolean; // When true, timeline expansion repeats the source
+  loopOffset?: number; // Phase offset into the MIDI source loop, in seconds
+  loopLength?: number; // Legacy/source loop length for repeated MIDI phrase editing
   events: MIDIEvent[];
   ccEvents?: MIDICCEvent[]; // CC lane events for piano roll editing
+  quantizeBackup?: {
+    events: MIDIEvent[];
+    ccEvents?: MIDICCEvent[];
+  };
   color: string;
+  muted?: boolean;
+  locked?: boolean;
 }
 
 // Type guards for clip discrimination
@@ -196,9 +340,73 @@ export function isAudioClip(clip: AudioClip | MIDIClip): clip is AudioClip {
   return "filePath" in clip;
 }
 
+export type MIDITrackEffectType = "arpeggiator" | "pitch" | "velocity" | "time";
+export type MIDIArpeggiatorMode = "up" | "down" | "upDown" | "asPlayed";
+
+export interface MIDITrackEffect {
+  id: string;
+  type: MIDITrackEffectType;
+  enabled: boolean;
+  semitones?: number;
+  scale?: number;
+  offset?: number;
+  offsetMs?: number;
+  gridSeconds?: number;
+  swing?: number;
+  rateSeconds?: number;
+  gate?: number;
+  mode?: MIDIArpeggiatorMode;
+  octaves?: number;
+}
+
+export interface MIDINoteClipboardItem {
+  noteNumber: number;
+  startTime: number;
+  duration: number;
+  velocity: number;
+  pitchBend?: number;
+  pressure?: number;
+  slide?: number;
+  muted?: boolean;
+}
+
+export interface MIDIEditRange {
+  startTime: number;
+  endTime: number;
+  minNote: number;
+  maxNote: number;
+  includeCC: boolean;
+}
+
+export interface MIDIQuantizeSettings {
+  presetId?: string;
+  gridSize?: GridSize;
+  gridSeconds: number;
+  strength: number;
+  mode?: "start" | "starts" | "end" | "ends" | "both" | "startsAndEnds" | "length" | "fixedLength";
+  swing?: number;
+  groovePreset?: "straight" | "swingLight" | "swingHeavy" | "laidBack16" | "push16";
+  tupletDivisions?: number;
+  catchRangeMs?: number;
+  safeRangeMs?: number;
+  randomizeMs?: number;
+  fixedLength?: number;
+  moveControllers?: boolean;
+}
+
+export interface MIDIRangeClipboard {
+  rangeLength: number;
+  notes: MIDINoteClipboardItem[];
+  ccEvents: Array<{ cc: number; time: number; value: number }>;
+  sourceTrackId: string | null;
+  sourceClipId: string | null;
+  isCut: boolean;
+}
+
 // Supports built-in params plus plugin params like "plugin_0_3" (fxIndex_paramIndex)
 export type AutomationParam = "volume" | "pan" | "mute" | (string & {});
 export type AutomationModeType = "off" | "read" | "write" | "touch" | "latch";
+export type AutomationWriteBehavior = "touch" | "latch" | "overwrite";
 export const AUTOMATION_LANE_HEIGHT = 60; // px per visible automation lane
 export const DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT = 16;
 export const BOTTOM_INTERACTION_BUFFER = 32;
@@ -217,20 +425,21 @@ export interface AutomationLane {
   visible: boolean;
   mode: AutomationModeType;
   armed: boolean;
+  readEnabled: boolean;
 }
 
 export interface AutomationSuspendSnapshot {
   showAutomation: boolean;
-  lanes: Record<string, { visible: boolean; armed: boolean; mode: AutomationModeType }>;
+  lanes: Record<string, { visible: boolean; armed: boolean; mode: AutomationModeType; readEnabled?: boolean }>;
 }
 
 // ===== Automation Layout Helpers =====
 
 export function getEffectiveTrackHeight(
-  track: Pick<Track, "automationEnabled" | "showAutomation" | "automationLanes">,
+  track: Pick<Track, "showAutomation" | "automationLanes">,
   baseTrackHeight: number,
 ): number {
-  if (!track.automationEnabled || !track.showAutomation) return baseTrackHeight;
+  if (!track.showAutomation) return baseTrackHeight;
   const visibleLaneCount = track.automationLanes.filter((l) => l.visible).length;
   return baseTrackHeight + visibleLaneCount * AUTOMATION_LANE_HEIGHT;
 }
@@ -239,8 +448,8 @@ function getTrackHeaderControlWidth(track: Pick<Track, "type">): number {
   const commonWidth = 30 + 20 + 126 + 50 + 50 + 50;
   if (track.type === "audio") return commonWidth + 96;
   if (track.type === "ai") return commonWidth + 128;
-  if (track.type === "instrument") return commonWidth + 92;
-  if (track.type === "midi") return commonWidth + 74;
+  if (track.type === "instrument") return commonWidth + 188;
+  if (track.type === "midi") return commonWidth + 170;
   return commonWidth;
 }
 
@@ -269,7 +478,7 @@ export function getTrackClipBodyHeight(
 }
 
 export function getTimelineRowMetrics(
-  track: Pick<Track, "type" | "automationEnabled" | "showAutomation" | "automationLanes">,
+  track: Pick<Track, "type" | "showAutomation" | "automationLanes">,
   baseTrackHeight: number,
 ) {
   const rowHeight = getEffectiveTrackHeight(track, baseTrackHeight);
@@ -390,6 +599,8 @@ export interface AudioClip {
   activeTakeIndex?: number; // Which take is active (undefined = main clip)
   sourceLength?: number; // Full duration of source audio file (for resize clamping after split)
   gainEnvelope?: Array<{ time: number; gain: number }>; // Per-clip gain envelope (time relative to clip start, gain 0.0-2.0)
+  importStatus?: "probing" | "preparingPlayback" | "ready" | "failed";
+  waveformStatus?: "preview" | "building" | "ready";
 }
 
 export interface TempoMarker {
@@ -445,7 +656,15 @@ export interface Track {
   // MIDI Configuration (MIDI/Instrument tracks)
   midiInputDevice?: string;
   midiChannel?: number; // 0 = all, 1-16 = specific channel
+  midiPitchBendRangeUp?: number;
+  midiPitchBendRangeDown?: number;
+  midiPitchBendRangeLinked?: boolean;
   instrumentPlugin?: string;
+  builtInInstrument?: "synth" | "piano" | "drums";
+  samplerSamplePath?: string;
+  samplerRootNote?: number;
+  samplerSourceType?: "audio" | "soundfont";
+  midiEffects?: MIDITrackEffect[];
 
   // FX counts (for visual indicators)
   inputFxCount: number;
@@ -455,6 +674,8 @@ export interface Track {
   // Automation
   automationLanes: AutomationLane[];
   showAutomation: boolean;
+  automationReadEnabled: boolean;
+  automationWriteEnabled: boolean;
   automationEnabled: boolean;
   suspendedAutomationState?: AutomationSuspendSnapshot | null;
 
@@ -693,10 +914,17 @@ interface DAWState {
   selectedClipId: string | null; // Last selected (for single-target actions)
   selectedClipIds: string[];     // All selected clips (multi-select)
   clipboard: {
-    clip: AudioClip | null;
-    clips: Array<{ clip: AudioClip; trackId: string }>; // Multi-clip with track info
+    clip: AudioClip | MIDIClip | null;
+    clips: Array<{ clip: AudioClip | MIDIClip; trackId: string }>; // Multi-clip with track info
     isCut: boolean;
   };
+  midiNoteClipboard: {
+    notes: MIDINoteClipboardItem[];
+    sourceTrackId: string | null;
+    sourceClipId: string | null;
+    isCut: boolean;
+  };
+  midiRangeClipboard: MIDIRangeClipboard;
 
   // Markers and Regions
   markers: Marker[];
@@ -712,8 +940,11 @@ interface DAWState {
   masterMono: boolean;
   masterAutomationLanes: AutomationLane[];
   showMasterAutomation: boolean;
+  masterAutomationReadEnabled: boolean;
+  masterAutomationWriteEnabled: boolean;
   masterAutomationEnabled: boolean;
   suspendedMasterAutomationState: AutomationSuspendSnapshot | null;
+  automationWriteBehavior: AutomationWriteBehavior;
 
   // Meter state — stored separately from `tracks` so that 10Hz meter updates
   // never give tracks a new array reference.  Only ChannelStrip / TrackHeader
@@ -744,7 +975,10 @@ interface DAWState {
   trackHeight: number; // For Vertical Zoom
   tcpWidth: number; // Track Control Panel width (draggable)
   snapEnabled: boolean;
+  snapType: SnapType;
   gridSize: GridSize;
+  quantizePresetId: string;
+  quantizePresets: QuantizePreset[];
   toolMode: "select" | "split" | "mute" | "smart";
 
   // UI State
@@ -779,6 +1013,7 @@ interface DAWState {
 
   // AI Tools Setup Modal
   showAiToolsSetup: boolean;
+  aiToolsSetupRequestedFeature: AiFeatureId | null;
 
   // Stem Separation Modal
   showStemSeparation: boolean;
@@ -797,14 +1032,28 @@ interface DAWState {
   showPianoRoll: boolean;
   pianoRollTrackId: string | null;
   pianoRollClipId: string | null;
+  midiEditorSessions: MidiEditorSession[];
+  activeMidiEditorSessionId: string | null;
+  dockedMidiEditorSessionId: string | null;
   selectedNoteIds: string[];
+  midiEditRange: MIDIEditRange | null;
+  pianoRollEditCursorTime: number | null;
+  activeMidiTool: PianoRollTool;
+  pianoRollVisibleLanes: PianoRollVisibleLane[];
+  pianoRollActiveLaneId: string;
   pianoRollScaleRoot: number; // 0=C, 1=C#, ..., 11=B
   pianoRollScaleType: string; // 'chromatic', 'major', 'minor', 'dorian', 'mixolydian', 'pentatonic_major', 'pentatonic_minor', 'blues'
+  pianoRollInsertVelocity: number;
+  pianoRollAuditionEnabled: boolean;
 
   // Step Input Mode (Piano Roll)
   stepInputEnabled: boolean;
   stepInputSize: number;     // Duration in beats (0.125=1/32, 0.25=1/16, 0.5=1/8, 1=1/4)
   stepInputPosition: number; // Current step cursor time in seconds (relative to clip start)
+  midiInputQuantizeEnabled: boolean;
+  midiInputQuantizeGridBeats: number;
+  midiInputQuantizeStrength: number;
+  lastMIDIQuantizeSettings: MIDIQuantizeSettings;
 
   // Audio Device
   audioDeviceSetup: AudioDeviceSetup | null;
@@ -817,6 +1066,7 @@ interface DAWState {
   projectPath: string | null;
   isModified: boolean;
   recentProjects: string[];
+  hydrateRecentProjects: () => Promise<void>;
   showUnsavedChangesDialog: boolean;
   pendingProjectAction: PendingProjectAction | null;
   pendingProjectActionLabel: string;
@@ -1114,6 +1364,7 @@ interface DAWActions {
   duplicateTrack: (trackId: string) => Promise<void>;
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
+  setTrackMIDIEffects: (trackId: string, midiEffects: MIDITrackEffect[]) => void;
   reorderTrack: (activeId: string, overId: string) => void;
   reorderMultipleTracks: (trackIds: string[], overId: string) => void;
   selectTrack: (
@@ -1186,6 +1437,12 @@ interface DAWActions {
     startChannel: number,
     channelCount: number,
   ) => Promise<void>;
+  setTrackMidiPitchBendRange: (
+    id: string,
+    up: number,
+    down?: number,
+    linked?: boolean,
+  ) => void;
 
   // Continuous edit begin/commit (for undo/redo of fader drags)
   beginTrackVolumeEdit: (id: string) => void;
@@ -1198,6 +1455,11 @@ interface DAWActions {
   // FX undo/redo actions
   addTrackFXWithUndo: (trackId: string, pluginPath: string, chainType: "input" | "track") => Promise<boolean>;
   removeTrackFXWithUndo: (trackId: string, fxIndex: number, chainType: "input" | "track") => Promise<boolean>;
+  loadInstrumentWithUndo: (trackId: string, pluginPath: string) => Promise<boolean>;
+  setBuiltInInstrumentWithUndo: (trackId: string, instrument: "synth" | "piano" | "drums") => Promise<boolean>;
+  removeInstrumentWithUndo: (trackId: string) => Promise<boolean>;
+  setTrackSamplerSampleWithUndo: (trackId: string, samplePath: string, rootNote?: number) => Promise<boolean>;
+  clearTrackSamplerSampleWithUndo: (trackId: string) => Promise<boolean>;
 
   // Record & Edit Modes
   setRecordMode: (mode: "normal" | "overdub" | "replace") => void;
@@ -1244,9 +1506,15 @@ interface DAWActions {
   toggleMasterMute: () => void;
   toggleMasterMono: () => void;
   toggleMasterAutomation: () => void;
+  setMasterAutomationRead: (enabled: boolean) => void;
+  toggleMasterAutomationRead: () => void;
+  setMasterAutomationWrite: (enabled: boolean) => void;
+  toggleMasterAutomationWrite: () => void;
   toggleMasterAutomationEnabled: () => void;
   addMasterAutomationLane: (param: string) => string | null;
   toggleMasterAutomationLaneVisibility: (laneId: string) => void;
+  setMasterAutomationLaneRead: (laneId: string, enabled: boolean) => void;
+  toggleMasterAutomationLaneRead: (laneId: string) => void;
   setMasterAutomationLaneMode: (laneId: string, mode: AutomationModeType) => void;
   armMasterAutomationLane: (laneId: string, armed: boolean) => void;
   setMasterTrackAutomationMode: (mode: AutomationModeType) => void;
@@ -1276,10 +1544,34 @@ interface DAWActions {
   setTcpWidth: (width: number) => void;
   toggleSnap: () => void;
   setGridSize: (size: GridSize) => void;
+  setSnapType: (type: SnapType) => void;
+  setQuantizePresetId: (presetId: string) => void;
+  saveQuantizePreset: (name: string, preset?: Partial<QuantizePreset>) => string;
+  renameQuantizePreset: (presetId: string, name: string) => void;
+  removeQuantizePreset: (presetId: string) => void;
+  restoreFactoryQuantizePresets: () => void;
 
   // Clips
   addClip: (trackId: string, clip: AudioClip) => void;
   removeClip: (trackId: string, clipId: string) => void;
+  importExternalMediaAtTimeline: (request: {
+    filePath: string;
+    name?: string;
+    trackId?: string;
+    insertIndex?: number;
+    startTime: number;
+    duration?: number;
+    sampleRate?: number;
+    waveformStatus?: "preview" | "building" | "ready";
+  }) => Promise<void>;
+  importExternalMIDIAtTimeline: (request: {
+    filePath: string;
+    name?: string;
+    targetTrackId?: string;
+    insertIndex?: number;
+    startTime: number;
+    parsedTracks?: Array<{ name?: string; channel?: number; events: any[] }>;
+  }) => Promise<void>;
   syncClipsWithBackend: () => Promise<void>;
   importMedia: (
     filePath: string,
@@ -1308,6 +1600,11 @@ interface DAWActions {
     newDuration: number,
     newOffset: number,
   ) => void;
+  setMIDIClipSourceWindow: (
+    clipId: string,
+    patch: Partial<Pick<MIDIClip, "offset" | "sourceLength" | "loopLength" | "loopEnabled" | "loopOffset">>,
+    description?: string,
+  ) => void;
   toggleClipMute: (clipId: string) => void;
   setClipVolume: (clipId: string, volumeDB: number) => void;
   setClipFades: (clipId: string, fadeIn: number, fadeOut: number) => void;
@@ -1317,11 +1614,19 @@ interface DAWActions {
   cutClip: (clipId: string) => void;
   copySelectedClips: () => void;
   cutSelectedClips: () => void;
+  copySelectedTimelineClips: () => void;
+  pasteSelectedTimelineClips: () => void;
   pasteClip: (targetTrackId: string, targetTime: number) => void;
   pasteClips: () => void; // Smart paste: selected track or new tracks, at playhead
   nudgeClips: (direction: "left" | "right", fine?: boolean) => void;
   deleteClip: (clipId: string) => void;
   duplicateClip: (clipId: string) => void;
+  duplicateClipToPosition: (
+    clipId: string,
+    targetTrackId: string,
+    targetStartTime: number,
+  ) => string | null;
+  repeatClip: (clipId: string, repeatCount?: number) => void;
 
   // Clip Gain Envelope
   addClipGainPoint: (clipId: string, time: number, gain: number) => void;
@@ -1340,13 +1645,34 @@ interface DAWActions {
   deleteRazorEditContent: () => void;
 
   // Track Automation (Phase 5)
+  setAutomationWriteBehavior: (behavior: AutomationWriteBehavior) => void;
   toggleTrackAutomation: (trackId: string) => void;
+  setTrackAutomationRead: (trackId: string, enabled: boolean) => void;
+  toggleTrackAutomationRead: (trackId: string) => void;
+  setTrackAutomationWrite: (trackId: string, enabled: boolean) => void;
+  toggleTrackAutomationWrite: (trackId: string) => void;
   toggleTrackAutomationEnabled: (trackId: string) => void;
   addAutomationLane: (trackId: string, param: AutomationParam, label?: string) => string | null;
   addAutomationPoint: (trackId: string, laneId: string, time: number, value: number) => void;
   removeAutomationPoint: (trackId: string, laneId: string, pointIndex: number) => void;
   moveAutomationPoint: (trackId: string, laneId: string, pointIndex: number, time: number, value: number) => void;
+  setAutomationLanePoints: (
+    trackId: string,
+    laneId: string,
+    points: AutomationPoint[],
+    options?: {
+      undoable?: boolean;
+      description?: string;
+      oldPoints?: AutomationPoint[];
+      oldTrackRead?: boolean;
+      oldTrackWrite?: boolean;
+      oldLaneRead?: boolean;
+      oldLaneMode?: AutomationModeType;
+    },
+  ) => void;
   toggleAutomationLaneVisibility: (trackId: string, laneId: string) => void;
+  setAutomationLaneRead: (trackId: string, laneId: string, enabled: boolean) => void;
+  toggleAutomationLaneRead: (trackId: string, laneId: string) => void;
   clearAutomationLane: (trackId: string, laneId: string) => void;
   setAutomationLaneMode: (trackId: string, laneId: string, mode: AutomationModeType) => void;
   setTrackAutomationMode: (trackId: string, mode: AutomationModeType) => void;
@@ -1355,6 +1681,11 @@ interface DAWActions {
   disarmAllAutomationLanes: (trackId: string) => void;
   showAllActiveEnvelopes: (trackId: string) => void;
   hideAllEnvelopes: (trackId: string) => void;
+  recordAutomationWriteTick: (nowMs?: number) => void;
+  endAutomationWriteSession: () => void;
+  setAutomationWriteValue: (trackId: string, param: string, value: number) => void;
+  beginAutomationParamTouch: (trackId: string, param: string) => void;
+  endAutomationParamTouch: (trackId: string, param: string) => void;
 
   // Strip Silence (Phase 3.12)
   stripSilence: (clipId: string, thresholdDb: number, minSilenceMs: number,
@@ -1412,7 +1743,7 @@ interface DAWActions {
   toggleGettingStarted: () => void;
   togglePreferences: () => void;
   toggleScriptConsole: () => void;
-  openAiToolsSetup: () => void;
+  openAiToolsSetup: (requestedFeature?: AiFeatureId) => void;
   closeAiToolsSetup: () => void;
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
@@ -1442,6 +1773,13 @@ interface DAWActions {
   // Piano Roll
   openPianoRoll: (trackId: string, clipId: string) => void;
   closePianoRoll: () => void;
+  openMidiEditorForClip: (trackId: string, clipId: string) => string | null;
+  focusMidiEditorSession: (sessionId: string) => void;
+  closeMidiEditorSession: (sessionId: string) => void;
+  dockMidiEditorSession: (sessionId: string) => void;
+  popOutMidiEditorSession: (sessionId: string) => void;
+  updateMidiEditorSession: (sessionId: string, patch: Partial<MidiEditorSession>) => void;
+  syncActiveMidiEditorSessionFromGlobals: (patch?: Partial<MidiEditorSession>) => void;
   addMIDIClip: (trackId: string, startTime: number, duration?: number) => string;
 
   // Project Settings Actions
@@ -1652,6 +1990,18 @@ interface DAWActions {
   zoomToSelection: () => void;
   toggleDrumEditor: () => void;
   selectAllMIDINotes: () => void;
+  setSelectedNoteIds: (ids: string[]) => void;
+  setMIDIEditRange: (range: MIDIEditRange | null) => void;
+  clearMIDIEditRange: () => void;
+  setActiveMidiTool: (tool: PianoRollTool) => void;
+  setPianoRollVisibleLanes: (lanes: PianoRollVisibleLane[]) => void;
+  setPianoRollActiveLane: (laneId: string) => void;
+  updatePianoRollVisibleLane: (laneId: string, patch: Partial<PianoRollVisibleLane>) => void;
+  addPianoRollVisibleLane: (lane: PianoRollVisibleLane) => void;
+  removePianoRollVisibleLane: (laneId: string) => void;
+  setPianoRollEditCursorTime: (time: number | null) => void;
+  setPianoRollInsertVelocity: (velocity: number) => void;
+  setPianoRollAuditionEnabled: (enabled: boolean) => void;
   updateMIDINotes: (clipId: string, notes: MIDIEvent[]) => void;
 
   // Piano Roll: Velocity & CC editing
@@ -1667,6 +2017,56 @@ interface DAWActions {
   commitMIDICCEvents: (trackId: string, clipId: string, oldCCEvents: MIDICCEvent[], newCCEvents: MIDICCEvent[], description?: string) => void;
   setPianoRollScaleRoot: (root: number) => void;
   setPianoRollScaleType: (scaleType: string) => void;
+  setMIDIInputQuantize: (settings: {
+    midiInputQuantizeEnabled?: boolean;
+    midiInputQuantizeGridBeats?: number;
+    midiInputQuantizeStrength?: number;
+  }) => void;
+  copySelectedMIDINotes: (trackId: string, clipId: string) => void;
+  cutSelectedMIDINotes: (trackId: string, clipId: string) => void;
+  copyMIDIRange: (trackId: string, clipId: string) => void;
+  cutMIDIRange: (trackId: string, clipId: string) => void;
+  deleteMIDIRange: (trackId: string, clipId: string) => void;
+  pasteMIDIRange: (trackId: string, clipId: string, pasteTime?: number) => string[];
+  duplicateMIDIRange: (trackId: string, clipId: string) => string[];
+  repeatMIDISelection: (trackId: string, clipId: string) => string[];
+  pasteMIDINotes: (trackId: string, clipId: string, pasteTime?: number) => string[];
+  duplicateSelectedMIDINotes: (trackId: string, clipId: string) => string[];
+  invertMIDISelection: (clipId: string) => void;
+  selectMIDINotesByPitch: (clipId: string, noteNumber?: number) => void;
+  selectMIDINotesInRange: (clipId: string, range: { startTime: number; endTime: number; minNote: number; maxNote: number }, mode?: "replace" | "add" | "toggle") => void;
+  quantizeSelectedMIDINotes: (trackId: string, clipId: string, gridSeconds: number, strength?: number, options?: {
+    presetId?: string;
+    gridSize?: GridSize;
+    mode?: "start" | "starts" | "end" | "ends" | "both" | "startsAndEnds" | "length" | "fixedLength";
+    swing?: number;
+    groovePreset?: "straight" | "swingLight" | "swingHeavy" | "laidBack16" | "push16";
+    tupletDivisions?: number;
+    catchRangeSeconds?: number;
+    catchRangeMs?: number;
+    safeRangeSeconds?: number;
+    safeRangeMs?: number;
+    randomizeSeconds?: number;
+    randomizeMs?: number;
+    fixedLength?: number;
+    moveControllers?: boolean;
+  }) => string[];
+  quantizeSelectedMIDINotesUsingLast: (trackId?: string, clipId?: string) => string[];
+  resetMIDIQuantize: (trackId: string, clipId: string) => boolean;
+  freezeMIDIQuantize: (trackId: string, clipId: string) => boolean;
+  humanizeSelectedMIDINotes: (trackId: string, clipId: string, options?: { timingMs?: number; velocity?: number }) => string[];
+  setSelectedMIDINoteVelocity: (trackId: string, clipId: string, velocity: number) => string[];
+  scaleSelectedMIDINoteVelocity: (trackId: string, clipId: string, factor: number) => string[];
+  randomizeSelectedMIDINoteVelocity: (trackId: string, clipId: string, amount?: number) => string[];
+  setSelectedMIDINoteLength: (trackId: string, clipId: string, duration: number) => string[];
+  legatoSelectedMIDINotes: (trackId: string, clipId: string) => string[];
+  reverseSelectedMIDINotes: (trackId: string, clipId: string) => string[];
+  invertSelectedMIDINotePitches: (trackId: string, clipId: string) => string[];
+  mirrorSelectedMIDINotePitches: (trackId: string, clipId: string, centerNote?: number) => string[];
+  snapSelectedMIDINotesToScale: (trackId: string, clipId: string, scaleRoot: number, scaleType: string) => string[];
+  toggleSelectedMIDINoteMute: (trackId: string, clipId: string, muted?: boolean) => string[];
+  insertMIDIChord: (trackId: string, clipId: string, startTime: number, rootNote: number, chordType?: "major" | "minor" | "power" | "diatonic") => string[];
+  cropMIDIClipToSelectedNotes: (trackId: string, clipId: string) => void;
 
   // Step Input Mode (Piano Roll)
   toggleStepInput: () => void;
@@ -1845,7 +2245,15 @@ export const createDefaultTrack = (
   inputChannelCount: 2,
   midiInputDevice: undefined,
   midiChannel: 0,
+  midiPitchBendRangeUp: 2,
+  midiPitchBendRangeDown: 2,
+  midiPitchBendRangeLinked: true,
   instrumentPlugin: undefined,
+  builtInInstrument: undefined,
+  samplerSamplePath: undefined,
+  samplerRootNote: 60,
+  samplerSourceType: undefined,
+  midiEffects: [],
   clips: [],
   midiClips: [],
   inputFxCount: 0,
@@ -1854,12 +2262,11 @@ export const createDefaultTrack = (
   meterLevel: 0,
   peakLevel: 0,
   clipping: false,
-  automationLanes: [
-    { id: "vol", param: "volume", points: [], visible: true, mode: "read", armed: false },
-    { id: "pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
-  ],
+  automationLanes: [],
   showAutomation: false,
-  automationEnabled: true,
+  automationReadEnabled: false,
+  automationWriteEnabled: false,
+  automationEnabled: false,
   suspendedAutomationState: null,
   frozen: false,
   takes: [],
@@ -1918,10 +2325,7 @@ export const initialTransport: TransportState = {
 };
 
 export function createDefaultMasterAutomationLanes(): AutomationLane[] {
-  return [
-    { id: "master-vol", param: "volume", points: [], visible: false, mode: "read", armed: false },
-    { id: "master-pan", param: "pan", points: [], visible: false, mode: "read", armed: false },
-  ];
+  return [];
 }
 
 export function createDefaultRenderMetadata() {
@@ -1983,6 +2387,20 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
       clips: [],
       isCut: false,
     },
+    midiNoteClipboard: {
+      notes: [],
+      sourceTrackId: null,
+      sourceClipId: null,
+      isCut: false,
+    },
+    midiRangeClipboard: {
+      rangeLength: 0,
+      notes: [],
+      ccEvents: [],
+      sourceTrackId: null,
+      sourceClipId: null,
+      isCut: false,
+    },
     transport: { ...initialTransport },
     recordingClips: [],
     recordingMIDIPreviews: {},
@@ -1996,7 +2414,15 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     projectRange: { start: 0, end: 0 },
     selectedClipId: null,
     selectedClipIds: [],
+    midiEditorSessions: [],
+    activeMidiEditorSessionId: null,
+    dockedMidiEditorSessionId: null,
     selectedNoteIds: [],
+    midiEditRange: null,
+    pianoRollEditCursorTime: null,
+    activeMidiTool: "select",
+    pianoRollVisibleLanes: DEFAULT_PIANO_ROLL_VISIBLE_LANES.map((lane) => ({ ...lane })),
+    pianoRollActiveLaneId: "velocity",
     markers: [],
     regions: [],
     tempoMarkers: [],
@@ -2008,8 +2434,11 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     masterMono: false,
     masterAutomationLanes: createDefaultMasterAutomationLanes(),
     showMasterAutomation: false,
-    masterAutomationEnabled: true,
+    masterAutomationReadEnabled: false,
+    masterAutomationWriteEnabled: false,
+    masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
+    automationWriteBehavior: "touch",
     projectPath: null,
     isModified: false,
     projectName: "Untitled Project",
@@ -2073,7 +2502,17 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "selectedClipId",
   "selectedClipIds",
   "clipboard",
+  "midiNoteClipboard",
+  "midiRangeClipboard",
+  "midiEditorSessions",
+  "activeMidiEditorSessionId",
+  "dockedMidiEditorSessionId",
   "selectedNoteIds",
+  "midiEditRange",
+  "pianoRollEditCursorTime",
+  "activeMidiTool",
+  "pianoRollInsertVelocity",
+  "pianoRollAuditionEnabled",
   "selectedRegionIds",
   "razorEdits",
   "timeSelection",
@@ -2197,6 +2636,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       clips: [],
       isCut: false,
     },
+    midiNoteClipboard: {
+      notes: [],
+      sourceTrackId: null,
+      sourceClipId: null,
+      isCut: false,
+    },
+    midiRangeClipboard: {
+      rangeLength: 0,
+      notes: [],
+      ccEvents: [],
+      sourceTrackId: null,
+      sourceClipId: null,
+      isCut: false,
+    },
     markers: [],
     regions: [],
     tempoMarkers: [],
@@ -2208,8 +2661,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     masterMono: false,
     masterAutomationLanes: createDefaultMasterAutomationLanes(),
     showMasterAutomation: false,
-    masterAutomationEnabled: true,
+    masterAutomationReadEnabled: false,
+    masterAutomationWriteEnabled: false,
+    masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
+    automationWriteBehavior: "touch",
     meterLevels: {},
     peakLevels: {},
     clippingStates: {},
@@ -2226,7 +2682,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     defaultCrossfadeLength: 0.05,
     razorEdits: [],
     snapEnabled: true,
-    gridSize: "bar",
+    snapType: "grid",
+    gridSize: "use_quantize",
+    quantizePresetId: "factory-1/16",
+    quantizePresets: [...FACTORY_QUANTIZE_PRESETS],
     toolMode: "select" as const,
     showMixer: true,
     showMasterTrackInTCP: false,
@@ -2256,6 +2715,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showRegionMarkerManager: false,
     showScriptConsole: false,
     showAiToolsSetup: false,
+    aiToolsSetupRequestedFeature: null,
     showStemSeparation: false,
     stemSepTrackId: null,
     stemSepClipId: null,
@@ -2267,12 +2727,39 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showPianoRoll: false,
     pianoRollTrackId: null,
     pianoRollClipId: null,
+    midiEditorSessions: [],
+    activeMidiEditorSessionId: null,
+    dockedMidiEditorSessionId: null,
     selectedNoteIds: [],
+    midiEditRange: null,
+    pianoRollEditCursorTime: null,
+    activeMidiTool: "select",
+    pianoRollVisibleLanes: DEFAULT_PIANO_ROLL_VISIBLE_LANES.map((lane) => ({ ...lane })),
+    pianoRollActiveLaneId: "velocity",
     pianoRollScaleRoot: 0,
     pianoRollScaleType: "chromatic",
+    pianoRollInsertVelocity: 80,
+    pianoRollAuditionEnabled: true,
     stepInputEnabled: false,
     stepInputSize: 0.25,     // 1/16 note by default
     stepInputPosition: 0,
+    midiInputQuantizeEnabled: false,
+    midiInputQuantizeGridBeats: 0.25,
+    midiInputQuantizeStrength: 1,
+    lastMIDIQuantizeSettings: {
+      presetId: "factory-1/16",
+      gridSize: "1/16",
+      gridSeconds: 0.125,
+      strength: 1,
+      mode: "start",
+      swing: 0,
+      groovePreset: "straight",
+      tupletDivisions: 1,
+      catchRangeMs: 0,
+      safeRangeMs: 0,
+      randomizeMs: 0,
+      moveControllers: true,
+    },
     audioDeviceSetup: null,
     canUndo: false,
     canRedo: false,
@@ -2524,7 +3011,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 ...nextStatus,
                 state: "ready" as const,
                 installInProgress: false,
-                available: true,
+                available: Boolean(nextStatus.available),
                 message: getAiToolsReadyMessage(nextStatus),
                 error: undefined,
                 errorCode: undefined,
@@ -2581,7 +3068,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               ...currentStatus,
               ...status,
               state: "ready" as const,
-              available: true,
+              available: Boolean(status.available ?? currentStatus.available),
               installInProgress: false,
               error: undefined,
               errorCode: undefined,
@@ -2603,27 +3090,30 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
-        const aiToolsFullyReady = currentStatus.available && isMusicGenerationFullyReady(currentStatus);
-        if (currentStatus.installInProgress || aiToolsFullyReady) return;
+        const selectedFeatures = options.selectedFeatures?.length
+          ? options.selectedFeatures
+          : [options.requestedFeature ?? "stemSeparation"];
+        const selectedFeaturesReady = selectedFeatures.every((featureId) => isAiFeatureReady(currentStatus, featureId));
+        if (currentStatus.installInProgress || selectedFeaturesReady) return;
 
         if (currentStatus.statusWarningCode === "reconciling_install_state") {
-          get().openAiToolsSetup();
+          get().openAiToolsSetup(options.requestedFeature);
           get().showToast("OpenStudio is still confirming the previous AI tools install result.", "info");
           return;
         }
 
         if (currentStatus.state === "pythonMissing") {
-          get().openAiToolsSetup();
+          get().openAiToolsSetup(options.requestedFeature);
           return;
         }
 
         if (!options.userConfirmedDownload) {
-          get().openAiToolsSetup();
-          get().showToast("Confirm the AI Tools download before setup starts.", "info");
+          get().openAiToolsSetup(options.requestedFeature);
+          get().showToast("Confirm the selected AI feature download before setup starts.", "info");
           return;
         }
 
-      get().showToast("AI tools are being installed in the background.", "info");
+      get().showToast("Selected AI features are being installed in the background.", "info");
 
       set({
         aiToolsStatus: {
@@ -2634,6 +3124,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               : "checking",
           installInProgress: true,
           available: false,
+          selectedFeatures,
+          requestedFeatures: selectedFeatures,
+          requestedFeature: options.requestedFeature,
           error: undefined,
           statusWarning: undefined,
           statusWarningCode: undefined,
@@ -2655,7 +3148,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       });
 
       try {
-        const result = await nativeBridge.installAiTools({ userConfirmedDownload: true });
+        const result = await nativeBridge.installAiTools({
+          userConfirmedDownload: true,
+          selectedFeatures,
+          requestedFeature: options.requestedFeature,
+        });
         if (result.status) {
           get().applyAiToolsStatusUpdate(result.status);
         } else {
@@ -2797,6 +3294,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     clearRecentProjects: () => {
       set({ recentProjects: [] });
       localStorage.removeItem("recentProjects");
+      nativeBridge.setRecentProjects([]).catch(logBridgeError("recent projects"));
     },
 
     // ========== Project Settings ==========
@@ -3764,9 +4262,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Clip Lock & Color ==========
     toggleClipLock: (clipId) => {
-      const clip = get().tracks.flatMap(t => t.clips).find(c => c.id === clipId);
+      const clip = get().tracks.flatMap(t => [...t.clips, ...t.midiClips]).find(c => c.id === clipId);
       if (!clip) return;
       const wasLocked = !!clip.locked;
+      const isMidi = Array.isArray((clip as MIDIClip).events);
+      const midiTrackId = isMidi ? get().tracks.find((t) => t.midiClips.some((c) => c.id === clipId))?.id : null;
 
       set((s) => ({
         tracks: s.tracks.map((track) => ({
@@ -3774,20 +4274,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           clips: track.clips.map((c) =>
             c.id === clipId ? { ...c, locked: !c.locked } : c,
           ),
+          midiClips: track.midiClips.map((c) =>
+            c.id === clipId ? { ...c, locked: !c.locked } : c,
+          ),
         })),
         isModified: true,
       }));
+      if (midiTrackId) void get().syncMIDITrackToBackend(midiTrackId, { debounce: false });
 
       commandManager.push({
         type: "TOGGLE_CLIP_LOCK",
         description: wasLocked ? "Unlock clip" : "Lock clip",
         timestamp: Date.now(),
         execute: () => set((s) => ({
-          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, locked: !wasLocked } : c) })),
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, locked: !wasLocked } : c), midiClips: t.midiClips.map((c) => c.id === clipId ? { ...c, locked: !wasLocked } : c) })),
           isModified: true,
         })),
         undo: () => set((s) => ({
-          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, locked: wasLocked } : c) })),
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, locked: wasLocked } : c), midiClips: t.midiClips.map((c) => c.id === clipId ? { ...c, locked: wasLocked } : c) })),
           isModified: true,
         })),
       });
@@ -3795,9 +4299,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     setClipColor: (clipId, color) => {
-      const clip = get().tracks.flatMap(t => t.clips).find(c => c.id === clipId);
+      const clip = get().tracks.flatMap(t => [...t.clips, ...t.midiClips]).find(c => c.id === clipId);
       if (!clip) return;
       const oldColor = clip.color;
+      const isMidi = Array.isArray((clip as MIDIClip).events);
+      const midiTrackId = isMidi ? get().tracks.find((t) => t.midiClips.some((c) => c.id === clipId))?.id : null;
 
       set((s) => ({
         tracks: s.tracks.map((track) => ({
@@ -3805,20 +4311,24 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           clips: track.clips.map((c) =>
             c.id === clipId ? { ...c, color } : c,
           ),
+          midiClips: track.midiClips.map((c) =>
+            c.id === clipId ? { ...c, color } : c,
+          ),
         })),
         isModified: true,
       }));
+      if (midiTrackId) void get().syncMIDITrackToBackend(midiTrackId, { debounce: false });
 
       commandManager.push({
         type: "SET_CLIP_COLOR",
         description: "Change clip color",
         timestamp: Date.now(),
         execute: () => set((s) => ({
-          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color } : c) })),
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color } : c), midiClips: t.midiClips.map((c) => c.id === clipId ? { ...c, color } : c) })),
           isModified: true,
         })),
         undo: () => set((s) => ({
-          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color: oldColor } : c) })),
+          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color: oldColor } : c), midiClips: t.midiClips.map((c) => c.id === clipId ? { ...c, color: oldColor } : c) })),
           isModified: true,
         })),
       });

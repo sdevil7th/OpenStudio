@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { calculateGridInterval } from "../../utils/snapToGrid";
+import { calculateGridInterval, getQuantizePresetById } from "../../utils/snapToGrid";
 
 // @ts-nocheck
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -11,10 +11,16 @@ export const quantizeActions = (set: SetFn, get: GetFn) => ({
     quantizeSelectedClips: () => {
       const state = get();
       if (state.selectedClipIds.length === 0) return;
+      const quantizePreset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
       const gridInterval = calculateGridInterval(
         state.transport.tempo,
         state.timeSignature,
         state.gridSize,
+        {
+          quantizePreset,
+          quantizeGridSize: quantizePreset.gridSize,
+          pixelsPerSecond: state.pixelsPerSecond,
+        },
       );
 
       // Capture old positions for undo

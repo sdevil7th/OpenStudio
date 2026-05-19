@@ -8,7 +8,7 @@ import {
   TCP_HEADER_PRIMARY_BUTTON_CLASS,
   TCP_HEADER_TOGGLE_BUTTON_CLASS,
 } from "../components/tcpHeaderButtonStyles";
-import { type Track, useDAWStore } from "../store/useDAWStore";
+import { createDefaultTrack, type Track, useDAWStore } from "../store/useDAWStore";
 
 const initialState = useDAWStore.getState();
 
@@ -54,9 +54,12 @@ const baseTrack: Track = {
       visible: true,
       mode: "read",
       armed: false,
+      readEnabled: true,
     },
   ],
   showAutomation: true,
+  automationReadEnabled: true,
+  automationWriteEnabled: false,
   automationEnabled: true,
   suspendedAutomationState: null,
   frozen: false,
@@ -80,6 +83,35 @@ afterEach(() => {
 });
 
 describe("TCP header button alignment", () => {
+  it("disables track automation read when no automation lanes exist", () => {
+    const freshTrack = createDefaultTrack("track-fresh", "Fresh", "#14b8a6", "audio", []);
+
+    const html = renderToStaticMarkup(
+      <TrackHeader track={freshTrack} isSelected={false} />,
+    );
+
+    expect(getButtonTag(html, "Add an automation lane or enable write first")).toContain("disabled");
+    expect(getButtonTag(html, "Add an automation lane or enable write first")).toContain("text-neutral-600!");
+    expect(getButtonTag(html, "Enable automation write")).not.toContain("disabled");
+  });
+
+  it("keeps empty-track read clickable while write forces read on", () => {
+    const freshTrack = {
+      ...createDefaultTrack("track-fresh", "Fresh", "#14b8a6", "audio", []),
+      automationReadEnabled: true,
+      automationWriteEnabled: true,
+      automationEnabled: true,
+    };
+
+    const html = renderToStaticMarkup(
+      <TrackHeader track={freshTrack} isSelected={false} />,
+    );
+
+    expect(getButtonTag(html, "Disable automation read")).not.toContain("disabled");
+    expect(getButtonTag(html, "Disable automation read")).toContain("bg-teal-600/25!");
+    expect(getButtonTag(html, "Disable automation write")).not.toContain("disabled");
+  });
+
   it("renders the master mono button as MONO", () => {
     useDAWStore.setState({
       masterVolume: 1,
@@ -94,9 +126,12 @@ describe("TCP header button alignment", () => {
           visible: true,
           mode: "read",
           armed: false,
+          readEnabled: true,
         },
       ],
       showMasterAutomation: true,
+      masterAutomationReadEnabled: true,
+      masterAutomationWriteEnabled: false,
       masterAutomationEnabled: true,
     });
 
@@ -106,7 +141,7 @@ describe("TCP header button alignment", () => {
     expect(html).toContain('title="Master Volume: 0.0 dB"');
   });
 
-  it("keeps the master automation pair gray when no lanes are active", () => {
+  it("renders independent master automation read and write buttons", () => {
     useDAWStore.setState({
       masterVolume: 1,
       isMasterMuted: false,
@@ -120,25 +155,24 @@ describe("TCP header button alignment", () => {
           visible: false,
           mode: "read",
           armed: false,
+          readEnabled: true,
         },
       ],
       showMasterAutomation: false,
+      masterAutomationReadEnabled: true,
+      masterAutomationWriteEnabled: false,
       masterAutomationEnabled: true,
     });
 
     const html = renderToStaticMarkup(<MasterTrackHeader />);
 
-    expect(
-      getButtonTag(html, "Master Automation (right-click to toggle lanes)"),
-    ).toContain("hover:text-green-500 hover:border-green-500");
-    expect(
-      getButtonTag(html, "Master Automation (right-click to toggle lanes)"),
-    ).not.toContain("text-green-400!");
-    expect(getButtonTag(html, "No automation lanes")).toContain(
-      "hover:text-green-500 hover:border-green-500",
+    expect(getButtonTag(html, "Add a master automation lane or enable write first")).toContain("disabled");
+    expect(getButtonTag(html, "Add a master automation lane or enable write first")).toContain("text-neutral-600!");
+    expect(getButtonTag(html, "Enable master automation write")).toContain(
+      "hover:text-red-300 hover:border-red-500",
     );
-    expect(getButtonTag(html, "No automation lanes")).not.toContain(
-      "text-green-400!",
+    expect(getButtonTag(html, "Master automation panel")).toContain(
+      "hover:text-teal-300 hover:border-teal-500",
     );
   });
 
@@ -156,9 +190,12 @@ describe("TCP header button alignment", () => {
           visible: true,
           mode: "read",
           armed: false,
+          readEnabled: true,
         },
       ],
       showMasterAutomation: true,
+      masterAutomationReadEnabled: true,
+      masterAutomationWriteEnabled: false,
       masterAutomationEnabled: true,
     });
 
@@ -170,8 +207,14 @@ describe("TCP header button alignment", () => {
     expect(trackHtml).toContain(
       `data-tcp-pair="fx" class="${TCP_HEADER_BUTTON_PAIR_CLASS}"`,
     );
-    expect(trackHtml).toContain(
-      `data-tcp-pair="automation" class="${TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS}"`,
+    expect(trackHtml).toMatch(
+      /data-tcp-pair="automation" class="[^"]*relative inline-flex[^"]*h-6[^"]*shrink-0[^"]*items-center[^"]*gap-0[^"]*overflow-hidden[^"]*ring-1[^"]*ring-inset[^"]*"/,
+    );
+    expect(trackHtml).toMatch(
+      /data-tcp-pair="automation" class="[^"]*ring-neutral-700[^"]*"/,
+    );
+    expect(trackHtml).not.toMatch(
+      /data-tcp-pair="automation" class="[^"]*ring-teal-500[^"]*"/,
     );
     expect(masterHtml).toMatch(
       new RegExp(
@@ -183,7 +226,7 @@ describe("TCP header button alignment", () => {
     expect(masterHtml).toMatch(
       new RegExp(
         `data-tcp-pair="automation" class="[^"]*${escapeForRegex(
-          TCP_HEADER_BUTTON_PAIR_CLASS,
+          TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS,
         )}[^"]*"`,
       ),
     );
@@ -195,16 +238,31 @@ describe("TCP header button alignment", () => {
       TCP_HEADER_PRIMARY_BUTTON_CLASS,
     );
     expect(
-      getButtonTag(trackHtml, "Envelope Manager (right-click for quick options)"),
+      getButtonTag(trackHtml, "Disable automation read"),
     ).toContain(`w-6 h-6 text-[10px]`);
     expect(
-      getButtonTag(trackHtml, "Envelope Manager (right-click for quick options)"),
-    ).toContain(TCP_HEADER_PRIMARY_BUTTON_CLASS);
-    expect(getButtonTag(trackHtml, "Suspend automation")).toContain(
+      getButtonTag(trackHtml, "Disable automation read"),
+    ).toContain("rounded");
+    expect(getButtonTag(trackHtml, "Automation panel")).toContain(
       `w-4 h-6 text-[10px]`,
     );
-    expect(getButtonTag(trackHtml, "Suspend automation")).toContain(
-      TCP_HEADER_TOGGLE_BUTTON_CLASS,
+    expect(getButtonTag(trackHtml, "Automation panel")).toContain(
+      "rounded-none",
+    );
+    expect(getButtonTag(trackHtml, "Automation panel")).toContain(
+      "border-y-0!",
+    );
+    expect(getButtonTag(trackHtml, "Automation panel")).toContain(
+      "border-l!",
+    );
+    expect(getButtonTag(trackHtml, "Automation panel")).not.toContain(
+      "bg-teal-500/10!",
+    );
+    expect(getButtonTag(trackHtml, "Enable automation write")).toContain(
+      "rounded-none border-y-0! border-r-0! border-l!",
+    );
+    expect(getButtonTag(trackHtml, "Enable automation write")).toContain(
+      `w-6 h-6 text-[10px]`,
     );
     expect(trackHtml).toMatch(
       new RegExp(
@@ -223,16 +281,16 @@ describe("TCP header button alignment", () => {
       TCP_HEADER_PRIMARY_BUTTON_CLASS,
     );
     expect(
-      getButtonTag(masterHtml, "Master Automation (right-click to toggle lanes)"),
+      getButtonTag(masterHtml, "Add a master automation lane or enable write first"),
     ).toContain(`w-6 h-6 text-[10px]`);
     expect(
-      getButtonTag(masterHtml, "Master Automation (right-click to toggle lanes)"),
-    ).toContain(TCP_HEADER_PRIMARY_BUTTON_CLASS);
+      getButtonTag(masterHtml, "Add a master automation lane or enable write first"),
+    ).toContain("rounded");
     expect(masterHtml).toMatch(
       new RegExp(
         `data-tcp-pair="automation" class="[^"]*${escapeForRegex(
-          TCP_HEADER_BUTTON_PAIR_CLASS,
-        )}[^"]*"[\\s\\S]*?${escapeForRegex(
+          TCP_HEADER_ANCHORED_BUTTON_PAIR_CLASS,
+        )}[^"]*"[\\s\\S]*?rounded[\\s\\S]*?${escapeForRegex(
           TCP_HEADER_PRIMARY_BUTTON_CLASS,
         )}[\\s\\S]*?w-4 h-6 text-\\[10px\\][\\s\\S]*?${escapeForRegex(
           TCP_HEADER_TOGGLE_BUTTON_CLASS,

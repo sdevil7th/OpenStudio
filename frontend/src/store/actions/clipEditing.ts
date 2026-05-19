@@ -16,6 +16,56 @@ type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GetFn = () => any;
 
+function isMidiClipLike(clip: any) {
+  return clip && Array.isArray(clip.events);
+}
+
+function findTimelineClip(state: any, clipId: string) {
+  for (const track of state.tracks) {
+    const audioIndex = track.clips.findIndex((clip: any) => clip.id === clipId);
+    if (audioIndex !== -1) {
+      return { clip: track.clips[audioIndex], trackId: track.id, track, index: audioIndex, kind: "audio" };
+    }
+
+    const midiIndex = track.midiClips.findIndex((clip: any) => clip.id === clipId);
+    if (midiIndex !== -1) {
+      return { clip: track.midiClips[midiIndex], trackId: track.id, track, index: midiIndex, kind: "midi" };
+    }
+  }
+
+  return null;
+}
+
+function cloneTracksForTimelineUndo(tracks: any[]) {
+  return tracks.map((track) => ({
+    ...track,
+    clips: [...track.clips],
+    midiClips: [...track.midiClips],
+  }));
+}
+
+function removeTimelineClipFromTrack(track: any, clipId: string) {
+  return {
+    ...track,
+    clips: track.clips.filter((clip: any) => clip.id !== clipId),
+    midiClips: track.midiClips.filter((clip: any) => clip.id !== clipId),
+  };
+}
+
+function syncMIDITracksForTimelineClips(get: GetFn, tracks: any[]) {
+  const state = get();
+  const trackIds = new Set<string>();
+  for (const track of tracks) {
+    if (track?.type === "midi" || track?.type === "instrument") {
+      trackIds.add(track.id);
+    }
+  }
+  for (const trackId of trackIds) {
+    const syncResult = state.syncMIDITrackToBackend?.(trackId, { debounce: false });
+    if (syncResult?.catch) syncResult.catch(() => {});
+  }
+}
+
 export const clipEditingActions = (set: SetFn, get: GetFn) => ({
     splitClipAtPlayhead: () => {
       const state = get();
@@ -233,7 +283,8 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       const clipEnd = clip.startTime + clip.duration;
       if (splitTime <= clip.startTime || splitTime >= clipEnd) return;
 
-      const splitOffset = splitTime - clip.startTime; // seconds into clip
+      const splitOffset = splitTime - clip.startTime; // seconds into visible clip
+      const sourceSplitOffset = (clip.offset || 0) + splitOffset;
       const leftId = crypto.randomUUID();
       const rightId = crypto.randomUUID();
 
@@ -241,21 +292,18 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         ...clip,
         id: leftId,
         duration: splitOffset,
-        events: clip.events.filter((e) => e.timestamp < splitOffset),
-        ccEvents: clip.ccEvents?.filter((e) => e.timestamp < splitOffset),
+        offset: clip.offset || 0,
+        events: [...clip.events],
+        ccEvents: clip.ccEvents ? [...clip.ccEvents] : [],
       };
       const rightClip: MIDIClip = {
         ...clip,
         id: rightId,
         startTime: splitTime,
         duration: clip.duration - splitOffset,
-        // Shift event timestamps relative to new clip start
-        events: clip.events
-          .filter((e) => e.timestamp >= splitOffset)
-          .map((e) => ({ ...e, timestamp: e.timestamp - splitOffset })),
-        ccEvents: clip.ccEvents
-          ?.filter((e) => e.timestamp >= splitOffset)
-          .map((e) => ({ ...e, timestamp: e.timestamp - splitOffset })),
+        offset: sourceSplitOffset,
+        events: [...clip.events],
+        ccEvents: clip.ccEvents ? [...clip.ccEvents] : [],
       };
 
       const newTracks = state.tracks.map((track) => {
@@ -276,6 +324,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         timestamp: Date.now(),
         execute: () => {
           set({ tracks: newTracks, selectedClipIds: [rightId], selectedClipId: rightId, isModified: true });
+          syncMIDITracksForTimelineClips(get, get().tracks);
         },
         undo: () => {
           set((s) => ({
@@ -290,10 +339,12 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
             selectedClipId: clip.id,
             isModified: true,
           }));
+          syncMIDITracksForTimelineClips(get, get().tracks);
         },
       });
       set({ tracks: newTracks, selectedClipIds: [rightId], selectedClipId: rightId,
         canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo(), isModified: true });
+      syncMIDITracksForTimelineClips(get, get().tracks);
     },
 
     selectClip: (clipId, modifiers) => {
@@ -344,7 +395,10 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     selectAllClips: () => {
       const state = get();
-      const allClipIds = state.tracks.flatMap((t) => t.clips.map((c) => c.id));
+      const allClipIds = state.tracks.flatMap((t) => [
+        ...t.clips.map((c) => c.id),
+        ...t.midiClips.map((c) => c.id),
+      ]);
       set({
         selectedClipIds: allClipIds,
         selectedClipId: allClipIds.length > 0 ? allClipIds[0] : null,
@@ -362,68 +416,71 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     moveClipToTrack: async (clipId, newTrackId, newStartTime) => {
       const state = get();
+      const found = findTimelineClip(state, clipId);
+      if (!found) return;
 
-      // Find the clip and its current track
-      let clipToMove: AudioClip | null = null;
-      let sourceTrackId: string | null = null;
-
-      state.tracks.forEach((track) => {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) {
-          clipToMove = clip;
-          sourceTrackId = track.id;
-        }
-      });
-
-      if (!clipToMove || !sourceTrackId) return;
-
-      // Get target track color for color inheritance
+      const sourceTrackId = found.trackId;
       const targetTrack = state.tracks.find((t) => t.id === newTrackId);
-      const targetColor = targetTrack?.color;
+      if (!targetTrack) return;
 
-      // Update frontend state only - backend sync happens via syncClipsWithBackend()
-      // at drag end or when play() is called. This avoids race conditions from
-      // rapid async remove/add calls during drag moves.
-      if (sourceTrackId === newTrackId) {
-        // Moving within the same track - just update startTime
-        set((state) => ({
-          tracks: state.tracks.map((track) => {
-            if (track.id === sourceTrackId) {
-              return {
-                ...track,
-                clips: track.clips.map((c) =>
-                  c.id === clipId ? { ...c, startTime: newStartTime } : c,
-                ),
-              };
-            }
-            return track;
-          }),
-        }));
-      } else {
-        // Moving to a different track - inherit target track's color
-        const updatedClip = {
-          ...(clipToMove as AudioClip),
-          startTime: newStartTime,
-          color: targetColor || (clipToMove as AudioClip).color,
-        };
+      const isMidi = found.kind === "midi";
+      if (isMidi && targetTrack.type !== "midi" && targetTrack.type !== "instrument") return;
+      if (!isMidi && (targetTrack.type === "midi" || targetTrack.type === "instrument")) return;
 
-        set((state) => ({
-          tracks: state.tracks.map((track) => {
-            if (track.id === sourceTrackId) {
-              return {
-                ...track,
-                clips: track.clips.filter((c) => c.id !== clipId),
-              };
-            } else if (track.id === newTrackId) {
-              return { ...track, clips: [...track.clips, updatedClip] };
-            }
-            return track;
-          }),
-        }));
-      }
+      const targetColor = targetTrack.color;
+      const updatedClip = {
+        ...found.clip,
+        startTime: Math.max(0, newStartTime),
+        color: targetColor || found.clip.color,
+      };
 
-      // Apply auto-crossfades on affected track(s)
-      if (get().autoCrossfade) {
+      set((state) => ({
+        tracks: state.tracks.map((track) => {
+          if (track.id === sourceTrackId && sourceTrackId === newTrackId) {
+            return isMidi
+              ? {
+                  ...track,
+                  midiClips: track.midiClips.map((clip) =>
+                    clip.id === clipId ? updatedClip : clip,
+                  ),
+                }
+              : {
+                  ...track,
+                  clips: track.clips.map((clip) =>
+                    clip.id === clipId ? updatedClip : clip,
+                  ),
+                };
+          }
+
+          if (track.id === sourceTrackId) {
+            return isMidi
+              ? { ...track, midiClips: track.midiClips.filter((clip) => clip.id !== clipId) }
+              : { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) };
+          }
+
+          if (track.id === newTrackId) {
+            return isMidi
+              ? { ...track, midiClips: [...track.midiClips, updatedClip] }
+              : { ...track, clips: [...track.clips, updatedClip] };
+          }
+
+          return track;
+        }),
+        ...(isMidi ? {
+          midiEditorSessions: (state.midiEditorSessions || []).map((session) =>
+            session.clipId === clipId
+              ? { ...session, trackId: newTrackId, updatedAt: Date.now() }
+              : session,
+          ),
+          ...(state.pianoRollClipId === clipId ? { pianoRollTrackId: newTrackId } : {}),
+        } : {}),
+        isModified: true,
+      }));
+
+      if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
+
+      // Apply auto-crossfades on affected audio track(s)
+      if (!isMidi && get().autoCrossfade) {
         get().applyAutoCrossfades(newTrackId);
         if (sourceTrackId !== newTrackId) {
           get().applyAutoCrossfades(sourceTrackId);
@@ -433,30 +490,29 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     resizeClip: (clipId, newStartTime, newDuration, newOffset) => {
       const state = get();
+      const found = findTimelineClip(state, clipId);
+      if (!found || found.clip.locked) return;
 
-      // Find old clip values
-      let oldValues: {
-        startTime: number;
-        duration: number;
-        offset: number;
-      } | null = null;
-      for (const track of state.tracks) {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) {
-          oldValues = {
-            startTime: clip.startTime,
-            duration: clip.duration,
-            offset: clip.offset,
-          };
-          break;
-        }
-      }
-
-      if (!oldValues) return;
+      const isMidi = found.kind === "midi";
+      const oldValues = {
+        startTime: found.clip.startTime,
+        duration: found.clip.duration,
+        offset: found.clip.offset || 0,
+        ...(isMidi ? { loopLength: found.clip.loopLength, sourceLength: found.clip.sourceLength } : {}),
+      };
+      const midiLoopLength = isMidi
+        ? Math.max(0.01, found.clip.sourceLength || found.clip.loopLength || found.clip.duration || newDuration)
+        : undefined;
+      const nextValues = {
+        startTime: Math.max(0, newStartTime),
+        duration: Math.max(0.01, newDuration),
+        offset: Math.max(0, newOffset || 0),
+        ...(isMidi ? { loopLength: midiLoopLength, sourceLength: midiLoopLength } : {}),
+      };
 
       const command: Command = {
         type: "RESIZE_CLIP",
-        description: "Resize clip",
+        description: isMidi ? "Resize MIDI clip" : "Resize clip",
         timestamp: Date.now(),
         execute: () => {
           set((s) => ({
@@ -466,14 +522,22 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
                 clip.id === clipId
                   ? {
                       ...clip,
-                      startTime: newStartTime,
-                      duration: newDuration,
-                      offset: newOffset,
+                      ...nextValues,
+                    }
+                  : clip,
+              ),
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId
+                  ? {
+                      ...clip,
+                      ...nextValues,
                     }
                   : clip,
               ),
             })),
+            isModified: true,
           }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
         undo: () => {
           set((s) => ({
@@ -482,8 +546,82 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
               clips: track.clips.map((clip) =>
                 clip.id === clipId ? { ...clip, ...oldValues } : clip,
               ),
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId ? { ...clip, ...oldValues } : clip,
+              ),
             })),
+            isModified: true,
           }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
+        },
+      };
+
+      commandManager.execute(command);
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+      });
+    },
+
+    setMIDIClipSourceWindow: (clipId, patch, description = "Edit MIDI clip source") => {
+      const state = get();
+      const found = findTimelineClip(state, clipId);
+      if (!found || found.kind !== "midi" || found.clip.locked) return;
+
+      const oldValues = {
+        offset: found.clip.offset || 0,
+        sourceLength: found.clip.sourceLength,
+        loopLength: found.clip.loopLength,
+        loopEnabled: found.clip.loopEnabled,
+        loopOffset: found.clip.loopOffset,
+      };
+      const currentSourceLength = Math.max(
+        0.01,
+        found.clip.sourceLength || found.clip.loopLength || found.clip.duration || 0.01,
+      );
+      const nextSourceLength = Math.max(
+        0.01,
+        patch.sourceLength ?? patch.loopLength ?? currentSourceLength,
+      );
+      const visibleItemIsLooped = (found.clip.duration || 0) > nextSourceLength + 0.000001;
+      const maxOffset = visibleItemIsLooped
+        ? Math.max(0, nextSourceLength - 0.000001)
+        : Math.max(0, nextSourceLength - (found.clip.duration || 0));
+      const nextValues = {
+        ...oldValues,
+        ...patch,
+        sourceLength: patch.sourceLength ?? oldValues.sourceLength ?? nextSourceLength,
+        loopLength: patch.loopLength ?? patch.sourceLength ?? oldValues.loopLength ?? nextSourceLength,
+        offset: Math.max(0, Math.min(maxOffset, patch.offset ?? oldValues.offset)),
+      };
+
+      const command: Command = {
+        type: "EDIT_MIDI_SOURCE_WINDOW",
+        description,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId ? { ...clip, ...nextValues } : clip,
+              ),
+            })),
+            isModified: true,
+          }));
+          syncMIDITracksForTimelineClips(get, get().tracks);
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId ? { ...clip, ...oldValues } : clip,
+              ),
+            })),
+            isModified: true,
+          }));
+          syncMIDITracksForTimelineClips(get, get().tracks);
         },
       };
 
@@ -495,11 +633,10 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
     },
 
     toggleClipMute: (clipId) => {
-      let oldMuted = false;
-      for (const track of get().tracks) {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) { oldMuted = !!clip.muted; break; }
-      }
+      const found = findTimelineClip(get(), clipId);
+      if (!found) return;
+      const oldMuted = !!found.clip.muted;
+      const isMidi = found.kind === "midi";
 
       const command: Command = {
         type: "TOGGLE_CLIP_MUTE",
@@ -512,9 +649,13 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
               clips: track.clips.map((clip) =>
                 clip.id === clipId ? { ...clip, muted: !oldMuted } : clip,
               ),
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId ? { ...clip, muted: !oldMuted } : clip,
+              ),
             })),
             isModified: true,
           }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
         undo: () => {
           set((s) => ({
@@ -523,9 +664,13 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
               clips: track.clips.map((clip) =>
                 clip.id === clipId ? { ...clip, muted: oldMuted } : clip,
               ),
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId ? { ...clip, muted: oldMuted } : clip,
+              ),
             })),
             isModified: true,
           }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
       };
 
@@ -738,12 +883,9 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     copyClip: (clipId) => {
       const state = get();
-      let foundClip: AudioClip | null = null;
-      let foundTrackId: string | null = null;
-      state.tracks.forEach((track) => {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) { foundClip = clip; foundTrackId = track.id; }
-      });
+      const found = findTimelineClip(state, clipId);
+      const foundClip = found?.clip ?? null;
+      const foundTrackId = found?.trackId ?? null;
 
       if (foundClip && foundTrackId) {
         set({ clipboard: { clip: foundClip, clips: [{ clip: foundClip, trackId: foundTrackId }], isCut: false } });
@@ -752,12 +894,9 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     cutClip: (clipId) => {
       const state = get();
-      let foundClip: AudioClip | null = null;
-      let foundTrackId: string | null = null;
-      state.tracks.forEach((track) => {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) { foundClip = clip; foundTrackId = track.id; }
-      });
+      const found = findTimelineClip(state, clipId);
+      const foundClip = found?.clip ?? null;
+      const foundTrackId = found?.trackId ?? null;
 
       if (foundClip && foundTrackId) {
         set({ clipboard: { clip: foundClip, clips: [{ clip: foundClip, trackId: foundTrackId }], isCut: true } });
@@ -766,9 +905,14 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     copySelectedClips: () => {
       const state = get();
-      const clipEntries: Array<{ clip: AudioClip; trackId: string }> = [];
+      const clipEntries: Array<{ clip: AudioClip | MIDIClip; trackId: string }> = [];
       for (const track of state.tracks) {
         for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            clipEntries.push({ clip, trackId: track.id });
+          }
+        }
+        for (const clip of track.midiClips) {
           if (state.selectedClipIds.includes(clip.id)) {
             clipEntries.push({ clip, trackId: track.id });
           }
@@ -781,9 +925,14 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     cutSelectedClips: () => {
       const state = get();
-      const clipEntries: Array<{ clip: AudioClip; trackId: string }> = [];
+      const clipEntries: Array<{ clip: AudioClip | MIDIClip; trackId: string }> = [];
       for (const track of state.tracks) {
         for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            clipEntries.push({ clip, trackId: track.id });
+          }
+        }
+        for (const clip of track.midiClips) {
           if (state.selectedClipIds.includes(clip.id)) {
             clipEntries.push({ clip, trackId: track.id });
           }
@@ -794,16 +943,25 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       }
     },
 
+    copySelectedTimelineClips: () => {
+      get().copySelectedClips();
+    },
+
+    pasteSelectedTimelineClips: () => {
+      get().pasteClips();
+    },
+
     pasteClip: (targetTrackId, targetTime) => {
       const state = get();
       const { clipboard } = state;
       if (!clipboard.clip) return;
 
       // Snapshot for undo
-      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldTracks = cloneTracksForTimelineUndo(state.tracks);
       const oldClipboard = clipboard;
+      const isMidi = isMidiClipLike(clipboard.clip);
 
-      const newClip: AudioClip = {
+      const newClip = {
         ...clipboard.clip,
         id: crypto.randomUUID(),
         startTime: targetTime,
@@ -813,14 +971,17 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         let newTracks = s.tracks;
         if (clipboard.isCut) {
           newTracks = s.tracks.map((t) => ({
-            ...t,
-            clips: t.clips.filter((c) => c.id !== clipboard.clip!.id),
+            ...removeTimelineClipFromTrack(t, clipboard.clip!.id),
           }));
         }
 
         return {
           tracks: newTracks.map((t) =>
-            t.id === targetTrackId ? { ...t, clips: [...t.clips, newClip] } : t,
+            t.id === targetTrackId
+              ? isMidi
+                ? { ...t, midiClips: [...t.midiClips, newClip] }
+                : { ...t, clips: [...t.clips, newClip] }
+              : t,
           ),
           clipboard: clipboard.isCut
             ? { clip: null, clips: [], isCut: false }
@@ -829,15 +990,22 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         };
       });
 
-      const newTracks = get().tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newTracks = cloneTracksForTimelineUndo(get().tracks);
       const newClipboardState = get().clipboard;
+      if (isMidi) syncMIDITracksForTimelineClips(get, newTracks);
 
       commandManager.push({
         type: "PASTE_CLIP",
         description: "Paste clip",
         timestamp: Date.now(),
-        execute: () => set({ tracks: newTracks, clipboard: newClipboardState, isModified: true }),
-        undo: () => set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true }),
+        execute: () => {
+          set({ tracks: newTracks, clipboard: newClipboardState, isModified: true });
+          if (isMidi) syncMIDITracksForTimelineClips(get, newTracks);
+        },
+        undo: () => {
+          set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true });
+          if (isMidi) syncMIDITracksForTimelineClips(get, oldTracks);
+        },
       });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
@@ -848,128 +1016,82 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       if (clipboard.clips.length === 0) return;
 
       // Snapshot for undo
-      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const oldTracks = cloneTracksForTimelineUndo(state.tracks);
       const oldClipboard = clipboard;
 
       const currentTime = state.transport.currentTime;
       const earliestTime = Math.min(...clipboard.clips.map((c) => c.clip.startTime));
+      const sourceTrackIds = [...new Set(clipboard.clips.map((entry) => entry.trackId))];
+      const targetTrackIds = sourceTrackIds.map((sourceTrackId, index) =>
+        state.selectedTrackIds[index] || sourceTrackId || state.tracks[0]?.id,
+      );
+      const trackMap = new Map<string, string>();
+      sourceTrackIds.forEach((sourceTrackId, index) => trackMap.set(sourceTrackId, targetTrackIds[index]));
+      const originalIds = new Set(clipboard.clips.map((entry) => entry.clip.id));
 
-      if (clipboard.clips.length === 1) {
-        const targetTrackId =
-          state.selectedTrackIds.length > 0
-            ? state.selectedTrackIds[0]
-            : state.tracks.length > 0
-              ? state.tracks[0].id
-              : null;
-        if (!targetTrackId) return;
-
-        const newClip: AudioClip = {
-          ...clipboard.clips[0].clip,
+      const pastedEntries = clipboard.clips.map((entry) => ({
+        clip: {
+          ...entry.clip,
           id: crypto.randomUUID(),
-          startTime: currentTime,
+          startTime: currentTime + (entry.clip.startTime - earliestTime),
+        },
+        targetTrackId: trackMap.get(entry.trackId) || targetTrackIds[0],
+        isMidi: isMidiClipLike(entry.clip),
+      }));
+
+      set((s) => {
+        let tracks = s.tracks;
+        if (clipboard.isCut) {
+          tracks = tracks.map((track) => ({
+            ...track,
+            clips: track.clips.filter((clip) => !originalIds.has(clip.id)),
+            midiClips: track.midiClips.filter((clip) => !originalIds.has(clip.id)),
+          }));
+        }
+
+        tracks = tracks.map((track) => {
+          const audioClips = pastedEntries
+            .filter((entry) => entry.targetTrackId === track.id && !entry.isMidi)
+            .map((entry) => entry.clip);
+          const midiClips = pastedEntries
+            .filter((entry) => entry.targetTrackId === track.id && entry.isMidi)
+            .map((entry) => entry.clip);
+          if (audioClips.length === 0 && midiClips.length === 0) return track;
+          return {
+            ...track,
+            clips: [...track.clips, ...audioClips],
+            midiClips: [...track.midiClips, ...midiClips],
+          };
+        });
+
+        return {
+          tracks,
+          clipboard: clipboard.isCut ? { clip: null, clips: [], isCut: false } : s.clipboard,
+          isModified: true,
         };
-
-        set((s) => {
-          let newTracks = s.tracks;
-          if (clipboard.isCut) {
-            const origId = clipboard.clips[0].clip.id;
-            newTracks = s.tracks.map((t) => ({
-              ...t,
-              clips: t.clips.filter((c) => c.id !== origId),
-            }));
-          }
-          return {
-            tracks: newTracks.map((t) =>
-              t.id === targetTrackId ? { ...t, clips: [...t.clips, newClip] } : t,
-            ),
-            clipboard: clipboard.isCut ? { clip: null, clips: [], isCut: false } : s.clipboard,
-            isModified: true,
-          };
-        });
-      } else {
-        const trackOrder = state.tracks.map((t) => t.id);
-        const sourceTrackIndices = [...new Set(clipboard.clips.map((c) => c.trackId))];
-        sourceTrackIndices.sort((a, b) => trackOrder.indexOf(a) - trackOrder.indexOf(b));
-
-        const targetTrackIds: string[] = [];
-        const newTracks: Array<{ id: string; name: string; color: string }> = [];
-
-        if (state.selectedTrackIds.length >= sourceTrackIndices.length) {
-          for (let i = 0; i < sourceTrackIndices.length; i++) {
-            targetTrackIds.push(state.selectedTrackIds[i]);
-          }
-        } else {
-          for (const srcTrackId of sourceTrackIndices) {
-            const existingTrack = state.tracks.find((t) => t.id === srcTrackId);
-            if (existingTrack) {
-              targetTrackIds.push(srcTrackId);
-            } else {
-              const newId = crypto.randomUUID();
-              newTracks.push({ id: newId, name: `Track ${state.tracks.length + newTracks.length + 1}`, color: "#3b82f6" });
-              targetTrackIds.push(newId);
-            }
-          }
-        }
-
-        const trackMap = new Map<string, string>();
-        sourceTrackIndices.forEach((srcId, i) => {
-          trackMap.set(srcId, targetTrackIds[i]);
-        });
-
-        const newClips = clipboard.clips.map((entry) => ({
-          clip: {
-            ...entry.clip,
-            id: crypto.randomUUID(),
-            startTime: currentTime + (entry.clip.startTime - earliestTime),
-          },
-          targetTrackId: trackMap.get(entry.trackId) || targetTrackIds[0],
-        }));
-
-        set((s) => {
-          let tracks = s.tracks;
-
-          if (clipboard.isCut) {
-            const origIds = new Set(clipboard.clips.map((c) => c.clip.id));
-            tracks = tracks.map((t) => ({
-              ...t,
-              clips: t.clips.filter((c) => !origIds.has(c.id)),
-            }));
-          }
-
-          const clipsByTrack = new Map<string, AudioClip[]>();
-          for (const { clip, targetTrackId } of newClips) {
-            if (!clipsByTrack.has(targetTrackId)) clipsByTrack.set(targetTrackId, []);
-            clipsByTrack.get(targetTrackId)!.push(clip);
-          }
-
-          tracks = tracks.map((t) => {
-            const addClips = clipsByTrack.get(t.id);
-            return addClips ? { ...t, clips: [...t.clips, ...addClips] } : t;
-          });
-
-          return {
-            tracks,
-            clipboard: clipboard.isCut ? { clip: null, clips: [], isCut: false } : s.clipboard,
-            isModified: true,
-          };
-        });
-
-        for (const newTrack of newTracks) {
-          get().addTrack(newTrack);
-        }
-      }
+      });
 
       // Undo tracking (captures full state after paste)
       const afterState = get();
-      const newTracksSnapshot = afterState.tracks.map(t => ({ ...t, clips: [...t.clips] }));
+      const newTracksSnapshot = cloneTracksForTimelineUndo(afterState.tracks);
       const newClipboardSnapshot = afterState.clipboard;
+      const touchedMIDI = pastedEntries.some((entry) => entry.isMidi);
+      if (touchedMIDI || clipboard.clips.some((entry) => isMidiClipLike(entry.clip))) {
+        syncMIDITracksForTimelineClips(get, newTracksSnapshot);
+      }
 
       commandManager.push({
         type: "PASTE_CLIPS",
         description: "Paste clips",
         timestamp: Date.now(),
-        execute: () => set({ tracks: newTracksSnapshot, clipboard: newClipboardSnapshot, isModified: true }),
-        undo: () => set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true }),
+        execute: () => {
+          set({ tracks: newTracksSnapshot, clipboard: newClipboardSnapshot, isModified: true });
+          if (touchedMIDI) syncMIDITracksForTimelineClips(get, newTracksSnapshot);
+        },
+        undo: () => {
+          set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true });
+          if (touchedMIDI) syncMIDITracksForTimelineClips(get, oldTracks);
+        },
       });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
@@ -987,6 +1109,11 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       const clipPositions = new Map<string, number>();
       for (const track of state.tracks) {
         for (const clip of track.clips) {
+          if (state.selectedClipIds.includes(clip.id)) {
+            clipPositions.set(clip.id, clip.startTime);
+          }
+        }
+        for (const clip of track.midiClips) {
           if (state.selectedClipIds.includes(clip.id)) {
             clipPositions.set(clip.id, clip.startTime);
           }
@@ -1018,9 +1145,15 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
                   ? { ...clip, startTime: Math.max(0, clipPositions.get(clip.id)! + delta) }
                   : clip,
               ),
+              midiClips: track.midiClips.map((clip) =>
+                clipPositions.has(clip.id)
+                  ? { ...clip, startTime: Math.max(0, clipPositions.get(clip.id)! + delta) }
+                  : clip,
+              ),
             })),
             isModified: true,
           }));
+          syncMIDITracksForTimelineClips(get, get().tracks);
         },
         undo: () => {
           set((s) => ({
@@ -1031,9 +1164,15 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
                   ? { ...clip, startTime: clipPositions.get(clip.id)! }
                   : clip,
               ),
+              midiClips: track.midiClips.map((clip) =>
+                clipPositions.has(clip.id)
+                  ? { ...clip, startTime: clipPositions.get(clip.id)! }
+                  : clip,
+              ),
             })),
             isModified: true,
           }));
+          syncMIDITracksForTimelineClips(get, get().tracks);
         },
       };
       commandManager.push(command);
@@ -1042,34 +1181,32 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     deleteClip: (clipId) => {
       const state = get();
-
-      // Check if clip is locked
-      const lockedClip = state.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
-      if (lockedClip?.locked) return;
-
-      // Find the clip and its track
-      let foundClip: AudioClip | null = null;
-      let foundTrackId: string | null = null;
-      let clipIndex = 0;
-
-      for (const track of state.tracks) {
-        const idx = track.clips.findIndex((c) => c.id === clipId);
-        if (idx !== -1) {
-          foundClip = track.clips[idx];
-          foundTrackId = track.id;
-          clipIndex = idx;
-          break;
-        }
-      }
-
-      if (!foundClip || !foundTrackId) return;
+      const found = findTimelineClip(state, clipId);
+      if (!found || found.clip.locked) return;
 
       // Capture values for ripple editing and backend sync
+      const foundClip = found.clip;
+      const foundTrackId = found.trackId;
+      const clipIndex = found.index;
+      const isMidi = found.kind === "midi";
       const clipFilePath = foundClip.filePath;
       const trackIdForBackend = foundTrackId;
       const rippleMode = state.rippleMode;
       const deletedDuration = foundClip.duration;
       const deletedEnd = foundClip.startTime + deletedDuration;
+      const previousMidiEditorState = isMidi
+        ? {
+            sessions: (state.midiEditorSessions || []).filter((session) => session.clipId === clipId),
+            activeId: state.activeMidiEditorSessionId,
+            dockedId: state.dockedMidiEditorSessionId,
+            showPianoRoll: state.showPianoRoll,
+            pianoRollTrackId: state.pianoRollTrackId,
+            pianoRollClipId: state.pianoRollClipId,
+            selectedNoteIds: [...(state.selectedNoteIds || [])],
+            midiEditRange: state.midiEditRange,
+            pianoRollEditCursorTime: state.pianoRollEditCursorTime,
+          }
+        : null;
 
       // Create and execute command
       const command: Command = {
@@ -1081,10 +1218,16 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
           set((s) => ({
             tracks: s.tracks.map((track) => {
               let clips = track.clips.filter((c) => c.id !== clipId);
+              let midiClips = track.midiClips.filter((c) => c.id !== clipId);
 
               // Ripple: shift downstream clips left by the deleted clip's duration
               if (rippleMode === "per_track" && track.id === foundTrackId) {
                 clips = clips.map((c) =>
+                  c.startTime >= deletedEnd
+                    ? { ...c, startTime: Math.max(0, c.startTime - deletedDuration) }
+                    : c,
+                );
+                midiClips = midiClips.map((c) =>
                   c.startTime >= deletedEnd
                     ? { ...c, startTime: Math.max(0, c.startTime - deletedDuration) }
                     : c,
@@ -1095,13 +1238,40 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
                     ? { ...c, startTime: Math.max(0, c.startTime - deletedDuration) }
                     : c,
                 );
+                midiClips = midiClips.map((c) =>
+                  c.startTime >= deletedEnd
+                    ? { ...c, startTime: Math.max(0, c.startTime - deletedDuration) }
+                    : c,
+                );
               }
 
-              return { ...track, clips };
+              return { ...track, clips, midiClips };
             }),
             selectedClipId:
               s.selectedClipId === clipId ? null : s.selectedClipId,
             selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId),
+            ...(isMidi ? (() => {
+              const remainingSessions = (s.midiEditorSessions || []).filter((session) => session.clipId !== clipId);
+              const dockedId = remainingSessions.some((session) => session.sessionId === s.dockedMidiEditorSessionId)
+                ? s.dockedMidiEditorSessionId
+                : null;
+              const activeId = remainingSessions.some((session) => session.sessionId === s.activeMidiEditorSessionId)
+                ? s.activeMidiEditorSessionId
+                : (dockedId || remainingSessions[0]?.sessionId || null);
+              return {
+                midiEditorSessions: remainingSessions,
+                activeMidiEditorSessionId: activeId,
+                dockedMidiEditorSessionId: dockedId,
+                showPianoRoll: Boolean(dockedId),
+                ...(s.pianoRollClipId === clipId ? {
+                  pianoRollTrackId: null,
+                  pianoRollClipId: null,
+                  selectedNoteIds: [],
+                  midiEditRange: null,
+                  pianoRollEditCursorTime: null,
+                } : {}),
+              };
+            })() : {}),
           }));
 
           // Sync with backend - remove from playback engine
@@ -1113,6 +1283,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
               console.error("[DAW] Failed to remove clip from backend:", error);
             }
           }
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
         undo: async () => {
           // Restore to frontend state + reverse ripple shift
@@ -1121,15 +1292,25 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
               if (track.id === foundTrackId) {
                 // Reverse ripple shift on this track
                 let clips = [...track.clips];
+                let midiClips = [...track.midiClips];
                 if (rippleMode !== "off") {
                   clips = clips.map((c) =>
                     c.startTime >= deletedEnd - deletedDuration
                       ? { ...c, startTime: c.startTime + deletedDuration }
                       : c,
                   );
+                  midiClips = midiClips.map((c) =>
+                    c.startTime >= deletedEnd - deletedDuration
+                      ? { ...c, startTime: c.startTime + deletedDuration }
+                      : c,
+                  );
                 }
-                clips.splice(clipIndex, 0, foundClip!);
-                return { ...track, clips };
+                if (isMidi) {
+                  midiClips.splice(clipIndex, 0, foundClip);
+                } else {
+                  clips.splice(clipIndex, 0, foundClip);
+                }
+                return { ...track, clips, midiClips };
               }
               if (rippleMode === "all_tracks") {
                 // Reverse ripple on other tracks too
@@ -1140,10 +1321,29 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
                       ? { ...c, startTime: c.startTime + deletedDuration }
                       : c,
                   ),
+                  midiClips: track.midiClips.map((c) =>
+                    c.startTime >= deletedEnd - deletedDuration
+                      ? { ...c, startTime: c.startTime + deletedDuration }
+                      : c,
+                  ),
                 };
               }
               return track;
             }),
+            ...(previousMidiEditorState ? {
+              midiEditorSessions: [
+                ...(s.midiEditorSessions || []).filter((session) => session.clipId !== clipId),
+                ...previousMidiEditorState.sessions,
+              ],
+              activeMidiEditorSessionId: previousMidiEditorState.activeId,
+              dockedMidiEditorSessionId: previousMidiEditorState.dockedId,
+              showPianoRoll: previousMidiEditorState.showPianoRoll,
+              pianoRollTrackId: previousMidiEditorState.pianoRollTrackId,
+              pianoRollClipId: previousMidiEditorState.pianoRollClipId,
+              selectedNoteIds: previousMidiEditorState.selectedNoteIds,
+              midiEditRange: previousMidiEditorState.midiEditRange,
+              pianoRollEditCursorTime: previousMidiEditorState.pianoRollEditCursorTime,
+            } : {}),
           }));
 
           // Re-add to backend
@@ -1167,6 +1367,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
               console.error("[DAW] Failed to restore clip to backend:", error);
             }
           }
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
       };
 
@@ -1179,25 +1380,15 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
 
     duplicateClip: (clipId) => {
       const state = get();
-
-      // Find the clip and its track
-      let foundClip: AudioClip | null = null;
-      let foundTrackId: string | null = null;
-
-      for (const track of state.tracks) {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) {
-          foundClip = clip;
-          foundTrackId = track.id;
-          break;
-        }
-      }
-
-      if (!foundClip || !foundTrackId) return;
+      const found = findTimelineClip(state, clipId);
+      if (!found) return;
+      const foundClip = found.clip;
+      const foundTrackId = found.trackId;
+      const isMidi = found.kind === "midi";
 
       // Create new clip ID upfront so we can track it for undo
       const newClipId = crypto.randomUUID();
-      const newClip: AudioClip = {
+      const newClip = {
         ...foundClip,
         id: newClipId,
         startTime: foundClip.startTime + foundClip.duration,
@@ -1211,18 +1402,143 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
           set((s) => ({
             tracks: s.tracks.map((track) =>
               track.id === foundTrackId
-                ? { ...track, clips: [...track.clips, newClip] }
+                ? isMidi
+                  ? { ...track, midiClips: [...track.midiClips, newClip] }
+                  : { ...track, clips: [...track.clips, newClip] }
                 : track,
             ),
+            selectedClipId: newClipId,
+            selectedClipIds: [newClipId],
+            isModified: true,
           }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
         undo: () => {
           set((s) => ({
             tracks: s.tracks.map((track) => ({
               ...track,
               clips: track.clips.filter((c) => c.id !== newClipId),
+              midiClips: track.midiClips.filter((c) => c.id !== newClipId),
             })),
+            selectedClipId: clipId,
+            selectedClipIds: [clipId],
+            isModified: true,
           }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
+        },
+      };
+
+      commandManager.execute(command);
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+      });
+    },
+
+    duplicateClipToPosition: (clipId, targetTrackId, targetStartTime) => {
+      const state = get();
+      const found = findTimelineClip(state, clipId);
+      const targetTrack = state.tracks.find((track: any) => track.id === targetTrackId);
+      if (!found || !targetTrack || found.clip.locked) return null;
+
+      const isMidi = found.kind === "midi";
+      if (isMidi && targetTrack.type !== "midi" && targetTrack.type !== "instrument") return null;
+      if (!isMidi && (targetTrack.type === "midi" || targetTrack.type === "instrument")) return null;
+
+      const oldTracks = cloneTracksForTimelineUndo(state.tracks);
+      const oldSelectedClipId = state.selectedClipId;
+      const oldSelectedClipIds = [...state.selectedClipIds];
+      const newClipId = crypto.randomUUID();
+      const newClip = {
+        ...found.clip,
+        id: newClipId,
+        startTime: Math.max(0, targetStartTime),
+        color: targetTrack.color || found.clip.color,
+      };
+
+      const command: Command = {
+        type: "DUPLICATE_CLIP_TO_POSITION",
+        description: isMidi ? "Copy MIDI clip" : "Copy clip",
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) =>
+              track.id === targetTrackId
+                ? isMidi
+                  ? { ...track, midiClips: [...track.midiClips, newClip] }
+                  : { ...track, clips: [...track.clips, newClip] }
+                : track,
+            ),
+            selectedClipId: newClipId,
+            selectedClipIds: [newClipId],
+            isModified: true,
+          }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
+        },
+        undo: () => {
+          set({
+            tracks: oldTracks,
+            selectedClipId: oldSelectedClipId,
+            selectedClipIds: oldSelectedClipIds,
+            isModified: true,
+          });
+          if (isMidi) syncMIDITracksForTimelineClips(get, oldTracks);
+        },
+      };
+
+      commandManager.execute(command);
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+      });
+      return newClipId;
+    },
+
+    repeatClip: (clipId, repeatCount = 3) => {
+      const state = get();
+      const found = findTimelineClip(state, clipId);
+      if (!found || found.clip.locked) return;
+
+      const count = Math.max(1, Math.min(128, Math.floor(Number(repeatCount) || 1)));
+      const isMidi = found.kind === "midi";
+      const newClips = Array.from({ length: count }, (_, index) => ({
+        ...found.clip,
+        id: crypto.randomUUID(),
+        startTime: found.clip.startTime + found.clip.duration * (index + 1),
+      }));
+      const newIds = newClips.map((clip) => clip.id);
+
+      const command: Command = {
+        type: "REPEAT_CLIP",
+        description: `Repeat clip ${count} time${count === 1 ? "" : "s"}`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) =>
+              track.id === found.trackId
+                ? isMidi
+                  ? { ...track, midiClips: [...track.midiClips, ...newClips] }
+                  : { ...track, clips: [...track.clips, ...newClips] }
+                : track,
+            ),
+            selectedClipId: newIds[newIds.length - 1],
+            selectedClipIds: newIds,
+            isModified: true,
+          }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.filter((clip) => !newIds.includes(clip.id)),
+              midiClips: track.midiClips.filter((clip) => !newIds.includes(clip.id)),
+            })),
+            selectedClipId: clipId,
+            selectedClipIds: [clipId],
+            isModified: true,
+          }));
+          if (isMidi) syncMIDITracksForTimelineClips(get, get().tracks);
         },
       };
 

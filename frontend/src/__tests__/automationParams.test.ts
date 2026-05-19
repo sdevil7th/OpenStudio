@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   automationToBackend,
   interpolateAtTime,
+  getAutomationDefault,
+  pluginAutomationParamId,
 } from "../store/automationParams";
 
 describe("automationToBackend", () => {
@@ -9,12 +11,16 @@ describe("automationToBackend", () => {
     expect(automationToBackend("volume", 0)).toBe(-60);
   });
 
-  it("converts volume 1.0 to +6 dB", () => {
-    expect(automationToBackend("volume", 1)).toBe(6);
+  it("converts volume 1.0 to +12 dB", () => {
+    expect(automationToBackend("volume", 1)).toBe(12);
   });
 
-  it("converts volume 0.5 to midpoint (-27 dB)", () => {
-    expect(automationToBackend("volume", 0.5)).toBe(-27);
+  it("converts volume 0.5 to midpoint (-24 dB)", () => {
+    expect(automationToBackend("volume", 0.5)).toBe(-24);
+  });
+
+  it("maps the default volume lane to exactly 0 dB", () => {
+    expect(automationToBackend("volume", getAutomationDefault("volume"))).toBeCloseTo(0);
   });
 
   it("converts pan 0.0 to -1.0 (full left)", () => {
@@ -31,6 +37,18 @@ describe("automationToBackend", () => {
 
   it("returns raw value for unknown params", () => {
     expect(automationToBackend("plugin_0_3", 0.7)).toBe(0.7);
+  });
+
+  it("builds namespaced plugin automation ids", () => {
+    expect(pluginAutomationParamId(true, 0, 3)).toBe("plugin_input_0_3");
+    expect(pluginAutomationParamId(false, 2, 4)).toBe("plugin_track_2_4");
+  });
+
+  it("converts MIDI automation params to backend ranges", () => {
+    expect(automationToBackend("midi_velocity_scale", 0.5)).toBe(1);
+    expect(automationToBackend("midi_pitch_bend", 0)).toBe(-1);
+    expect(automationToBackend("midi_pitch_bend", 1)).toBe(1);
+    expect(automationToBackend("midi_cc_74", 1)).toBe(127);
   });
 });
 

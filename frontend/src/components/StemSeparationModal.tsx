@@ -64,6 +64,14 @@ export default function StemSeparationModal() {
   const [progress, setProgress] = useState<StemSepProgress>({ state: "idle", progress: 0 });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const completedRef = useRef(false);
+  const stemFeature = aiToolsStatus.features?.stemSeparation;
+  const isStemSeparationReady = Boolean(stemFeature?.ready ?? aiToolsStatus.available);
+  const isStemSeparationCompatible = stemFeature?.compatible ?? true;
+  const stemSeparationBlockMessage =
+    stemFeature?.message
+    || (stemFeature?.blockReason
+      ? `This machine does not meet Stem Separation requirements: ${stemFeature.blockReason}.`
+      : "This machine does not meet Stem Separation requirements.");
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -99,7 +107,7 @@ export default function StemSeparationModal() {
   };
 
   const handleSeparate = async () => {
-    if (!stemSepTrackId || !stemSepClipId || selectedStems.length === 0 || !aiToolsStatus.available) return;
+    if (!stemSepTrackId || !stemSepClipId || selectedStems.length === 0 || !isStemSeparationReady) return;
     setSeparating(true);
     setProgress({ state: "loading", progress: 0 });
     completedRef.current = false;
@@ -140,7 +148,7 @@ export default function StemSeparationModal() {
           if (idleCount >= 10) {
             completedRef.current = true;
             stopPolling();
-            setProgress({ state: "error", progress: 0, error: "Separation did not start. Install AI Tools first." });
+            setProgress({ state: "error", progress: 0, error: "Separation did not start. Install Stem Separation first." });
             setSeparating(false);
           }
           return;
@@ -200,9 +208,9 @@ export default function StemSeparationModal() {
   };
 
   const handleInstallAiTools = async () => {
-    if (aiToolsStatus.installInProgress || aiToolsStatus.available) return;
+    if (aiToolsStatus.installInProgress || isStemSeparationReady || !isStemSeparationCompatible) return;
 
-    await installAiTools();
+    await installAiTools({ requestedFeature: "stemSeparation", selectedFeatures: ["stemSeparation"] });
   };
 
   const handleCancel = async () => {
@@ -242,44 +250,19 @@ export default function StemSeparationModal() {
             </div>
           </div>
 
-          {!aiToolsStatus.available ? (
+          {!isStemSeparationReady ? (
             <div className="space-y-3 rounded border border-neutral-700 bg-daw-dark p-4">
               <div>
-                <p className="text-sm font-medium text-daw-text">AI Tools Required</p>
+                <p className="text-sm font-medium text-daw-text">Stem Separation Required</p>
                 <p className="mt-1 text-xs text-daw-text-secondary">
                   Stem separation is optional and installs on demand so the main app stays smaller.
                 </p>
               </div>
 
               <div className="rounded bg-neutral-900/80 p-3 text-xs text-daw-text-secondary">
-                {aiToolsStatus.message || "Install AI Tools to enable stem separation."}
-                <p className="mt-2">
-                  Music generation:{" "}
-                  <span className="text-daw-text">
-                    {(
-                      aiToolsStatus.musicGenerationReady
-                      && aiToolsStatus.musicGenerationLayoutValid
-                      && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
-                    ) ? "ready" : "not ready yet"}
-                  </span>
-                  {aiToolsStatus.aceStepVersion ? ` (ACE-Step ${aiToolsStatus.aceStepVersion})` : ""}
-                </p>
-                {aiToolsStatus.musicGenerationModelId ? (
-                  <p className="mt-1">
-                    Pinned model: <span className="text-daw-text">{aiToolsStatus.musicGenerationModelId}</span>
-                  </p>
-                ) : null}
-                {aiToolsStatus.musicGenerationCheckpointRoot ? (
-                  <p className="mt-1 break-all">
-                    Checkpoint root: <span className="text-daw-text">{aiToolsStatus.musicGenerationCheckpointRoot}</span>
-                  </p>
-                ) : null}
-                <p className="mt-1">
-                  Checkpoint layout:{" "}
-                  <span className="text-daw-text">
-                    {aiToolsStatus.musicGenerationLayoutValid ? "valid" : "missing files"}
-                  </span>
-                </p>
+                {isStemSeparationCompatible
+                  ? aiToolsStatus.message || "Install Stem Separation to enable this workflow."
+                  : stemSeparationBlockMessage}
                 {aiToolsStatus.error ? (
                   <p className="mt-2 text-daw-record">{aiToolsStatus.error}</p>
                 ) : null}
@@ -307,7 +290,7 @@ export default function StemSeparationModal() {
                     />
                   </div>
                   <p className="text-xs text-daw-text-secondary text-center">
-                    {aiToolsStatus.message || "Installing AI Tools..."}
+                    {aiToolsStatus.message || "Installing Stem Separation..."}
                   </p>
                 </div>
               )}
@@ -316,22 +299,23 @@ export default function StemSeparationModal() {
                   <Button
                     variant="primary"
                     onClick={() => void handleInstallAiTools()}
-                    disabled={aiToolsStatus.installInProgress}
+                    disabled={aiToolsStatus.installInProgress || !isStemSeparationCompatible}
                   >
                     {aiToolsStatus.buildRuntimeMode === "downloaded-runtime"
                       ? aiToolsStatus.state === "modelMissing"
-                        ? "Finish AI Tools Setup"
-                        : "Download AI Tools"
+                        ? "Finish Stem Separation Setup"
+                        : "Download Stem Separation"
                       : aiToolsStatus.requiresExternalPython
                       ? aiToolsStatus.state === "pythonMissing"
                         ? "Get Python"
-                        : "Install AI Tools"
-                      : "Install AI Tools"}
+                        : "Install Stem Separation"
+                      : "Install Stem Separation"}
                   </Button>
                   {(aiToolsStatus.state === "pythonMissing"
                     || aiToolsStatus.state === "error"
-                    || aiToolsStatus.state === "cancelled") && (
-                    <Button variant="ghost" onClick={() => void openAiToolsSetup()}>
+                    || aiToolsStatus.state === "cancelled"
+                    || !isStemSeparationCompatible) && (
+                    <Button variant="ghost" onClick={() => void openAiToolsSetup("stemSeparation")}>
                       Open Setup Guide
                     </Button>
                   )}

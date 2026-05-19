@@ -79,6 +79,12 @@ public:
         bool musicGenerationReady = false;
         bool musicGenerationLayoutValid = false;
         bool musicGenerationPerformanceReady = true;
+        juce::StringArray selectedFeatures;
+        juce::StringArray requestedFeatures;
+        juce::StringArray installedFeatures;
+        juce::String requestedFeature;
+        juce::var hardware;
+        juce::var features;
     };
 
     /** Check if Python environment and audio-separator are available. */
@@ -92,6 +98,9 @@ public:
 
     /** Start installing the optional AI tools into the user's app-data directory after explicit user confirmation. */
     juce::var installAiTools (bool userConfirmedDownload);
+
+    /** Start installing selected optional AI feature modules after explicit user confirmation. */
+    juce::var installAiTools (const juce::String& optionsJson);
 
     /** Remove installed AI runtime files, local models, and pinned ACE-Step caches. */
     juce::var resetAiTools();
@@ -228,6 +237,39 @@ private:
         juce::String musicGenerationDefaultProfile;
         bool musicGenerationWarmSessionCapable = false;
     };
+
+    struct InstallOptions
+    {
+        bool userConfirmedDownload = false;
+        juce::StringArray selectedFeatures;
+        juce::String requestedFeature;
+    };
+
+    struct HardwareStatus
+    {
+        juce::int64 systemRamMb = 0;
+        juce::String gpuBackend { "none" };
+        juce::String gpuName;
+        juce::int64 gpuMemoryMb = 0;
+        bool gpuMemoryDetected = false;
+        bool audioGenerationGpuSupported = false;
+        bool stemSeparationCompatible = false;
+        bool audioGenerationCompatible = false;
+        juce::String stemSeparationBlockReason;
+        juce::String audioGenerationBlockReason;
+    };
+
+    /** Parse feature-aware install options while preserving legacy bool behavior. */
+    InstallOptions parseInstallOptions (const juce::String& optionsJson, bool legacyConfirmed) const;
+
+    /** Probe local hardware for conservative AI feature gating. */
+    HardwareStatus probeHardwareStatus() const;
+
+    /** Convert hardware status to a UI/installer payload. */
+    static juce::var hardwareStatusToVar (const HardwareStatus& hardware);
+
+    /** Build per-feature compatibility and readiness status. */
+    static juce::var buildFeatureStatusVar (const AiToolsStatus& status, const HardwareStatus& hardware);
 
     /** Probe runtime capabilities via the helper script. */
     RuntimeCapabilities probeRuntimeCapabilities (const juce::File& python,

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
+import { useShallow } from "zustand/shallow";
 import {
   X,
   Waves,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 import {
   getFXChainSlots,
   notifyFXChainChanged,
@@ -296,6 +298,15 @@ export function PluginBrowser({
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
   const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const { currentInstrumentPlugin, removeInstrumentWithUndo } = useDAWStore(
+    useShallow((state) => {
+      const track = state.tracks.find((candidate) => candidate.id === trackId);
+      return {
+        currentInstrumentPlugin: track?.instrumentPlugin,
+        removeInstrumentWithUndo: state.removeInstrumentWithUndo,
+      };
+    }),
+  );
 
   const toggleFavorite = (pluginId: string) => {
     setFavorites((prev) => {
@@ -391,15 +402,11 @@ export function PluginBrowser({
           }
         }
       } else if (targetChain === "instrument") {
-        success = await nativeBridge.loadInstrument(
+        success = await store.loadInstrumentWithUndo(
           trackId,
           plugin.fileOrIdentifier,
         );
         if (success) {
-          store.updateTrack(trackId, {
-            type: "instrument",
-            instrumentPlugin: plugin.fileOrIdentifier,
-          });
           await waitForInstrumentPlugin(
             trackId,
             plugin.fileOrIdentifier,
@@ -513,6 +520,12 @@ export function PluginBrowser({
     });
   }, [filteredPlugins, favorites]);
 
+  const currentInstrumentName = useMemo(() => {
+    if (!currentInstrumentPlugin) return "";
+    const known = plugins.find((plugin) => plugin.fileOrIdentifier === currentInstrumentPlugin);
+    return known?.name || currentInstrumentPlugin.split(/[\\/]/).pop() || "Instrument";
+  }, [currentInstrumentPlugin, plugins]);
+
   const content = (
     <>
       <div
@@ -598,6 +611,29 @@ export function PluginBrowser({
           </button>
         ))}
       </div>
+
+      {targetChain === "instrument" && currentInstrumentPlugin && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-neutral-900 border-b border-neutral-700">
+          <Music size={14} className="text-purple-400 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-xs text-neutral-400">Loaded instrument</div>
+            <div className="text-sm text-white truncate" title={currentInstrumentPlugin}>
+              {currentInstrumentName}
+            </div>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => {
+              void removeInstrumentWithUndo(trackId);
+            }}
+            title="Remove instrument"
+            aria-label="Remove loaded instrument"
+          >
+            <X size={14} />
+          </Button>
+        </div>
+      )}
 
       <div
         className={
@@ -709,12 +745,15 @@ export function PluginBrowser({
 
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-2000"
+      className="fixed inset-0 bg-black/80 flex items-center justify-center z-[10000]"
+      data-modal-root="true"
       onClick={onClose}
+      onContextMenu={guardModalContextMenu}
     >
       <div
         className="bg-neutral-900 border border-neutral-700 rounded-lg w-[90%] max-w-[800px] max-h-[80vh] flex flex-col shadow-xl"
         onClick={(e) => e.stopPropagation()}
+        onContextMenu={guardModalContextMenu}
       >
         <div className="flex justify-between items-center p-4 border-b border-neutral-700">
           <h2 className="m-0 text-lg text-white font-semibold">

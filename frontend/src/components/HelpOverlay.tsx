@@ -5,6 +5,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { getAllHelpTexts, type HelpEntry } from "../utils/helpTexts";
 import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { Button } from "./ui";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 /**
  * HelpOverlay — Contextual Help Panel (F1)
@@ -98,15 +99,20 @@ export function HelpOverlay() {
   if (!showContextualHelp) return null;
 
   return (
-    <div className="fixed inset-0 z-2000 flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
+      data-modal-root="true"
+      onContextMenu={guardModalContextMenu}
+    >
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/50"
         onClick={toggleContextualHelp}
+        onContextMenu={guardModalContextMenu}
       />
 
       {/* Panel */}
-      <div className="relative w-[700px] max-h-[80vh] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden">
+      <div className="relative w-[700px] max-h-[80vh] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden" onContextMenu={guardModalContextMenu}>
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-daw-border shrink-0">
           <div className="flex items-center gap-2">

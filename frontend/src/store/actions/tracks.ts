@@ -3,13 +3,54 @@ import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError, toastBridgeError } from "../../utils/bridgeErrorHandler";
 import { createDefaultTrack } from "../useDAWStore";
-import { getLinkedTrackIds, _linkingInProgress, _editSnapshots, _autoRecordTimers, AUTO_RECORD_INTERVAL_MS, syncAutomationLaneToBackend } from "./storeHelpers";
+import { syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
+import {
+  getLinkedTrackIds,
+  _linkingInProgress,
+  _editSnapshots,
+  _autoRecordTimers,
+  _automationTouchedParams,
+  _automationLatchedParams,
+  automationTouchKey,
+  syncAutomationLaneToBackend,
+} from "./storeHelpers";
 
 // @ts-nocheck
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GetFn = () => any;
+
+const BUILT_IN_PLUGIN_NAMES = new Set([
+  "OpenStudio Piano",
+  "OpenStudio Drums",
+  "OpenStudio Basic Synth",
+  "Studio13 Piano",
+  "Studio13 Drums",
+  "Studio13 Basic Synth",
+  "OpenStudio EQ",
+  "OpenStudio Compressor",
+  "OpenStudio Gate",
+  "OpenStudio Limiter",
+  "OpenStudio Delay",
+  "OpenStudio Reverb",
+  "OpenStudio Chorus",
+  "OpenStudio Saturator",
+  "OpenStudio Pitch Correct",
+  "S13 EQ",
+  "S13 Compressor",
+  "S13 Gate",
+  "S13 Limiter",
+  "S13 Delay",
+  "S13 Reverb",
+  "S13 Chorus",
+  "S13 Saturator",
+  "S13 Pitch Correct",
+]);
+
+function isBuiltInPluginPath(pluginPath: string | undefined): boolean {
+  return Boolean(pluginPath && BUILT_IN_PLUGIN_NAMES.has(pluginPath));
+}
 
 function cloneAudioClip(clip: any): any {
   return {
@@ -113,7 +154,7 @@ async function clearTrackBoundUiBeforeRemoval(state: any, trackId: string, track
 
 async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: boolean }) {
   if (options?.includeAddTrack) {
-    await nativeBridge.addTrack(track.id);
+    await nativeBridge.addTrack(track.id, track.type);
   }
 
   await nativeBridge.setTrackType(track.id, track.type).catch(() => false);
@@ -140,6 +181,23 @@ async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: 
   if (track.midiOutputDevice) {
     await nativeBridge.setTrackMIDIOutput(track.id, track.midiOutputDevice).catch(() => false);
   }
+
+  if (track.samplerSamplePath) {
+    await nativeBridge.setTrackSamplerSample(track.id, track.samplerSamplePath, track.samplerRootNote ?? 60).catch(() => false);
+  } else if (track.type === "instrument" && track.builtInInstrument) {
+    const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
+    await nativeBridge.setBuiltInPluginParam(
+      { trackId: track.id, chain: "instrument", fxIndex: -1 },
+      "instrumentMode",
+      modeMap[track.builtInInstrument] ?? 0,
+    ).catch(() => false);
+  }
+}
+
+function trackAutomationReadEnabled(track: any): boolean {
+  if (typeof track?.automationReadEnabled === "boolean") return track.automationReadEnabled;
+  if (typeof track?.automationEnabled === "boolean") return track.automationEnabled;
+  return (track?.automationLanes?.length ?? 0) > 0;
 }
 
 async function restoreTrackFxChain(sourceTrackId: string, newTrackId: string, isInputFX: boolean) {
@@ -151,7 +209,9 @@ async function restoreTrackFxChain(sourceTrackId: string, newTrackId: string, is
   for (let i = 0; i < sourceFx.length; i++) {
     const pluginPath = sourceFx[i]?.pluginPath;
     if (!pluginPath) continue;
-    const success = await addFx(newTrackId, pluginPath, false).catch(() => false);
+    const success = isBuiltInPluginPath(pluginPath)
+      ? await nativeBridge.addTrackBuiltInFX(newTrackId, pluginPath, isInputFX).catch(() => false)
+      : await addFx(newTrackId, pluginPath, false).catch(() => false);
     if (!success) continue;
     const pluginState = await nativeBridge.getPluginState(sourceTrackId, i, isInputFX).catch(() => null);
     if (pluginState) {
@@ -202,7 +262,7 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
   }
 
   if (newTrack.midiClips.length > 0) {
-    await nativeBridge.setTrackMIDIClips(newTrack.id, newTrack.midiClips).catch(() => false);
+    await syncTrackMIDIClipsToBackend(newTrack.id, newTrack.midiClips, newTrack.midiEffects || []).catch(() => false);
   }
 
   for (const [sendIndex, send] of (newTrack.sends ?? []).entries()) {
@@ -230,7 +290,7 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
   for (const lane of newTrack.automationLanes) {
     syncAutomationLaneToBackend(newTrack.id, lane);
   }
-  if (!newTrack.automationEnabled) {
+  if (!trackAutomationReadEnabled(newTrack)) {
     for (const lane of newTrack.automationLanes) {
       await nativeBridge.setAutomationMode(newTrack.id, lane.param, "off").catch(() => false);
     }
@@ -297,7 +357,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       const duplicatedTrack = cloneTrackForDuplication(sourceTrack, newTrackId);
 
       try {
-        await nativeBridge.addTrack(newTrackId);
+        await nativeBridge.addTrack(newTrackId, duplicatedTrack.type);
         set((s) => {
           const tracks = [...s.tracks];
           tracks.splice(sourceTrackIndex + 1, 0, duplicatedTrack);
@@ -359,7 +419,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         },
         undo: async () => {
           // Re-add track to backend
-          await nativeBridge.addTrack(id).catch(() => {});
+          await nativeBridge.addTrack(id, trackSnapshot.type).catch(() => {});
           // Restore track at original position
           set((s) => {
             const newTracks = [...s.tracks];
@@ -402,6 +462,35 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
           return t;
         }),
       }));
+    },
+
+    setTrackMIDIEffects: (trackId, midiEffects) => {
+      const track = get().tracks.find((t) => t.id === trackId);
+      if (!track) return;
+      const oldEffects = (track.midiEffects || []).map((effect: any) => ({ ...effect }));
+      const nextEffects = (midiEffects || []).map((effect: any) => ({ ...effect }));
+      const applyEffects = (effects: any[]) => {
+        set((state) => ({
+          tracks: state.tracks.map((candidate) =>
+            candidate.id === trackId ? { ...candidate, midiEffects: effects.map((effect) => ({ ...effect })) } : candidate,
+          ),
+          isModified: true,
+        }));
+        const latestTrack = get().tracks.find((candidate) => candidate.id === trackId);
+        if (latestTrack && (latestTrack.type === "midi" || latestTrack.type === "instrument")) {
+          void syncTrackMIDIClipsToBackend(trackId, latestTrack.midiClips || [], effects).catch(logBridgeError("midi fx sync"));
+        }
+      };
+
+      applyEffects(nextEffects);
+      commandManager.push({
+        type: "UPDATE_TRACK",
+        description: `Update MIDI FX on "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => applyEffects(nextEffects),
+        undo: () => applyEffects(oldEffects),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     setTrackNotes: (trackId, notes) => {
@@ -628,24 +717,14 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         _linkingInProgress.add("vol_" + tid);
         nativeBridge.setTrackVolume(tid, volumeDB);
+        const linkedTrack = get().tracks.find((t) => t.id === tid);
+        if (trackAutomationReadEnabled(linkedTrack)
+            && linkedTrack?.automationWriteEnabled) {
+          get().setAutomationWriteValue?.(tid, "volume", Math.max(0, Math.min(1, ((volumeDB ?? 0) + 60) / 72)));
+        }
       }
       for (const tid of linkedIds) _linkingInProgress.delete("vol_" + tid);
 
-      // Auto-record automation: write points when playing + lane armed + mode is write/touch/latch
-      if (get().transport.isPlaying) {
-        const freshTrack = get().tracks.find((t) => t.id === id);
-        const volLane = freshTrack?.automationLanes.find((l) => l.param === "volume");
-        if (volLane && volLane.armed && (volLane.mode === "write" || volLane.mode === "touch" || volLane.mode === "latch")) {
-          const now = Date.now();
-          const key = `${id}_volume`;
-          const lastRecorded = _autoRecordTimers.get(key) ?? 0;
-          if (now - lastRecorded >= AUTO_RECORD_INTERVAL_MS) {
-            _autoRecordTimers.set(key, now);
-            const normalizedValue = Math.max(0, Math.min(1, (volumeDB + 60) / 66));
-            get().addAutomationPoint(id, volLane.id, get().transport.currentTime, normalizedValue);
-          }
-        }
-      }
     },
 
     setTrackPan: async (id, pan) => {
@@ -662,24 +741,14 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         _linkingInProgress.add("pan_" + tid);
         nativeBridge.setTrackPan(tid, pan);
+        const linkedTrack = get().tracks.find((t) => t.id === tid);
+        if (trackAutomationReadEnabled(linkedTrack)
+            && linkedTrack?.automationWriteEnabled) {
+          get().setAutomationWriteValue?.(tid, "pan", Math.max(0, Math.min(1, ((pan ?? 0) + 1) / 2)));
+        }
       }
       for (const tid of linkedIds) _linkingInProgress.delete("pan_" + tid);
 
-      // Auto-record automation: write points when playing + lane armed + mode is write/touch/latch
-      if (get().transport.isPlaying) {
-        const freshTrack = get().tracks.find((t) => t.id === id);
-        const panLane = freshTrack?.automationLanes.find((l) => l.param === "pan");
-        if (panLane && panLane.armed && (panLane.mode === "write" || panLane.mode === "touch" || panLane.mode === "latch")) {
-          const now = Date.now();
-          const key = `${id}_pan`;
-          const lastRecorded = _autoRecordTimers.get(key) ?? 0;
-          if (now - lastRecorded >= AUTO_RECORD_INTERVAL_MS) {
-            _autoRecordTimers.set(key, now);
-            const normalizedValue = Math.max(0, Math.min(1, (pan + 1) / 2));
-            get().addAutomationPoint(id, panLane.id, get().transport.currentTime, normalizedValue);
-          }
-        }
-      }
     },
 
     toggleTrackMute: async (id) => {
@@ -720,6 +789,15 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       };
 
       commandManager.execute(command);
+      for (const tid of linkedIds) {
+        const t = get().tracks.find((candidate) => candidate.id === tid);
+        if (t?.automationWriteEnabled) {
+          get().beginAutomationParamTouch?.(tid, "mute");
+          get().setAutomationWriteValue?.(tid, "mute", newMuted ? 1 : 0);
+          get().recordAutomationWriteTick?.(Date.now());
+          get().endAutomationParamTouch?.(tid, "mute");
+        }
+      }
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
@@ -848,6 +926,42 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       await nativeBridge.setTrackInputChannels(id, startChannel, channelCount);
     },
 
+    setTrackMidiPitchBendRange: (id, up, down = up, linked = true) => {
+      const track = get().tracks.find((t) => t.id === id);
+      if (!track) return;
+
+      const oldRange = {
+        midiPitchBendRangeUp: track.midiPitchBendRangeUp ?? 2,
+        midiPitchBendRangeDown: track.midiPitchBendRangeDown ?? track.midiPitchBendRangeUp ?? 2,
+        midiPitchBendRangeLinked: track.midiPitchBendRangeLinked ?? true,
+      };
+      const nextRange = {
+        midiPitchBendRangeUp: Math.max(1, Math.min(24, Math.round(up))),
+        midiPitchBendRangeDown: Math.max(1, Math.min(24, Math.round(linked ? up : down))),
+        midiPitchBendRangeLinked: linked,
+      };
+
+      const applyRange = (range) => set((state) => ({
+        tracks: state.tracks.map((candidate) =>
+          candidate.id === id ? { ...candidate, ...range } : candidate,
+        ),
+        isModified: true,
+      }));
+
+      applyRange(nextRange);
+      commandManager.push({
+        type: "SET_TRACK_MIDI_PITCH_BEND_RANGE",
+        description: "Set MIDI pitch bend range",
+        timestamp: Date.now(),
+        execute: () => applyRange(nextRange),
+        undo: () => applyRange(oldRange),
+      });
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+      });
+    },
+
     // ========== Continuous Edit Begin/Commit (for undo/redo of fader drags) ==========
     beginTrackVolumeEdit: (id) => {
       const state = get();
@@ -855,11 +969,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         const t = state.tracks.find((tr) => tr.id === tid);
         if (t) _editSnapshots.set("vol_" + tid, t.volumeDB);
-        // Signal touch begin to backend for touch/latch automation
-        const volLane = t?.automationLanes.find((l) => l.param === "volume");
-        if (volLane && volLane.armed && (volLane.mode === "touch" || volLane.mode === "latch")) {
-          nativeBridge.beginTouchAutomation(tid, "volume");
-        }
+        get().beginAutomationParamTouch?.(tid, "volume");
       }
     },
     commitTrackVolumeEdit: (id) => {
@@ -877,7 +987,17 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         if (!t || t.volumeDB === oldVal) continue;
         changes.push({ tid, oldVal, newVal: t.volumeDB });
       }
-      if (changes.length === 0) return;
+      const endTouched = () => {
+        for (const tid of linkedIds) {
+          const t = get().tracks.find((tr) => tr.id === tid);
+          get().endAutomationParamTouch?.(tid, "volume");
+        }
+      };
+
+      if (changes.length === 0) {
+        endTouched();
+        return;
+      }
 
       const command: Command = {
         type: "SET_TRACK_VOLUME",
@@ -905,15 +1025,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       commandManager.execute(command);
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
 
-      // Signal touch end to backend + clear throttle timers for touch/latch automation
-      for (const c of changes) {
-        const t = get().tracks.find((tr) => tr.id === c.tid);
-        const volLane = t?.automationLanes.find((l) => l.param === "volume");
-        if (volLane && volLane.armed && (volLane.mode === "touch" || volLane.mode === "latch")) {
-          nativeBridge.endTouchAutomation(c.tid, "volume");
-          _autoRecordTimers.delete(`${c.tid}_volume`);
-        }
-      }
+      endTouched();
     },
     beginTrackPanEdit: (id) => {
       const state = get();
@@ -921,11 +1033,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         const t = state.tracks.find((tr) => tr.id === tid);
         if (t) _editSnapshots.set("pan_" + tid, t.pan);
-        // Signal touch begin to backend for touch/latch automation
-        const panLane = t?.automationLanes.find((l) => l.param === "pan");
-        if (panLane && panLane.armed && (panLane.mode === "touch" || panLane.mode === "latch")) {
-          nativeBridge.beginTouchAutomation(tid, "pan");
-        }
+        get().beginAutomationParamTouch?.(tid, "pan");
       }
     },
     commitTrackPanEdit: (id) => {
@@ -942,7 +1050,17 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         if (!t || t.pan === oldVal) continue;
         changes.push({ tid, oldVal, newVal: t.pan });
       }
-      if (changes.length === 0) return;
+      const endTouched = () => {
+        for (const tid of linkedIds) {
+          const t = get().tracks.find((tr) => tr.id === tid);
+          get().endAutomationParamTouch?.(tid, "pan");
+        }
+      };
+
+      if (changes.length === 0) {
+        endTouched();
+        return;
+      }
 
       const command: Command = {
         type: "SET_TRACK_PAN",
@@ -970,15 +1088,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       commandManager.execute(command);
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
 
-      // Signal touch end to backend + clear throttle timers for touch/latch automation
-      for (const c of changes) {
-        const t = get().tracks.find((tr) => tr.id === c.tid);
-        const panLane = t?.automationLanes.find((l) => l.param === "pan");
-        if (panLane && panLane.armed && (panLane.mode === "touch" || panLane.mode === "latch")) {
-          nativeBridge.endTouchAutomation(c.tid, "pan");
-          _autoRecordTimers.delete(`${c.tid}_pan`);
-        }
-      }
+      endTouched();
     },
     beginClipVolumeEdit: (clipId) => {
       for (const track of get().tracks) {

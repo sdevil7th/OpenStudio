@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <map>
 
 #if JUCE_WINDOWS
  #include <dwmapi.h>
@@ -464,6 +465,20 @@ int runHeadlessPitchRegressionJob(AudioEngine& audioEngine, const juce::String& 
         + " objectiveGateStatus=" + juce::String(failed ? "fail" : "pass"));
     return failed ? 2 : 0;
 }
+
+int runHeadlessAutomatedRegressionSuite(AudioEngine& audioEngine, const juce::File& reportFile)
+{
+    auto result = audioEngine.runAutomatedRegressionSuite();
+    const bool wroteReport = writeHeadlessResult(reportFile, result);
+    const bool overallPass = result.isObject()
+        && static_cast<bool>(result.getProperty("overallPass", false));
+
+    juce::Logger::writeToLog("[automatedRegression.headless] report=" + reportFile.getFullPathName()
+        + " wroteReport=" + juce::String(wroteReport ? "true" : "false")
+        + " overallPass=" + juce::String(overallPass ? "true" : "false"));
+
+    return wroteReport && overallPass ? 0 : 2;
+}
 }
 
 //==============================================================================
@@ -488,6 +503,7 @@ public:
 
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
         const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
+        const auto automatedRegressionHeadlessMode = commandLineHasFlag(commandLine, "--automated-regression-headless");
         const auto startupSelfTestReportPath = getCommandLineOptionValue(commandLine, "--report");
         const auto pitchRegressionHeadlessJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression-headless");
         const auto pitchRegressionJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression");
@@ -520,6 +536,18 @@ public:
             const auto success = MainComponent::writeStartupSelfTestReport(reportFile);
             juce::Logger::writeToLog("Startup self-test completed with result: " + juce::String(success ? "PASS" : "FAIL"));
             setApplicationReturnValue(success ? 0 : 1);
+            quit();
+            return;
+        }
+
+        if (automatedRegressionHeadlessMode)
+        {
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath)
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_AutomatedRegression.json");
+
+            const auto exitCode = runHeadlessAutomatedRegressionSuite(audioEngine, reportFile);
+            setApplicationReturnValue(exitCode);
             quit();
             return;
         }
@@ -580,6 +608,7 @@ public:
     {
         juce::Logger::writeToLog("Application Check-out.");
 
+        midiEditorWindowManagers.clear();
         mixerWindowManager = nullptr;
         mainWindow = nullptr;
 
@@ -590,6 +619,12 @@ public:
     {
         if (mixerWindowManager != nullptr)
             mixerWindowManager->close();
+        for (auto& entry : midiEditorWindowManagers)
+            if (entry.second != nullptr)
+            {
+                midiEditorWindowCloseReasons[entry.first] = "appQuit";
+                entry.second->close();
+            }
 
         quit();
     }
@@ -717,6 +752,34 @@ private:
         {
             return getMixerUISnapshot();
         };
+        callbacks.openMidiEditorWindow = [this](const juce::String& sessionId, const juce::var& bounds)
+        {
+            return openMidiEditorWindow(sessionId, bounds);
+        };
+        callbacks.prewarmMidiEditorWindow = [this](const juce::String& sessionId, const juce::var& bounds)
+        {
+            return prewarmMidiEditorWindow(sessionId, bounds);
+        };
+        callbacks.focusMidiEditorWindow = [this](const juce::String& sessionId)
+        {
+            return focusMidiEditorWindow(sessionId);
+        };
+        callbacks.closeMidiEditorWindow = [this](const juce::String& sessionId, const juce::String& reason)
+        {
+            return closeMidiEditorWindow(sessionId, reason);
+        };
+        callbacks.getMidiEditorWindowState = [this](const juce::String& sessionId)
+        {
+            return getMidiEditorWindowState(sessionId);
+        };
+        callbacks.publishMidiEditorUISnapshot = [this](const juce::String& sessionId, const juce::var& snapshot)
+        {
+            publishMidiEditorUISnapshot(sessionId, snapshot);
+        };
+        callbacks.getMidiEditorUISnapshot = [this](const juce::String& sessionId)
+        {
+            return getMidiEditorUISnapshot(sessionId);
+        };
         return callbacks;
     }
 
@@ -759,6 +822,117 @@ private:
         return latestMixerUISnapshot;
     }
 
+    juce::String normaliseMidiEditorSessionId(const juce::String& sessionId) const
+    {
+        const auto trimmed = sessionId.trim();
+        return trimmed.isNotEmpty() ? trimmed : juce::String("default-midi-editor");
+    }
+
+    MixerWindowManager* getOrCreateMidiEditorWindowManager(const juce::String& sessionId)
+    {
+        const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
+        auto existing = midiEditorWindowManagers.find(safeSessionId);
+        if (existing != midiEditorWindowManagers.end())
+            return existing->second.get();
+
+        auto manager = std::make_unique<MixerWindowManager>(
+            [this, safeSessionId]()
+            {
+                return std::make_unique<MainComponent>(audioEngine,
+                                                       appUpdater,
+                                                       startupMode,
+                                                       MainComponent::WindowRole::midiEditor,
+                                                       createWindowCallbacks(),
+                                                       juce::String(),
+                                                       safeSessionId);
+            },
+            [this, safeSessionId](const juce::Rectangle<int>& bounds)
+            {
+                handleMidiEditorWindowClosed(safeSessionId, bounds);
+            },
+            "MIDI Editor",
+            juce::Rectangle<int>(140, 100, 1400, 850),
+            900,
+            560);
+
+        auto* result = manager.get();
+        midiEditorWindowManagers[safeSessionId] = std::move(manager);
+        return result;
+    }
+
+    bool openMidiEditorWindow(const juce::String& sessionId, const juce::var& boundsValue)
+    {
+        if (auto* manager = getOrCreateMidiEditorWindowManager(sessionId))
+            return manager->open(rectangleFromVar(boundsValue));
+
+        return false;
+    }
+
+    bool prewarmMidiEditorWindow(const juce::String& sessionId, const juce::var& boundsValue)
+    {
+        if (auto* manager = getOrCreateMidiEditorWindowManager(sessionId))
+            return manager->prewarm(rectangleFromVar(boundsValue));
+
+        return false;
+    }
+
+    bool focusMidiEditorWindow(const juce::String& sessionId)
+    {
+        const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
+        auto existing = midiEditorWindowManagers.find(safeSessionId);
+        if (existing == midiEditorWindowManagers.end() || existing->second == nullptr)
+            return false;
+
+        return existing->second->focus();
+    }
+
+    bool closeMidiEditorWindow(const juce::String& sessionId, const juce::String& reason)
+    {
+        const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
+        auto existing = midiEditorWindowManagers.find(safeSessionId);
+        if (existing == midiEditorWindowManagers.end() || existing->second == nullptr)
+            return false;
+
+        const auto closeReason = reason.trim().isNotEmpty() ? reason.trim() : juce::String("close");
+        midiEditorWindowCloseReasons[safeSessionId] = closeReason;
+
+        if (closeReason == "dock")
+            return existing->second->hide();
+
+        return existing->second->close();
+    }
+
+    juce::var getMidiEditorWindowState(const juce::String& sessionId) const
+    {
+        const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
+        const auto existing = midiEditorWindowManagers.find(safeSessionId);
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("isOpen", existing != midiEditorWindowManagers.end()
+                                   && existing->second != nullptr
+                                   && existing->second->isOpen());
+        obj->setProperty("sessionId", safeSessionId);
+        return juce::var(obj);
+    }
+
+    void publishMidiEditorUISnapshot(const juce::String& sessionId, const juce::var& snapshot)
+    {
+        const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
+        {
+            const juce::ScopedLock sl(midiEditorSnapshotLock);
+            latestMidiEditorUISnapshots[safeSessionId] = snapshot;
+        }
+
+        MainComponent::broadcastEventToAll("midiEditorUISync", snapshot);
+    }
+
+    juce::var getMidiEditorUISnapshot(const juce::String& sessionId) const
+    {
+        const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
+        const juce::ScopedLock sl(midiEditorSnapshotLock);
+        const auto existing = latestMidiEditorUISnapshots.find(safeSessionId);
+        return existing != latestMidiEditorUISnapshots.end() ? existing->second : juce::var();
+    }
+
     void handleMixerWindowClosed(const juce::Rectangle<int>& bounds)
     {
         if (auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr)
@@ -769,13 +943,33 @@ private:
         MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "mixerWindowClosed", juce::var(payload));
     }
 
+    void handleMidiEditorWindowClosed(const juce::String& sessionId, const juce::Rectangle<int>& bounds)
+    {
+        const auto reasonIt = midiEditorWindowCloseReasons.find(sessionId);
+        const auto reason = reasonIt != midiEditorWindowCloseReasons.end()
+            ? reasonIt->second
+            : juce::String("close");
+        if (reasonIt != midiEditorWindowCloseReasons.end())
+            midiEditorWindowCloseReasons.erase(reasonIt);
+
+        auto* payload = new juce::DynamicObject();
+        payload->setProperty("sessionId", sessionId);
+        payload->setProperty("reason", reason);
+        payload->setProperty("bounds", rectangleToVar(bounds));
+        MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "midiEditorWindowClosed", juce::var(payload));
+    }
+
     AudioEngine audioEngine;
     AppUpdater appUpdater;
     MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<MixerWindowManager> mixerWindowManager;
+    std::map<juce::String, std::unique_ptr<MixerWindowManager>> midiEditorWindowManagers;
     mutable juce::CriticalSection mixerSnapshotLock;
     juce::var latestMixerUISnapshot;
+    mutable juce::CriticalSection midiEditorSnapshotLock;
+    std::map<juce::String, juce::var> latestMidiEditorUISnapshots;
+    std::map<juce::String, juce::String> midiEditorWindowCloseReasons;
 };
 
 START_JUCE_APPLICATION (OpenStudioApplication)

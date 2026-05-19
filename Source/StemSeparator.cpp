@@ -10,6 +10,11 @@ constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
 constexpr auto kPinnedMusicGenerationModelId = "acestep-v15-xl-turbo";
 constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo";
 constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/Ace-Step1.5";
+constexpr auto kFeatureStemSeparation = "stemSeparation";
+constexpr auto kFeatureAudioGeneration = "audioGeneration";
+constexpr juce::int64 kMinStemSystemRamMb = 8 * 1024;
+constexpr juce::int64 kMinAudioSystemRamMb = 16 * 1024;
+constexpr juce::int64 kMinAudioGpuMemoryMb = 8 * 1024;
 constexpr auto kPythonHelpUrl = "https://www.python.org/downloads/";
 constexpr auto kInstallSourceDownloadedRuntime = "downloadedRuntime";
 constexpr auto kInstallSourceExternalPython = "externalPython";
@@ -60,6 +65,52 @@ juce::StringArray varToStringArray (const juce::var& value)
             result.add(item.toString());
     }
     return result;
+}
+
+juce::String normaliseFeatureId (juce::String value)
+{
+    value = value.trim();
+    if (value == "stem" || value == "stems" || value == "stem-separation"
+        || value == "stem_separation" || value == kFeatureStemSeparation)
+        return kFeatureStemSeparation;
+
+    if (value == "audio" || value == "music" || value == "audio-generation"
+        || value == "audio_generation" || value == "music-generation"
+        || value == "musicGeneration" || value == kFeatureAudioGeneration)
+        return kFeatureAudioGeneration;
+
+    return {};
+}
+
+void addFeatureIfMissing (juce::StringArray& features, const juce::String& featureId)
+{
+    if (featureId.isNotEmpty() && ! features.contains(featureId))
+        features.add(featureId);
+}
+
+juce::StringArray normaliseFeatureArray (const juce::var& value)
+{
+    juce::StringArray features;
+
+    if (auto* array = value.getArray())
+    {
+        for (const auto& entry : *array)
+            addFeatureIfMissing(features, normaliseFeatureId(entry.toString()));
+    }
+    else
+    {
+        juce::StringArray tokens;
+        tokens.addTokens(value.toString(), ",; \t\r\n", {});
+        for (const auto& token : tokens)
+            addFeatureIfMissing(features, normaliseFeatureId(token));
+    }
+
+    return features;
+}
+
+juce::StringArray defaultInstallFeatures()
+{
+    return { kFeatureStemSeparation };
 }
 
 juce::String summariseDiagnosticLines (const juce::StringArray& lines)
@@ -652,6 +703,224 @@ bool StemSeparator::isExternalPythonFallbackEnabled() const
 #endif
 }
 
+StemSeparator::InstallOptions StemSeparator::parseInstallOptions (const juce::String& optionsJson, bool legacyConfirmed) const
+{
+    InstallOptions options;
+    options.userConfirmedDownload = legacyConfirmed;
+    options.selectedFeatures = defaultInstallFeatures();
+
+    const auto trimmed = optionsJson.trim();
+    if (trimmed.isEmpty())
+        return options;
+
+    const auto parsed = juce::JSON::parse(trimmed);
+    if (! parsed.isObject())
+        return options;
+
+    if (parsed.hasProperty("userConfirmedDownload"))
+        options.userConfirmedDownload = static_cast<bool>(parsed["userConfirmedDownload"]);
+
+    if (parsed.hasProperty("requestedFeature"))
+        options.requestedFeature = normaliseFeatureId(parsed["requestedFeature"].toString());
+
+    if (parsed.hasProperty("selectedFeatures"))
+        options.selectedFeatures = normaliseFeatureArray(parsed["selectedFeatures"]);
+
+    if (options.selectedFeatures.isEmpty() && options.requestedFeature.isNotEmpty())
+        options.selectedFeatures.add(options.requestedFeature);
+
+    if (options.selectedFeatures.isEmpty())
+        options.selectedFeatures = defaultInstallFeatures();
+
+    return options;
+}
+
+StemSeparator::HardwareStatus StemSeparator::probeHardwareStatus() const
+{
+    HardwareStatus hardware;
+    hardware.systemRamMb = static_cast<juce::int64>(juce::SystemStats::getMemorySizeInMegabytes());
+
+    auto probeNvidia = [] (HardwareStatus& target)
+    {
+        juce::ChildProcess probe;
+        const auto command = "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits";
+        if (! probe.start(command) || ! probe.waitForProcessToFinish(5000))
+            return;
+
+        auto output = probe.readAllProcessOutput();
+        if (probe.getExitCode() != 0)
+            return;
+
+        juce::StringArray lines;
+        lines.addLines(output);
+        for (const auto& line : lines)
+        {
+            juce::StringArray parts;
+            parts.addTokens(line, ",", {});
+            if (parts.size() < 2)
+                continue;
+
+            const auto memoryMb = static_cast<juce::int64>(
+                parts[parts.size() - 1].retainCharacters("0123456789.").getDoubleValue());
+            if (memoryMb > target.gpuMemoryMb)
+            {
+                target.gpuBackend = "cuda";
+                target.gpuName = parts[0].trim();
+                target.gpuMemoryMb = memoryMb;
+                target.gpuMemoryDetected = true;
+                target.audioGenerationGpuSupported = true;
+            }
+        }
+    };
+
+    probeNvidia(hardware);
+
+#if JUCE_LINUX
+    if (hardware.gpuBackend == "none")
+    {
+        juce::ChildProcess probe;
+        if (probe.start("rocm-smi --showmeminfo vram") && probe.waitForProcessToFinish(5000) && probe.getExitCode() == 0)
+        {
+            const auto output = probe.readAllProcessOutput();
+            juce::int64 bestMemoryMb = 0;
+            juce::String digits;
+            for (auto i = 0; i < output.length(); ++i)
+            {
+                const auto ch = output[i];
+                if (juce::CharacterFunctions::isDigit(ch))
+                {
+                    digits += juce::String::charToString(ch);
+                    continue;
+                }
+
+                if (digits.isNotEmpty())
+                {
+                    auto value = digits.getLargeIntValue();
+                    if (value > 1024 * 1024)
+                        value /= 1024 * 1024;
+                    bestMemoryMb = juce::jmax(bestMemoryMb, value);
+                    digits.clear();
+                }
+            }
+
+            if (bestMemoryMb >= kMinAudioGpuMemoryMb)
+            {
+                hardware.gpuBackend = "rocm";
+                hardware.gpuName = "AMD ROCm GPU";
+                hardware.gpuMemoryMb = bestMemoryMb;
+                hardware.gpuMemoryDetected = true;
+                hardware.audioGenerationGpuSupported = true;
+            }
+        }
+    }
+#endif
+
+    if (hardware.systemRamMb <= 0)
+        hardware.stemSeparationBlockReason = "system memory could not be detected";
+    else if (hardware.systemRamMb < kMinStemSystemRamMb)
+        hardware.stemSeparationBlockReason = "at least 8 GB system RAM is required";
+
+    hardware.stemSeparationCompatible = hardware.stemSeparationBlockReason.isEmpty();
+
+    if (hardware.systemRamMb <= 0)
+        hardware.audioGenerationBlockReason = "system memory could not be detected";
+    else if (hardware.systemRamMb < kMinAudioSystemRamMb)
+        hardware.audioGenerationBlockReason = "at least 16 GB system RAM is required";
+    else if (! hardware.audioGenerationGpuSupported || hardware.gpuMemoryMb < kMinAudioGpuMemoryMb)
+        hardware.audioGenerationBlockReason = "supported GPU with at least 8 GB memory was not detected";
+
+    hardware.audioGenerationCompatible = hardware.audioGenerationBlockReason.isEmpty();
+    return hardware;
+}
+
+juce::var StemSeparator::hardwareStatusToVar (const HardwareStatus& hardware)
+{
+    auto requirements = std::make_unique<juce::DynamicObject>();
+    auto stemRequirements = std::make_unique<juce::DynamicObject>();
+    stemRequirements->setProperty("minSystemRamMb", static_cast<double>(kMinStemSystemRamMb));
+    requirements->setProperty(kFeatureStemSeparation, juce::var(stemRequirements.release()));
+
+    auto audioRequirements = std::make_unique<juce::DynamicObject>();
+    audioRequirements->setProperty("minSystemRamMb", static_cast<double>(kMinAudioSystemRamMb));
+    audioRequirements->setProperty("minGpuMemoryMb", static_cast<double>(kMinAudioGpuMemoryMb));
+    juce::Array<juce::var> supportedGpuBackends;
+    supportedGpuBackends.add("cuda");
+    supportedGpuBackends.add("rocm");
+    audioRequirements->setProperty("supportedGpuBackends", supportedGpuBackends);
+    requirements->setProperty(kFeatureAudioGeneration, juce::var(audioRequirements.release()));
+
+    auto obj = std::make_unique<juce::DynamicObject>();
+    obj->setProperty("schemaVersion", 1);
+    obj->setProperty("systemRamMb", static_cast<double>(hardware.systemRamMb));
+    obj->setProperty("systemRamGb", hardware.systemRamMb > 0 ? hardware.systemRamMb / 1024.0 : 0.0);
+    obj->setProperty("gpuBackend", hardware.gpuBackend);
+    obj->setProperty("gpuName", hardware.gpuName);
+    obj->setProperty("gpuMemoryMb", static_cast<double>(hardware.gpuMemoryMb));
+    obj->setProperty("gpuMemoryGb", hardware.gpuMemoryMb > 0 ? hardware.gpuMemoryMb / 1024.0 : 0.0);
+    obj->setProperty("gpuMemoryDetected", hardware.gpuMemoryDetected);
+    obj->setProperty("audioGenerationGpuSupported", hardware.audioGenerationGpuSupported);
+    obj->setProperty("requirements", juce::var(requirements.release()));
+    return juce::var(obj.release());
+}
+
+juce::var StemSeparator::buildFeatureStatusVar (const AiToolsStatus& status, const HardwareStatus& hardware)
+{
+    auto buildFeature = [&] (const juce::String& id,
+                             const juce::String& label,
+                             bool compatible,
+                             const juce::String& blockReason,
+                             bool ready,
+                             bool requiresGpu,
+                             juce::int64 minSystemRamMb,
+                             juce::int64 minGpuMemoryMb = 0)
+    {
+        auto feature = std::make_unique<juce::DynamicObject>();
+        feature->setProperty("id", id);
+        feature->setProperty("label", label);
+        feature->setProperty("selected", status.selectedFeatures.contains(id));
+        feature->setProperty("requested", status.requestedFeatures.contains(id) || status.requestedFeature == id);
+        feature->setProperty("installed", status.installedFeatures.contains(id) || ready);
+        feature->setProperty("ready", ready);
+        feature->setProperty("compatible", compatible);
+        feature->setProperty("blocked", ! compatible);
+        feature->setProperty("blockReason", blockReason);
+        feature->setProperty("requiresGpu", requiresGpu);
+        feature->setProperty("minSystemRamMb", static_cast<double>(minSystemRamMb));
+        if (minGpuMemoryMb > 0)
+            feature->setProperty("minGpuMemoryMb", static_cast<double>(minGpuMemoryMb));
+        feature->setProperty("message", compatible
+            ? label + " is compatible with this machine."
+            : "This machine does not meet " + label + " requirements: " + blockReason + ".");
+        return juce::var(feature.release());
+    };
+
+    const auto stemReady = status.scriptAvailable && status.runtimeInstalled && status.modelInstalled;
+    const auto audioReady = status.musicGenerationReady
+        && status.musicGenerationLayoutValid
+        && status.musicGenerationPerformanceReady
+        && hasNativeMusicProfile(status);
+
+    auto features = std::make_unique<juce::DynamicObject>();
+    features->setProperty(kFeatureStemSeparation,
+                          buildFeature(kFeatureStemSeparation,
+                                       "Stem Separation",
+                                       hardware.stemSeparationCompatible,
+                                       hardware.stemSeparationBlockReason,
+                                       stemReady,
+                                       false,
+                                       kMinStemSystemRamMb));
+    features->setProperty(kFeatureAudioGeneration,
+                          buildFeature(kFeatureAudioGeneration,
+                                       "Audio Generation",
+                                       hardware.audioGenerationCompatible,
+                                       hardware.audioGenerationBlockReason,
+                                       audioReady,
+                                       true,
+                                       kMinAudioSystemRamMb,
+                                       kMinAudioGpuMemoryMb));
+    return juce::var(features.release());
+}
+
 StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File& systemPython,
                                                                 const juce::File& script,
                                                                 const juce::File& installerScript,
@@ -673,9 +942,16 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
                                               : juce::String(kInstallSourceDownloadedRuntime);
     status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
+    if (status.selectedFeatures.isEmpty())
+        status.selectedFeatures = defaultInstallFeatures();
+    const auto hardware = probeHardwareStatus();
+    status.hardware = hardwareStatusToVar(hardware);
 
     if (status.installInProgress)
+    {
+        status.features = buildFeatureStatusVar(status, hardware);
         return status;
+    }
 
     status.available = status.scriptAvailable && status.runtimeInstalled && status.modelInstalled;
 
@@ -713,6 +989,11 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.activityLines.add(status.stepLabel);
         if (status.message != status.stepLabel)
             status.activityLines.add(status.message);
+        if (status.installedFeatures.isEmpty())
+            status.installedFeatures.add(kFeatureStemSeparation);
+        if (musicGenerationFullyReady)
+            addFeatureIfMissing(status.installedFeatures, kFeatureAudioGeneration);
+        status.features = buildFeatureStatusVar(status, hardware);
         return status;
     }
 
@@ -721,6 +1002,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.available = false;
         status.installInProgress = false;
         status.terminalReason = status.errorCode;
+        status.features = buildFeatureStatusVar(status, hardware);
 
         if (status.message.isEmpty())
             status.message = "OpenStudio could not confirm that AI Tools finished installing.";
@@ -737,6 +1019,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.errorCode = "installer_unavailable";
         status.lastPhase = "installer_unavailable";
         status.terminalReason = status.errorCode;
+        status.features = buildFeatureStatusVar(status, hardware);
         return status;
     }
 
@@ -749,6 +1032,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.errorCode = "runtime_manifest_missing";
         status.lastPhase = "fetching_runtime_manifest";
         status.terminalReason = status.errorCode;
+        status.features = buildFeatureStatusVar(status, hardware);
         return status;
     }
 
@@ -763,6 +1047,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
             status.errorCode = "python_missing";
             status.lastPhase = "pythonMissing";
             status.terminalReason.clear();
+            status.features = buildFeatureStatusVar(status, hardware);
             return status;
         }
 
@@ -775,6 +1060,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.errorCode.clear();
         status.lastPhase = "runtimeMissing";
         status.terminalReason.clear();
+        status.features = buildFeatureStatusVar(status, hardware);
         return status;
     }
 
@@ -785,6 +1071,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
     status.errorCode.clear();
     status.lastPhase = "modelMissing";
     status.terminalReason.clear();
+    status.features = buildFeatureStatusVar(status, hardware);
     return status;
 }
 
@@ -821,6 +1108,11 @@ StemSeparator::AiToolsStatus StemSeparator::buildInitialAiToolsStatus() const
     status.musicGenerationSharedRepoId = kPinnedMusicGenerationSharedRepoId;
     status.musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot().getFullPathName();
     status.musicGenerationLayoutValid = false;
+    status.selectedFeatures = defaultInstallFeatures();
+    status.requestedFeatures = status.selectedFeatures;
+    const auto hardware = probeHardwareStatus();
+    status.hardware = hardwareStatusToVar(hardware);
+    status.features = buildFeatureStatusVar(status, hardware);
     status.fallbackAttempted = false;
     return status;
 }
@@ -870,6 +1162,16 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
         status.musicGenerationSharedRepoId = kPinnedMusicGenerationSharedRepoId;
     if (status.musicGenerationCheckpointRoot.isEmpty())
         status.musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot().getFullPathName();
+    if (status.selectedFeatures.isEmpty())
+        status.selectedFeatures = defaultInstallFeatures();
+    if (status.requestedFeatures.isEmpty())
+        status.requestedFeatures = status.selectedFeatures;
+    if (status.hardware.isVoid() || status.hardware.isUndefined() || status.features.isVoid() || status.features.isUndefined())
+    {
+        const auto hardware = probeHardwareStatus();
+        status.hardware = hardwareStatusToVar(hardware);
+        status.features = buildFeatureStatusVar(status, hardware);
+    }
     return status;
 }
 
@@ -973,6 +1275,17 @@ void StemSeparator::scheduleStatusRefresh()
         refreshedStatus.musicGenerationUnavailableProfiles = runtimeCapabilities.musicGenerationUnavailableProfiles;
         refreshedStatus.musicGenerationDefaultProfile = runtimeCapabilities.musicGenerationDefaultProfile;
         refreshedStatus.musicGenerationWarmSessionCapable = runtimeCapabilities.musicGenerationWarmSessionCapable;
+        refreshedStatus.installedFeatures.clear();
+        if (refreshedStatus.scriptAvailable && refreshedStatus.runtimeInstalled && refreshedStatus.modelInstalled)
+            refreshedStatus.installedFeatures.add(kFeatureStemSeparation);
+        if (refreshedStatus.musicGenerationReady
+            && refreshedStatus.musicGenerationLayoutValid
+            && refreshedStatus.musicGenerationPerformanceReady
+            && hasNativeMusicProfile(refreshedStatus))
+            refreshedStatus.installedFeatures.add(kFeatureAudioGeneration);
+        const auto refreshedHardware = probeHardwareStatus();
+        refreshedStatus.hardware = hardwareStatusToVar(refreshedHardware);
+        refreshedStatus.features = buildFeatureStatusVar(refreshedStatus, refreshedHardware);
         const auto musicGenerationFullyReady = refreshedStatus.musicGenerationReady
                                             && refreshedStatus.musicGenerationLayoutValid
                                             && refreshedStatus.musicGenerationPerformanceReady
@@ -1325,6 +1638,15 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     juce::Array<juce::var> availableProfiles;
     for (const auto& profile : status.musicGenerationAvailableProfiles)
         availableProfiles.add(profile);
+    juce::Array<juce::var> selectedFeatures;
+    for (const auto& feature : status.selectedFeatures)
+        selectedFeatures.add(feature);
+    juce::Array<juce::var> requestedFeatures;
+    for (const auto& feature : status.requestedFeatures)
+        requestedFeatures.add(feature);
+    juce::Array<juce::var> installedFeatures;
+    for (const auto& feature : status.installedFeatures)
+        installedFeatures.add(feature);
     obj->setProperty("state", status.state);
     obj->setProperty("progress", static_cast<double>(status.progress));
     obj->setProperty("stepIndex", status.stepIndex);
@@ -1381,6 +1703,12 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status)
     obj->setProperty("musicGenerationReady", status.musicGenerationReady);
     obj->setProperty("musicGenerationLayoutValid", status.musicGenerationLayoutValid);
     obj->setProperty("musicGenerationPerformanceReady", status.musicGenerationPerformanceReady);
+    obj->setProperty("selectedFeatures", selectedFeatures);
+    obj->setProperty("requestedFeatures", requestedFeatures);
+    obj->setProperty("installedFeatures", installedFeatures);
+    obj->setProperty("requestedFeature", status.requestedFeature);
+    obj->setProperty("hardware", status.hardware);
+    obj->setProperty("features", status.features);
     return juce::var(obj.release());
 }
 
@@ -1407,9 +1735,21 @@ juce::var StemSeparator::refreshAiToolsStatus()
 
 juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
 {
+    auto options = std::make_unique<juce::DynamicObject>();
+    options->setProperty("userConfirmedDownload", userConfirmedDownload);
+    juce::Array<juce::var> selectedFeatures;
+    selectedFeatures.add(kFeatureStemSeparation);
+    options->setProperty("selectedFeatures", selectedFeatures);
+    options->setProperty("requestedFeature", kFeatureStemSeparation);
+    return installAiTools(juce::JSON::toString(juce::var(options.release()), true));
+}
+
+juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
+{
     if (! aiToolsInstallWorkInProgress.load())
         scheduleStatusRefresh();
 
+    const auto installOptions = parseInstallOptions(optionsJson, false);
     auto cachedStatus = getCachedAiToolsStatusSnapshot();
     const bool musicGenerationFullyReady = cachedStatus.musicGenerationReady
         && cachedStatus.musicGenerationLayoutValid
@@ -1417,10 +1757,20 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         && hasNativeMusicProfile(cachedStatus);
 
     auto result = std::make_unique<juce::DynamicObject>();
-    if (cachedStatus.available && musicGenerationFullyReady)
+    bool selectedFeaturesReady = true;
+    for (const auto& feature : installOptions.selectedFeatures)
+    {
+        const auto normalisedFeature = normaliseFeatureId(feature);
+        if (normalisedFeature == kFeatureStemSeparation)
+            selectedFeaturesReady = selectedFeaturesReady && cachedStatus.available;
+        else if (normalisedFeature == kFeatureAudioGeneration)
+            selectedFeaturesReady = selectedFeaturesReady && musicGenerationFullyReady;
+    }
+
+    if (selectedFeaturesReady)
     {
         result->setProperty("started", false);
-        result->setProperty("message", "AI tools are already installed.");
+        result->setProperty("message", "Selected AI features are already installed.");
         result->setProperty("status", aiToolsStatusToVar(cachedStatus));
         return juce::var(result.release());
     }
@@ -1433,12 +1783,55 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         return juce::var(result.release());
     }
 
-    if (! userConfirmedDownload)
+    if (! installOptions.userConfirmedDownload)
     {
         result->setProperty("started", false);
         result->setProperty("error", "AI tools setup requires explicit confirmation before downloading runtime or model files.");
         result->setProperty("message", "Open the AI Tools setup window and confirm the download to continue.");
         result->setProperty("status", aiToolsStatusToVar(cachedStatus));
+        return juce::var(result.release());
+    }
+
+    const auto hardware = probeHardwareStatus();
+    juce::StringArray installFeatures;
+    juce::StringArray blockedFeatures;
+    for (const auto& feature : installOptions.selectedFeatures)
+    {
+        const auto normalisedFeature = normaliseFeatureId(feature);
+        const auto compatible = (normalisedFeature == kFeatureStemSeparation && hardware.stemSeparationCompatible)
+            || (normalisedFeature == kFeatureAudioGeneration && hardware.audioGenerationCompatible);
+        if (compatible)
+            addFeatureIfMissing(installFeatures, normalisedFeature);
+        else
+            addFeatureIfMissing(blockedFeatures, normalisedFeature);
+    }
+
+    if (installFeatures.isEmpty())
+    {
+        AiToolsStatus blockedStatus = cachedStatus;
+        blockedStatus.state = "error";
+        blockedStatus.progress = 0.0f;
+        blockedStatus.available = cachedStatus.available;
+        blockedStatus.installInProgress = false;
+        blockedStatus.selectedFeatures = installOptions.selectedFeatures;
+        blockedStatus.requestedFeatures = installOptions.selectedFeatures;
+        blockedStatus.requestedFeature = installOptions.requestedFeature;
+        blockedStatus.hardware = hardwareStatusToVar(hardware);
+        blockedStatus.errorCode = "hardware_requirement_unmet";
+        blockedStatus.terminalReason = blockedStatus.errorCode;
+        blockedStatus.message = blockedFeatures.contains(kFeatureAudioGeneration)
+            ? "This machine does not meet Audio Generation requirements: " + hardware.audioGenerationBlockReason + "."
+            : "This machine does not meet Stem Separation requirements: " + hardware.stemSeparationBlockReason + ".";
+        blockedStatus.error = blockedStatus.message;
+        blockedStatus.features = buildFeatureStatusVar(blockedStatus, hardware);
+        result->setProperty("started", false);
+        result->setProperty("error", blockedStatus.message);
+        result->setProperty("status", aiToolsStatusToVar(blockedStatus));
+        {
+            const juce::ScopedLock lock (aiToolsStatusLock);
+            lastAiToolsStatus = blockedStatus;
+            initialStatusPrepared = true;
+        }
         return juce::var(result.release());
     }
 
@@ -1456,6 +1849,11 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         status.progress = 0.0f;
         status.available = false;
         status.installInProgress = true;
+        status.selectedFeatures = installFeatures;
+        status.requestedFeatures = installOptions.selectedFeatures;
+        status.requestedFeature = installOptions.requestedFeature;
+        status.hardware = hardwareStatusToVar(hardware);
+        status.features = buildFeatureStatusVar(status, hardware);
         status.message = devFallbackEnabled
             ? "Preparing AI tools installation..."
             : "Checking OpenStudio AI runtime downloads...";
@@ -1465,7 +1863,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     });
 
-    std::thread ([this, devFallbackEnabled]
+    std::thread ([this, devFallbackEnabled, installFeatures, requestedFeatures = installOptions.selectedFeatures, requestedFeature = installOptions.requestedFeature]
     {
         const auto installerScript = findInstallerScript();
         const auto systemPython = findSystemPython();
@@ -1480,8 +1878,9 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         juce::String selectedBackendRequested;
         juce::File selectedBackendInstallPlanFile;
         bool fallbackAttempted = false;
+        const auto installFeatureArg = installFeatures.joinIntoString(",");
 
-        auto finishWithStatus = [this, &selectedRuntimeCandidate, &selectedBackendRequested, &sessionId, &fallbackAttempted] (const juce::String& state,
+        auto finishWithStatus = [this, &selectedRuntimeCandidate, &selectedBackendRequested, &sessionId, &fallbackAttempted, installFeatures, requestedFeatures, requestedFeature] (const juce::String& state,
                                                                                                     float progress,
                                                                                                     const juce::String& message,
                                                                                                     const juce::String& error,
@@ -1524,12 +1923,18 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                 status.requiresExternalPython = requiresExternalPython;
                 status.installSource = installSource;
                 status.helpUrl = requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
+                status.selectedFeatures = installFeatures;
+                status.requestedFeatures = requestedFeatures;
+                status.requestedFeature = requestedFeature;
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
                 status.lastPhase = state;
                 status.terminalReason = state == "error" ? errorCode : juce::String();
                 status.fallbackAttempted = fallbackAttempted;
+                const auto hardware = probeHardwareStatus();
+                status.hardware = hardwareStatusToVar(hardware);
+                status.features = buildFeatureStatusVar(status, hardware);
             });
         };
 
@@ -1548,7 +1953,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                              devFallbackEnabled ? juce::String(kBuildRuntimeModeUnbundledDev) : juce::String(kBuildRuntimeModeDownloadedRuntime));
         };
 
-        auto updateStep = [this, &logFile, devFallbackEnabled, &selectedRuntimeCandidate, &selectedBackendRequested, &sessionId, &fallbackAttempted] (const juce::String& state,
+        auto updateStep = [this, &logFile, devFallbackEnabled, &selectedRuntimeCandidate, &selectedBackendRequested, &sessionId, &fallbackAttempted, installFeatures, requestedFeatures, requestedFeature] (const juce::String& state,
                                                                                                                                  float progress,
                                                                                                                                  const juce::String& message,
                                                                                                                                  const juce::String& installSource)
@@ -1579,12 +1984,18 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                 status.requiresExternalPython = devFallbackEnabled;
                 status.installSource = installSource;
                 status.helpUrl = devFallbackEnabled ? juce::String(kPythonHelpUrl) : juce::String();
+                status.selectedFeatures = installFeatures;
+                status.requestedFeatures = requestedFeatures;
+                status.requestedFeature = requestedFeature;
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
                 status.lastPhase = state;
                 status.terminalReason.clear();
                 status.fallbackAttempted = fallbackAttempted;
+                const auto hardware = probeHardwareStatus();
+                status.hardware = hardwareStatusToVar(hardware);
+                status.features = buildFeatureStatusVar(status, hardware);
             });
         };
 
@@ -1601,6 +2012,8 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
         appendAiToolsLogLine("modelsDir=" + modelsDir.getFullPathName());
         appendAiToolsLogLine("musicGenerationCheckpointRoot=" + musicGenerationCheckpointRoot.getFullPathName());
+        appendAiToolsLogLine("selectedFeatures=" + installFeatureArg);
+        appendAiToolsLogLine("requestedFeatures=" + requestedFeatures.joinIntoString(","));
 
         if (! installerScript.existsAsFile())
         {
@@ -1769,6 +2182,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                     if (auto* windowsPlatformObject = platformNode.getDynamicObject())
                     {
                         const auto likelyNvidia = isLikelyNvidiaWindowsMachine();
+                        const auto audioGenerationRequested = installFeatures.contains(kFeatureAudioGeneration);
                         appendAiToolsLogLine("windowsHardwareClass=" + juce::String(likelyNvidia ? "nvidia" : "non-nvidia"));
                         const auto baseNode = windowsPlatformObject->getProperty("base");
                         if (auto* backendsObject = windowsPlatformObject->getProperty("backends").getDynamicObject())
@@ -1789,7 +2203,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                                                                                  baseNode,
                                                                                  "cuda",
                                                                                  cudaInstallPlan));
-                                if (! directmlNode.isVoid() && ! directmlNode.isUndefined())
+                                if (! audioGenerationRequested && ! directmlNode.isVoid() && ! directmlNode.isUndefined())
                                     runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:directml",
                                                                                  "Windows base runtime + DirectML",
                                                                                  likelyNvidia ? "Prepared as fallback if the CUDA backend install or probe fails." : "Selected because no NVIDIA hardware was detected.",
@@ -1808,19 +2222,20 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                             {
                                 if (likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
                                     runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Selected first because NVIDIA hardware was detected.", cudaNode));
-                                if (! directmlNode.isVoid() && ! directmlNode.isUndefined())
+                                if (! audioGenerationRequested && ! directmlNode.isVoid() && ! directmlNode.isUndefined())
                                     runtimeCandidates.add(buildCandidateFromNode("windows-directml-x64", "Windows DirectML runtime", likelyNvidia ? "Prepared as fallback if CUDA validation fails." : "Selected because no NVIDIA hardware was detected.", directmlNode));
                                 if (! likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined() && runtimeCandidates.isEmpty())
                                     runtimeCandidates.add(buildCandidateFromNode("windows-cuda-x64", "Windows CUDA runtime", "Using CUDA runtime because it is the only published Windows candidate.", cudaNode));
                             }
                         }
 
-                        if (runtimeCandidates.isEmpty() && getPropertyString(platformNode, "url").isNotEmpty())
+                        if (runtimeCandidates.isEmpty() && ! audioGenerationRequested && getPropertyString(platformNode, "url").isNotEmpty())
                             runtimeCandidates.add(buildCandidateFromNode("windows-legacy", "Windows runtime", "Using legacy flat Windows runtime manifest entry.", platformNode));
                     }
 #else
                     if (auto* linuxPlatformObject = platformNode.getDynamicObject())
                     {
+                        const auto audioGenerationRequested = installFeatures.contains(kFeatureAudioGeneration);
                         const auto architectureKey = getAiRuntimeArchitectureKey();
                         const auto architectureNode = linuxPlatformObject->getProperty(architectureKey);
                         if (! architectureNode.isVoid() && ! architectureNode.isUndefined())
@@ -1853,12 +2268,13 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                                                                                  rocmInstallPlan));
                             }
 
-                            runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey,
-                                                                         "Linux " + architectureKey,
-                                                                         runtimeCandidates.isEmpty() ? "Selected by current Linux architecture." : "Prepared as fallback if GPU backend setup fails before installation.",
-                                                                         architectureNode));
+                            if (! audioGenerationRequested)
+                                runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey,
+                                                                             "Linux " + architectureKey,
+                                                                             runtimeCandidates.isEmpty() ? "Selected by current Linux architecture." : "Prepared as fallback if GPU backend setup fails before installation.",
+                                                                             architectureNode));
                         }
-                        else if (getPropertyString(platformNode, "url").isNotEmpty())
+                        else if (! audioGenerationRequested && getPropertyString(platformNode, "url").isNotEmpty())
                         {
                             runtimeCandidates.add(buildCandidateFromNode("linux-legacy",
                                                                          "Linux runtime",
@@ -1883,10 +2299,11 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                     }
                     else if (! platformNode.isVoid() && ! platformNode.isUndefined())
                     {
-                        runtimeCandidates.add(buildCandidateFromNode("linux-legacy",
-                                                                     "Linux runtime",
-                                                                     "Using legacy flat Linux runtime manifest entry.",
-                                                                     platformNode));
+                        if (! installFeatures.contains(kFeatureAudioGeneration))
+                            runtimeCandidates.add(buildCandidateFromNode("linux-legacy",
+                                                                         "Linux runtime",
+                                                                         "Using legacy flat Linux runtime manifest entry.",
+                                                                         platformNode));
                     }
 #endif
                 }
@@ -1978,7 +2395,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
 
                 juce::String downloadError;
                 if (! downloadFileWithProgress(juce::URL(runtimeUrl), runtimeArchive,
-                                               [this, &logFile, candidate] (float progress, juce::int64 downloaded, juce::int64 total)
+                                               [this, &logFile, candidate, installFeatures, requestedFeatures, requestedFeature] (float progress, juce::int64 downloaded, juce::int64 total)
                                                {
                                                     updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
                                                     {
@@ -2004,10 +2421,16 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                                                         status.buildRuntimeMode = kBuildRuntimeModeDownloadedRuntime;
                                                         status.requiresExternalPython = false;
                                                         status.installSource = kInstallSourceDownloadedRuntime;
-                                                       status.helpUrl.clear();
-                                                       status.runtimeCandidate = candidate.key;
-                                                       status.backendRequested = candidate.backendRequested;
-                                                   });
+                                                        status.helpUrl.clear();
+                                                        status.runtimeCandidate = candidate.key;
+                                                        status.backendRequested = candidate.backendRequested;
+                                                        status.selectedFeatures = installFeatures;
+                                                        status.requestedFeatures = requestedFeatures;
+                                                        status.requestedFeature = requestedFeature;
+                                                        const auto hardware = probeHardwareStatus();
+                                                        status.hardware = hardwareStatusToVar(hardware);
+                                                        status.features = buildFeatureStatusVar(status, hardware);
+                                                    });
                                                }, downloadError))
                 {
                     if (aiToolsCancelRequested.load())
@@ -2174,6 +2597,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
             + " --music-gen-model " + quoteCommandPart(kPinnedMusicGenerationModelId)
             + " --music-gen-checkpoint-root " + quoteCommandPart(musicGenerationCheckpointRoot.getFullPathName())
             + " --log-path " + quoteCommandPart(logFile.getFullPathName())
+            + " --features " + quoteCommandPart(installFeatureArg)
             + launchMode;
         if (selectedBackendRequested.isNotEmpty())
             cmd += " --backend-requested " + quoteCommandPart(selectedBackendRequested);
@@ -2184,6 +2608,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
         appendAiToolsLogLine("installerScript=" + installerScript.getFullPathName());
         appendAiToolsLogLine("backendRequested=" + selectedBackendRequested);
+        appendAiToolsLogLine("installerFeatures=" + installFeatureArg);
         if (selectedBackendInstallPlanFile.existsAsFile())
             appendAiToolsLogLine("backendInstallPlan=" + selectedBackendInstallPlanFile.getFullPathName());
         appendAiToolsLogLine("installerCommand=" + cmd);
@@ -2192,6 +2617,7 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
                                             {
                                                 obj.setProperty("runtimeCandidate", selectedRuntimeCandidate);
                                                 obj.setProperty("backendRequested", selectedBackendRequested);
+                                                obj.setProperty("selectedFeatures", installFeatureArg);
                                                 obj.setProperty("command", cmd);
                                             }));
 
@@ -2265,6 +2691,12 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
             lastAiToolsStatus.lastPhase = installLastObservedPhase;
             lastAiToolsStatus.terminalReason.clear();
             lastAiToolsStatus.fallbackAttempted = fallbackAttempted;
+            lastAiToolsStatus.selectedFeatures = installFeatures;
+            lastAiToolsStatus.requestedFeatures = requestedFeatures;
+            lastAiToolsStatus.requestedFeature = requestedFeature;
+            const auto hardware = probeHardwareStatus();
+            lastAiToolsStatus.hardware = hardwareStatusToVar(hardware);
+            lastAiToolsStatus.features = buildFeatureStatusVar(lastAiToolsStatus, hardware);
         }
 
         startInstallMonitor();
@@ -2719,6 +3151,18 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.musicGenerationLayoutValid = static_cast<bool>(json["musicGenerationLayoutValid"]);
     if (json.hasProperty("musicGenerationPerformanceReady"))
         status.musicGenerationPerformanceReady = static_cast<bool>(json["musicGenerationPerformanceReady"]);
+    if (json.hasProperty("selectedFeatures"))
+        status.selectedFeatures = normaliseFeatureArray(json["selectedFeatures"]);
+    if (json.hasProperty("requestedFeatures"))
+        status.requestedFeatures = normaliseFeatureArray(json["requestedFeatures"]);
+    if (json.hasProperty("installedFeatures"))
+        status.installedFeatures = normaliseFeatureArray(json["installedFeatures"]);
+    if (json.hasProperty("requestedFeature"))
+        status.requestedFeature = normaliseFeatureId(json["requestedFeature"].toString());
+    if (json.hasProperty("hardware"))
+        status.hardware = json["hardware"];
+    if (json.hasProperty("features"))
+        status.features = json["features"];
 
     if (status.lastPhase.isEmpty() && status.state.isNotEmpty())
         status.lastPhase = status.state;
@@ -2741,6 +3185,16 @@ StemSeparator::AiToolsStatus StemSeparator::parseInstallJsonLine(const juce::Str
         status.musicGenerationSharedRepoId = kPinnedMusicGenerationSharedRepoId;
     if (status.musicGenerationCheckpointRoot.isEmpty())
         status.musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot().getFullPathName();
+    if (status.selectedFeatures.isEmpty())
+        status.selectedFeatures = defaultInstallFeatures();
+    if (status.requestedFeatures.isEmpty())
+        status.requestedFeatures = status.selectedFeatures;
+    if (status.hardware.isVoid() || status.hardware.isUndefined() || status.features.isVoid() || status.features.isUndefined())
+    {
+        const auto hardware = probeHardwareStatus();
+        status.hardware = hardwareStatusToVar(hardware);
+        status.features = buildFeatureStatusVar(status, hardware);
+    }
     return status;
 }
 

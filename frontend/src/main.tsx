@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useLayoutEffect, useRef } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 import { startupMode, windowRole } from "./utils/windowEnvironment";
@@ -98,6 +98,21 @@ async function reportFrontendStartupStateViaNativeFunction(
   state: string,
   detail: string,
 ) {
+  const backend = await waitForNativeBackend();
+  const directReporter = backend?.reportFrontendStartupState as
+    | ((state: string, detail?: string) => Promise<boolean>)
+    | undefined;
+  if (typeof directReporter === "function") {
+    const directResult = await withTimeout(
+      directReporter(state, detail),
+      STARTUP_REPORT_TIMEOUT_MS,
+      `Direct native startup reporting (${state})`,
+    );
+    if (directResult !== undefined) {
+      return;
+    }
+  }
+
   const nativeResult = await withTimeout(
     invokeNativeFunction("reportFrontendStartupState", state, detail),
     STARTUP_REPORT_TIMEOUT_MS,
@@ -196,6 +211,25 @@ function finishStartup(state: "boot-ready" | "boot-failed", detail: string) {
   void reportFrontendStartupState(state, detail);
 }
 
+let nativeRuntimeStopRequested = false;
+
+function stopNativeRuntimeAfterFrontendFailure() {
+  if (nativeRuntimeStopRequested) {
+    return;
+  }
+
+  nativeRuntimeStopRequested = true;
+  void invokeNativeFunction("setTransportRecording", false).catch((error) => {
+    console.error("[RuntimeGuard] Failed to stop recording after frontend failure:", error);
+  });
+  void invokeNativeFunction("setTransportPlaying", false).catch((error) => {
+    console.error("[RuntimeGuard] Failed to stop playback after frontend failure:", error);
+  });
+  void invokeNativeFunction("closeAllPluginWindows").catch((error) => {
+    console.error("[RuntimeGuard] Failed to close plugin windows after frontend failure:", error);
+  });
+}
+
 void reportFrontendStartupState(
   "boot-started",
   `window=${windowRole ?? "main"} startup=${startupMode}`,
@@ -203,6 +237,7 @@ void reportFrontendStartupState(
 
 window.addEventListener("error", (event) => {
   const detail = event.error?.stack || event.message || "Unknown window error";
+  stopNativeRuntimeAfterFrontendFailure();
   finishStartup("boot-failed", `window.onerror: ${detail}`);
 });
 
@@ -210,27 +245,50 @@ window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
   const detail =
     reason instanceof Error ? reason.stack || reason.message : String(reason);
+  stopNativeRuntimeAfterFrontendFailure();
   finishStartup("boot-failed", `unhandledrejection: ${detail}`);
 });
 
 function StartupReadySentinel() {
   const hasReportedReady = useRef(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (hasReportedReady.current) {
       return;
     }
 
-    hasReportedReady.current = true;
-    const frame = window.requestAnimationFrame(() => {
-      finishStartup(
-        "boot-ready",
-        isSafeStartup ? "safe-startup-ui-mounted" : "root-mounted",
-      );
-    });
+    const reportReady = (detail: string) => {
+      if (hasReportedReady.current) {
+        return;
+      }
 
+      hasReportedReady.current = true;
+      finishStartup("boot-ready", detail);
+    };
+
+    if (isSafeStartup || windowRole === "midiEditor" || windowRole === "mixer") {
+      reportReady(
+        isSafeStartup ? "safe-startup-ui-mounted" : `${windowRole}-root-mounted`,
+      );
+      return;
+    }
+
+    const handleAppReady = (event: Event) => {
+      const detail =
+        event instanceof CustomEvent && typeof event.detail === "string"
+          ? event.detail
+          : "main-app-ready";
+      reportReady(detail);
+    };
+    const fallbackTimeout = window.setTimeout(
+      () => reportReady("main-app-ready-timeout-fallback"),
+      6500,
+    );
+
+    window.addEventListener("openstudio:app-ready", handleAppReady);
     return () => {
-      window.cancelAnimationFrame(frame);
+      window.clearTimeout(fallbackTimeout);
+      window.removeEventListener("openstudio:app-ready", handleAppReady);
     };
   }, []);
 
@@ -278,29 +336,38 @@ async function bootstrap() {
   } else if (windowRole === "mixer") {
     const rootModule = await import("./MixerWindowApp.tsx");
     RootComponent = rootModule.default;
+  } else if (windowRole === "midiEditor") {
+    const rootModule = await import("./MidiEditorWindowApp.tsx");
+    RootComponent = rootModule.default;
   } else {
     const rootModule = await import("./App.tsx");
     RootComponent = rootModule.default;
   }
 
+  const app = (
+    <ErrorBoundary
+      onError={(error, info) => {
+        finishStartup(
+          "boot-failed",
+          `[ErrorBoundary] ${error.stack || error.message}\n${info.componentStack}`,
+        );
+      }}
+    >
+      <StartupReadySentinel />
+      <RootComponent />
+    </ErrorBoundary>
+  );
+
+  const strictModeEnabled =
+    new URLSearchParams(window.location.search).get("strictMode") === "true";
+
   ReactDOM.createRoot(appRoot).render(
-    <React.StrictMode>
-      <ErrorBoundary
-        onError={(error, info) => {
-          finishStartup(
-            "boot-failed",
-            `[ErrorBoundary] ${error.stack || error.message}\n${info.componentStack}`,
-          );
-        }}
-      >
-        <RootComponent />
-        <StartupReadySentinel />
-      </ErrorBoundary>
-    </React.StrictMode>,
+    strictModeEnabled ? <React.StrictMode>{app}</React.StrictMode> : app,
   );
 }
 
 void bootstrap().catch((error) => {
+  stopNativeRuntimeAfterFrontendFailure();
   finishStartup(
     "boot-failed",
     `[bootstrap] ${error instanceof Error ? error.stack || error.message : String(error)}`,

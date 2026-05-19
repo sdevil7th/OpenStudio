@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "AppUpdater.h"
+#include <set>
 
 //==============================================================================
 /*
@@ -22,7 +23,8 @@ public:
     enum class WindowRole
     {
         main,
-        mixer
+        mixer,
+        midiEditor
     };
 
     enum class FrontendStartupState
@@ -50,6 +52,13 @@ public:
         std::function<juce::var()> getMixerWindowState;
         std::function<void(const juce::var&)> publishMixerUISnapshot;
         std::function<juce::var()> getMixerUISnapshot;
+        std::function<bool(const juce::String&, const juce::var&)> openMidiEditorWindow;
+        std::function<bool(const juce::String&, const juce::var&)> prewarmMidiEditorWindow;
+        std::function<bool(const juce::String&)> focusMidiEditorWindow;
+        std::function<bool(const juce::String&, const juce::String&)> closeMidiEditorWindow;
+        std::function<juce::var(const juce::String&)> getMidiEditorWindowState;
+        std::function<void(const juce::String&, const juce::var&)> publishMidiEditorUISnapshot;
+        std::function<juce::var(const juce::String&)> getMidiEditorUISnapshot;
     };
 
     //==============================================================================
@@ -58,7 +67,8 @@ public:
                   StartupMode startupModeIn,
                   WindowRole roleIn,
                   WindowCallbacks callbacksIn = {},
-                  const juce::String& pitchRegressionJobPathIn = {});
+                  const juce::String& pitchRegressionJobPathIn = {},
+                  const juce::String& windowInstanceIdIn = {});
     ~MainComponent() override;
 
     //==============================================================================
@@ -72,6 +82,11 @@ public:
     static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
     static juce::var buildStartupSelfTestReport();
     static bool writeStartupSelfTestReport(const juce::File& reportFile);
+
+#if JUCE_WINDOWS
+    void emitExternalMediaDropTargetEvent(const juce::String& eventId, const juce::var& payload);
+    void bringMainWindowToFrontForExternalMediaDrag();
+#endif
 
 private:
     juce::Rectangle<int> getDesktopWorkAreaForCurrentWindow() const;
@@ -98,6 +113,10 @@ private:
     juce::var buildStartupDiagnostics() const;
     void initializePitchRegressionJob(const juce::String& pitchRegressionJobPathIn);
     bool completePitchRegressionJob(const juce::var& result);
+#if JUCE_WINDOWS
+    void installExternalMediaDropTarget();
+    bool isWaveformPreviewRequestCancelled(const juce::String& requestId) const;
+#endif
 
     //==============================================================================
     // Your private member variables go here...
@@ -105,6 +124,7 @@ private:
     AppUpdater& appUpdater;
     StartupMode startupMode = StartupMode::normal;
     WindowRole windowRole = WindowRole::main;
+    juce::String windowInstanceId;
     WindowCallbacks windowCallbacks;
     juce::File webuiDir;
     juce::WebBrowserComponent webView;
@@ -131,6 +151,7 @@ private:
     juce::ThreadPool previewSegmentPool { 2 };
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
+    juce::ThreadPool mediaPreviewPool { 2 };
     juce::CriticalSection pitchCorrectionJobLock;
     juce::String activePreviewRequestGroup;
     juce::String activeNoteRenderRequestGroup;
@@ -154,6 +175,12 @@ private:
     bool pitchRegressionJobCompleted = false;
     juce::CriticalSection pitchRegressionNativeResultLock;
     juce::var lastPitchRegressionNativeResult;
+#if JUCE_WINDOWS
+    class ExternalMediaDropTarget;
+    std::unique_ptr<ExternalMediaDropTarget> externalMediaDropTarget;
+    mutable juce::CriticalSection waveformPreviewRequestLock;
+    std::set<juce::String> cancelledWaveformPreviewRequests;
+#endif
 
     static juce::CriticalSection instanceListLock;
     static juce::Array<MainComponent*> activeInstances;

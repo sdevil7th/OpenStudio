@@ -12,7 +12,7 @@ export interface AutomationParamDef {
   shortLabel: string;     // Compact: "Vol", "Pan(Pre)"
   color: string;
   defaultNormalized: number; // Default 0-1 value (0.77 ≈ 0 dB for volume, 0.5 for pan)
-  category: "base" | "pre-fx" | "tail";
+  category: "base" | "pre-fx" | "tail" | "midi";
   toBackend: (normalized: number) => number;
   formatNormalized: (normalized: number) => string;
   inlineFader: InlineFaderConfig | null;
@@ -41,7 +41,7 @@ function formatPan(pan: number): string {
 }
 
 function formatNormalizedVolume(n: number): string {
-  return formatVolumeDB(n * 66 - 60);
+  return formatVolumeDB(n * VOLUME_DB_RANGE + VOLUME_MIN_DB);
 }
 
 function formatNormalizedPan(n: number): string {
@@ -62,10 +62,25 @@ function formatNormalizedPercent(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
 }
 
+function formatNormalizedVelocityScale(n: number): string {
+  return `${Math.round(n * 200)}%`;
+}
+
+function formatNormalizedMIDI127(n: number): string {
+  return `${Math.round(n * 127)}`;
+}
+
 // --- Conversion helpers ---
 
-const volToBackend = (n: number) => n * 66 - 60;
+export const VOLUME_MIN_DB = -60;
+export const VOLUME_MAX_DB = 12;
+export const VOLUME_DB_RANGE = VOLUME_MAX_DB - VOLUME_MIN_DB;
+export const VOLUME_UNITY_NORMALIZED = (0 - VOLUME_MIN_DB) / VOLUME_DB_RANGE;
+
+const volToBackend = (n: number) => n * VOLUME_DB_RANGE + VOLUME_MIN_DB;
 const panToBackend = (n: number) => n * 2 - 1;
+const velocityScaleToBackend = (n: number) => n * 2;
+const midi127ToBackend = (n: number) => n * 127;
 const identity = (n: number) => n;
 
 // --- Registry ---
@@ -76,7 +91,7 @@ export const AUTOMATION_PARAMS: readonly AutomationParamDef[] = [
     label: "Volume",
     shortLabel: "Vol",
     color: "#4488ff",
-    defaultNormalized: 0.77,
+    defaultNormalized: VOLUME_UNITY_NORMALIZED,
     category: "base",
     toBackend: volToBackend,
     formatNormalized: formatNormalizedVolume,
@@ -121,7 +136,7 @@ export const AUTOMATION_PARAMS: readonly AutomationParamDef[] = [
     label: "Volume (Pre-FX)",
     shortLabel: "Vol(Pre)",
     color: "#6699ff",
-    defaultNormalized: 0.77,
+    defaultNormalized: VOLUME_UNITY_NORMALIZED,
     category: "pre-fx",
     toBackend: volToBackend,
     formatNormalized: formatNormalizedVolume,
@@ -171,10 +186,87 @@ export const AUTOMATION_PARAMS: readonly AutomationParamDef[] = [
     label: "Trim Volume",
     shortLabel: "Trim",
     color: "#44aaff",
-    defaultNormalized: 0.77,
+    defaultNormalized: VOLUME_UNITY_NORMALIZED,
     category: "tail",
     toBackend: volToBackend,
     formatNormalized: formatNormalizedVolume,
+    inlineFader: null,
+  },
+  {
+    id: "midi_velocity_scale",
+    label: "MIDI Velocity Scale",
+    shortLabel: "Vel%",
+    color: "#4cc9f0",
+    defaultNormalized: 0.5,
+    category: "midi",
+    toBackend: velocityScaleToBackend,
+    formatNormalized: formatNormalizedVelocityScale,
+    inlineFader: null,
+  },
+  {
+    id: "midi_pitch_bend",
+    label: "MIDI Pitch Bend",
+    shortLabel: "PB",
+    color: "#f59e0b",
+    defaultNormalized: 0.5,
+    category: "midi",
+    toBackend: panToBackend,
+    formatNormalized: formatNormalizedWidth,
+    inlineFader: null,
+  },
+  {
+    id: "midi_channel_pressure",
+    label: "MIDI Channel Pressure",
+    shortLabel: "Press",
+    color: "#c084fc",
+    defaultNormalized: 0,
+    category: "midi",
+    toBackend: midi127ToBackend,
+    formatNormalized: formatNormalizedMIDI127,
+    inlineFader: null,
+  },
+  {
+    id: "midi_cc_1",
+    label: "MIDI CC 1 Mod Wheel",
+    shortLabel: "CC1",
+    color: "#22c55e",
+    defaultNormalized: 0,
+    category: "midi",
+    toBackend: midi127ToBackend,
+    formatNormalized: formatNormalizedMIDI127,
+    inlineFader: null,
+  },
+  {
+    id: "midi_cc_7",
+    label: "MIDI CC 7 Volume",
+    shortLabel: "CC7",
+    color: "#14b8a6",
+    defaultNormalized: 0.7874,
+    category: "midi",
+    toBackend: midi127ToBackend,
+    formatNormalized: formatNormalizedMIDI127,
+    inlineFader: null,
+  },
+  {
+    id: "midi_cc_10",
+    label: "MIDI CC 10 Pan",
+    shortLabel: "CC10",
+    color: "#a3e635",
+    defaultNormalized: 0.5,
+    category: "midi",
+    toBackend: midi127ToBackend,
+    formatNormalized: formatNormalizedMIDI127,
+    inlineFader: null,
+  },
+  {
+    id: "midi_cc_64",
+    label: "MIDI CC 64 Sustain",
+    shortLabel: "CC64",
+    color: "#f97316",
+    defaultNormalized: 0,
+    category: "midi",
+    toBackend: midi127ToBackend,
+    formatNormalized: formatNormalizedMIDI127,
     inlineFader: null,
   },
 ] as const;
@@ -200,6 +292,22 @@ const FALLBACK_DEF: Omit<AutomationParamDef, "id" | "label" | "shortLabel"> = {
 export function getAutomationParamDef(paramId: string): AutomationParamDef {
   const def = PARAM_MAP.get(paramId);
   if (def) return def;
+  if (/^midi_cc_(\d{1,3})$/.test(paramId)) {
+    const cc = Number(paramId.slice("midi_cc_".length));
+    if (cc >= 0 && cc <= 127) {
+      return {
+        id: paramId,
+        label: `MIDI CC ${cc}`,
+        shortLabel: `CC${cc}`,
+        color: DEFAULT_AUTOMATION_COLOR,
+        defaultNormalized: 0,
+        category: "midi",
+        toBackend: midi127ToBackend,
+        formatNormalized: formatNormalizedMIDI127,
+        inlineFader: null,
+      };
+    }
+  }
   return { id: paramId, label: paramId, shortLabel: paramId, ...FALLBACK_DEF };
 }
 
@@ -212,24 +320,30 @@ export function getAutomationShortLabel(paramId: string): string {
 }
 
 export function getAutomationDefault(paramId: string): number {
-  return PARAM_MAP.get(paramId)?.defaultNormalized ?? 0.5;
+  return getAutomationParamDef(paramId).defaultNormalized;
 }
 
 export function automationToBackend(paramId: string, normalized: number): number {
-  const def = PARAM_MAP.get(paramId);
-  return def ? def.toBackend(normalized) : normalized;
+  return getAutomationParamDef(paramId).toBackend(normalized);
 }
 
 export function formatAutomationValue(paramId: string, normalized: number): string {
-  const def = PARAM_MAP.get(paramId);
-  return def ? def.formatNormalized(normalized) : formatNormalizedPercent(normalized);
+  return getAutomationParamDef(paramId).formatNormalized(normalized);
 }
 
 export function getTrackAutomationParams(trackType: TrackType): AutomationParamDef[] {
   const hasPreFX = trackType === "instrument" || trackType === "bus";
+  const hasMIDI = trackType === "midi" || trackType === "instrument";
   return AUTOMATION_PARAMS.filter(
-    (p) => p.category === "base" || p.category === "tail" || (hasPreFX && p.category === "pre-fx"),
+    (p) => p.category === "base"
+      || p.category === "tail"
+      || (hasPreFX && p.category === "pre-fx")
+      || (hasMIDI && p.category === "midi"),
   );
+}
+
+export function pluginAutomationParamId(isInputFX: boolean, fxIndex: number, paramIndex: number): string {
+  return `plugin_${isInputFX ? "input" : "track"}_${fxIndex}_${paramIndex}`;
 }
 
 export function getMasterAutomationParams(): AutomationParamDef[] {

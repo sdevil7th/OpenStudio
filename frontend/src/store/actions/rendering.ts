@@ -14,6 +14,7 @@ import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { prepareForManualRender } from "../../utils/renderPreparation";
+import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
 
 export const renderingActions = (set: SetFn, get: GetFn) => ({
 
@@ -369,16 +370,21 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         .filter((t) => (t.type === "midi" || t.type === "instrument") && t.midiClips.length > 0)
         .map((t) => ({
           name: t.name,
-          clips: t.midiClips.map((c) => ({
+          clips: serializeMIDIClipsForBackend(t.midiClips, t.midiEffects || []).map((c) => ({
             startTime: c.startTime,
             duration: c.duration,
             events: c.events,
           })),
-        }));
-      if (midiTracks.length === 0) return false;
-      const filePath = await nativeBridge.showSaveDialog(undefined, "Export Project MIDI");
+      }));
+      if (midiTracks.length === 0) {
+        get().showToast("No MIDI clips to export.", "info");
+        return false;
+      }
+      const filePath = await nativeBridge.showSaveDialog("Studio13 Project.mid", "Export Project MIDI", "*.mid;*.midi");
       if (!filePath) return false;
-      return await nativeBridge.exportProjectMIDI(filePath, midiTracks);
+      const success = await nativeBridge.exportProjectMIDI(filePath, midiTracks);
+      get().showToast(success ? "Project MIDI exported" : "Failed to export project MIDI", success ? "success" : "error");
+      return success;
     },
     consolidateTrack: async (trackId) => {
       const state = get();
@@ -428,11 +434,13 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     renderClipInPlace: async (clipId) => {
       const state = get();
       // Find the clip and its track
-      let sourceClip: AudioClip | null = null;
+      let sourceClip: AudioClip | MIDIClip | null = null;
       let sourceTrack: Track | null = null;
       let sourceTrackIndex = -1;
       for (let i = 0; i < state.tracks.length; i++) {
-        const clip = state.tracks[i].clips.find((c) => c.id === clipId);
+        const clip =
+          state.tracks[i].clips.find((c) => c.id === clipId) ||
+          state.tracks[i].midiClips.find((c) => c.id === clipId);
         if (clip) {
           sourceClip = clip;
           sourceTrack = state.tracks[i];
@@ -444,7 +452,8 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
 
       const startTime = sourceClip.startTime;
       const endTime = sourceClip.startTime + sourceClip.duration;
-      const safeName = sourceClip.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const sourceClipName = sourceClip.name || "Clip";
+      const safeName = sourceClipName.replace(/[^a-zA-Z0-9_-]/g, "_");
       const filePath = await nativeBridge.showRenderSaveDialog(`${safeName}_rendered.wav`, "wav");
       if (!filePath) return;
       await prepareForManualRender(get().syncClipsWithBackend, "render-clip-in-place");
@@ -455,7 +464,10 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         endTime,
         filePath,
         format: "wav",
-        sampleRate: state.projectSampleRate || 44100,
+        // Render in place should match live playback. Passing 0 lets the
+        // backend use the current audio-device rate instead of a stale project
+        // export setting.
+        sampleRate: 0,
         bitDepth: state.projectBitDepth || 24,
         channels: 2,
         normalize: false,
@@ -489,11 +501,11 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       get().addClip(newTrackId, {
         id: crypto.randomUUID(),
         filePath,
-        name: `${sourceClip.name} (Rendered)`,
+        name: `${sourceClipName} (Rendered)`,
         startTime,
         duration: renderedDuration,
         offset: 0,
-        color: sourceTrack.color,
+        color: sourceClip.color || sourceTrack.color,
         volumeDB: 0,
         fadeIn: 0,
         fadeOut: 0,
@@ -508,11 +520,13 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     renderTrackInPlace: async (trackId) => {
       const state = get();
       const track = state.tracks.find((t) => t.id === trackId);
-      if (!track || track.clips.length === 0) return;
+      if (!track) return;
+      const timelineClips = [...(track.clips || []), ...(track.midiClips || [])];
+      if (timelineClips.length === 0) return;
 
       const sourceTrackIndex = state.tracks.findIndex((t) => t.id === trackId);
-      const earliest = Math.min(...track.clips.map((c) => c.startTime));
-      const latest = Math.max(...track.clips.map((c) => c.startTime + c.duration));
+      const earliest = Math.min(...timelineClips.map((c) => c.startTime));
+      const latest = Math.max(...timelineClips.map((c) => c.startTime + c.duration));
       const safeName = track.name.replace(/[^a-zA-Z0-9_-]/g, "_");
       const filePath = await nativeBridge.showRenderSaveDialog(`${safeName}_rendered.wav`, "wav");
       if (!filePath) return;
@@ -524,7 +538,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         endTime: latest,
         filePath,
         format: "wav",
-        sampleRate: state.projectSampleRate || 44100,
+        sampleRate: 0,
         bitDepth: state.projectBitDepth || 24,
         channels: 2,
         normalize: false,
@@ -940,7 +954,11 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       set({ showPitchEditor: false, pitchEditorTrackId: null, pitchEditorClipId: null, pitchEditorFxIndex: 0 });
       usePitchEditorStore.getState().close();
     },
-    setLowerZoneHeight: (h) => set({ lowerZoneHeight: Math.max(150, Math.min(600, h)) }),
+    setLowerZoneHeight: (h) => {
+      const viewportHeight = typeof window !== "undefined" ? window.innerHeight : 900;
+      const maxHeight = Math.max(180, Math.round(viewportHeight * 0.85));
+      set({ lowerZoneHeight: Math.max(180, Math.min(maxHeight, h)) });
+    },
     executeScript: async (code) => {
       try {
         const result = await nativeBridge.executeScript(code);

@@ -3,14 +3,15 @@ import { MixerPanel } from "./components/MixerPanel";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
+import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import {
   hydrateMixerUISnapshotFromNative,
   startMixerUISync,
 } from "./utils/mixerWindowSync";
+import { startSharedTransportSync } from "./utils/sharedTransportSync";
 
 export default function MixerWindowApp() {
   const batchUpdateMeterLevels = useDAWStore((state) => state.batchUpdateMeterLevels);
-  const setCurrentTime = useDAWStore((state) => state.setCurrentTime);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -42,38 +43,10 @@ export default function MixerWindowApp() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = nativeBridge.onTransportUpdate((data) => {
-      const state = useDAWStore.getState();
-      const backendPos = data.position;
-      const frontendPos = state.transport.currentTime;
-      const drift = Math.abs(backendPos - frontendPos);
-      const backendPlaying = !!data.isPlaying;
-      const frontendPlaying = state.transport.isPlaying;
+    return startSharedTransportSync();
+  }, []);
 
-      if (backendPlaying !== frontendPlaying) {
-        useDAWStore.setState((current) => ({
-          transport: {
-            ...current.transport,
-            isPlaying: backendPlaying,
-            isPaused: false,
-            isRecording: backendPlaying ? current.transport.isRecording : false,
-            currentTime: backendPos,
-          },
-        }));
-        return;
-      }
-
-      if (!frontendPlaying) {
-        return;
-      }
-
-      if (drift > 0.03) {
-        setCurrentTime(backendPos);
-      }
-    });
-
-    return unsubscribe;
-  }, [setCurrentTime]);
+  useEffect(() => installModalContextMenuLeakGuard(), []);
 
   useEffect(() => {
     nativeBridge.onMeterUpdate((data) => {
@@ -110,13 +83,15 @@ export default function MixerWindowApp() {
         targetIsEditable:
           !!target &&
           (target instanceof HTMLInputElement ||
+            target instanceof HTMLSelectElement ||
             target instanceof HTMLTextAreaElement ||
             target.isContentEditable),
         preventDefault: () => e.preventDefault(),
+        stopPropagation: () => e.stopPropagation(),
       });
     };
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     const unsubscribeNativeShortcuts = nativeBridge.onNativeGlobalShortcut(
       (event: NativeGlobalShortcutEvent) => {
         void dispatchGlobalShortcut({ ...event, source: "pluginWindow" });
@@ -124,7 +99,7 @@ export default function MixerWindowApp() {
     );
 
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
       unsubscribeNativeShortcuts();
     };
   }, []);

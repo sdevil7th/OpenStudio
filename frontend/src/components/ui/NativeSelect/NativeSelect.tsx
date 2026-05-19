@@ -1,5 +1,6 @@
 import { forwardRef } from 'react';
 import classNames from 'classnames';
+import { ChevronDown } from 'lucide-react';
 import {
   NativeSelectProps,
   NativeSelectOption,
@@ -106,7 +107,7 @@ export const NativeSelect = forwardRef<HTMLSelectElement, NativeSelectProps>(
     const selectClasses = classNames(
       nativeSelectSizeStyles[size],
       nativeSelectVariantStyles[variant],
-      'rounded cursor-pointer transition-colors',
+      'w-full appearance-none rounded cursor-pointer transition-colors',
       fullWidth && 'w-full',
       error && 'border-red-500 focus:border-red-500',
       isDisabled && 'opacity-60 cursor-not-allowed',
@@ -115,7 +116,8 @@ export const NativeSelect = forwardRef<HTMLSelectElement, NativeSelectProps>(
     );
 
     const WrapperComponent = label ? 'div' : 'span';
-    const wrapperClasses = classNames(fullWidth && 'w-full');
+    const wrapperClasses = classNames(label ? 'block' : 'inline-block', fullWidth && 'w-full');
+    const controlClasses = classNames('relative inline-flex min-w-0', fullWidth && 'w-full');
 
     return (
       <WrapperComponent className={wrapperClasses}>
@@ -125,36 +127,43 @@ export const NativeSelect = forwardRef<HTMLSelectElement, NativeSelectProps>(
           </label>
         )}
 
-        <select
-          ref={ref}
-          value={loading ? '' : (value !== undefined ? String(value) : '')}
-          onChange={handleChange}
-          disabled={isDisabled}
-          className={selectClasses}
-          title={title}
-        >
-          {loading ? (
-            <option className="bg-neutral-900 text-white">--</option>
-          ) : (
-            <>
-              {showPlaceholder && placeholder && (
-                <option value="" disabled className="bg-neutral-900 text-neutral-400">
-                  {placeholder}
-                </option>
-              )}
-              {normalizedOptions.map((opt) => (
-                <option
-                  key={String(opt.value)}
-                  value={String(opt.value)}
-                  disabled={opt.disabled}
-                  className="bg-neutral-900 text-white"
-                >
-                  {opt.label}
-                </option>
-              ))}
-            </>
-          )}
-        </select>
+        <span className={controlClasses}>
+          <select
+            ref={ref}
+            value={loading ? '' : (value !== undefined ? String(value) : '')}
+            onChange={handleChange}
+            disabled={isDisabled}
+            className={selectClasses}
+            title={title}
+          >
+            {loading ? (
+              <option className="bg-neutral-900 text-white">--</option>
+            ) : (
+              <>
+                {showPlaceholder && placeholder && (
+                  <option value="" disabled className="bg-neutral-900 text-neutral-400">
+                    {placeholder}
+                  </option>
+                )}
+                {normalizedOptions.map((opt) => (
+                  <option
+                    key={String(opt.value)}
+                    value={String(opt.value)}
+                    disabled={opt.disabled}
+                    className="bg-neutral-900 text-white"
+                  >
+                    {opt.label}
+                  </option>
+                ))}
+              </>
+            )}
+          </select>
+          <ChevronDown
+            size={12}
+            className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-neutral-500"
+            aria-hidden="true"
+          />
+        </span>
 
         {error && (
           <span className="block text-xs text-red-500 mt-1">{error}</span>

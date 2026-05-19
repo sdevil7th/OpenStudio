@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
+import { guardModalContextMenu } from "../utils/modalEventGuards";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -30,8 +31,12 @@ export function CorrectPitchModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl w-80 p-4">
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/50"
+      data-modal-root="true"
+      onContextMenu={guardModalContextMenu}
+    >
+      <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl w-80 p-4" onContextMenu={guardModalContextMenu}>
         <h3 className="text-sm font-semibold text-neutral-200 mb-3">Correct Pitch</h3>
 
         {/* Pitch Center slider */}

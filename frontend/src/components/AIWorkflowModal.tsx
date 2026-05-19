@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { type AiToolsStatus } from "../services/NativeBridge";
+import { type AiFeatureId, type AiToolsStatus } from "../services/NativeBridge";
 import { type Track } from "../store/useDAWStore";
 import {
   AI_WORKFLOWS,
@@ -28,7 +28,7 @@ interface AIWorkflowModalProps {
   onClose: () => void;
   onGenerate: () => void | Promise<void>;
   onCancel: () => void | Promise<void>;
-  onOpenAiToolsSetup: () => void;
+  onOpenAiToolsSetup: (requestedFeature?: AiFeatureId) => void;
   onWorkflowChange: (workflowId: string) => void;
   onParamsChange: (params: Record<string, unknown>) => void;
 }
@@ -145,12 +145,16 @@ export function AIWorkflowModal({
     track.aiGenerationState === "loading"
     || track.aiGenerationState === "generating";
   const isMusicGenerationReady = Boolean(
-    aiToolsStatus.musicGenerationReady
-    && aiToolsStatus.musicGenerationLayoutValid
-    && (aiToolsStatus.musicGenerationPerformanceReady ?? true),
+    aiToolsStatus.features?.audioGeneration?.ready
+    ?? (
+      aiToolsStatus.musicGenerationReady
+      && aiToolsStatus.musicGenerationLayoutValid
+      && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
+    ),
   );
   const musicGenerationBlockedMessage = !isMusicGenerationReady
-    ? (aiToolsStatus.musicGenerationPerformanceStatusMessage
+    ? (aiToolsStatus.features?.audioGeneration?.message
+      || aiToolsStatus.musicGenerationPerformanceStatusMessage
       || aiToolsStatus.musicGenerationStatusMessage
       || (!aiToolsStatus.musicGenerationLayoutValid
         && aiToolsStatus.musicGenerationModelId
@@ -158,7 +162,7 @@ export function AIWorkflowModal({
           ? `Pinned ACE-Step native asset layout is not ready in ${aiToolsStatus.musicGenerationCheckpointRoot}.`
           : aiToolsStatus.error
             || aiToolsStatus.message
-            || "AI music generation is not ready yet."))
+            || "Audio Generation is not ready yet."))
     : "";
   const canSubmitGeneration =
     workflow.available !== false && isMusicGenerationReady && !isBusy;
@@ -274,7 +278,7 @@ export function AIWorkflowModal({
                     {formatPhaseLabel(track.aiGenerationPhase)}
                   </p>
                   <p className="mt-1 text-xs leading-5 text-daw-text-secondary">
-                    {track.aiGenerationMessage || "Music generation is in progress."}
+                    {track.aiGenerationMessage || "Audio Generation is in progress."}
                   </p>
                 </div>
 
@@ -489,8 +493,8 @@ export function AIWorkflowModal({
         ) : (
           <>
             {!isMusicGenerationReady ? (
-              <Button variant="secondary" onClick={onOpenAiToolsSetup}>
-                Open AI Tools Setup
+              <Button variant="secondary" onClick={() => onOpenAiToolsSetup("audioGeneration")}>
+                Set Up Audio Generation
               </Button>
             ) : null}
             <Button

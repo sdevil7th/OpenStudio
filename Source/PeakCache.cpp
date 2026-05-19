@@ -241,11 +241,12 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
     entry.totalSamples = totalSamples;
     entry.levels.resize(NUM_LEVELS);
 
-    // Build finest level (stride 64) first by reading the entire file in chunks
+    // Build the finest level once, then derive coarser levels from it.  The old
+    // path updated every mip level for every decoded sample, multiplying import
+    // peak-build CPU by NUM_LEVELS.
     const int CHUNK_SIZE = 65536;  // Read 64K samples at a time
     juce::AudioBuffer<float> readBuffer(numChannels, CHUNK_SIZE);
 
-    // Pre-allocate all levels
     for (int lvl = 0; lvl < NUM_LEVELS; ++lvl)
     {
         auto& level = entry.levels[static_cast<size_t>(lvl)];
@@ -255,23 +256,27 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
         level.data.resize(static_cast<size_t>(level.numPeaks) * static_cast<size_t>(numChannels) * 2, 0.0f);
     }
 
-    // Single pass through the file: compute all mipmap levels simultaneously
+    auto& fineLevel = entry.levels[0];
     juce::int64 samplesRead = 0;
+    int fineSampleCount = 0;
+    int finePeakIndex = 0;
+    std::vector<float> chMin(static_cast<size_t>(numChannels), 0.0f);
+    std::vector<float> chMax(static_cast<size_t>(numChannels), 0.0f);
 
-    // Per-level accumulators
-    struct LevelAcc
+    auto flushFinePeak = [&]()
     {
-        int sampleCount = 0;
-        int peakIndex = 0;
-        std::vector<float> chMin;
-        std::vector<float> chMax;
+        if (finePeakIndex >= fineLevel.numPeaks)
+            return;
+
+        const int dataIdx = finePeakIndex * numChannels * 2;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            fineLevel.data[static_cast<size_t>(dataIdx + ch * 2)] = chMin[static_cast<size_t>(ch)];
+            fineLevel.data[static_cast<size_t>(dataIdx + ch * 2 + 1)] = chMax[static_cast<size_t>(ch)];
+        }
+        ++finePeakIndex;
+        fineSampleCount = 0;
     };
-    std::vector<LevelAcc> accs(NUM_LEVELS);
-    for (int lvl = 0; lvl < NUM_LEVELS; ++lvl)
-    {
-        accs[static_cast<size_t>(lvl)].chMin.assign(static_cast<size_t>(numChannels), 0.0f);
-        accs[static_cast<size_t>(lvl)].chMax.assign(static_cast<size_t>(numChannels), 0.0f);
-    }
 
     while (samplesRead < totalSamples)
     {
@@ -283,67 +288,64 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
         // Process each sample
         for (int s = 0; s < samplesToRead; ++s)
         {
-            for (int lvl = 0; lvl < NUM_LEVELS; ++lvl)
+            if (fineSampleCount == 0)
             {
-                auto& acc = accs[static_cast<size_t>(lvl)];
-                auto& level = entry.levels[static_cast<size_t>(lvl)];
-
-                // Initialize min/max on first sample of each peak window
-                if (acc.sampleCount == 0)
+                for (int ch = 0; ch < numChannels; ++ch)
                 {
-                    for (int ch = 0; ch < numChannels; ++ch)
-                    {
-                        float val = readBuffer.getSample(ch, s);
-                        acc.chMin[static_cast<size_t>(ch)] = val;
-                        acc.chMax[static_cast<size_t>(ch)] = val;
-                    }
-                }
-                else
-                {
-                    for (int ch = 0; ch < numChannels; ++ch)
-                    {
-                        float val = readBuffer.getSample(ch, s);
-                        if (val < acc.chMin[static_cast<size_t>(ch)]) acc.chMin[static_cast<size_t>(ch)] = val;
-                        if (val > acc.chMax[static_cast<size_t>(ch)]) acc.chMax[static_cast<size_t>(ch)] = val;
-                    }
-                }
-
-                acc.sampleCount++;
-
-                // Flush peak when stride reached
-                if (acc.sampleCount >= LEVEL_STRIDES[lvl])
-                {
-                    if (acc.peakIndex < level.numPeaks)
-                    {
-                        int dataIdx = acc.peakIndex * numChannels * 2;
-                        for (int ch = 0; ch < numChannels; ++ch)
-                        {
-                            level.data[static_cast<size_t>(dataIdx + ch * 2)] = acc.chMin[static_cast<size_t>(ch)];
-                            level.data[static_cast<size_t>(dataIdx + ch * 2 + 1)] = acc.chMax[static_cast<size_t>(ch)];
-                        }
-                    }
-                    acc.peakIndex++;
-                    acc.sampleCount = 0;
+                    const float val = readBuffer.getSample(ch, s);
+                    chMin[static_cast<size_t>(ch)] = val;
+                    chMax[static_cast<size_t>(ch)] = val;
                 }
             }
+            else
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    const float val = readBuffer.getSample(ch, s);
+                    if (val < chMin[static_cast<size_t>(ch)]) chMin[static_cast<size_t>(ch)] = val;
+                    if (val > chMax[static_cast<size_t>(ch)]) chMax[static_cast<size_t>(ch)] = val;
+                }
+            }
+
+            ++fineSampleCount;
+            if (fineSampleCount >= fineLevel.stride)
+                flushFinePeak();
         }
 
         samplesRead += samplesToRead;
     }
 
-    // Flush any remaining partial windows
-    for (int lvl = 0; lvl < NUM_LEVELS; ++lvl)
-    {
-        auto& acc = accs[static_cast<size_t>(lvl)];
-        auto& level = entry.levels[static_cast<size_t>(lvl)];
+    if (fineSampleCount > 0)
+        flushFinePeak();
 
-        if (acc.sampleCount > 0 && acc.peakIndex < level.numPeaks)
+    for (int lvl = 1; lvl < NUM_LEVELS; ++lvl)
+    {
+        auto& level = entry.levels[static_cast<size_t>(lvl)];
+        const int finePeaksPerCoarsePeak = juce::jmax(1, level.stride / fineLevel.stride);
+
+        for (int peak = 0; peak < level.numPeaks; ++peak)
         {
-            int dataIdx = acc.peakIndex * numChannels * 2;
+            const int fineStart = peak * finePeaksPerCoarsePeak;
+            const int fineEnd = juce::jmin(fineStart + finePeaksPerCoarsePeak, fineLevel.numPeaks);
+            if (fineStart >= fineEnd)
+                break;
+
+            const int dataIdx = peak * numChannels * 2;
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                level.data[static_cast<size_t>(dataIdx + ch * 2)] = acc.chMin[static_cast<size_t>(ch)];
-                level.data[static_cast<size_t>(dataIdx + ch * 2 + 1)] = acc.chMax[static_cast<size_t>(ch)];
+                float minVal = 0.0f;
+                float maxVal = 0.0f;
+                for (int finePeak = fineStart; finePeak < fineEnd; ++finePeak)
+                {
+                    const int fineDataIdx = finePeak * numChannels * 2 + ch * 2;
+                    const float mn = fineLevel.data[static_cast<size_t>(fineDataIdx)];
+                    const float mx = fineLevel.data[static_cast<size_t>(fineDataIdx + 1)];
+                    if (finePeak == fineStart || mn < minVal) minVal = mn;
+                    if (finePeak == fineStart || mx > maxVal) maxVal = mx;
+                }
+
+                level.data[static_cast<size_t>(dataIdx + ch * 2)] = minVal;
+                level.data[static_cast<size_t>(dataIdx + ch * 2 + 1)] = maxVal;
             }
         }
     }

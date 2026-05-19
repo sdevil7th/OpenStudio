@@ -69,7 +69,8 @@ public:
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
 
     // Messaging
-    juce::String addTrack(const juce::String& explicitId = juce::String());  // Returns track ID, optional explicit ID for restore
+    juce::String addTrack(const juce::String& explicitId = juce::String(),
+                          const juce::String& initialType = juce::String());  // Returns track ID, optional explicit ID/type for restore
     bool removeTrack(const juce::String& trackId);
     bool reorderTrack(const juce::String& trackId, int newPosition);
     int getTrackIndex(const juce::String& trackId) const;  // For lookups
@@ -204,7 +205,14 @@ public:
     void setTrackMIDIInput(const juce::String& trackId, const juce::String& deviceName, int channel);
     void setTrackMIDIClips(const juce::String& trackId, const juce::String& clipsJSON);
     bool sendMidiNote(const juce::String& trackId, int note, int velocity, bool isNoteOn);
+    juce::var getTrackMIDINoteActivity(const juce::String& trackId, int maxAgeMs = 1200) const;
+    bool panicMIDI();
     bool loadInstrument(const juce::String& trackId, const juce::String& vstPath);
+    bool removeInstrument(const juce::String& trackId);
+    bool setTrackSamplerSample(const juce::String& trackId, const juce::String& samplePath, int rootNote);
+    bool clearTrackSamplerSample(const juce::String& trackId);
+    juce::String getInstrumentState(const juce::String& trackId);
+    bool setInstrumentState(const juce::String& trackId, const juce::String& base64State);
     void setProcessingPrecision(const juce::String& precisionMode);
     juce::String getProcessingPrecision() const;
     bool setTrackPluginPrecisionOverride(const juce::String& trackId, int fxIndex, bool isInputFX, const juce::String& mode);
@@ -218,6 +226,13 @@ public:
     juce::var getTrackInputFX(const juce::String& trackId);
     juce::var getTrackFX(const juce::String& trackId);
     juce::var getPluginParameters(const juce::String& trackId, int fxIndex, bool isInputFX);
+    bool setPluginParameter(const juce::String& trackId, int fxIndex, bool isInputFX, int paramIndex, float value);
+    juce::var getBuiltInPluginSchema(const juce::String& trackId, const juce::String& chainType, int fxIndex);
+    juce::var getBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex);
+    bool setBuiltInPluginParam(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                               const juce::String& paramId, float value);
+    bool setBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                               const juce::String& stateJSON);
     void removeTrackInputFX(const juce::String& trackId, int fxIndex);
     void removeTrackFX(const juce::String& trackId, int fxIndex);
     void bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed);
@@ -346,6 +361,9 @@ public:
     // Set all automation points for a track parameter (bulk sync from frontend)
     void setAutomationPoints(const juce::String& trackId, const juce::String& parameterId,
                              const juce::String& pointsJSON);
+    void replaceAutomationPointsInRange(const juce::String& trackId, const juce::String& parameterId,
+                                        double startTimeSeconds, double endTimeSeconds,
+                                        const juce::String& pointsJSON);
     // Set automation mode for a track parameter
     void setAutomationMode(const juce::String& trackId, const juce::String& parameterId,
                            const juce::String& modeStr);
@@ -414,6 +432,7 @@ public:
 
     // MIDI Import/Export (Phase 19.9)
     juce::var importMIDIFile(const juce::String& filePath);
+    bool exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm = 120.0);
     bool exportMIDIFile(const juce::String& trackId, const juce::String& clipId,
                         const juce::String& eventsJSON, const juce::String& outputPath, double clipTempo);
 
@@ -498,6 +517,7 @@ public:
     juce::var getAiToolsStatus();
     juce::var refreshAiToolsStatus();
     juce::var installAiTools(bool userConfirmedDownload);
+    juce::var installAiTools(const juce::String& optionsJSON);
     juce::var resetAiTools();
     juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
     juce::var getStemSeparationProgress();
@@ -590,8 +610,8 @@ private:
 
     juce::MidiBuffer buildTrackMidiBlock(const juce::String& trackId, double blockStartTimeSeconds,
                                          int numSamples, double sampleRate, bool playing);
-    void queueAllNotesOffForTrack(TrackProcessor& track);
-    void queueAllNotesOffForAllTracks();
+    void queueAllNotesOffForTrack(TrackProcessor& track, bool requestChase = true);
+    void queueAllNotesOffForAllTracks(bool requestChase = true);
     void applyProcessingPrecisionToTrack(TrackProcessor& track);
     void rebuildRealtimeProcessingSnapshots();
     std::unique_ptr<juce::AudioProcessor> createProcessorForStageSlot(const DesiredFXStageSlot& slot,

@@ -4,6 +4,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Checkbox, Input, NativeSelect } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
+import { GRID_TYPE_MODE_OPTIONS, type GridSize } from "../utils/snapToGrid";
 
 interface PreferencesModalProps {
   isOpen: boolean;
@@ -127,15 +128,11 @@ function GeneralTab() {
           size="sm"
         />
       </Row>
-      <Row label="Default Grid Size">
+      <Row label="Default Grid Type">
         <NativeSelect
-          options={["bar", "half_bar", "quarter_bar", "eighth_bar", "beat", "half_beat", "quarter_beat", "second", "minute"]}
+          options={[...GRID_TYPE_MODE_OPTIONS]}
           value={gridSize}
-          onChange={(val) => useDAWStore.getState().setGridSize(val as any)}
-          formatLabel={(v) => {
-            const labels: Record<string, string> = { bar: "Bar", half_bar: "1/2 Bar", quarter_bar: "1/4 Bar", eighth_bar: "1/8 Bar", beat: "Beat", half_beat: "Half Beat", quarter_beat: "Quarter Beat", second: "Second", minute: "Minute" };
-            return labels[String(v)] || String(v);
-          }}
+          onChange={(val) => useDAWStore.getState().setGridSize(val as GridSize)}
         />
       </Row>
 
@@ -152,11 +149,22 @@ function GeneralTab() {
 
 // ========== Editing Tab ==========
 function EditingTab() {
-  const { autoCrossfade, defaultCrossfadeLength, rippleMode, recordMode } = useDAWStore(useShallow((s) => ({
+  const {
+    autoCrossfade,
+    defaultCrossfadeLength,
+    rippleMode,
+    recordMode,
+    midiInputQuantizeEnabled,
+    midiInputQuantizeGridBeats,
+    midiInputQuantizeStrength,
+  } = useDAWStore(useShallow((s) => ({
     autoCrossfade: s.autoCrossfade,
     defaultCrossfadeLength: s.defaultCrossfadeLength,
     rippleMode: s.rippleMode,
     recordMode: s.recordMode,
+    midiInputQuantizeEnabled: s.midiInputQuantizeEnabled,
+    midiInputQuantizeGridBeats: s.midiInputQuantizeGridBeats,
+    midiInputQuantizeStrength: s.midiInputQuantizeStrength,
   })));
 
   return (
@@ -195,6 +203,41 @@ function EditingTab() {
           onChange={(val) => useDAWStore.getState().setRecordMode(val as any)}
           formatLabel={(v) => String(v).charAt(0).toUpperCase() + String(v).slice(1)}
         />
+      </Row>
+      <Row label="MIDI Input Quantize">
+        <Checkbox
+          checked={midiInputQuantizeEnabled}
+          onChange={() => useDAWStore.getState().setMIDIInputQuantize({ midiInputQuantizeEnabled: !midiInputQuantizeEnabled })}
+          size="sm"
+        />
+      </Row>
+      <Row label="Input Quantize Grid">
+        <NativeSelect
+          options={["0.125", "0.25", "0.5", "1"]}
+          value={String(midiInputQuantizeGridBeats)}
+          onChange={(val) => useDAWStore.getState().setMIDIInputQuantize({ midiInputQuantizeGridBeats: Number(val) })}
+          formatLabel={(v) => {
+            const labels: Record<string, string> = { "0.125": "1/32", "0.25": "1/16", "0.5": "1/8", "1": "1/4" };
+            return labels[String(v)] || String(v);
+          }}
+        />
+      </Row>
+      <Row label="Input Quantize Strength">
+        <Input
+          type="number"
+          variant="compact"
+          size="xs"
+          value={Math.round(midiInputQuantizeStrength * 100).toString()}
+          onChange={(e) => {
+            const percent = parseInt(e.target.value, 10);
+            if (!isNaN(percent)) {
+              useDAWStore.getState().setMIDIInputQuantize({ midiInputQuantizeStrength: Math.max(0, Math.min(100, percent)) / 100 });
+            }
+          }}
+          className="w-16"
+          inputClassName="w-16"
+        />
+        <span className="text-xs text-daw-text-muted">%</span>
       </Row>
 
       <SectionHeader>Ripple Editing</SectionHeader>

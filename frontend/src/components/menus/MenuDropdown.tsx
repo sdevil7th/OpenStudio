@@ -193,7 +193,7 @@ export function MenuDropdown({
       </Button>
 
       {isOpen && (
-        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-9999" role="menu" aria-label={`${label} menu`}>
+        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-[9999]" role="menu" aria-label={`${label} menu`}>
           {items.map((item, index) => (
             <div key={index} className="relative">
               {renderMenuItem(item, index)}
