@@ -82,6 +82,7 @@ const TimecodeSettingsPanel = React.lazy(() => import("./components/TimecodeSett
 const HelpOverlay = React.lazy(() => import("./components/HelpOverlay").then(m => ({ default: m.HelpOverlay })));
 const GettingStartedGuide = React.lazy(() => import("./components/GettingStartedGuide").then(m => ({ default: m.GettingStartedGuide })));
 const StemSeparationModal = React.lazy(() => import("./components/StemSeparationModal"));
+const AIClipGenerationModal = React.lazy(() => import("./components/AIClipGenerationModal"));
 const AiToolsSetupModal = React.lazy(() => import("./components/AiToolsSetupModal"));
 import {
   DndContext,
@@ -171,6 +172,7 @@ function App() {
     masterAutomationLanes,
     showMasterAutomation,
     showStemSeparation,
+    showAIClipGeneration,
     showAiToolsSetup,
     closeAiToolsSetup,
     hydrateRecentProjects,
@@ -246,6 +248,7 @@ function App() {
       masterAutomationLanes: state.masterAutomationLanes,
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
+      showAIClipGeneration: state.showAIClipGeneration,
       showAiToolsSetup: state.showAiToolsSetup,
       closeAiToolsSetup: state.closeAiToolsSetup,
       hydrateRecentProjects: state.hydrateRecentProjects,
@@ -395,7 +398,6 @@ function App() {
   const previousAiToolsFullReadyRef = useRef(Boolean(
     aiToolsStatus.musicGenerationReady
     && aiToolsStatus.musicGenerationLayoutValid
-    && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
     && hasNativeMusicProfile,
   ));
   const [aiToolsInstallStatusStale, setAiToolsInstallStatusStale] = useState(false);
@@ -475,7 +477,6 @@ function App() {
       currentState === "ready"
       && aiToolsStatus.musicGenerationReady
       && aiToolsStatus.musicGenerationLayoutValid
-      && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
       && hasNativeMusicProfile,
     );
     const currentPartialReady = Boolean(
@@ -483,7 +484,6 @@ function App() {
       && (
         !aiToolsStatus.musicGenerationReady
         || !aiToolsStatus.musicGenerationLayoutValid
-        || !(aiToolsStatus.musicGenerationPerformanceReady ?? true)
         || !hasNativeMusicProfile
       ),
     );
@@ -1943,6 +1943,13 @@ function App() {
         </Suspense>
       )}
 
+      {/* AI Clip Generation Modal */}
+      {showAIClipGeneration && (
+        <Suspense fallback={null}>
+          <AIClipGenerationModal />
+        </Suspense>
+      )}
+
       {/* Channel Strip EQ Modal */}
       {showChannelStripEQ && (
         <Suspense fallback={null}>
@@ -2041,6 +2048,7 @@ function App() {
 
       {/* AI Tools Background Install Popup */}
       {!showStemSeparation &&
+        !showAIClipGeneration &&
         !showAiToolsSetup &&
         showAiToolsBackgroundInstallPopup &&
         aiToolsStatus.installInProgress && (

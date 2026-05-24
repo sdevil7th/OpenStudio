@@ -3,7 +3,13 @@ import { createPortal } from "react-dom";
 import classNames from "classnames";
 import { Sparkles, SlidersHorizontal, Wand2 } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
-import { AI_WORKFLOWS, getAIWorkflow } from "../data/aiWorkflows";
+import {
+  AI_MUSIC_MODELS,
+  getAIWorkflow,
+  getAIWorkflowsForSurface,
+  getAiMusicModel,
+  resolveAiMusicModelId,
+} from "../data/aiWorkflows";
 import { nativeBridge, type AIGenerationProgress } from "../services/NativeBridge";
 import {
   getEffectiveTrackHeight,
@@ -74,6 +80,20 @@ function formatProgressAgeLabel(ageMs?: number) {
   return minutes > 0
     ? `${minutes}m ${seconds}s since progress`
     : `${seconds}s since progress`;
+}
+
+function sanitizeAiSetupMessage(message: string): string {
+  const lowered = message.toLowerCase();
+  if (
+    lowered.includes("vendor_runtime")
+    || lowered.includes("comfy")
+    || lowered.includes("nodes_ace.py")
+    || lowered.includes("folder_paths.py")
+    || lowered.includes("packaged openstudio split backend")
+  ) {
+    return "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup.";
+  }
+  return message;
 }
 
 function formatRuntimeProfileLabel(profile?: string) {
@@ -169,7 +189,7 @@ function getDisplayState(
 }
 
 function getStatusHeadline(track: Track) {
-  const workflow = getAIWorkflow(track.aiWorkflow);
+  const workflow = getAIWorkflow(track.aiWorkflow, track.aiMusicModelId, "ai-track");
 
   if (workflow.available === false) {
     return workflow.availabilityNote || "Workflow unavailable";
@@ -272,6 +292,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const {
     updateTrack,
     toggleTrackMute,
+    setAITrackModel,
     setAITrackWorkflow,
     setAITrackParams,
     setAITrackGenerationState,
@@ -283,6 +304,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     useShallow((state) => ({
       updateTrack: state.updateTrack,
       toggleTrackMute: state.toggleTrackMute,
+      setAITrackModel: state.setAITrackModel,
       setAITrackWorkflow: state.setAITrackWorkflow,
       setAITrackParams: state.setAITrackParams,
       setAITrackGenerationState: state.setAITrackGenerationState,
@@ -299,22 +321,34 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const generationStartTimeRef = useRef<number | null>(null);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showParams, setShowParams] = useState(false);
-  const workflow = getAIWorkflow(track.aiWorkflow);
+  const modelId = resolveAiMusicModelId(track.aiMusicModelId);
+  const model = getAiMusicModel(modelId);
+  const workflow = getAIWorkflow(track.aiWorkflow, modelId, "ai-track");
+  const workflows = getAIWorkflowsForSurface("ai-track", modelId);
   const isBusy =
     track.aiGenerationState === "loading"
     || track.aiGenerationState === "generating";
+  const selectedModelStatus = aiToolsStatus.musicModels?.[modelId];
   const canStartMusicGeneration =
     workflow.available !== false
     && Boolean(
-      aiToolsStatus.features?.audioGeneration?.ready
+      selectedModelStatus?.ready
       ?? (
-        aiToolsStatus.musicGenerationReady
-        && aiToolsStatus.musicGenerationLayoutValid
-        && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
+        modelId === "ace-step-v15-xl-turbo"
+          ? (
+              aiToolsStatus.features?.audioGeneration?.ready
+              ?? (
+                aiToolsStatus.musicGenerationReady
+                && aiToolsStatus.musicGenerationLayoutValid
+              )
+            )
+          : false
       ),
     );
-  const musicGenerationBlockedMessage =
-    aiToolsStatus.features?.audioGeneration?.message
+  const musicGenerationBlockedMessage = sanitizeAiSetupMessage(
+    selectedModelStatus?.message
+    || selectedModelStatus?.blockReason
+    || aiToolsStatus.features?.audioGeneration?.message
     || aiToolsStatus.musicGenerationPerformanceStatusMessage
     || aiToolsStatus.musicGenerationStatusMessage
     || (!aiToolsStatus.musicGenerationLayoutValid
@@ -323,7 +357,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
         ? `Pinned ACE-Step native asset layout is not ready in ${aiToolsStatus.musicGenerationCheckpointRoot}.`
         : aiToolsStatus.error
           || aiToolsStatus.message
-          || "Audio Generation is not ready yet.");
+          || "Audio Generation is not ready yet."),
+  );
 
   const stopPolling = () => {
     if (pollTimeoutRef.current !== null) {
@@ -553,7 +588,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     }
 
     const startTime = useDAWStore.getState().transport.currentTime;
-    const workflowId = track.aiWorkflow ?? "text-to-music";
+    const workflowId = workflow.id;
     const params = { ...(track.aiWorkflowParams ?? {}) };
 
     if (workflow.available === false) {
@@ -594,7 +629,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       progress: 0.01,
       error: "",
       phase: "starting",
-      message: "Starting ACE-Step...",
+      message: `Starting ${model.shortLabel}...`,
       backend: "",
       elapsedMs: 0,
       heartbeatTs: 0,
@@ -625,6 +660,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     try {
       const result = await nativeBridge.startAIGeneration(
         track.id,
+        modelId,
         workflowId,
         params,
       );
@@ -705,9 +741,21 @@ export const AITrackHeader = React.memo(function AITrackHeader({
               </span>
               <div className="min-w-0 flex-1" data-no-drag data-no-select>
                 <Select
-                  value={track.aiWorkflow ?? "text-to-music"}
+                  value={modelId}
+                  onChange={(value) => setAITrackModel(track.id, resolveAiMusicModelId(String(value)))}
+                  options={AI_MUSIC_MODELS.map((entry) => ({
+                    value: entry.id,
+                    label: entry.shortLabel,
+                  }))}
+                  size="sm"
+                  fullWidth
+                />
+              </div>
+              <div className="min-w-0 flex-[1.1]" data-no-drag data-no-select>
+                <Select
+                  value={workflow.id}
                   onChange={(value) => setAITrackWorkflow(track.id, String(value))}
-                  options={AI_WORKFLOWS.map((entry) => ({
+                  options={workflows.map((entry) => ({
                     value: entry.id,
                     label: entry.label,
                     disabled: entry.available === false,
@@ -720,13 +768,12 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                 variant={isBusy ? "danger" : "primary"}
                 size="sm"
                 onClick={() => void handleGenerate()}
-                disabled={!canStartMusicGeneration && !isBusy}
                 data-no-drag
                 data-no-select
                 className="shrink-0"
               >
                 <Wand2 size={12} />
-                {isBusy ? "Cancel" : "Generate"}
+                {isBusy ? "Cancel" : canStartMusicGeneration ? "Generate" : "Set Up"}
               </Button>
             </div>
 
@@ -892,6 +939,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
           setAITrackGenerationState(track.id, "idle");
         }}
         onOpenAiToolsSetup={openAiToolsSetup}
+        onModelChange={(nextModelId) => setAITrackModel(track.id, nextModelId)}
         onWorkflowChange={(workflowId) => setAITrackWorkflow(track.id, workflowId)}
         onParamsChange={(params) => setAITrackParams(track.id, params)}
       />

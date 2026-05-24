@@ -13,6 +13,9 @@ import { resetSyncCache } from "./clips";
 const AUDIO_TRANSPORT_LOG_PREFIX = "[audio.transport]";
 const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
 
+let recordStartInFlight = false;
+let recordStartToken = 0;
+
 const stringifyForDebug = (value: unknown) => {
   try {
     return JSON.stringify(value, null, 2);
@@ -224,21 +227,37 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
     record: async () => {
+      if (recordStartInFlight) {
+        console.warn(`${AUDIO_RECORD_LOG_PREFIX} record ignored because a start is already in flight`);
+        return;
+      }
+
       const { tracks, transport, pixelsPerSecond, timeSelection } = get();
+      if (transport.isRecording) {
+        console.warn(`${AUDIO_RECORD_LOG_PREFIX} record ignored because transport is already recording`);
+        return;
+      }
+
       const armedTracks = tracks
         .map((t) => ({ track: t }))
         .filter(({ track }) => track.armed);
+      if (armedTracks.length === 0) {
+        get().showToast?.("Arm a track before recording", "info");
+        return;
+      }
+
+      recordStartInFlight = true;
+      const recordToken = ++recordStartToken;
       console.log(`${AUDIO_RECORD_LOG_PREFIX} record:start`, {
         transportBefore: transport,
         armedTrackIds: armedTracks.map(({ track }) => track.id),
       });
 
+      try {
       const wasAlreadyPlaying = transport.isPlaying;
       const armedMidiTracks = armedTracks
         .map(({ track }) => track)
         .filter((track) => track.type === "midi" || track.type === "instrument");
-
-      await syncArmedTracksBeforeRecording(armedTracks);
 
       if (armedMidiTracks.length > 0) {
         let availableDevices: string[] = [];
@@ -352,13 +371,24 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       // Only sync clips with backend if we're starting fresh (not already playing)
       if (!wasAlreadyPlaying) {
         // Sync clips FIRST (slow), then position + play back-to-back
-        await get().syncClipsWithBackend();
+        try {
+          await get().syncClipsWithBackend();
+        } catch (error) {
+          console.warn(`${AUDIO_RECORD_LOG_PREFIX} record:syncClipsWithBackend failed; continuing with recording`, error);
+        }
+        await syncArmedTracksBeforeRecording(armedTracks);
         const positionResult = await nativeBridge.setTransportPosition(currentTime);
         console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setTransportPosition`, { currentTime, positionResult });
       } else {
         console.log(
           "[DAW] Punch-in recording: already playing, preserving playback state",
         );
+        await syncArmedTracksBeforeRecording(armedTracks);
+      }
+
+      if (recordToken !== recordStartToken) {
+        console.warn(`${AUDIO_RECORD_LOG_PREFIX} record start cancelled before native recording`);
+        return;
       }
 
       set((state) => ({
@@ -366,7 +396,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           ...state.transport,
           isPlaying: true,
           isPaused: false,
-          isRecording: armedTracks.length > 0,
+          isRecording: true,
         },
         recordingClips: newRecordingClips,
         recordingMIDIPreviews: {},
@@ -387,10 +417,35 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         const playingResult = await nativeBridge.setTransportPlaying(true);
         console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setTransportPlaying`, { playingResult });
       }
+      if (recordToken !== recordStartToken) {
+        console.warn(`${AUDIO_RECORD_LOG_PREFIX} record start cancelled after playback start`);
+        if (!wasAlreadyPlaying) {
+          await nativeBridge.setTransportPlaying(false).catch(logBridgeError("record:cancelPlaybackStart"));
+        }
+        return;
+      }
       const recordingResult = await nativeBridge.setTransportRecording(true);
       console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setTransportRecording`, { recordingResult });
       const recordSnapshot = await nativeBridge.getAudioDebugSnapshot();
       console.log(`${AUDIO_RECORD_LOG_PREFIX} record:debugSnapshot`, recordSnapshot, stringifyForDebug(recordSnapshot));
+      } catch (error) {
+        console.error(`${AUDIO_RECORD_LOG_PREFIX} record failed`, error);
+        get().showToast?.("Failed to start recording", "error");
+        set((state) => ({
+          transport: {
+            ...state.transport,
+            isPlaying: transport.isPlaying,
+            isPaused: transport.isPaused,
+            isRecording: transport.isRecording,
+          },
+          recordingClips: transport.isRecording ? state.recordingClips : [],
+          recordingMIDIPreviews: transport.isRecording ? state.recordingMIDIPreviews : {},
+        }));
+      } finally {
+        if (recordToken === recordStartToken) {
+          recordStartInFlight = false;
+        }
+      }
     },
 
     pause: () => {
@@ -408,6 +463,10 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
     stop: async () => {
       const { playStartPosition, transport, addClip, playheadStopBehavior } = get();
+      if (recordStartInFlight) {
+        recordStartToken += 1;
+        recordStartInFlight = false;
+      }
       const wasRecording = transport.isRecording;
       const wasPlaying = transport.isPlaying || transport.isPaused;
       console.log("[useDAWStore] STOP called. Was recording:", wasRecording);
@@ -470,6 +529,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         const newClips = await nativeBridge.getLastCompletedClips();
         const currentTracks = get().tracks;
         const currentRecordMode = get().recordMode;
+        const tracksByIdAtStop = new Map(currentTracks.map((track) => [track.id, track]));
         const armedAudioTrackIds = new Set(
           currentTracks
             .filter((track) => track.armed && track.type === "audio")
@@ -489,9 +549,27 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           count: newClips.length,
           clips: newClips,
         });
-        const completedAudioClips = newClips.filter(
-          (clipInfo) => clipInfo.duration > 0 && armedAudioTrackIds.has(clipInfo.trackId),
-        );
+        const completedAudioClips = newClips.filter((clipInfo) => {
+          const track = tracksByIdAtStop.get(clipInfo.trackId);
+          if (clipInfo.duration <= 0 || !track || track.type !== "audio") {
+            console.warn("[useDAWStore] Ignoring completed audio recording", {
+              trackId: clipInfo.trackId,
+              duration: clipInfo.duration,
+              trackExists: Boolean(track),
+              trackType: track?.type,
+            });
+            return false;
+          }
+
+          if (!armedAudioTrackIds.has(clipInfo.trackId)) {
+            console.warn("[useDAWStore] Accepting completed audio recording for a track outside the current armed audio set", {
+              trackId: clipInfo.trackId,
+              duration: clipInfo.duration,
+            });
+          }
+
+          return true;
+        });
 
         // Group clips by trackId for loop recording take handling
         const clipsByTrack = new Map<string, typeof newClips>();

@@ -2514,6 +2514,50 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                         completion(juce::URL(args[0].toString()).launchInDefaultBrowser());
                     })
+                    .withNativeFunction ("browseForFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto title = args.size() > 0 && args[0].isString()
+                            ? args[0].toString()
+                            : juce::String("Select File");
+                        const auto filters = args.size() > 1 && args[1].isString()
+                            ? args[1].toString()
+                            : juce::String("*");
+                        auto initialDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            title,
+                            initialDir,
+                            filters.isNotEmpty() ? filters : juce::String("*"),
+                            true);
+
+                        const auto chooserFlags = juce::FileBrowserComponent::openMode
+                                                | juce::FileBrowserComponent::canSelectFiles;
+                        fileChooser->launchAsync(chooserFlags, [completion] (const juce::FileChooser& fc) {
+                            auto result = fc.getResult();
+                            completion(result.existsAsFile() ? result.getFullPathName() : juce::String());
+                        });
+                    })
+                    .withNativeFunction ("browseForFolder", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto title = args.size() > 0 && args[0].isString()
+                            ? args[0].toString()
+                            : juce::String("Select Folder");
+                        auto initialDir = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                            .getChildFile("Downloads");
+                        if (! initialDir.isDirectory())
+                            initialDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            title,
+                            initialDir,
+                            "*",
+                            true);
+
+                        const auto chooserFlags = juce::FileBrowserComponent::openMode
+                                                | juce::FileBrowserComponent::canSelectDirectories;
+                        fileChooser->launchAsync(chooserFlags, [completion] (const juce::FileChooser& fc) {
+                            auto result = fc.getResult();
+                            completion(result.isDirectory() ? result.getFullPathName() : juce::String());
+                        });
+                    })
                     // ========== Project Save/Load (F2) ==========
                     .withNativeFunction ("showSaveDialog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Show native save file dialog
@@ -6155,8 +6199,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(juce::var());
                     })
                     .withNativeFunction ("startAIGeneration", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        if (args.size() >= 3)
-                            completion(audioEngine.startAIGeneration(args[0].toString(), args[1].toString(), args[2].toString()));
+                        if (args.size() >= 4)
+                            completion(audioEngine.startAIGeneration(args[0].toString(), args[1].toString(), args[2].toString(), args[3].toString()));
+                        else if (args.size() >= 3)
+                            completion(audioEngine.startAIGeneration(args[0].toString(), "ace-step-v15-xl-turbo", args[1].toString(), args[2].toString()));
                         else
                             completion(juce::var());
                     })

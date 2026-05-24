@@ -1,4 +1,9 @@
-import { normalizeWorkflowParams } from "../data/aiWorkflows";
+import {
+  DEFAULT_AI_MUSIC_MODEL_ID,
+  type AiMusicModelId,
+  normalizeWorkflowParams,
+  resolveAiMusicModelId,
+} from "../data/aiWorkflows";
 
 // Type definitions for the JUCE backend
 const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
@@ -719,6 +724,24 @@ export interface AiHardwareStatus {
   }>;
 }
 
+export interface AiMusicModelStatus {
+  id: AiMusicModelId;
+  label?: string;
+  installed: boolean;
+  ready: boolean;
+  compatible?: boolean;
+  blocked?: boolean;
+  blockReason?: string;
+  message?: string;
+  modelPath?: string | null;
+  runtimePath?: string | null;
+  attribution?: string;
+  licenseAccepted?: boolean;
+  runtimeReady?: boolean;
+  modelReady?: boolean;
+  missingFiles?: string[];
+}
+
 export interface AiToolsStatus {
     state:
       | "idle"
@@ -795,6 +818,7 @@ export interface AiToolsStatus {
   musicGenerationUnavailableProfiles?: Array<Record<string, unknown>>;
   musicGenerationDefaultProfile?: string;
   musicGenerationWarmSessionCapable?: boolean;
+  musicModels?: Partial<Record<AiMusicModelId, AiMusicModelStatus>>;
   selectedFeatures?: AiFeatureId[];
   requestedFeatures?: AiFeatureId[];
   installedFeatures?: AiFeatureId[];
@@ -817,6 +841,9 @@ export interface AIGenerationProgress {
   message?: string;
   backend?: string;
   outputFile?: string;
+  modelId?: AiMusicModelId;
+  workflowId?: string;
+  sourceClipId?: string;
   error?: string;
   elapsedMs?: number;
   heartbeatTs?: number;
@@ -855,6 +882,9 @@ export interface InstallAiToolsOptions {
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
+  modelId?: "ace-step-v15-xl-turbo" | "stable-audio-3-medium";
+  stableAudioModelPath?: string;
+  stableAudioLicenseAccepted?: boolean;
 }
 
 export interface ResetAiToolsResponse {
@@ -1823,7 +1853,12 @@ declare global {
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
         cancelAiToolsInstall?: () => Promise<void>;
-        startAIGeneration?: (trackId: string, workflowId: string, paramsJSON: string) => Promise<{ started: boolean; error?: string }>;
+        startAIGeneration?: (
+          trackId: string,
+          modelIdOrWorkflowId: string,
+          workflowIdOrParamsJSON: string,
+          paramsJSON?: string,
+        ) => Promise<{ started: boolean; error?: string }>;
         getAIGenerationProgress?: () => Promise<AIGenerationProgress>;
         cancelAIGeneration?: () => Promise<void>;
 
@@ -5429,6 +5464,33 @@ class NativeBridge {
         musicGenerationSharedRepoId: "ACE-Step/Ace-Step1.5",
         musicGenerationCheckpointRoot: null,
         musicGenerationPerformanceStatusMessage: "",
+        musicModels: {
+          "ace-step-v15-xl-turbo": {
+            id: "ace-step-v15-xl-turbo",
+            label: "ACE-Step 1.5 XL Turbo",
+            installed: false,
+            ready: false,
+            compatible: false,
+            blocked: true,
+            blockReason: "native hardware probe is unavailable in the web preview",
+            message: "ACE-Step setup is available in the desktop app.",
+          },
+          "stable-audio-3-medium": {
+            id: "stable-audio-3-medium",
+            label: "Stable Audio 3 Medium",
+            installed: false,
+            ready: false,
+            compatible: false,
+            blocked: true,
+            blockReason: "Stable Audio setup is available in the desktop app.",
+            message: "Manual Stable Audio 3 import is available in the desktop app.",
+            attribution: "Powered by Stability AI",
+            licenseAccepted: false,
+            runtimeReady: false,
+            modelReady: false,
+            missingFiles: ["model.safetensors", "model_config.json"],
+          },
+        },
         selectedFeatures: ["stemSeparation"],
         requestedFeatures: ["stemSeparation"],
         installedFeatures: [],
@@ -5537,18 +5599,37 @@ class NativeBridge {
 
   async startAIGeneration(
     trackId: string,
-    workflowId: string,
-    params: Record<string, unknown>,
+    modelIdOrWorkflowId: string,
+    workflowIdOrParams: string | Record<string, unknown>,
+    paramsMaybe?: Record<string, unknown>,
   ): Promise<{ started: boolean; error?: string }> {
-    const normalizedParams = normalizeWorkflowParams(workflowId, params);
+    const isNewSignature = typeof workflowIdOrParams === "string";
+    const modelId = isNewSignature
+      ? resolveAiMusicModelId(modelIdOrWorkflowId)
+      : DEFAULT_AI_MUSIC_MODEL_ID;
+    const workflowId = isNewSignature
+      ? workflowIdOrParams
+      : modelIdOrWorkflowId;
+    const params = isNewSignature
+      ? paramsMaybe ?? {}
+      : workflowIdOrParams;
+    const sourcePayload =
+      params && typeof params === "object" && "source" in params
+        ? (params as Record<string, unknown>).source
+        : undefined;
+    const normalizedParams = {
+      ...normalizeWorkflowParams(workflowId, params, modelId),
+      ...(sourcePayload && typeof sourcePayload === "object" ? { source: sourcePayload } : {}),
+    };
     if (this.isNative && window.__JUCE__?.backend.startAIGeneration) {
       return await window.__JUCE__.backend.startAIGeneration(
         trackId,
+        modelId,
         workflowId,
         JSON.stringify(normalizedParams),
       );
     }
-    console.log("[NativeBridge] Mock startAIGeneration:", trackId, workflowId, normalizedParams);
+    console.log("[NativeBridge] Mock startAIGeneration:", trackId, modelId, workflowId, normalizedParams);
     return { started: false, error: "AI generation is only available in the native app." };
   }
 

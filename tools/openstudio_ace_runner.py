@@ -280,8 +280,7 @@ def get_backend_root() -> Path:
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError(
-            "OpenStudio ACE split backend is missing packaged runtime files: "
-            + ", ".join(missing)
+            "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup."
         )
     return backend_root
 

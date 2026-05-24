@@ -3920,10 +3920,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (track->hasActiveARA())
             anyActiveARAInCallback = true;
 
-        // Solo logic: if any track is soloed, skip non-soloed tracks entirely
-        // (recording still works because record-armed tracks should also be soloed,
-        //  and in practice users don't solo-off a track they're actively recording)
-        if (anySoloed && !track->getSolo())
+        const bool excludedBySolo = anySoloed && !track->getSolo();
+        const bool hasActiveAudioRecording = isRecordMode.load() && audioRecorder.isRecording(trackId);
+        const bool needsRecordingPath = track->getRecordArmed() || hasActiveAudioRecording;
+
+        // Solo should silence non-soloed tracks, but it must not prevent an
+        // armed/active track from reaching the recorder.
+        if (excludedBySolo && !needsRecordingPath)
         {
             track->resetRMS();
             continue;
@@ -3938,7 +3941,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                           && !staticMuteBlocksInput
                                           && (track->getRecordArmed()
                                               || track->getInputMonitoring()
-                                              || audioRecorder.isRecording(trackId));
+                                              || hasActiveAudioRecording);
         const double blockStartTimeSeconds = currentSamplePosition / currentSampleRate;
         const bool shouldProcessMidi = track->needsProcessing(blockStartTimeSeconds, numSamples,
                                                               currentSampleRate, isPlaying.load());
@@ -4049,7 +4052,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // ========== RECORD RAW AUDIO (BEFORE FX) ==========
         // Write to recorder if transport is playing AND in record mode
         // This captures the raw input BEFORE any FX processing
-        if (isPlaying && isRecordMode && audioRecorder.isRecording(trackId))
+        if (isPlaying && isRecordMode.load() && hasActiveAudioRecording)
         {
             // Punch recording: only write audio within punch range
             bool shouldWrite = true;
@@ -4144,7 +4147,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
 
         // ========== SEND MIXING: fill destination track send accum buffers ==========
-        if (!trackEntry.sends.empty())
+        if (!excludedBySolo && !trackEntry.sends.empty())
         {
             const auto& preFaderBuffer = track->getPreFaderBuffer();
             for (const auto& send : trackEntry.sends)
@@ -4194,7 +4197,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             track->sendMIDIToOutput(midiMessages, currentSampleRate, track->getMute());
 
         // Mix track output to device outputs (only if master send is enabled)
-        if (track->getMasterSendEnabled())
+        if (!excludedBySolo && track->getMasterSendEnabled())
         {
             int outStart = track->getOutputStartChannel();
             int outCount = track->getOutputChannelCount();
@@ -17009,6 +17012,7 @@ void AudioEngine::cancelAiToolsInstall()
 }
 
 juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
+                                         const juce::String& modelId,
                                          const juce::String& workflowId,
                                          const juce::String& paramsJSON)
 {
@@ -17026,51 +17030,71 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
     auto aiToolsStatus = stemSeparator.getAiToolsStatus();
     if (auto* statusObject = aiToolsStatus.getDynamicObject())
     {
-        const auto musicGenerationReady = static_cast<bool>(statusObject->getProperty("musicGenerationReady"));
-        const auto layoutValid = static_cast<bool>(statusObject->getProperty("musicGenerationLayoutValid"));
-        const auto performanceReady = ! statusObject->hasProperty("musicGenerationPerformanceReady")
-            || static_cast<bool>(statusObject->getProperty("musicGenerationPerformanceReady"));
-        const auto availableProfilesVar = statusObject->getProperty("musicGenerationAvailableProfiles");
-        auto hasNativeMusicProfile = true;
-        if (auto* availableProfilesArray = availableProfilesVar.getArray())
+        if (modelId == "stable-audio-3-medium")
         {
-            if (! availableProfilesArray->isEmpty())
+            auto stableReady = false;
+            juce::String stableMessage = "Stable Audio 3 Medium is not set up yet.";
+            if (auto* musicModels = statusObject->getProperty("musicModels").getDynamicObject())
             {
-                hasNativeMusicProfile = false;
-                for (const auto& profile : *availableProfilesArray)
+                if (auto* stableModel = musicModels->getProperty("stable-audio-3-medium").getDynamicObject())
                 {
-                    if (profile.toString() == "native-xl-turbo")
+                    stableReady = static_cast<bool>(stableModel->getProperty("ready"));
+                    stableMessage = stableModel->getProperty("message").toString();
+                }
+            }
+
+            if (! stableReady)
+            {
+                result->setProperty("started", false);
+                result->setProperty("error", stableMessage.isNotEmpty()
+                    ? stableMessage
+                    : "Import Stable Audio 3 Medium from AI Tools Setup before generating.");
+                return juce::var(result.release());
+            }
+        }
+        else
+        {
+            const auto musicGenerationReady = static_cast<bool>(statusObject->getProperty("musicGenerationReady"));
+            const auto layoutValid = static_cast<bool>(statusObject->getProperty("musicGenerationLayoutValid"));
+            const auto availableProfilesVar = statusObject->getProperty("musicGenerationAvailableProfiles");
+            auto hasNativeMusicProfile = true;
+            if (auto* availableProfilesArray = availableProfilesVar.getArray())
+            {
+                if (! availableProfilesArray->isEmpty())
+                {
+                    hasNativeMusicProfile = false;
+                    for (const auto& profile : *availableProfilesArray)
                     {
-                        hasNativeMusicProfile = true;
-                        break;
+                        if (profile.toString() == "native-xl-turbo")
+                        {
+                            hasNativeMusicProfile = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if (! musicGenerationReady || ! layoutValid || ! performanceReady || ! hasNativeMusicProfile)
-        {
-            const auto musicGenerationStatusMessage = statusObject->getProperty("musicGenerationStatusMessage").toString();
-            const auto musicGenerationPerformanceStatusMessage = statusObject->getProperty("musicGenerationPerformanceStatusMessage").toString();
-            const auto statusMessage = statusObject->getProperty("message").toString();
-            const auto errorMessage = statusObject->getProperty("error").toString();
-            const auto modelId = statusObject->getProperty("musicGenerationModelId").toString();
-            const auto checkpointRoot = statusObject->getProperty("musicGenerationCheckpointRoot").toString();
-            result->setProperty("started", false);
-            result->setProperty(
-                "error",
-                errorMessage.isNotEmpty()
-                    ? errorMessage
-                    : (! hasNativeMusicProfile)
-                        ? "The Native XL Turbo ACE-Step profile is still missing required music-generation assets. Retry AI Tools install to finish setup."
-                    : musicGenerationPerformanceStatusMessage.isNotEmpty()
-                        ? musicGenerationPerformanceStatusMessage
-                    : musicGenerationStatusMessage.isNotEmpty()
-                        ? musicGenerationStatusMessage
-                    : (! layoutValid && modelId.isNotEmpty() && checkpointRoot.isNotEmpty())
-                        ? "Pinned ACE-Step model " + modelId + " is not ready in " + checkpointRoot + "."
-                        : statusMessage);
-            return juce::var(result.release());
+            if (! musicGenerationReady || ! layoutValid || ! hasNativeMusicProfile)
+            {
+                const auto musicGenerationStatusMessage = statusObject->getProperty("musicGenerationStatusMessage").toString();
+                const auto statusMessage = statusObject->getProperty("message").toString();
+                const auto errorMessage = statusObject->getProperty("error").toString();
+                const auto aceModelId = statusObject->getProperty("musicGenerationModelId").toString();
+                const auto checkpointRoot = statusObject->getProperty("musicGenerationCheckpointRoot").toString();
+                result->setProperty("started", false);
+                result->setProperty(
+                    "error",
+                    errorMessage.isNotEmpty()
+                        ? errorMessage
+                        : (! hasNativeMusicProfile)
+                            ? "The Native XL Turbo ACE-Step profile is still missing required music-generation assets. Retry AI Tools install to finish setup."
+                        : musicGenerationStatusMessage.isNotEmpty()
+                            ? musicGenerationStatusMessage
+                        : (! layoutValid && aceModelId.isNotEmpty() && checkpointRoot.isNotEmpty())
+                            ? "Pinned ACE-Step model " + aceModelId + " is not ready in " + checkpointRoot + "."
+                            : statusMessage);
+                return juce::var(result.release());
+            }
         }
     }
 
@@ -17078,7 +17102,7 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
         .getChildFile("OpenStudio")
         .getChildFile("generated-music");
 
-    if (! aiTrackEngine.startGeneration(workflowId, paramsJSON, outputDir))
+    if (! aiTrackEngine.startGeneration(modelId, workflowId, paramsJSON, outputDir))
     {
         auto progress = aiTrackEngine.pollProgress();
         result->setProperty("started", false);
@@ -17102,6 +17126,12 @@ juce::var AudioEngine::getAIGenerationProgress()
     obj->setProperty("phase", progress.phase);
     obj->setProperty("message", progress.message);
     obj->setProperty("backend", progress.backend);
+    if (progress.modelId.isNotEmpty())
+        obj->setProperty("modelId", progress.modelId);
+    if (progress.workflowId.isNotEmpty())
+        obj->setProperty("workflowId", progress.workflowId);
+    if (progress.sourceClipId.isNotEmpty())
+        obj->setProperty("sourceClipId", progress.sourceClipId);
     obj->setProperty("elapsedMs", progress.elapsedMs);
     obj->setProperty("heartbeatTs", progress.heartbeatTs);
     if (progress.phaseProgress >= 0.0)

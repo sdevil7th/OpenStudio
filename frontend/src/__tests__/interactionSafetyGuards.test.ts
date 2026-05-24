@@ -45,6 +45,13 @@ describe("interaction safety guards", () => {
     expect(midiWindowSource).toContain("installModalContextMenuLeakGuard()");
   });
 
+  it("keeps context submenus open while crossing into the submenu", () => {
+    expect(contextMenuSource).toContain("submenuCloseTimerRef");
+    expect(contextMenuSource).toContain("scheduleSubmenuClose");
+    expect(contextMenuSource).toContain("onMouseEnter={clearSubmenuCloseTimer}");
+    expect(contextMenuSource).toContain("left-full top-0 -ml-px");
+  });
+
   it("keeps piano roll resize and modal context-menu paths guarded", () => {
     expect(pianoRollSource).toContain("Math.max(1, containerRef.current.clientWidth)");
     expect(pianoRollSource).toContain("Math.max(1, containerRef.current.clientHeight)");

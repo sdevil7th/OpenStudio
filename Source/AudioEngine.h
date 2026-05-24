@@ -524,6 +524,7 @@ public:
     void cancelStemSeparation();
     void cancelAiToolsInstall();
     juce::var startAIGeneration(const juce::String& trackId,
+                                const juce::String& modelId,
                                 const juce::String& workflowId,
                                 const juce::String& paramsJSON);
     juce::var getAIGenerationProgress();

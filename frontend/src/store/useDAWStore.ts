@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiFeatureId, type AiToolsStatus } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import {
   FACTORY_QUANTIZE_PRESETS,
@@ -29,12 +29,26 @@ import { screensetActions } from "./actions/screensets";
 import { macroActions } from "./actions/macros";
 import { renderQueueActions } from "./actions/renderQueue";
 import { quantizeActions } from "./actions/quantize";
-import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../data/aiWorkflows";
+import {
+  DEFAULT_AI_MUSIC_MODEL_ID,
+  STABLE_AUDIO_3_MODEL_ID,
+  type AIWorkflowId,
+  type AiMusicModelId,
+  getAIWorkflow,
+  getDefaultWorkflowForModel,
+  getDefaultWorkflowParams,
+  normalizeWorkflowId,
+  normalizeWorkflowParams,
+  resolveAiMusicModelId,
+} from "../data/aiWorkflows";
 
 export interface InstallAiToolsOptions {
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
+  modelId?: AiMusicModelId;
+  stableAudioModelPath?: string;
+  stableAudioLicenseAccepted?: boolean;
 }
 
 
@@ -91,7 +105,6 @@ function isMusicGenerationFullyReady(
     AiToolsStatus,
     | "musicGenerationReady"
     | "musicGenerationLayoutValid"
-    | "musicGenerationPerformanceReady"
     | "musicGenerationAvailableProfiles"
   >,
 ): boolean {
@@ -101,7 +114,6 @@ function isMusicGenerationFullyReady(
   return Boolean(
     status.musicGenerationReady
     && status.musicGenerationLayoutValid
-    && (status.musicGenerationPerformanceReady ?? true)
     && nativeProfileReady
   );
 }
@@ -159,6 +171,30 @@ const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
   selectedBackend: "cpu",
   musicGenerationPerformanceReady: true,
   musicGenerationPerformanceStatusMessage: "",
+  musicModels: {
+    [DEFAULT_AI_MUSIC_MODEL_ID]: {
+      id: DEFAULT_AI_MUSIC_MODEL_ID,
+      label: "ACE-Step 1.5 XL Turbo",
+      installed: false,
+      ready: false,
+      compatible: false,
+      blocked: true,
+      blockReason: "AI tools are still being checked.",
+      message: "Checking ACE-Step setup...",
+    },
+    "stable-audio-3-medium": {
+      id: "stable-audio-3-medium",
+      label: "Stable Audio 3 Medium",
+      installed: false,
+      ready: false,
+      compatible: false,
+      blocked: true,
+      blockReason: "Stable Audio 3 has not been imported yet.",
+      message: "Import the Stable Audio 3 Medium Hugging Face snapshot to enable this model.",
+      attribution: "Powered by Stability AI",
+      licenseAccepted: false,
+    },
+  },
   lastPhase: "checking",
   fallbackAttempted: false,
   restartRequired: false,
@@ -603,6 +639,19 @@ export interface AudioClip {
   waveformStatus?: "preview" | "building" | "ready";
 }
 
+export interface AIClipGenerationRange {
+  start: number;
+  end: number;
+}
+
+export interface AddGeneratedSourceAudioOptions {
+  sourceTrackId: string;
+  sourceClipId: string;
+  workflowId: AIWorkflowId;
+  filePath: string;
+  clipName?: string;
+}
+
 export interface TempoMarker {
   id: string;
   time: number; // Position in seconds
@@ -713,6 +762,7 @@ export interface Track {
   notes?: string; // Free-form track notes/comments
   waveformZoom?: number; // Waveform vertical zoom factor (0.1 to 5.0, default 1.0)
   spectralView?: boolean; // Show spectrogram instead of waveform
+  aiMusicModelId?: AiMusicModelId;
   aiWorkflow?: string;
   aiWorkflowParams?: Record<string, unknown>;
   aiGenerationState?: AITrackGenerationState;
@@ -1021,6 +1071,14 @@ interface DAWState {
   stemSepClipId: string | null;
   stemSepClipName: string;
   stemSepClipDuration: number;
+  showAIClipGeneration: boolean;
+  aiClipGenerationTrackId: string | null;
+  aiClipGenerationClipId: string | null;
+  aiClipGenerationWorkflowId: AIWorkflowId | null;
+  aiClipGenerationModelId: AiMusicModelId;
+  aiClipGenerationParams: Record<string, unknown>;
+  aiClipGenerationRange: AIClipGenerationRange | null;
+  aiClipGenerationError: string;
   aiToolsStatus: AiToolsStatus;
   aiToolsStatusLoading: boolean;
   aiToolsStatusLastUpdatedAt: number;
@@ -1377,6 +1435,7 @@ interface DAWActions {
 
   // Track Notes
   setTrackNotes: (trackId: string, notes: string) => void;
+  setAITrackModel: (trackId: string, modelId: AiMusicModelId) => void;
   setAITrackWorkflow: (trackId: string, workflowId: string) => void;
   setAITrackParams: (
     trackId: string,
@@ -1422,6 +1481,9 @@ interface DAWActions {
     filePath: string,
     startTime: number,
     clipName?: string,
+  ) => Promise<void>;
+  addGeneratedSourceAudioClip: (
+    options: AddGeneratedSourceAudioOptions,
   ) => Promise<void>;
 
   // Track Audio Controls
@@ -1748,9 +1810,20 @@ interface DAWActions {
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
   reopenStemSeparation: () => void;
+  openAIClipGeneration: (
+    trackId: string,
+    clipId: string,
+    workflowId: AIWorkflowId,
+    modelId?: AiMusicModelId,
+  ) => void;
+  closeAIClipGeneration: () => void;
+  setAIClipGenerationModel: (modelId: AiMusicModelId) => void;
+  setAIClipGenerationParams: (params: Record<string, unknown>) => void;
+  setAIClipGenerationRange: (range: AIClipGenerationRange | null) => void;
+  setAIClipGenerationError: (error: string) => void;
   refreshAiToolsStatus: (force?: boolean) => Promise<AiToolsStatus>;
   applyAiToolsStatusUpdate: (status: AiToolsStatus) => void;
-  installAiTools: (options?: InstallAiToolsOptions) => Promise<void>;
+  installAiTools: (options?: InstallAiToolsOptions) => Promise<InstallAiToolsResponse | undefined>;
   resetAiTools: () => Promise<void>;
   cancelAiToolsInstall: () => Promise<void>;
   completeStemSeparation: (sourceTrackId: string, sourceClipId: string, clipName: string,
@@ -2280,8 +2353,9 @@ export const createDefaultTrack = (
   playbackOffsetMs: 0,
   trackChannelCount: 2,
   midiOutputDevice: "",
+  aiMusicModelId: DEFAULT_AI_MUSIC_MODEL_ID,
   aiWorkflow: "text-to-music",
-  aiWorkflowParams: getDefaultWorkflowParams("text-to-music"),
+  aiWorkflowParams: getDefaultWorkflowParams("text-to-music", DEFAULT_AI_MUSIC_MODEL_ID),
   aiGenerationState: "idle",
   aiGenerationProgress: 0,
   aiGenerationError: "",
@@ -2463,6 +2537,14 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     clipLauncher: createDefaultClipLauncherState(),
     showMissingMedia: false,
     missingMediaFiles: [],
+    showAIClipGeneration: false,
+    aiClipGenerationTrackId: null,
+    aiClipGenerationClipId: null,
+    aiClipGenerationWorkflowId: null,
+    aiClipGenerationModelId: DEFAULT_AI_MUSIC_MODEL_ID,
+    aiClipGenerationParams: {},
+    aiClipGenerationRange: null,
+    aiClipGenerationError: "",
   };
 }
 
@@ -2560,6 +2642,7 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "showMasterTrackInTCP",
   "showCrosshair",
   "showProjectCompare",
+  "showAIClipGeneration",
   "projectCompareData",
 
   // Piano Roll editing context — ephemeral
@@ -2567,6 +2650,13 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "pianoRollClipId",
   "dynamicSplitClipId",
   "crossfadeEditorClipIds",
+  "aiClipGenerationTrackId",
+  "aiClipGenerationClipId",
+  "aiClipGenerationWorkflowId",
+  "aiClipGenerationModelId",
+  "aiClipGenerationParams",
+  "aiClipGenerationRange",
+  "aiClipGenerationError",
 
   // Step Input state — runtime only
   "stepInputEnabled",
@@ -2721,6 +2811,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     stemSepClipId: null,
     stemSepClipName: "",
     stemSepClipDuration: 0,
+    showAIClipGeneration: false,
+    aiClipGenerationTrackId: null,
+    aiClipGenerationClipId: null,
+    aiClipGenerationWorkflowId: null,
+    aiClipGenerationModelId: DEFAULT_AI_MUSIC_MODEL_ID,
+    aiClipGenerationParams: {},
+    aiClipGenerationRange: null,
+    aiClipGenerationError: "",
     aiToolsStatus: DEFAULT_AI_TOOLS_STATUS,
     aiToolsStatusLoading: true,
     aiToolsStatusLastUpdatedAt: Date.now(),
@@ -3090,36 +3188,50 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
+        const isStableAudioImport = options.modelId === STABLE_AUDIO_3_MODEL_ID;
         const selectedFeatures = options.selectedFeatures?.length
           ? options.selectedFeatures
           : [options.requestedFeature ?? "stemSeparation"];
         const selectedFeaturesReady = selectedFeatures.every((featureId) => isAiFeatureReady(currentStatus, featureId));
-        if (currentStatus.installInProgress || selectedFeaturesReady) return;
+        if (currentStatus.installInProgress || (!isStableAudioImport && selectedFeaturesReady)) return undefined;
 
-        if (currentStatus.statusWarningCode === "reconciling_install_state") {
+        if (!isStableAudioImport && currentStatus.statusWarningCode === "reconciling_install_state") {
           get().openAiToolsSetup(options.requestedFeature);
           get().showToast("OpenStudio is still confirming the previous AI tools install result.", "info");
-          return;
+          return undefined;
         }
 
-        if (currentStatus.state === "pythonMissing") {
+        if (!isStableAudioImport && currentStatus.state === "pythonMissing") {
           get().openAiToolsSetup(options.requestedFeature);
-          return;
+          return undefined;
         }
 
         if (!options.userConfirmedDownload) {
           get().openAiToolsSetup(options.requestedFeature);
           get().showToast("Confirm the selected AI feature download before setup starts.", "info");
-          return;
+          return undefined;
         }
 
-      get().showToast("Selected AI features are being installed in the background.", "info");
+      get().showToast(
+        isStableAudioImport
+          ? "Stable Audio 3 setup is starting in the background."
+          : "Selected AI features are being installed in the background.",
+        "info",
+      );
+
+      const pendingMessage = isStableAudioImport
+        ? "Preparing Stable Audio 3 Medium import..."
+        : currentStatus.buildRuntimeMode === "downloaded-runtime"
+          ? "Checking OpenStudio AI runtime downloads..."
+          : "Preparing AI tools installation...";
 
       set({
         aiToolsStatus: {
           ...currentStatus,
           state:
-            currentStatus.buildRuntimeMode === "downloaded-runtime"
+            isStableAudioImport
+              ? "installing"
+              : currentStatus.buildRuntimeMode === "downloaded-runtime"
               ? "fetching_runtime_manifest"
               : "checking",
           installInProgress: true,
@@ -3130,25 +3242,16 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           error: undefined,
           statusWarning: undefined,
           statusWarningCode: undefined,
-          message:
-            currentStatus.buildRuntimeMode === "downloaded-runtime"
-              ? "Checking OpenStudio AI runtime downloads..."
-              : "Preparing AI tools installation...",
-          stepLabel:
-            currentStatus.buildRuntimeMode === "downloaded-runtime"
-              ? "Checking OpenStudio AI runtime downloads..."
-              : "Preparing AI tools installation...",
-          activityLines: [
-            currentStatus.buildRuntimeMode === "downloaded-runtime"
-              ? "Checking OpenStudio AI runtime downloads..."
-              : "Preparing AI tools installation...",
-          ],
+          message: pendingMessage,
+          stepLabel: pendingMessage,
+          activityLines: [pendingMessage],
         },
         aiToolsStatusLastUpdatedAt: Date.now(),
       });
 
       try {
         const result = await nativeBridge.installAiTools({
+          ...options,
           userConfirmedDownload: true,
           selectedFeatures,
           requestedFeature: options.requestedFeature,
@@ -3162,6 +3265,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         if (!result.started && result.error) {
           get().showToast(result.error, "error");
         }
+        return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (get().aiToolsStatus.installInProgress) {
@@ -3174,7 +3278,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             aiToolsStatusLoading: false,
             aiToolsStatusLastUpdatedAt: Date.now(),
           });
-          return;
+          return undefined;
         }
         set({
           aiToolsStatus: {
@@ -3188,6 +3292,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           aiToolsStatusLastUpdatedAt: Date.now(),
         });
         get().showToast(message, "error");
+        return undefined;
       }
     },
     resetAiTools: async () => {
@@ -4390,21 +4495,89 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       });
     },
 
-    setAITrackWorkflow: (trackId, workflowId) => {
+    setAITrackModel: (trackId, modelId) => {
       const state = get();
       const track = state.tracks.find((entry) => entry.id === trackId);
       if (!track || track.type !== "ai") return;
 
+      const previousModelId = resolveAiMusicModelId(track.aiMusicModelId);
       const previousWorkflow = track.aiWorkflow ?? "text-to-music";
       const previousParams = { ...(track.aiWorkflowParams ?? {}) };
-      const nextParams = getDefaultWorkflowParams(workflowId);
+      const nextModelId = resolveAiMusicModelId(modelId);
+      const currentWorkflowId = normalizeWorkflowId(previousWorkflow);
+      const nextWorkflow =
+        currentWorkflowId
+        && getAIWorkflow(currentWorkflowId, nextModelId, "ai-track").id === currentWorkflowId
+          ? getAIWorkflow(currentWorkflowId, nextModelId, "ai-track")
+          : getDefaultWorkflowForModel(nextModelId, "ai-track");
+      const nextParams = getDefaultWorkflowParams(nextWorkflow.id, nextModelId);
 
       set((store) => ({
         tracks: store.tracks.map((entry) =>
           entry.id === trackId
             ? {
                 ...entry,
-                aiWorkflow: workflowId,
+                aiMusicModelId: nextModelId,
+                aiWorkflow: nextWorkflow.id,
+                aiWorkflowParams: nextParams,
+              }
+            : entry,
+        ),
+      }));
+
+      commandManager.push({
+        type: "UPDATE_TRACK",
+        description: `Set AI model on "${track.name}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? {
+                    ...entry,
+                    aiMusicModelId: nextModelId,
+                    aiWorkflow: nextWorkflow.id,
+                    aiWorkflowParams: nextParams,
+                  }
+                : entry,
+            ),
+          }));
+        },
+        undo: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? {
+                    ...entry,
+                    aiMusicModelId: previousModelId,
+                    aiWorkflow: previousWorkflow,
+                    aiWorkflowParams: previousParams,
+                  }
+                : entry,
+            ),
+          }));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    setAITrackWorkflow: (trackId, workflowId) => {
+      const state = get();
+      const track = state.tracks.find((entry) => entry.id === trackId);
+      if (!track || track.type !== "ai") return;
+
+      const modelId = resolveAiMusicModelId(track.aiMusicModelId);
+      const workflow = getAIWorkflow(workflowId, modelId, "ai-track");
+      const previousWorkflow = track.aiWorkflow ?? "text-to-music";
+      const previousParams = { ...(track.aiWorkflowParams ?? {}) };
+      const nextParams = getDefaultWorkflowParams(workflow.id, modelId);
+
+      set((store) => ({
+        tracks: store.tracks.map((entry) =>
+          entry.id === trackId
+            ? {
+                ...entry,
+                aiWorkflow: workflow.id,
                 aiWorkflowParams: nextParams,
               }
             : entry,
@@ -4421,7 +4594,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               entry.id === trackId
                 ? {
                     ...entry,
-                    aiWorkflow: workflowId,
+                    aiWorkflow: workflow.id,
                     aiWorkflowParams: nextParams,
                   }
                 : entry,
@@ -4454,6 +4627,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const nextParams = normalizeWorkflowParams(
         track.aiWorkflow ?? "text-to-music",
         params,
+        track.aiMusicModelId,
       );
 
       set((store) => ({
@@ -4661,6 +4835,141 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             isModified: true,
           }));
           void nativeBridge.removePlaybackClip(trackId, newClip.filePath);
+        },
+      });
+    },
+
+    addGeneratedSourceAudioClip: async (options) => {
+      const state = get();
+      const sourceTrack = state.tracks.find((entry) => entry.id === options.sourceTrackId);
+      const sourceClip = sourceTrack?.clips.find((clip) => clip.id === options.sourceClipId);
+      if (!sourceTrack || !sourceClip) {
+        throw new Error("Source clip is no longer available.");
+      }
+
+      const workflow = getAIWorkflow(options.workflowId, DEFAULT_AI_MUSIC_MODEL_ID, "clip-context");
+      const mediaInfo = await nativeBridge.importMediaFile(options.filePath);
+      if (!mediaInfo?.filePath || !mediaInfo.duration) {
+        throw new Error(`Failed to prepare generated audio: ${options.filePath}`);
+      }
+
+      const sourceName = sourceClip.name || "Audio";
+      const generatedClip: AudioClip = {
+        id: crypto.randomUUID(),
+        filePath: mediaInfo.filePath,
+        name:
+          options.clipName
+          || mediaInfo.filePath.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, "")
+          || workflow.label,
+        startTime:
+          options.workflowId === "continue-clip"
+            ? sourceClip.startTime + sourceClip.duration
+            : sourceClip.startTime,
+        duration: mediaInfo.duration,
+        offset: 0,
+        color: sourceTrack.color || "#4cc9f0",
+        volumeDB: 0,
+        fadeIn: 0,
+        fadeOut: 0,
+        sampleRate: mediaInfo.sampleRate,
+        sourceLength: mediaInfo.duration,
+      };
+
+      const continuationEnd = generatedClip.startTime + generatedClip.duration;
+      const continuationClear =
+        options.workflowId === "continue-clip"
+        && sourceTrack.clips.every((clip) => {
+          if (clip.id === sourceClip.id) return true;
+          const clipEnd = clip.startTime + clip.duration;
+          return clip.startTime >= continuationEnd || clipEnd <= generatedClip.startTime;
+        });
+      const placeOnSourceTrack = options.workflowId === "continue-clip" && continuationClear;
+      const newTrackId = placeOnSourceTrack ? null : crypto.randomUUID();
+      const newTrackName =
+        options.workflowId === "variation"
+          ? `AI Variation - ${sourceName}`
+          : options.workflowId === "inpaint-selection"
+            ? `AI Inpaint - ${sourceName}`
+            : `AI Continuation - ${sourceName}`;
+      const newTrack = newTrackId
+        ? {
+            ...createDefaultTrack(newTrackId, newTrackName, sourceTrack.color, "audio", state.tracks),
+            clips: [generatedClip],
+          }
+        : null;
+      const targetTrackId = placeOnSourceTrack ? sourceTrack.id : newTrackId!;
+
+      get().executeCommand({
+        type: "ADD_CLIP",
+        description:
+          options.workflowId === "continue-clip"
+            ? `Add AI continuation for "${sourceName}"`
+            : `Add ${workflow.label.toLowerCase()} for "${sourceName}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((store) => {
+            if (placeOnSourceTrack) {
+              return {
+                tracks: store.tracks.map((entry) =>
+                  entry.id === sourceTrack.id
+                    ? { ...entry, clips: [...entry.clips, generatedClip] }
+                    : entry,
+                ),
+                isModified: true,
+              };
+            }
+
+            const tracks = [...store.tracks];
+            const insertIndex = tracks.findIndex((entry) => entry.id === sourceTrack.id);
+            if (insertIndex >= 0 && newTrack) {
+              tracks.splice(insertIndex + 1, 0, newTrack);
+            } else if (newTrack) {
+              tracks.push(newTrack);
+            }
+            return { tracks, isModified: true };
+          });
+
+          if (newTrackId) {
+            void nativeBridge.addTrack(newTrackId).catch(logBridgeError("sync"));
+          }
+          void nativeBridge.addPlaybackClip(
+            targetTrackId,
+            generatedClip.filePath,
+            generatedClip.startTime,
+            generatedClip.duration,
+            generatedClip.offset || 0,
+            generatedClip.volumeDB || 0,
+            generatedClip.fadeIn || 0,
+            generatedClip.fadeOut || 0,
+            generatedClip.id,
+            generatedClip.pitchCorrectionSourceFilePath,
+            generatedClip.pitchCorrectionSourceOffset,
+          ).catch(logBridgeError("sync"));
+        },
+        undo: () => {
+          set((store) => {
+            if (placeOnSourceTrack) {
+              return {
+                tracks: store.tracks.map((entry) =>
+                  entry.id === sourceTrack.id
+                    ? {
+                        ...entry,
+                        clips: entry.clips.filter((clip) => clip.id !== generatedClip.id),
+                      }
+                    : entry,
+                ),
+                isModified: true,
+              };
+            }
+            return {
+              tracks: store.tracks.filter((entry) => entry.id !== newTrackId),
+              isModified: true,
+            };
+          });
+          void nativeBridge.removePlaybackClip(targetTrackId, generatedClip.filePath).catch(logBridgeError("sync"));
+          if (newTrackId) {
+            void nativeBridge.removeTrack(newTrackId).catch(logBridgeError("sync"));
+          }
         },
       });
     },

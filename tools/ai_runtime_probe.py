@@ -629,8 +629,7 @@ def probe_runtime_capabilities(
             report,
             ready=False,
             message=(
-                "ACE-Step 1.5 assets are installed, but the packaged OpenStudio split backend "
-                "is missing runtime files: " + ", ".join(backend_missing)
+                "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup."
             ),
             error_code="missing_openstudio_native_backend",
         )
@@ -670,10 +669,7 @@ def probe_runtime_capabilities(
                 _set_music_generation_status(
                     report,
                     ready=False,
-                    message=(
-                        "ACE-Step 1.5 is installed, but the packaged OpenStudio split backend "
-                        f"cannot import its ACE-Step bridge in this environment: {bridge_import_error}"
-                    ),
+                    message="ACE-Step runtime files are present, but the ACE-Step bridge could not be loaded. Repair or reinstall ACE-Step Audio Generation setup.",
                     error_code="broken_v15_runtime_bridge",
                 )
                 report["backendDecisionTrace"].append(

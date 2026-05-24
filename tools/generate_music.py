@@ -29,6 +29,9 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import soundfile as sf
+
 from ai_runtime_probe import (
     DEFAULT_MUSIC_GEN_MODEL,
     REQUIRED_MUSIC_GEN_NATIVE_FILES,
@@ -62,6 +65,7 @@ LM_SHAPE_MISMATCH_MARKERS = (
     "size of tensor a",
     "must match the size of tensor b",
 )
+SOURCE_WORKFLOWS = {"variation", "inpaint-selection", "continue-clip"}
 
 ACTIVE_TRACE_LOCK = threading.Lock()
 ACTIVE_TRACE_SESSION: "AITraceSession | None" = None
@@ -166,7 +170,7 @@ def resolve_openstudio_native_backend() -> dict[str, str]:
     missing = [str(path) for path in required_paths if not path.exists()]
     if missing:
         raise GenerationFailure(
-            "The packaged OpenStudio ACE split backend is incomplete: " + ", ".join(missing),
+            "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup.",
             progress=0.04,
             failureKind="native_asset_missing",
         )
@@ -633,6 +637,188 @@ def normalize_generation_params(raw_params: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     return normalized
+
+
+def prepare_source_segment(
+    *,
+    raw_params: dict[str, Any],
+    output_path: Path,
+    request_id: str,
+) -> tuple[Path, dict[str, Any]]:
+    source = raw_params.get("source")
+    if not isinstance(source, dict):
+        raise GenerationFailure("Source-audio workflow requires a source clip payload.")
+
+    source_file = Path(normalize_text(source.get("filePath"))).expanduser()
+    if not source_file.exists():
+        raise GenerationFailure(f"Source audio file does not exist: {source_file}")
+
+    clip_offset = max(0.0, normalize_float(source.get("clipOffset"), 0.0))
+    clip_duration = max(0.01, normalize_float(source.get("clipDuration"), 0.0))
+    source_info = sf.info(str(source_file))
+    start_frame = int(round(clip_offset * source_info.samplerate))
+    frame_count = int(round(clip_duration * source_info.samplerate))
+    data, samplerate = sf.read(
+        str(source_file),
+        start=start_frame,
+        frames=frame_count,
+        always_2d=True,
+    )
+    if data.size == 0:
+        raise GenerationFailure("Source clip segment is empty after applying clip offset and duration.")
+
+    segment_path = output_path.parent / f"{request_id}_source_segment.wav"
+    sf.write(str(segment_path), data, samplerate)
+    return segment_path, {
+        "clipOffset": clip_offset,
+        "clipDuration": clip_duration,
+        "sourceClipId": normalize_text(source.get("sourceClipId")),
+        "sourceTrackId": normalize_text(source.get("sourceTrackId")),
+        "inpaintRange": source.get("inpaintRange") if isinstance(source.get("inpaintRange"), dict) else None,
+        "extensionDuration": max(0.01, normalize_float(source.get("extensionDuration"), 20.0)),
+    }
+
+
+def apply_source_workflow_params(
+    *,
+    workflow: str,
+    raw_params: dict[str, Any],
+    params: dict[str, Any],
+    output_path: Path,
+    request_id: str,
+) -> dict[str, Any]:
+    source_segment, source_meta = prepare_source_segment(
+        raw_params=raw_params,
+        output_path=output_path,
+        request_id=request_id,
+    )
+    params = dict(params)
+    params["src_audio"] = str(source_segment)
+    params["sourceClipId"] = source_meta.get("sourceClipId", "")
+    params["sourceClipDuration"] = source_meta["clipDuration"]
+
+    if workflow == "variation":
+        params["task_type"] = "cover"
+        params["duration"] = max(0.01, source_meta["clipDuration"])
+        params["audio_cover_strength"] = normalize_float(
+            raw_params.get("audio_cover_strength"),
+            0.55,
+        )
+        return params
+
+    if workflow == "inpaint-selection":
+        inpaint_range = source_meta.get("inpaintRange") or {}
+        start = normalize_float(
+            raw_params.get("repainting_start", raw_params.get("inpaint_start", inpaint_range.get("start", 0.0))),
+            0.0,
+        )
+        end = normalize_float(
+            raw_params.get("repainting_end", raw_params.get("inpaint_end", inpaint_range.get("end", source_meta["clipDuration"]))),
+            source_meta["clipDuration"],
+        )
+        params["task_type"] = "repaint"
+        params["duration"] = max(0.01, source_meta["clipDuration"])
+        params["repainting_start"] = max(0.0, min(start, source_meta["clipDuration"]))
+        params["repainting_end"] = max(params["repainting_start"], min(end, source_meta["clipDuration"]))
+        params["audio_cover_strength"] = normalize_float(
+            raw_params.get("audio_cover_strength"),
+            0.55,
+        )
+        return params
+
+    if workflow == "continue-clip":
+        extension_duration = max(
+            0.01,
+            normalize_float(raw_params.get("extension_duration"), source_meta["extensionDuration"]),
+        )
+        source_duration = source_meta["clipDuration"]
+        params["task_type"] = "repaint"
+        params["duration"] = source_duration + extension_duration
+        params["repainting_start"] = source_duration
+        params["repainting_end"] = source_duration + extension_duration
+        params["audio_cover_strength"] = normalize_float(
+            raw_params.get("audio_cover_strength"),
+            0.55,
+        )
+        params["continueSourceDuration"] = source_duration
+        params["continueExtensionDuration"] = extension_duration
+        return params
+
+    return params
+
+
+def crop_continuation_tail(
+    *,
+    generated_path: Path,
+    output_path: Path,
+    source_duration: float,
+    extension_duration: float,
+) -> None:
+    info = sf.info(str(generated_path))
+    start_frame = max(0, int(round(source_duration * info.samplerate)))
+    frame_count = max(1, int(round(extension_duration * info.samplerate)))
+    context_frame_count = min(start_frame, max(1, int(round(min(source_duration, 2.0) * info.samplerate))))
+    context_start_frame = max(0, start_frame - context_frame_count)
+    context_data = None
+    if context_frame_count > 0:
+        context_data, _ = sf.read(
+            str(generated_path),
+            start=context_start_frame,
+            frames=context_frame_count,
+            always_2d=True,
+        )
+    data, samplerate = sf.read(
+        str(generated_path),
+        start=start_frame,
+        frames=frame_count,
+        always_2d=True,
+    )
+    if data.size == 0:
+        raise GenerationFailure("ACE-Step continuation completed, but no generated tail was available to import.")
+    if context_data is not None and context_data.size:
+        tail_peak = float(np.max(np.abs(data))) if data.size else 0.0
+        tail_rms = float(np.sqrt(np.mean(np.square(data)))) if data.size else 0.0
+        context_peak = float(np.max(np.abs(context_data)))
+        context_rms = float(np.sqrt(np.mean(np.square(context_data))))
+        if tail_peak > 1.0e-5 and tail_rms > 1.0e-6 and context_rms > tail_rms:
+            desired_scale = context_rms / tail_rms
+            headroom_scale = 0.98 / tail_peak
+            context_peak_scale = context_peak / tail_peak if context_peak > tail_peak else desired_scale
+            scale = min(desired_scale, headroom_scale, context_peak_scale, 12.0)
+            if scale > 1.25:
+                data = np.clip(data * scale, -0.98, 0.98)
+    data = normalize_audio_headroom(data)
+    sf.write(str(output_path), data, samplerate)
+
+
+def normalize_audio_headroom(data: np.ndarray, *, headroom: float = 0.98) -> np.ndarray:
+    if data.size == 0:
+        return data
+    peak = float(np.max(np.abs(data)))
+    if peak > headroom and peak > 1.0e-9:
+        data = data * (headroom / peak)
+    return np.clip(data, -headroom, headroom)
+
+
+def crop_source_workflow_output(
+    *,
+    generated_path: Path,
+    output_path: Path,
+    duration: float,
+    workflow: str,
+) -> None:
+    info = sf.info(str(generated_path))
+    frame_count = max(1, int(round(max(0.01, duration) * info.samplerate)))
+    data, samplerate = sf.read(
+        str(generated_path),
+        start=0,
+        frames=frame_count,
+        always_2d=True,
+    )
+    if data.size == 0:
+        raise GenerationFailure(f"ACE-Step {workflow} completed, but no generated audio was available to import.")
+    data = normalize_audio_headroom(data)
+    sf.write(str(output_path), data, samplerate)
 
 
 def get_installed_checkpoint_assets(checkpoint_root: Path) -> set[str]:
@@ -1381,8 +1567,8 @@ def build_generation_param_payload(
     lyrics = normalize_text(params.get("lyrics"))
     instrumental = not lyrics
 
-    return {
-        "task_type": "text2music",
+    payload = {
+        "task_type": normalize_text(params.get("task_type")) or "text2music",
         "caption": normalize_text(params.get("prompt")),
         "lyrics": lyrics,
         "instrumental": instrumental,
@@ -1406,6 +1592,15 @@ def build_generation_param_payload(
         "use_cot_language": use_lm_audio_codes,
         "use_constrained_decoding": use_lm_audio_codes,
     }
+    if normalize_text(params.get("src_audio")):
+        payload["src_audio"] = normalize_text(params.get("src_audio"))
+    if "repainting_start" in params:
+        payload["repainting_start"] = normalize_float(params.get("repainting_start"), 0.0)
+    if "repainting_end" in params:
+        payload["repainting_end"] = normalize_float(params.get("repainting_end"), -1.0)
+    if "audio_cover_strength" in params:
+        payload["audio_cover_strength"] = normalize_float(params.get("audio_cover_strength"), 1.0)
+    return payload
 
 
 def build_generation_params(params: dict[str, Any], *, generation_mode: str):
@@ -1669,6 +1864,7 @@ class ProgressReporter:
             "phase": "idle",
             "message": "",
             "backend": backend,
+            "modelId": model_id,
             "musicGenerationModelId": model_id,
             "musicGenerationCheckpointRoot": str(checkpoint_root),
             "runMode": run_mode,
@@ -1798,6 +1994,7 @@ class ProgressReporter:
                 "phase": phase,
                 "message": message,
                 "backend": self.backend,
+                "modelId": self.model_id,
                 "runMode": self.run_mode,
                 "sessionMode": self.session_mode,
                 "runtimeProfile": self.runtime_profile,
@@ -2039,12 +2236,17 @@ class WorkerSession:
         lm_backend, lm_backend_reason, lm_acceleration_ready = resolve_lm_backend(device)
         reporter.set_lm_backend(lm_backend)
         if sys.platform == "win32" and device == "cuda" and not lm_acceleration_ready:
-            raise GenerationFailure(
-                "OpenStudio requires the pinned Windows ACE-Step acceleration stack before music generation can start. "
-                + lm_backend_reason,
-                progress=0.12,
+            reporter.update(
+                "loading",
+                0.12,
+                phase="initializing_model",
+                message="ACE-Step CUDA acceleration is incomplete; using the PyTorch LM fallback.",
                 lmBackend=lm_backend,
                 lmBackendReason=lm_backend_reason,
+                statusNote=(
+                    "ACE-Step optional acceleration is unavailable, so generation may be slower. "
+                    + lm_backend_reason
+                ),
             )
         init_status, init_ok = dit_handler.initialize_service(
             project_root=str(self.checkpoint_root),
@@ -2108,18 +2310,13 @@ class WorkerSession:
         session_mode: str,
         request_id: str,
     ) -> str:
-        if workflow == "continuation":
-            raise GenerationFailure(
-                "Continuation workflow is not yet supported by this ACE-Step bridge.",
-                progress=0.1,
-            )
-
         try:
             raw_params = json.loads(raw_params_json)
         except json.JSONDecodeError as exc:
             raise GenerationFailure(f"Invalid params JSON: {exc}") from exc
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        is_source_workflow = workflow in SOURCE_WORKFLOWS
         layout = validate_checkpoint_layout(self.checkpoint_root, self.model_id)
         selection = resolve_runtime_selection(
             requested_profile=normalize_text(raw_params.get("runtimeProfile"))
@@ -2128,10 +2325,12 @@ class WorkerSession:
             or DEFAULT_LM_SELECTION,
             checkpoint_root=self.checkpoint_root,
         )
-        use_legacy_wrapper = normalize_bool(
+        use_legacy_wrapper = is_source_workflow or normalize_bool(
             os.environ.get("OPENSTUDIO_USE_LEGACY_ACE_WRAPPER"),
             False,
         )
+        if use_legacy_wrapper:
+            ensure_hidden_legacy_lm_bridge(self.checkpoint_root)
         run_mode = (
             "warm"
             if use_legacy_wrapper
@@ -2186,6 +2385,25 @@ class WorkerSession:
                 statusNote=" ".join(selection["statusNotes"]).strip() or None,
             )
             params = normalize_generation_params(raw_params)
+            if is_source_workflow:
+                if "generate_audio_codes" not in raw_params:
+                    params["generate_audio_codes"] = False
+                reporter.update(
+                    "loading",
+                    0.07,
+                    phase="preparing_source_audio",
+                    message="Preparing the selected source clip for ACE-Step...",
+                    sourceClipId=normalize_text((raw_params.get("source") or {}).get("sourceClipId"))
+                    if isinstance(raw_params.get("source"), dict)
+                    else None,
+                )
+                params = apply_source_workflow_params(
+                    workflow=workflow,
+                    raw_params=raw_params,
+                    params=params,
+                    output_path=output_path,
+                    request_id=request_id,
+                )
             reporter.set_runtime_context(
                 run_mode=run_mode,
                 session_mode=session_mode,
@@ -2443,7 +2661,22 @@ class WorkerSession:
                 message="Writing the generated audio file...",
             )
             try:
-                shutil.copyfile(output_candidate, output_path)
+                if workflow == "continue-clip":
+                    crop_continuation_tail(
+                        generated_path=Path(output_candidate).expanduser().resolve(),
+                        output_path=output_path,
+                        source_duration=normalize_float(params.get("continueSourceDuration"), 0.0),
+                        extension_duration=normalize_float(params.get("continueExtensionDuration"), 20.0),
+                    )
+                elif workflow in {"variation", "inpaint-selection"}:
+                    crop_source_workflow_output(
+                        generated_path=Path(output_candidate).expanduser().resolve(),
+                        output_path=output_path,
+                        duration=normalize_float(params.get("sourceClipDuration"), params.get("duration", 0.0)),
+                        workflow=workflow,
+                    )
+                else:
+                    shutil.copyfile(output_candidate, output_path)
             except Exception as exc:  # pragma: no cover - file-system dependent
                 raise GenerationFailure(
                     f"Failed to save generated audio: {exc}",
