@@ -45,6 +45,25 @@ describe("interaction safety guards", () => {
     expect(midiWindowSource).toContain("installModalContextMenuLeakGuard()");
   });
 
+  it("isolates modal pointer drags without blocking text selection", () => {
+    expect(modalGuardSource).toContain("guardModalPointerEvent");
+    expect(modalGuardSource).toContain("event.stopPropagation();");
+    expect(modalGuardSource).toContain("isEditableTextTarget");
+    expect(modalGuardSource).toContain("document.addEventListener(\"mousemove\", stopModalPointerBubble, false)");
+    expect(modalGuardSource).toContain("nativeBridge.startWindowDrag()");
+    expect(modalSource).toContain("onMouseDown={guardModalPointerEvent}");
+    expect(modalSource).toContain("onPointerDown={guardModalPointerEvent}");
+    expect(modalSource).toContain("onMouseMove={guardModalPointerEvent}");
+    expect(modalGuardSource).toContain("event.preventDefault();");
+  });
+
+  it("keeps context submenus open while crossing into the submenu", () => {
+    expect(contextMenuSource).toContain("submenuCloseTimerRef");
+    expect(contextMenuSource).toContain("scheduleSubmenuClose");
+    expect(contextMenuSource).toContain("onMouseEnter={clearSubmenuCloseTimer}");
+    expect(contextMenuSource).toContain("left-full top-0 -ml-px");
+  });
+
   it("keeps piano roll resize and modal context-menu paths guarded", () => {
     expect(pianoRollSource).toContain("Math.max(1, containerRef.current.clientWidth)");
     expect(pianoRollSource).toContain("Math.max(1, containerRef.current.clientHeight)");

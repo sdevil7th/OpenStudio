@@ -24,6 +24,7 @@ import {
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
 import { maybeRunPitchRegressionDriver } from "./utils/pitchRegressionDriver";
+import { shouldAutoStopPlayback } from "./utils/transportAutoStop";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { TimelineRuler } from "./components/TimelineRuler";
@@ -82,6 +83,7 @@ const TimecodeSettingsPanel = React.lazy(() => import("./components/TimecodeSett
 const HelpOverlay = React.lazy(() => import("./components/HelpOverlay").then(m => ({ default: m.HelpOverlay })));
 const GettingStartedGuide = React.lazy(() => import("./components/GettingStartedGuide").then(m => ({ default: m.GettingStartedGuide })));
 const StemSeparationModal = React.lazy(() => import("./components/StemSeparationModal"));
+const AIClipGenerationModal = React.lazy(() => import("./components/AIClipGenerationModal"));
 const AiToolsSetupModal = React.lazy(() => import("./components/AiToolsSetupModal"));
 import {
   DndContext,
@@ -171,6 +173,7 @@ function App() {
     masterAutomationLanes,
     showMasterAutomation,
     showStemSeparation,
+    showAIClipGeneration,
     showAiToolsSetup,
     closeAiToolsSetup,
     hydrateRecentProjects,
@@ -246,6 +249,7 @@ function App() {
       masterAutomationLanes: state.masterAutomationLanes,
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
+      showAIClipGeneration: state.showAIClipGeneration,
       showAiToolsSetup: state.showAiToolsSetup,
       closeAiToolsSetup: state.closeAiToolsSetup,
       hydrateRecentProjects: state.hydrateRecentProjects,
@@ -391,11 +395,10 @@ function App() {
   const previousAiToolsInstallInProgressRef = useRef(aiToolsStatus.installInProgress);
   const hasNativeMusicProfile =
     (aiToolsStatus.musicGenerationAvailableProfiles ?? []).length === 0
-    || (aiToolsStatus.musicGenerationAvailableProfiles ?? []).includes("native-xl-turbo");
+    || (aiToolsStatus.musicGenerationAvailableProfiles ?? []).includes("ace-diffusers");
   const previousAiToolsFullReadyRef = useRef(Boolean(
     aiToolsStatus.musicGenerationReady
     && aiToolsStatus.musicGenerationLayoutValid
-    && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
     && hasNativeMusicProfile,
   ));
   const [aiToolsInstallStatusStale, setAiToolsInstallStatusStale] = useState(false);
@@ -475,7 +478,6 @@ function App() {
       currentState === "ready"
       && aiToolsStatus.musicGenerationReady
       && aiToolsStatus.musicGenerationLayoutValid
-      && (aiToolsStatus.musicGenerationPerformanceReady ?? true)
       && hasNativeMusicProfile,
     );
     const currentPartialReady = Boolean(
@@ -483,7 +485,6 @@ function App() {
       && (
         !aiToolsStatus.musicGenerationReady
         || !aiToolsStatus.musicGenerationLayoutValid
-        || !(aiToolsStatus.musicGenerationPerformanceReady ?? true)
         || !hasNativeMusicProfile
       ),
     );
@@ -509,7 +510,7 @@ function App() {
       } else if (currentPartialReady && readyStateChanged) {
         showToast(
           (!hasNativeMusicProfile
-            ? "Stem separation is ready, but the OpenStudio ACE split profile is still missing required music-generation assets."
+            ? "Stem separation is ready, but the ACE-Step Diffusers backend is still missing required music-generation assets."
             : "")
             ||
           aiToolsStatus.musicGenerationPerformanceStatusMessage
@@ -729,7 +730,7 @@ function App() {
       }
 
       if (command === "transport.record") {
-        void state.record();
+        void state.toggleRecord();
         return;
       }
 
@@ -833,6 +834,7 @@ function App() {
 
     let lastTime = performance.now();
     let lastAutoUpdate = 0; // throttle automation value updates to ~30fps
+    let autoStopInFlight = false;
     let frameId: number;
 
     const loop = () => {
@@ -843,6 +845,31 @@ function App() {
       const currentState = useDAWStore.getState();
       if (currentState.transport.isPlaying) {
         let newTime = currentState.transport.currentTime + dt;
+
+        const autoStopDecision = shouldAutoStopPlayback({
+          tracks: currentState.tracks,
+          transport: currentState.transport,
+          metronomeEnabled: currentState.metronomeEnabled,
+          nextTime: newTime,
+        });
+        if (autoStopDecision.shouldStop) {
+          if (!autoStopInFlight) {
+            autoStopInFlight = true;
+            if (autoStopDecision.stopTime !== null) {
+              currentState.setCurrentTime(autoStopDecision.stopTime);
+            }
+            console.log("[App] Auto-stopping silent playback", {
+              reason: autoStopDecision.reason,
+              stopTime: autoStopDecision.stopTime,
+              latestEndTime: autoStopDecision.bounds.latestEndTime,
+            });
+            void currentState.stop().catch((error) => {
+              console.warn("[App] Auto-stop silent playback failed", error);
+              autoStopInFlight = false;
+            });
+          }
+          return;
+        }
 
         // Loop: wrap back to loopStart when reaching loopEnd
         const { loopEnabled, loopStart, loopEnd } = currentState.transport;
@@ -898,9 +925,9 @@ function App() {
         useDAWStore.setState((current) => ({
           transport: {
             ...current.transport,
-            isPlaying: backendPlaying,
+            isPlaying: backendPlaying || Boolean(current.recordSession),
             isPaused: false,
-            isRecording: backendPlaying ? current.transport.isRecording : false,
+            isRecording: backendPlaying || Boolean(current.recordSession) ? current.transport.isRecording : false,
             currentTime: backendPos,
           },
         }));
@@ -1943,6 +1970,13 @@ function App() {
         </Suspense>
       )}
 
+      {/* AI Clip Generation Modal */}
+      {showAIClipGeneration && (
+        <Suspense fallback={null}>
+          <AIClipGenerationModal />
+        </Suspense>
+      )}
+
       {/* Channel Strip EQ Modal */}
       {showChannelStripEQ && (
         <Suspense fallback={null}>
@@ -2041,6 +2075,7 @@ function App() {
 
       {/* AI Tools Background Install Popup */}
       {!showStemSeparation &&
+        !showAIClipGeneration &&
         !showAiToolsSetup &&
         showAiToolsBackgroundInstallPopup &&
         aiToolsStatus.installInProgress && (

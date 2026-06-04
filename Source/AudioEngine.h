@@ -274,6 +274,7 @@ public:
     
     // Waveform Visualization
     juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels);
+    bool refreshWaveformPeaks(const juce::String& filePath);
     juce::var getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels);
 
     // Offline Render/Export
@@ -524,6 +525,7 @@ public:
     void cancelStemSeparation();
     void cancelAiToolsInstall();
     juce::var startAIGeneration(const juce::String& trackId,
+                                const juce::String& modelId,
                                 const juce::String& workflowId,
                                 const juce::String& paramsJSON);
     juce::var getAIGenerationProgress();
@@ -642,7 +644,8 @@ private:
     // FFmpeg helpers for lossy encoding and sample rate conversion
     juce::File findFFmpegExe() const;
     bool convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
-                           const juce::String& format, double targetSampleRate, int quality) const;
+                           const juce::String& format, double targetSampleRate, int quality,
+                           int bitDepth, int numChannels) const;
     // Device settings persistence
     void saveDeviceSettings();
     void loadDeviceSettings();
@@ -872,6 +875,7 @@ private:
     // Polyphonic Pitch Detection (Phase 6) — lazy-loaded
     PolyPitchDetector polyPitchDetector;
     bool polyModelLoadAttempted = false;
+    juce::CriticalSection polyAnalysisLock;
 
     // Polyphonic Pitch Editing (Phase 7)
     PolyResynthesizer polyResynthesizer;

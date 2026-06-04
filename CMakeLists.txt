@@ -634,21 +634,12 @@ if(EXISTS "${AI_MUSIC_GENERATION_SCRIPT}")
     )
 endif()
 
-set(AI_OPENSTUDIO_ACE_RUNNER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_runner.py")
-if(EXISTS "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}")
+set(AI_STABLE_AUDIO_GENERATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stable_audio3_generate.py")
+if(EXISTS "${AI_STABLE_AUDIO_GENERATION_SCRIPT}")
     openstudio_copy_runtime_file(
-        "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}"
-        "scripts/openstudio_ace_runner.py"
-        "Copying OpenStudio ACE runner script to output directory"
-    )
-endif()
-
-set(AI_OPENSTUDIO_ACE_BACKEND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_backend")
-if(EXISTS "${AI_OPENSTUDIO_ACE_BACKEND_DIR}")
-    openstudio_copy_runtime_directory(
-        "${AI_OPENSTUDIO_ACE_BACKEND_DIR}"
-        "scripts/openstudio_ace_backend"
-        "Copying OpenStudio ACE backend package to output directory"
+        "${AI_STABLE_AUDIO_GENERATION_SCRIPT}"
+        "scripts/stable_audio3_generate.py"
+        "Copying Stable Audio 3 generation helper script to output directory"
     )
 endif()
 
@@ -707,6 +698,14 @@ openstudio_remove_runtime_file(
 openstudio_remove_runtime_file(
     "scripts/openstudio_ace_backend/parity_debug.py"
     "Removing ACE-Step parity backend helper from output directory"
+)
+openstudio_remove_runtime_file(
+    "scripts/openstudio_ace_runner.py"
+    "Removing legacy OpenStudio ACE split runner from output directory"
+)
+openstudio_remove_runtime_path(
+    "scripts/openstudio_ace_backend"
+    "Removing legacy OpenStudio ACE split backend from output directory"
 )
 set(LEGACY_EXTERNAL_ACE_RUNNER_PATH "scripts/co")
 string(APPEND LEGACY_EXTERNAL_ACE_RUNNER_PATH "mfy_ace_runner.py")

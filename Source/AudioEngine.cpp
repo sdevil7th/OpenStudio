@@ -3920,10 +3920,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (track->hasActiveARA())
             anyActiveARAInCallback = true;
 
-        // Solo logic: if any track is soloed, skip non-soloed tracks entirely
-        // (recording still works because record-armed tracks should also be soloed,
-        //  and in practice users don't solo-off a track they're actively recording)
-        if (anySoloed && !track->getSolo())
+        const bool excludedBySolo = anySoloed && !track->getSolo();
+        const bool hasActiveAudioRecording = isRecordMode.load() && audioRecorder.isRecording(trackId);
+        const bool needsRecordingPath = track->getRecordArmed() || hasActiveAudioRecording;
+
+        // Solo should silence non-soloed tracks, but it must not prevent an
+        // armed/active track from reaching the recorder.
+        if (excludedBySolo && !needsRecordingPath)
         {
             track->resetRMS();
             continue;
@@ -3938,7 +3941,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                           && !staticMuteBlocksInput
                                           && (track->getRecordArmed()
                                               || track->getInputMonitoring()
-                                              || audioRecorder.isRecording(trackId));
+                                              || hasActiveAudioRecording);
         const double blockStartTimeSeconds = currentSamplePosition / currentSampleRate;
         const bool shouldProcessMidi = track->needsProcessing(blockStartTimeSeconds, numSamples,
                                                               currentSampleRate, isPlaying.load());
@@ -4049,7 +4052,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // ========== RECORD RAW AUDIO (BEFORE FX) ==========
         // Write to recorder if transport is playing AND in record mode
         // This captures the raw input BEFORE any FX processing
-        if (isPlaying && isRecordMode && audioRecorder.isRecording(trackId))
+        if (isPlaying && isRecordMode.load() && hasActiveAudioRecording)
         {
             // Punch recording: only write audio within punch range
             bool shouldWrite = true;
@@ -4144,7 +4147,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
 
         // ========== SEND MIXING: fill destination track send accum buffers ==========
-        if (!trackEntry.sends.empty())
+        if (!excludedBySolo && !trackEntry.sends.empty())
         {
             const auto& preFaderBuffer = track->getPreFaderBuffer();
             for (const auto& send : trackEntry.sends)
@@ -4194,7 +4197,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             track->sendMIDIToOutput(midiMessages, currentSampleRate, track->getMute());
 
         // Mix track output to device outputs (only if master send is enabled)
-        if (track->getMasterSendEnabled())
+        if (!excludedBySolo && track->getMasterSendEnabled())
         {
             int outStart = track->getOutputStartChannel();
             int outCount = track->getOutputChannelCount();
@@ -6566,6 +6569,44 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         addSuite("release_guardrails", false, "Guardrail payload missing");
         addSuite("precision_benchmark_matrix", false, "Guardrail payload missing");
         addSuite("plugin_capability_matrix", false, "Guardrail payload missing");
+    }
+
+    {
+        constexpr double fixtureSampleRate = 48000.0;
+        constexpr int fixtureBlockSize = 512;
+        constexpr double fixtureBpm = 120.0;
+        const double samplesPerBeat = (60.0 / fixtureBpm) * fixtureSampleRate;
+
+        auto firstClickSampleForStart = [&] (double startSample)
+        {
+            Metronome probe;
+            probe.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            probe.setBpm(fixtureBpm);
+            probe.setTimeSignature(4, 4);
+            probe.setVolume(1.0f);
+            probe.setEnabled(true);
+            juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+            buffer.clear();
+            probe.getNextAudioBlock(buffer, startSample);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                if (std::abs(buffer.getSample(0, sample)) > 1.0e-5f
+                    || std::abs(buffer.getSample(1, sample)) > 1.0e-5f)
+                    return sample;
+            }
+            return -1;
+        };
+
+        const int sampleZeroClick = firstClickSampleForStart(0.0);
+        const int midBeatClick = firstClickSampleForStart(samplesPerBeat * 0.5);
+        const int boundaryClick = firstClickSampleForStart(samplesPerBeat);
+        const bool metronomeBoundaryPass = sampleZeroClick == 1
+                                        && midBeatClick < 0
+                                        && boundaryClick == 1;
+        addSuite("metronome_boundary_start_fixture", metronomeBoundaryPass,
+                 "sample0FirstClick=" + juce::String(sampleZeroClick)
+                     + ", midBeatFirstClick=" + juce::String(midBeatClick)
+                     + ", boundaryFirstClick=" + juce::String(boundaryClick));
     }
 
     auto bufferFiniteAndBounded = [] (const juce::AudioBuffer<float>& buffer, float peakLimit)
@@ -10749,6 +10790,25 @@ juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int sample
     return peakCache.getPeaks(audioFile, samplesPerPixel, startSample, numPixels);
 }
 
+bool AudioEngine::refreshWaveformPeaks(const juce::String& filePath)
+{
+    juce::File audioFile(filePath);
+    if (!audioFile.existsAsFile())
+    {
+        juce::Logger::writeToLog("refreshWaveformPeaks: File not found: " + filePath);
+        return false;
+    }
+
+    peakCache.invalidate(audioFile);
+    peakCache.generateAsync(audioFile, [this, filePath]() {
+        juce::Logger::writeToLog("refreshWaveformPeaks: Peak cache ready for: " + filePath);
+        if (onPeaksReady)
+            onPeaksReady(filePath);
+    });
+
+    return true;
+}
+
 juce::var AudioEngine::getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels)
 {
     logAudioRecord("getRecordingPeaks track=" + trackId
@@ -11574,7 +11634,8 @@ juce::File AudioEngine::findFFmpegExe() const
 }
 
 bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
-                                     const juce::String& format, double targetSampleRate, int quality) const
+                                     const juce::String& format, double targetSampleRate, int quality,
+                                     int bitDepth, int numChannels) const
 {
     auto ffmpeg = findFFmpegExe();
     if (!ffmpeg.existsAsFile())
@@ -11589,15 +11650,32 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     args.add("-y");                                // Overwrite output
     args.add("-i");
     args.add(inputFile.getFullPathName());         // Input file
-
-    // Sample rate conversion (if target differs from source)
-    if (targetSampleRate > 0)
-    {
-        args.add("-ar");
-        args.add(juce::String((int)targetSampleRate));
-    }
+    args.add("-map");
+    args.add("0:a:0");
+    args.add("-vn");
+    args.add("-sn");
+    args.add("-dn");
 
     juce::String formatLower = format.toLowerCase();
+    double outputSampleRate = targetSampleRate;
+    if (formatLower == "mp3" && outputSampleRate > 48000.0)
+    {
+        logToDisk("convertWithFFmpeg: MP3 does not support " + juce::String(outputSampleRate)
+                  + " Hz; using 48000 Hz for MP3 output");
+        outputSampleRate = 48000.0;
+    }
+
+    // Sample rate conversion (if target differs from source)
+    if (outputSampleRate > 0)
+    {
+        args.add("-ar");
+        args.add(juce::String((int)outputSampleRate));
+    }
+    if (numChannels == 1 || numChannels == 2)
+    {
+        args.add("-ac");
+        args.add(juce::String(numChannels));
+    }
 
     if (formatLower == "mp3")
     {
@@ -11616,6 +11694,29 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
         int q = (quality > 0) ? quality : 6;
         args.add("-q:a");
         args.add(juce::String(q));
+    }
+    else if (formatLower == "wav")
+    {
+        args.add("-codec:a");
+        args.add(bitDepth == 32 ? "pcm_f32le" : (bitDepth == 16 ? "pcm_s16le" : "pcm_s24le"));
+    }
+    else if (formatLower == "aiff" || formatLower == "aif")
+    {
+        args.add("-codec:a");
+        args.add(bitDepth == 32 ? "pcm_f32be" : (bitDepth == 16 ? "pcm_s16be" : "pcm_s24be"));
+    }
+    else if (formatLower == "flac")
+    {
+        const int flacBitDepth = bitDepth >= 24 ? 24 : 16;
+        args.add("-codec:a");
+        args.add("flac");
+        args.add("-sample_fmt");
+        args.add(flacBitDepth == 24 ? "s32" : "s16");
+        if (flacBitDepth == 24)
+        {
+            args.add("-bits_per_raw_sample");
+            args.add("24");
+        }
     }
     else
     {
@@ -11690,8 +11791,9 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     // Use requested sample rate for render if provided, otherwise fall back to device rate.
     // PlaybackEngine::fillTrackBuffer() handles per-file SR conversion automatically,
     // so rendering at a different rate than the device is fully supported.
-    double actualSampleRate = (renderSampleRate > 0) ? renderSampleRate : currentSampleRate;
-    if (actualSampleRate <= 0) actualSampleRate = 44100.0;
+    double requestedOutputSampleRate = (renderSampleRate > 0) ? renderSampleRate : currentSampleRate;
+    if (requestedOutputSampleRate <= 0) requestedOutputSampleRate = 44100.0;
+    double actualSampleRate = requestedOutputSampleRate;
     if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 24;
     if (numChannels < 1 || numChannels > 2) numChannels = 2;
 
@@ -11713,8 +11815,13 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     if (isStemRender)
         stemTrackId = source.substring(5); // After "stem:"
 
-    logToDisk("renderProject: Using actualSampleRate=" + juce::String(actualSampleRate) +
-              (actualSampleRate != currentSampleRate ? " (differs from device rate " + juce::String(currentSampleRate) + ")" : " (device rate)"));
+    const bool canUseFFmpegSampleRatePostProcess =
+        isLossyFormat
+        || formatLower == "wav"
+        || formatLower == "aiff"
+        || formatLower == "aif"
+        || formatLower == "flac";
+
     if (isLossyFormat)
         logToDisk("renderProject: Lossy format=" + formatLower + " codecQuality=" + juce::String(codecQuality));
     if (isStemRender)
@@ -11871,6 +11978,67 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     }
 
     logToDisk("renderProject: " + juce::String((int)trackSnapshots.size()) + " tracks, anySoloed=" + juce::String(anySoloed ? "true" : "false"));
+
+    if (canUseFFmpegSampleRatePostProcess)
+    {
+        double includedClipSampleRate = 0.0;
+        bool includedClipsHaveSingleSampleRate = false;
+        bool includedClipSampleRateMismatch = false;
+        juce::AudioFormatManager sourceRateFormatManager;
+        sourceRateFormatManager.registerBasicFormats();
+
+        for (const auto& clip : clipSnapshot)
+        {
+            if (! clip.isActive)
+                continue;
+
+            auto trackIt = trackSnapshotById.find(clip.trackId);
+            if (trackIt == trackSnapshotById.end())
+                continue;
+
+            const auto& snap = trackIt->second;
+            if (isStemRender && snap.id != stemTrackId)
+                continue;
+            if (! isStemRender && snap.muted)
+                continue;
+            if (! isStemRender && anySoloed && ! snap.soloed)
+                continue;
+
+            std::unique_ptr<juce::AudioFormatReader> reader(sourceRateFormatManager.createReaderFor(clip.audioFile));
+            if (! reader || reader->sampleRate <= 0.0)
+                continue;
+
+            if (! includedClipsHaveSingleSampleRate)
+            {
+                includedClipSampleRate = reader->sampleRate;
+                includedClipsHaveSingleSampleRate = true;
+            }
+            else if (std::abs(includedClipSampleRate - reader->sampleRate) > 1.0)
+            {
+                includedClipSampleRateMismatch = true;
+                break;
+            }
+        }
+
+        if (includedClipsHaveSingleSampleRate
+            && ! includedClipSampleRateMismatch
+            && std::abs(includedClipSampleRate - requestedOutputSampleRate) > 1.0
+            && includedClipSampleRate <= 192000.0)
+        {
+            logToDisk("renderProject: intermediate render sample rate set from "
+                      + juce::String(actualSampleRate) + " to source rate "
+                      + juce::String(includedClipSampleRate)
+                      + " so FFmpeg handles final SRC to "
+                      + juce::String(requestedOutputSampleRate));
+            actualSampleRate = includedClipSampleRate;
+            needsFFmpegPostProcess = true;
+        }
+    }
+
+    logToDisk("renderProject: Using actualSampleRate=" + juce::String(actualSampleRate) +
+              (std::abs(actualSampleRate - requestedOutputSampleRate) > 1.0
+                  ? " (ffmpeg intermediate; requested output rate " + juce::String(requestedOutputSampleRate) + ")"
+                  : (actualSampleRate != currentSampleRate ? " (differs from device rate " + juce::String(currentSampleRate) + ")" : " (device rate)")));
 
     struct ScopedTrackMuteBypass
     {
@@ -12208,7 +12376,10 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         root->setProperty("requestedOutputFile", outputFile.getFullPathName());
         root->setProperty("renderFile", renderFile.getFullPathName());
         root->setProperty("format", format);
+        root->setProperty("requestedOutputSampleRate", requestedOutputSampleRate);
         root->setProperty("actualSampleRate", actualSampleRate);
+        root->setProperty("ffmpegPostProcess", needsFFmpegPostProcess);
+        root->setProperty("lossyIntermediateRender", isLossyFormat);
         root->setProperty("bitDepth", bitDepth);
         root->setProperty("channels", numChannels);
         root->setProperty("normalize", normalize);
@@ -12962,12 +13133,14 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         logToDisk ("renderProject: signal-chain debug report=" + reportFile.getFullPathName());
     }
 
-    // ========== 9. FFmpeg post-processing (lossy encoding only) ==========
+    // ========== 9. FFmpeg post-processing (encoding or final SRC) ==========
     if (needsFFmpegPostProcess)
     {
-        logToDisk("renderProject: Starting FFmpeg post-processing (lossy encoding)...");
-        // SR conversion is already handled natively — no need to pass targetSR here
-        bool ffmpegOk = convertWithFFmpeg(renderFile, outputFile, formatLower, 0, codecQuality);
+        logToDisk("renderProject: Starting FFmpeg post-processing (encoding/final SRC)...");
+        // Let FFmpeg perform the final output SRC/encode step.
+        bool ffmpegOk = convertWithFFmpeg(renderFile, outputFile, formatLower,
+                                          requestedOutputSampleRate, codecQuality,
+                                          bitDepth, numChannels);
 
         // Clean up temp file
         renderFile.deleteFile();
@@ -16541,30 +16714,41 @@ bool AudioEngine::isPolyphonicDetectionAvailable() const
 #endif
 }
 
+static juce::var makePolyAnalysisError(const juce::String& clipId, const juce::String& error)
+{
+    auto errObj = std::make_unique<juce::DynamicObject>();
+    errObj->setProperty("error", error);
+    errObj->setProperty("clipId", clipId);
+    errObj->setProperty("sampleRate", 22050.0);
+    errObj->setProperty("hopSize", 256);
+    errObj->setProperty("pitchSalience", juce::Array<juce::var>());
+    errObj->setProperty("salienceDownsampleFactor", 1);
+    errObj->setProperty("notes", juce::Array<juce::var>());
+    return juce::var(errObj.release());
+}
+
 juce::var AudioEngine::analyzePolyphonic(const juce::String& trackId, const juce::String& clipId)
 {
-    // Lazy-load the ONNX model on first use
-    if (! polyModelLoadAttempted)
+    // Lazy-load the ONNX model on first use. Basic Pitch/ONNX Runtime objects are
+    // shared by all conversion requests, so model load and inference are serialized.
     {
-        polyModelLoadAttempted = true;
-        auto exeDir = getApplicationRuntimeDirectory();
-        auto modelFile = exeDir.getChildFile("models").getChildFile("basic_pitch_nmp.onnx");
-        if (! modelFile.existsAsFile())
+        const juce::ScopedLock lock(polyAnalysisLock);
+        if (! polyModelLoadAttempted)
         {
-            juce::Logger::writeToLog("analyzePolyphonic: Model not found at " + modelFile.getFullPathName());
-            // Try alternative location
-            modelFile = exeDir.getChildFile("basic_pitch_nmp.onnx");
+            polyModelLoadAttempted = true;
+            auto exeDir = getApplicationRuntimeDirectory();
+            auto modelFile = exeDir.getChildFile("models").getChildFile("basic_pitch_nmp.onnx");
+            if (! modelFile.existsAsFile())
+            {
+                juce::Logger::writeToLog("analyzePolyphonic: Model not found at " + modelFile.getFullPathName());
+                // Try alternative location
+                modelFile = exeDir.getChildFile("basic_pitch_nmp.onnx");
+            }
+            polyPitchDetector.loadModel(modelFile);
         }
-        polyPitchDetector.loadModel(modelFile);
-    }
 
-    if (! polyPitchDetector.isModelLoaded())
-    {
-        auto errObj = std::make_unique<juce::DynamicObject>();
-        errObj->setProperty("error", "Polyphonic model not loaded. Place basic_pitch_nmp.onnx in the models/ directory.");
-        errObj->setProperty("clipId", clipId);
-        errObj->setProperty("notes", juce::Array<juce::var>());
-        return juce::var(errObj.release());
+        if (! polyPitchDetector.isModelLoaded())
+            return makePolyAnalysisError(clipId, "Polyphonic model not loaded. Place basic_pitch_nmp.onnx in the models/ directory.");
     }
 
     // Find the clip's audio file
@@ -16579,23 +16763,33 @@ juce::var AudioEngine::analyzePolyphonic(const juce::String& trackId, const juce
         }
     }
 
-    if (! foundClip || ! foundClip->audioFile.existsAsFile())
-        return juce::var();
+    if (! foundClip)
+        return makePolyAnalysisError(clipId, "Audio clip not found for MIDI conversion.");
+
+    if (! foundClip->audioFile.existsAsFile())
+        return makePolyAnalysisError(clipId, "Audio file for clip is missing.");
 
     // Read audio file
     juce::AudioFormatManager fmtMgr;
     fmtMgr.registerBasicFormats();
     std::unique_ptr<juce::AudioFormatReader> reader(fmtMgr.createReaderFor(foundClip->audioFile));
-    if (! reader) return juce::var();
+    if (! reader)
+        return makePolyAnalysisError(clipId, "Could not read audio file for MIDI conversion.");
 
-    int startSample = static_cast<int>(foundClip->offset * reader->sampleRate);
-    int numSamples = static_cast<int>(foundClip->duration * reader->sampleRate);
-    numSamples = std::min(numSamples, static_cast<int>(reader->lengthInSamples) - startSample);
-    if (numSamples <= 0) return juce::var();
+    const int64_t startSample64 = static_cast<int64_t>(std::round(foundClip->offset * reader->sampleRate));
+    const int64_t requestedSamples64 = static_cast<int64_t>(std::round(foundClip->duration * reader->sampleRate));
+    if (startSample64 < 0 || requestedSamples64 <= 0 || startSample64 >= reader->lengthInSamples)
+        return makePolyAnalysisError(clipId, "Audio clip has no readable audio in its visible range.");
+
+    const int64_t availableSamples64 = reader->lengthInSamples - startSample64;
+    const int numSamples = static_cast<int>(std::min<int64_t>(requestedSamples64, availableSamples64));
+    if (numSamples <= 0)
+        return makePolyAnalysisError(clipId, "Audio clip has no readable audio in its visible range.");
 
     // Read and mix to mono
     juce::AudioBuffer<float> buffer(static_cast<int>(reader->numChannels), numSamples);
-    reader->read(&buffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+    if (! reader->read(&buffer, 0, numSamples, static_cast<juce::int64>(startSample64), true, true))
+        return makePolyAnalysisError(clipId, "Could not read audio file for MIDI conversion.");
 
     juce::AudioBuffer<float> mono(1, numSamples);
     mono.clear();
@@ -16603,11 +16797,14 @@ juce::var AudioEngine::analyzePolyphonic(const juce::String& trackId, const juce
         mono.addFrom(0, 0, buffer, ch, 0, numSamples, 1.0f / static_cast<float>(buffer.getNumChannels()));
 
     // Run polyphonic analysis
-    auto result = polyPitchDetector.analyze(mono.getReadPointer(0), numSamples,
-                                             reader->sampleRate, clipId);
-
-    // Cache result for reuse in polyphonic editing
-    polyAnalysisCache[clipId] = result;
+    PolyPitchDetector::PolyAnalysisResult result;
+    {
+        const juce::ScopedLock lock(polyAnalysisLock);
+        result = polyPitchDetector.analyze(mono.getReadPointer(0), numSamples,
+                                           reader->sampleRate, clipId);
+        // Cache result for reuse in polyphonic editing
+        polyAnalysisCache[clipId] = result;
+    }
 
     return PolyPitchDetector::resultToJSON(result);
 }
@@ -16633,17 +16830,25 @@ juce::var AudioEngine::applyPolyPitchCorrection(const juce::String& trackId,
                                                   const juce::var& editedNotesJson)
 {
     // Check if we have a cached analysis for this clip
-    auto cacheIt = polyAnalysisCache.find(clipId);
-    if (cacheIt == polyAnalysisCache.end())
+    PolyPitchDetector::PolyAnalysisResult analysisResult;
     {
-        // Need to run analysis first
-        analyzePolyphonic(trackId, clipId);
-        cacheIt = polyAnalysisCache.find(clipId);
-        if (cacheIt == polyAnalysisCache.end())
-            return PolyResynthesizer::resultToJSON("", false);
+        const juce::ScopedLock lock(polyAnalysisLock);
+        auto cacheIt = polyAnalysisCache.find(clipId);
+        if (cacheIt != polyAnalysisCache.end())
+            analysisResult = cacheIt->second;
     }
 
-    const auto& analysisResult = cacheIt->second;
+    if (analysisResult.clipId.isEmpty())
+    {
+        analyzePolyphonic(trackId, clipId);
+        const juce::ScopedLock lock(polyAnalysisLock);
+        auto cacheIt = polyAnalysisCache.find(clipId);
+        if (cacheIt != polyAnalysisCache.end())
+            analysisResult = cacheIt->second;
+    }
+
+    if (analysisResult.clipId.isEmpty())
+        return PolyResynthesizer::resultToJSON("", false);
 
     // Find the clip's audio file
     auto clips = playbackEngine.getClipSnapshot();
@@ -16729,16 +16934,25 @@ juce::var AudioEngine::soloPolyNote(const juce::String& trackId,
                                      const juce::String& noteId)
 {
     // Check cache
-    auto cacheIt = polyAnalysisCache.find(clipId);
-    if (cacheIt == polyAnalysisCache.end())
+    PolyPitchDetector::PolyAnalysisResult analysisResult;
     {
-        analyzePolyphonic(trackId, clipId);
-        cacheIt = polyAnalysisCache.find(clipId);
-        if (cacheIt == polyAnalysisCache.end())
-            return PolyResynthesizer::resultToJSON("", false);
+        const juce::ScopedLock lock(polyAnalysisLock);
+        auto cacheIt = polyAnalysisCache.find(clipId);
+        if (cacheIt != polyAnalysisCache.end())
+            analysisResult = cacheIt->second;
     }
 
-    const auto& analysisResult = cacheIt->second;
+    if (analysisResult.clipId.isEmpty())
+    {
+        analyzePolyphonic(trackId, clipId);
+        const juce::ScopedLock lock(polyAnalysisLock);
+        auto cacheIt = polyAnalysisCache.find(clipId);
+        if (cacheIt != polyAnalysisCache.end())
+            analysisResult = cacheIt->second;
+    }
+
+    if (analysisResult.clipId.isEmpty())
+        return PolyResynthesizer::resultToJSON("", false);
 
     // Find clip audio
     auto clips = playbackEngine.getClipSnapshot();
@@ -17009,6 +17223,7 @@ void AudioEngine::cancelAiToolsInstall()
 }
 
 juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
+                                         const juce::String& modelId,
                                          const juce::String& workflowId,
                                          const juce::String& paramsJSON)
 {
@@ -17026,51 +17241,71 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
     auto aiToolsStatus = stemSeparator.getAiToolsStatus();
     if (auto* statusObject = aiToolsStatus.getDynamicObject())
     {
-        const auto musicGenerationReady = static_cast<bool>(statusObject->getProperty("musicGenerationReady"));
-        const auto layoutValid = static_cast<bool>(statusObject->getProperty("musicGenerationLayoutValid"));
-        const auto performanceReady = ! statusObject->hasProperty("musicGenerationPerformanceReady")
-            || static_cast<bool>(statusObject->getProperty("musicGenerationPerformanceReady"));
-        const auto availableProfilesVar = statusObject->getProperty("musicGenerationAvailableProfiles");
-        auto hasNativeMusicProfile = true;
-        if (auto* availableProfilesArray = availableProfilesVar.getArray())
+        if (modelId == "stable-audio-3-medium")
         {
-            if (! availableProfilesArray->isEmpty())
+            auto stableReady = false;
+            juce::String stableMessage = "Stable Audio 3 Medium is not set up yet.";
+            if (auto* musicModels = statusObject->getProperty("musicModels").getDynamicObject())
             {
-                hasNativeMusicProfile = false;
-                for (const auto& profile : *availableProfilesArray)
+                if (auto* stableModel = musicModels->getProperty("stable-audio-3-medium").getDynamicObject())
                 {
-                    if (profile.toString() == "native-xl-turbo")
+                    stableReady = static_cast<bool>(stableModel->getProperty("ready"));
+                    stableMessage = stableModel->getProperty("message").toString();
+                }
+            }
+
+            if (! stableReady)
+            {
+                result->setProperty("started", false);
+                result->setProperty("error", stableMessage.isNotEmpty()
+                    ? stableMessage
+                    : "Import Stable Audio 3 Medium from AI Tools Setup before generating.");
+                return juce::var(result.release());
+            }
+        }
+        else
+        {
+            const auto musicGenerationReady = static_cast<bool>(statusObject->getProperty("musicGenerationReady"));
+            const auto layoutValid = static_cast<bool>(statusObject->getProperty("musicGenerationLayoutValid"));
+            const auto availableProfilesVar = statusObject->getProperty("musicGenerationAvailableProfiles");
+            auto hasNativeMusicProfile = true;
+            if (auto* availableProfilesArray = availableProfilesVar.getArray())
+            {
+                if (! availableProfilesArray->isEmpty())
+                {
+                    hasNativeMusicProfile = false;
+                    for (const auto& profile : *availableProfilesArray)
                     {
-                        hasNativeMusicProfile = true;
-                        break;
+                        if (profile.toString() == "ace-diffusers")
+                        {
+                            hasNativeMusicProfile = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if (! musicGenerationReady || ! layoutValid || ! performanceReady || ! hasNativeMusicProfile)
-        {
-            const auto musicGenerationStatusMessage = statusObject->getProperty("musicGenerationStatusMessage").toString();
-            const auto musicGenerationPerformanceStatusMessage = statusObject->getProperty("musicGenerationPerformanceStatusMessage").toString();
-            const auto statusMessage = statusObject->getProperty("message").toString();
-            const auto errorMessage = statusObject->getProperty("error").toString();
-            const auto modelId = statusObject->getProperty("musicGenerationModelId").toString();
-            const auto checkpointRoot = statusObject->getProperty("musicGenerationCheckpointRoot").toString();
-            result->setProperty("started", false);
-            result->setProperty(
-                "error",
-                errorMessage.isNotEmpty()
-                    ? errorMessage
-                    : (! hasNativeMusicProfile)
-                        ? "The Native XL Turbo ACE-Step profile is still missing required music-generation assets. Retry AI Tools install to finish setup."
-                    : musicGenerationPerformanceStatusMessage.isNotEmpty()
-                        ? musicGenerationPerformanceStatusMessage
-                    : musicGenerationStatusMessage.isNotEmpty()
-                        ? musicGenerationStatusMessage
-                    : (! layoutValid && modelId.isNotEmpty() && checkpointRoot.isNotEmpty())
-                        ? "Pinned ACE-Step model " + modelId + " is not ready in " + checkpointRoot + "."
-                        : statusMessage);
-            return juce::var(result.release());
+            if (! musicGenerationReady || ! layoutValid || ! hasNativeMusicProfile)
+            {
+                const auto musicGenerationStatusMessage = statusObject->getProperty("musicGenerationStatusMessage").toString();
+                const auto statusMessage = statusObject->getProperty("message").toString();
+                const auto errorMessage = statusObject->getProperty("error").toString();
+                const auto aceModelId = statusObject->getProperty("musicGenerationModelId").toString();
+                const auto checkpointRoot = statusObject->getProperty("musicGenerationCheckpointRoot").toString();
+                result->setProperty("started", false);
+                result->setProperty(
+                    "error",
+                    errorMessage.isNotEmpty()
+                        ? errorMessage
+                        : (! hasNativeMusicProfile)
+                            ? "The ACE-Step Diffusers backend is still missing required music-generation assets. Retry AI Tools install to finish setup."
+                        : musicGenerationStatusMessage.isNotEmpty()
+                            ? musicGenerationStatusMessage
+                        : (! layoutValid && aceModelId.isNotEmpty() && checkpointRoot.isNotEmpty())
+                            ? "ACE-Step Diffusers model " + aceModelId + " is not ready in " + checkpointRoot + "."
+                            : statusMessage);
+                return juce::var(result.release());
+            }
         }
     }
 
@@ -17078,7 +17313,7 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
         .getChildFile("OpenStudio")
         .getChildFile("generated-music");
 
-    if (! aiTrackEngine.startGeneration(workflowId, paramsJSON, outputDir))
+    if (! aiTrackEngine.startGeneration(modelId, workflowId, paramsJSON, outputDir))
     {
         auto progress = aiTrackEngine.pollProgress();
         result->setProperty("started", false);
@@ -17102,6 +17337,12 @@ juce::var AudioEngine::getAIGenerationProgress()
     obj->setProperty("phase", progress.phase);
     obj->setProperty("message", progress.message);
     obj->setProperty("backend", progress.backend);
+    if (progress.modelId.isNotEmpty())
+        obj->setProperty("modelId", progress.modelId);
+    if (progress.workflowId.isNotEmpty())
+        obj->setProperty("workflowId", progress.workflowId);
+    if (progress.sourceClipId.isNotEmpty())
+        obj->setProperty("sourceClipId", progress.sourceClipId);
     obj->setProperty("elapsedMs", progress.elapsedMs);
     obj->setProperty("heartbeatTs", progress.heartbeatTs);
     if (progress.phaseProgress >= 0.0)

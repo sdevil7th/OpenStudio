@@ -61,9 +61,10 @@ export function MainToolbar({
   const {
     isPlaying,
     isPaused,
+    isRecording,
     loopEnabled,
     play,
-    record,
+    toggleRecord,
     stop,
     toggleLoop,
     tracks,
@@ -97,9 +98,10 @@ export function MainToolbar({
     useShallow((s) => ({
       isPlaying: s.transport.isPlaying,
       isPaused: s.transport.isPaused,
+      isRecording: s.transport.isRecording,
       loopEnabled: s.transport.loopEnabled,
       play: s.play,
-      record: s.record,
+      toggleRecord: s.toggleRecord,
       stop: s.stop,
       toggleLoop: s.toggleLoop,
       tracks: s.tracks,
@@ -309,11 +311,11 @@ export function MainToolbar({
         <Button
           variant="danger"
           size="icon-lg"
-          active={hasArmedTracks && isPlaying}
-          disabled={!hasArmedTracks}
-          onClick={() => record()}
-          title={hasArmedTracks ? `Record (${recordShortcut})` : "Arm a track to record"}
-          aria-label={hasArmedTracks ? "Record" : "Arm a track to record"}
+          active={isRecording}
+          disabled={!hasArmedTracks && !isRecording}
+          onClick={() => toggleRecord()}
+          title={isRecording || hasArmedTracks ? `Record (${recordShortcut})` : "Arm a track to record"}
+          aria-label={isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
         >
           <Circle size={16} fill="currentColor" />
         </Button>

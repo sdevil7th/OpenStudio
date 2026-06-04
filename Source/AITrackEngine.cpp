@@ -2,7 +2,9 @@
 
 namespace
 {
-constexpr auto kPinnedMusicGenerationModelId = "acestep-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
+constexpr auto kStableAudioModelId = "stable-audio-3-medium";
 constexpr auto kReaderSleepMs = 50;
 constexpr auto kWorkerStartupTimeoutMs = 45000;
 constexpr auto kWorkerRequestTimeoutMs = 10000;
@@ -246,12 +248,24 @@ juce::File AITrackEngine::getUserRuntimeRoot() const
     return getUserDataRoot().getChildFile("stem-runtime");
 }
 
+juce::File AITrackEngine::getStableAudioRuntimeRoot() const
+{
+    return getUserDataRoot().getChildFile("stable-audio-runtime");
+}
+
 juce::File AITrackEngine::getMusicGenerationCheckpointRoot() const
 {
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile(".cache")
         .getChildFile("ace-step")
-        .getChildFile("checkpoints");
+        .getChildFile("diffusers");
+}
+
+juce::File AITrackEngine::getStableAudioModelRoot() const
+{
+    return getUserDataRoot()
+        .getChildFile("models")
+        .getChildFile(kStableAudioModelId);
 }
 
 juce::File AITrackEngine::findPython() const
@@ -295,6 +309,15 @@ juce::File AITrackEngine::findPython() const
     return {};
 }
 
+juce::File AITrackEngine::findStableAudioPython() const
+{
+    auto runtimePython = findPythonInRuntimeRoot(getStableAudioRuntimeRoot());
+    if (runtimePython.existsAsFile())
+        return runtimePython;
+
+    return {};
+}
+
 juce::File AITrackEngine::findScript() const
 {
     const auto runtimeDir = getApplicationRuntimeDirectory();
@@ -309,6 +332,26 @@ juce::File AITrackEngine::findScript() const
     const auto workingCopyScript = juce::File::getCurrentWorkingDirectory()
         .getChildFile("tools")
         .getChildFile("generate_music.py");
+    if (workingCopyScript.existsAsFile())
+        return workingCopyScript;
+
+    return {};
+}
+
+juce::File AITrackEngine::findStableAudioScript() const
+{
+    const auto runtimeDir = getApplicationRuntimeDirectory();
+    const auto packagedScript = runtimeDir.getChildFile("scripts").getChildFile("stable_audio3_generate.py");
+    if (packagedScript.existsAsFile())
+        return packagedScript;
+
+    const auto bundledDevScript = runtimeDir.getChildFile("tools").getChildFile("stable_audio3_generate.py");
+    if (bundledDevScript.existsAsFile())
+        return bundledDevScript;
+
+    const auto workingCopyScript = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("tools")
+        .getChildFile("stable_audio3_generate.py");
     if (workingCopyScript.existsAsFile())
         return workingCopyScript;
 
@@ -330,10 +373,14 @@ void AITrackEngine::cleanupLegacyWorkerProcesses(const juce::File& python, const
         "Get-CimInstance Win32_Process | "
         "Where-Object { $_.CommandLine -like '*--worker*' "
         "  -and $_.CommandLine -like '*" + escapedScriptPath + "*' "
-        "  -and $_.CommandLine -like '*" + escapedPythonPath + "*' } | "
+        "  -and ("
+        "    $_.CommandLine -like '*" + escapedPythonPath + "*' "
+        "    -or $_.CommandLine -like '*stable_audio3_generate.py*' "
+        "    -or $_.CommandLine -like '*generate_music.py*'"
+        "  ) } | "
         "ForEach-Object { "
         "  & taskkill /PID $_.ProcessId /F /T 2>$null | Out-Null; "
-        "  Write-Output ('stopped legacy ACE-Step worker pid ' + $_.ProcessId) "
+        "  Write-Output ('stopped legacy AI generation worker pid ' + $_.ProcessId) "
         "}");
 
     juce::ChildProcess cleanup;
@@ -415,9 +462,12 @@ bool AITrackEngine::waitForWorkerReady(int timeoutMs)
 
         if (currentProgress_.error.isEmpty())
         {
+            const auto modelLabel = currentProgress_.modelId == kStableAudioModelId
+                ? juce::String("Stable Audio 3")
+                : juce::String("ACE-Step");
             const auto message = workerExitedBeforeReady
-                ? appendProcessDetailsLocked("ACE-Step worker exited before reporting ready.")
-                : appendProcessDetailsLocked("ACE-Step worker did not become ready in time.");
+                ? appendProcessDetailsLocked(modelLabel + " worker exited before reporting ready.")
+                : appendProcessDetailsLocked(modelLabel + " worker did not become ready in time.");
             setProgressErrorLocked(workerExitedBeforeReady ? "worker_start_failed"
                                                            : "worker_start_timeout",
                                    message,
@@ -471,7 +521,7 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
         if (workerPidToKill > 0)
         {
             juce::String killOutput;
-            juce::Logger::writeToLog("AITrackEngine: stopping ACE-Step child process tree pid="
+            juce::Logger::writeToLog("AITrackEngine: stopping AI generation child process tree pid="
                                      + juce::String(workerPidToKill));
             killedTree = killWindowsProcessTree(workerPidToKill, &killOutput);
             if (killOutput.isNotEmpty())
@@ -481,7 +531,7 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
 
         if (! killedTree && processToKill->isRunning())
         {
-            juce::Logger::writeToLog("AITrackEngine: stopping ACE-Step child process");
+            juce::Logger::writeToLog("AITrackEngine: stopping AI generation child process");
             processToKill->kill();
         }
     }
@@ -501,8 +551,10 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
     }
 }
 
-bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::File& script)
+bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId)
 {
+    const auto isStableAudio = modelId == kStableAudioModelId;
+    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
     const auto expectedScriptVersion = computeScriptVersion(script);
     {
         const juce::ScopedLock sl(lock_);
@@ -524,13 +576,23 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
         command.add(python.getFullPathName());
         command.add(script.getFullPathName());
         command.add("--worker");
-        command.add("--checkpoint-root");
-        command.add(getMusicGenerationCheckpointRoot().getFullPathName());
-        command.add("--music-gen-model");
-        command.add(kPinnedMusicGenerationModelId);
+        if (isStableAudio)
+        {
+            command.add("--model-root");
+            command.add(getStableAudioModelRoot().getFullPathName());
+        }
+        else
+        {
+            command.add("--cache-root");
+            command.add(getMusicGenerationCheckpointRoot().getFullPathName());
+            command.add("--music-gen-model");
+            command.add(kPinnedMusicGenerationModelId);
+            command.add("--model-id");
+            command.add(kPinnedMusicGenerationModelRepoId);
+        }
 
         const auto commandLine = buildCommandLineForLog(command);
-        juce::Logger::writeToLog("AITrackEngine: launching persistent ACE-Step worker: " + commandLine
+        juce::Logger::writeToLog("AITrackEngine: launching persistent " + modelLabel + " worker: " + commandLine
                                  + " protocolVersion=" + juce::String(kWorkerProtocolVersion)
                                  + " expectedScriptVersion=" + expectedScriptVersion
                                  + " launchAttempt=" + juce::String(launchAttempt + 1));
@@ -550,7 +612,8 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             currentProgress_.state = "loading";
             currentProgress_.progress = 0.02f;
             currentProgress_.phase = "starting_worker";
-            currentProgress_.message = "Starting the ACE-Step runtime session...";
+            currentProgress_.message = "Starting the " + modelLabel + " runtime session...";
+            currentProgress_.modelId = modelId;
             currentProgress_.backend = "unknown";
             currentProgress_.error.clear();
             currentProgress_.runMode = "cold";
@@ -563,10 +626,13 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             currentProgress_.scriptVersion = expectedScriptVersion;
             currentProgress_.lastStdoutLine.clear();
             currentProgress_.lastStderrLine.clear();
-            currentProgress_.tracePath.clear();
-            currentProgress_.failureDetail.clear();
+            currentProgress_.runtimeProfile.clear();
+            currentProgress_.lmModel.clear();
+            currentProgress_.attemptMode.clear();
             currentProgress_.lmBackend.clear();
             currentProgress_.lmStage.clear();
+            currentProgress_.tracePath.clear();
+            currentProgress_.failureDetail.clear();
         }
 
         if (! workerProcess_->start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
@@ -574,7 +640,7 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             const juce::ScopedLock sl(lock_);
             workerProcess_.reset();
             setProgressErrorLocked("worker_start_failed",
-                                   "Failed to start the ACE-Step runtime session.",
+                                   "Failed to start the " + modelLabel + " runtime session.",
                                    "worker_start");
             return false;
         }
@@ -599,10 +665,13 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
     return false;
 }
 
-bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
+bool AITrackEngine::sendGenerateRequest(const juce::String& modelId,
+                                        const juce::String& workflowId,
                                         const juce::String& paramsJson,
                                         const juce::File& outputFile)
 {
+    const auto isStableAudio = modelId == kStableAudioModelId;
+    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
     int port = 0;
     juce::String requestId;
     {
@@ -617,7 +686,7 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
     {
         const juce::ScopedLock sl(lock_);
         setProgressErrorLocked("worker_connect_failed",
-                               appendProcessDetailsLocked("ACE-Step worker did not provide a listening port."),
+                               appendProcessDetailsLocked(modelLabel + " worker did not provide a listening port."),
                                "worker_request");
         return false;
     }
@@ -627,13 +696,14 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
     {
         const juce::ScopedLock sl(lock_);
         setProgressErrorLocked("worker_connect_failed",
-                               appendProcessDetailsLocked("OpenStudio could not contact the ACE-Step runtime session."),
+                               appendProcessDetailsLocked("OpenStudio could not contact the " + modelLabel + " runtime session."),
                                "worker_request");
         return false;
     }
 
     auto request = std::make_unique<juce::DynamicObject>();
     request->setProperty("command", "generate");
+    request->setProperty("modelId", modelId);
     request->setProperty("workflow", workflowId);
     request->setProperty("params", paramsJson);
     request->setProperty("output", outputFile.getFullPathName());
@@ -649,7 +719,7 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
             return false;
 
         setProgressErrorLocked("worker_request_failed",
-                               appendProcessDetailsLocked("OpenStudio could not fully submit the generation request to the ACE-Step session."),
+                               appendProcessDetailsLocked("OpenStudio could not fully submit the generation request to the " + modelLabel + " session."),
                                "worker_protocol");
         return false;
     }
@@ -668,7 +738,7 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
             return false;
 
         setProgressErrorLocked("worker_request_timeout",
-                               appendProcessDetailsLocked("ACE-Step did not acknowledge the generation request in time."),
+                               appendProcessDetailsLocked(modelLabel + " did not acknowledge the generation request in time."),
                                "worker_protocol");
         return false;
     }
@@ -678,10 +748,10 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
     {
         auto error = object != nullptr
             ? object->getProperty("error").toString()
-            : "ACE-Step returned an invalid worker response.";
+            : modelLabel + " returned an invalid worker response.";
 
         if (error.isEmpty())
-            error = "ACE-Step rejected the generation request.";
+            error = modelLabel + " rejected the generation request.";
 
         const juce::ScopedLock sl(lock_);
         if (cancelRequested_)
@@ -704,7 +774,7 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
     {
         const juce::ScopedLock sl(lock_);
         setProgressErrorLocked("worker_protocol_failed",
-                               appendProcessDetailsLocked("ACE-Step acknowledged the request with a mismatched protocol or request id."),
+                               appendProcessDetailsLocked(modelLabel + " acknowledged the request with a mismatched protocol or request id."),
                                "worker_protocol");
         return false;
     }
@@ -718,11 +788,15 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& workflowId,
 
 void AITrackEngine::launchGenerationTask(const juce::File& python,
                                          const juce::File& script,
+                                         const juce::String& modelId,
                                          const juce::String& workflowId,
                                          const juce::String& paramsJson,
                                          const juce::File& outputFile)
 {
-    if (! ensureWorkerAvailable(python, script))
+    const auto isStableAudio = modelId == kStableAudioModelId;
+    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
+
+    if (! ensureWorkerAvailable(python, script, modelId))
     {
         const juce::ScopedLock sl(lock_);
         generationActive_ = false;
@@ -749,7 +823,9 @@ void AITrackEngine::launchGenerationTask(const juce::File& python,
         currentProgress_.state = "loading";
         currentProgress_.progress = 0.03f;
         currentProgress_.phase = "submitting_request";
-        currentProgress_.message = "Submitting the generation request to the ACE-Step session...";
+        currentProgress_.message = "Submitting the generation request to the " + modelLabel + " session...";
+        currentProgress_.modelId = modelId;
+        currentProgress_.workflowId = workflowId;
         currentProgress_.outputFile.clear();
         currentProgress_.error.clear();
         currentProgress_.elapsedMs = 0.0;
@@ -759,9 +835,14 @@ void AITrackEngine::launchGenerationTask(const juce::File& python,
         currentProgress_.sessionMode = "persistent";
         currentProgress_.workerExitCode = 0;
         currentProgress_.failureKind.clear();
+        currentProgress_.runtimeProfile.clear();
+        currentProgress_.lmModel.clear();
+        currentProgress_.attemptMode.clear();
+        currentProgress_.lmBackend.clear();
+        currentProgress_.lmStage.clear();
     }
 
-    if (! sendGenerateRequest(workflowId, paramsJson, outputFile))
+    if (! sendGenerateRequest(modelId, workflowId, paramsJson, outputFile))
     {
         const juce::ScopedLock sl(lock_);
         generationActive_ = false;
@@ -774,7 +855,8 @@ void AITrackEngine::launchGenerationTask(const juce::File& python,
     }
 }
 
-bool AITrackEngine::startGeneration(const juce::String& workflowId,
+bool AITrackEngine::startGeneration(const juce::String& modelId,
+                                    const juce::String& workflowId,
                                     const juce::String& paramsJson,
                                     const juce::File& outputDir)
 {
@@ -786,14 +868,16 @@ bool AITrackEngine::startGeneration(const juce::String& workflowId,
             return false;
     }
 
-    const auto python = findPython();
-    const auto script = findScript();
+    const auto isStableAudio = modelId == kStableAudioModelId;
+    const auto python = isStableAudio ? findStableAudioPython() : findPython();
+    const auto script = isStableAudio ? findStableAudioScript() : findScript();
+    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
 
     if (! python.existsAsFile() || ! script.existsAsFile())
     {
         const juce::ScopedLock sl(lock_);
         setProgressErrorLocked("runtime_missing",
-                               "AI runtime is not ready. Install AI Tools first.",
+                               modelLabel + " runtime is not ready. Install AI Tools first.",
                                "runtime_missing");
         return false;
     }
@@ -811,7 +895,8 @@ bool AITrackEngine::startGeneration(const juce::String& workflowId,
     {
         const juce::ScopedLock sl(lock_);
         currentOutputFile_ = outputDir.getChildFile(
-            "generated_music_" + createSafeMusicGenerationTimestamp() + ".wav");
+            (isStableAudio ? "generated_stable_audio_" : "generated_music_")
+            + createSafeMusicGenerationTimestamp() + ".wav");
         outputFile = currentOutputFile_;
         generationActive_ = true;
         cancelRequested_ = false;
@@ -823,7 +908,10 @@ bool AITrackEngine::startGeneration(const juce::String& workflowId,
         currentProgress_.state = "loading";
         currentProgress_.progress = 0.01f;
         currentProgress_.phase = "starting";
-        currentProgress_.message = "Starting the ACE-Step runtime session...";
+        currentProgress_.message = "Starting the " + modelLabel + " runtime session...";
+        currentProgress_.modelId = modelId;
+        currentProgress_.workflowId = workflowId;
+        currentProgress_.sourceClipId.clear();
         currentProgress_.outputFile.clear();
         currentProgress_.error.clear();
         currentProgress_.elapsedMs = 0.0;
@@ -836,18 +924,22 @@ bool AITrackEngine::startGeneration(const juce::String& workflowId,
         currentProgress_.lastStdoutLine.clear();
         currentProgress_.lastStderrLine.clear();
         currentProgress_.statusNote.clear();
-        currentProgress_.attemptMode = "lm_dit";
+        currentProgress_.attemptMode = isStableAudio ? juce::String() : juce::String("lm_dit");
         currentProgress_.attemptIndex = 1;
         currentProgress_.protocolVersion = kWorkerProtocolVersion;
         currentProgress_.scriptVersion = expectedScriptVersion_;
         currentProgress_.requestId = currentRequestId_;
         currentProgress_.priorFailure.clear();
         currentProgress_.lastProgressAgeMs = 0.0;
+        currentProgress_.runtimeProfile.clear();
+        currentProgress_.lmModel.clear();
+        currentProgress_.lmBackend.clear();
+        currentProgress_.lmStage.clear();
     }
 
-    generationThread_ = std::thread([this, python, script, workflowId, paramsJson, outputFile]()
+    generationThread_ = std::thread([this, python, script, modelId, workflowId, paramsJson, outputFile]()
     {
-        launchGenerationTask(python, script, workflowId, paramsJson, outputFile);
+        launchGenerationTask(python, script, modelId, workflowId, paramsJson, outputFile);
     });
 
     return true;
@@ -906,11 +998,14 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
             if (workerProtocolVersion_ != kWorkerProtocolVersion
                 || (! expectedScriptVersion_.isEmpty() && workerScriptVersion_ != expectedScriptVersion_))
             {
+                const auto modelLabel = currentProgress_.modelId == kStableAudioModelId
+                    ? juce::String("Stable Audio 3")
+                    : juce::String("ACE-Step");
                 workerProtocolRejected_ = true;
                 workerReady_ = false;
                 workerPort_ = 0;
                 setProgressErrorLocked("worker_protocol_failed",
-                                       appendProcessDetailsLocked("ACE-Step worker protocol or script version mismatch."),
+                                       appendProcessDetailsLocked(modelLabel + " worker protocol or script version mismatch."),
                                        "worker_protocol");
                 currentProgress_.statusNote = "Rejecting stale worker session before generation starts.";
                 juce::Logger::writeToLog("AITrackEngine: rejecting worker ready handshake due to version mismatch"
@@ -923,11 +1018,13 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
 
             workerReady_ = true;
             workerPort_ = static_cast<int> (double (obj->getProperty("port")));
+            const auto backend = obj->getProperty("backend").toString();
+            const auto readyLabel = backend == "stable-audio-3" ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
             currentProgress_.state = "idle";
             currentProgress_.progress = 0.0f;
             currentProgress_.phase = "worker_ready";
-            currentProgress_.message = "ACE-Step runtime session is ready.";
-            currentProgress_.backend = obj->getProperty("backend").toString();
+            currentProgress_.message = readyLabel + " runtime session is ready.";
+            currentProgress_.backend = backend;
             currentProgress_.sessionMode = obj->hasProperty("sessionMode")
                 ? obj->getProperty("sessionMode").toString()
                 : "persistent";
@@ -987,6 +1084,12 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
         currentProgress_.backend = obj->getProperty("backend").toString();
     if (obj->hasProperty("outputFile"))
         currentProgress_.outputFile = obj->getProperty("outputFile").toString();
+    if (obj->hasProperty("modelId"))
+        currentProgress_.modelId = obj->getProperty("modelId").toString();
+    if (obj->hasProperty("workflowId"))
+        currentProgress_.workflowId = obj->getProperty("workflowId").toString();
+    if (obj->hasProperty("sourceClipId"))
+        currentProgress_.sourceClipId = obj->getProperty("sourceClipId").toString();
     if (obj->hasProperty("error"))
         currentProgress_.error = obj->getProperty("error").toString();
     if (obj->hasProperty("elapsedMs"))
@@ -1265,6 +1368,7 @@ void AITrackEngine::stopWorker(bool clearProgress, bool userCancelled)
 AIGenerationProgress AITrackEngine::pollProgress()
 {
     bool shouldStopForDecodeStall = false;
+    bool shouldReleaseTerminalWorker = false;
 
     {
         const juce::ScopedLock sl(lock_);
@@ -1324,9 +1428,22 @@ AIGenerationProgress AITrackEngine::pollProgress()
         currentProgress_.workerExitCode = workerExitCode_;
         currentProgress_.lastStdoutLine = lastStdoutLine_;
         currentProgress_.lastStderrLine = lastStderrLine_;
+
+        const auto inTerminalState = currentProgress_.state == "done"
+            || currentProgress_.state == "error"
+            || currentProgress_.state == "cancelled";
+        if (inTerminalState
+            && ! generationActive_
+            && workerProcess_ != nullptr
+            && workerProcess_->isRunning())
+        {
+            shouldReleaseTerminalWorker = true;
+        }
     }
 
     if (shouldStopForDecodeStall)
+        stopWorkerSession(false, false, false);
+    else if (shouldReleaseTerminalWorker)
         stopWorkerSession(false, false, false);
 
     const juce::ScopedLock sl(lock_);

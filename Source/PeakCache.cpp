@@ -59,6 +59,29 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
     return true;
 }
 
+void PeakCache::invalidate(const juce::File& audioFile)
+{
+    const auto key = audioFile.getFullPathName();
+
+    {
+        const juce::ScopedLock sl(cacheLock);
+        memoryCache.erase(key);
+    }
+
+    {
+        const juce::ScopedLock sl(pendingLock);
+        pendingGenerations.erase(key);
+    }
+
+    auto peakFile = getPeakFilePath(audioFile);
+    if (peakFile.existsAsFile())
+        peakFile.deleteFile();
+
+    auto legacyPeakFile = getLegacyPeakFilePath(audioFile);
+    if (legacyPeakFile.existsAsFile())
+        legacyPeakFile.deleteFile();
+}
+
 juce::var PeakCache::getPeaks(const juce::File& audioFile,
                                int samplesPerPixel,
                                int startSample,

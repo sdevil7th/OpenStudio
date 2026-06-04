@@ -1,398 +1,259 @@
 <p align="center">
-  <img src="frontend/public/icon.svg" height="110"/>
-  <h1 align="center">OpenStudio</h1>
+  <img src="frontend/public/icon.svg" height="112" alt="OpenStudio logo"/>
+</p>
+
+<h1 align="center">OpenStudio</h1>
+
+<p align="center">
+  <strong>A native, open DAW for recording, editing, mixing, pitch work, plugin hosting, and local AI-assisted music production.</strong>
 </p>
 
 <p align="center">
-  A professional-grade DAW built with a <strong>JUCE C++ audio engine</strong> and a <strong>React/TypeScript UI</strong> — shipping natively on Windows and macOS.
+  Built with a JUCE C++ audio engine and a React/TypeScript interface. No Electron shell, no cloud-only workflow, no locked session model.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue" alt="Platform: Windows and macOS"/>
   <img src="https://img.shields.io/badge/engine-JUCE%208-informational" alt="JUCE 8"/>
-  <img src="https://img.shields.io/badge/UI-React%20%2B%20TypeScript-61dafb?logo=react" alt="React + TypeScript"/>
+  <img src="https://img.shields.io/badge/UI-React%20%2B%20TypeScript-61dafb?logo=react" alt="React and TypeScript"/>
   <img src="https://img.shields.io/badge/audio-ASIO%20%7C%20WASAPI%20%7C%20DirectSound-green" alt="Audio drivers"/>
   <img src="https://img.shields.io/badge/plugins-VST3%20%7C%20CLAP%20%7C%20LV2-orange" alt="Plugin formats"/>
+  <img src="https://img.shields.io/badge/AI-ACE--Step%20%7C%20Stable%20Audio%203-purple" alt="AI music models"/>
 </p>
 
-### Project and Preset Formats
-- Project files save as `.osproj` and continue opening legacy `.s13` sessions
-- Theme exports use `.ostheme`
-- Built-in FX presets use `.ospreset`
-- Peak cache files use `.ospeaks`
+<p align="center">
+  <a href="#quick-start">Quick Start</a>
+  |
+  <a href="#features-at-a-glance">Features</a>
+  |
+  <a href="#comparison">Comparison</a>
+  |
+  <a href="docs/USER_MANUAL.md">User Manual</a>
+  |
+  <a href="docs/API.md">Lua API</a>
+</p>
 
-### Release Packaging
-- Windows ships as a standard installer
-- macOS ships as a free degraded unsigned DMG for v1
-- Automatic update metadata is served from `https://openstudio.org.in`
-- Optional AI stem-separation tools install later from inside the app and are not bundled in the base download
+> Screenshot/GIF slot: add a first-run timeline or mixer capture here once the current UI pass is ready.
 
 ---
 
-## macOS installation debugging
-- This command needs to be ran on macOS after installation through installer to un-quarantine the app and use it
-- Otherwise the app would be shown as damaged or broken in macOS
+## Why OpenStudio?
+
+OpenStudio is for people who want a real DAW surface, not just a prompt box, and a modern production workflow without giving up native audio performance. It combines classic multitrack production with newer tools such as stem separation, audio-to-MIDI, source-conditioned AI generation, graphical pitch editing, and scriptable project operations.
+
+The goal is direct: record or import material, edit it deeply, route and mix it like a DAW, generate or transform ideas with local AI tools when useful, then render deliverables without leaving the session.
+
+## Features At A Glance
+
+| Area | Current support |
+|---|---|
+| Recording | Multitrack audio recording, MIDI recording, input monitoring, punch range, record modes |
+| Editing | Clip move/trim/split, ripple edit, razor edit, fades, grouping, takes, slip edit, reverse, normalize, time stretch, pitch shift |
+| MIDI | MIDI tracks, instrument tracks, piano roll, velocity/CC editing, transforms, virtual keyboard, MIDI import/export, audio-to-MIDI |
+| Mixing | Mixer, detached mixer, sends, buses, routing matrix, master strip, meter isolation, mixer snapshots |
+| Plugins | VST3, CLAP, LV2 code paths, native plugin editors, input/track/master/monitoring FX, plugin presets, A/B states, MIDI learn |
+| Built-in FX | EQ, compressor, gate, limiter, delay, reverb, chorus, saturator, pitch corrector, basic synth/piano/drums |
+| Pitch | Graphical pitch editor, YIN analysis, note blobs, drift/vibrato tools, real-time auto-tune style FX, Basic Pitch polyphonic detection |
+| AI | Optional AI Tools runtime, stem separation, ACE-Step music generation, Stable Audio 3 text-to-audio, clip variation, inpaint, continuation |
+| Render | WAV, AIFF, FLAC, MP3, OGG, mono/stereo, sample-rate conversion, normalize, tail, dither, secondary output, stems, regions, razor areas |
+| Delivery | Render queue, region render matrix, DDP export, batch converter, session archive, project compare, clean project directory |
+| Workflow | Command palette, shortcut reference and rebinding, help overlay, getting started guide, screensets, themes, toolbar editor |
+| Extensibility | Lua scripting API, script editor, JSFX/S13FX script effects, project automation helpers |
+| Sync / media | Timecode display/settings, big clock, media explorer, media pool, missing media resolver, video window plumbing |
+
+Some advanced features are still evolving. See [Implemented But Partial / Caveated](docs/implemented_features.md#implemented-but-partial--caveated) for the honest edges.
+
+## Comparison
+
+These comparisons are meant to position OpenStudio clearly, not pretend a young open DAW replaces decades of commercial engineering in every studio tomorrow.
+
+### OpenStudio vs Cubase
+
+| Need | Cubase | OpenStudio |
+|---|---|---|
+| Composition DAW | Mature commercial DAW with deep MIDI, scoring, VariAudio, built-in instruments, and large content libraries | Native open DAW with MIDI, instrument tracks, piano roll, audio-to-MIDI, pitch editor, and scriptable workflows |
+| Pitch editing | VariAudio and ARA-compatible workflows | Built-in graphical pitch editor, real-time pitch corrector FX, Basic Pitch detection, and ARA hosting |
+| AI assistance | Cubase Pro includes modern assisted tools such as stem separation | Optional local AI Tools runtime for stem separation plus text-to-music, text-to-audio, variation, inpaint, and continuation workflows |
+| Extensibility | VST ecosystem, commercial extension model | VST3/CLAP/LV2, JSFX/S13FX, Lua API, open source codebase |
+| Best fit | Established production/composition rooms that need Steinberg's mature ecosystem | Builders, indie producers, researchers, and power users who want DAW depth plus local AI and hackability |
+
+### OpenStudio vs Pro Tools
+
+| Need | Pro Tools | OpenStudio |
+|---|---|---|
+| Studio standard | Mature industry-standard audio/post platform with AAX, HDX, large facility workflows, and advanced immersive/post tooling | Open native DAW focused on fast iteration, local-first production, and transparent implementation |
+| Editing | Deep editing, recording, comping, post-production workflows | Multitrack recording, takes, razor/ripple editing, slip edit, clip properties, freeze, region tools |
+| Pitch / repair | Strong third-party ecosystem through ARA partners and plugins | Built-in graphical pitch editor, real-time pitch corrector, ARA host controller, source-aware pitch render diagnostics |
+| Delivery | Strong broadcast/post pipelines and collaboration tooling | Offline render, stems, region render matrix, render queue, DDP export, archive tools |
+| Best fit | Commercial facilities and sessions that need Pro Tools compatibility | Producers and developers who want open workflows, modern UI, and integrated AI generation inside a DAW |
+
+### OpenStudio vs Suno AI
+
+| Need | Suno AI | OpenStudio |
+|---|---|---|
+| Product shape | Cloud AI song generation service | Full DAW with optional local AI-assisted generation |
+| Starting point | Prompt to generated song | Record, import, generate, edit, arrange, mix, render |
+| Control | Fast idea generation with plan/credit limits and cloud queues | Timeline-level control over clips, tracks, routing, plugins, MIDI, pitch, stems, and exports |
+| AI workflows | Song generation, editing, uploads, stems depending on plan | ACE-Step text-to-music and lyrics+style, Stable Audio 3 text-to-audio, source variation, inpaint, continuation, stem separation |
+| Ownership/privacy model | Depends on Suno plan and terms; free plan is non-commercial as of the current Suno pricing/help pages | Local project files and local optional AI tooling; users decide what media enters the session |
+| Best fit | Quickly making complete AI songs | Turning recordings, generated ideas, stems, and MIDI into editable productions |
+
+Reference pages used for the comparison: [Cubase editions](https://www.steinberg.net/cubase/compare-editions/), [Pro Tools](https://www.avid.com/en/pro-tools), [Suno pricing](https://suno.com/pricing), and [Suno rights help](https://help.suno.com/en/categories/550145-rights-ownership).
+
+## AI Music And Assisted Audio
+
+OpenStudio keeps AI as part of the DAW workflow rather than a replacement for it.
+
+| Workflow | What it does |
+|---|---|
+| Text to Music | Generates a fresh music clip through ACE-Step from prompt, lyrics, BPM, key/scale, language, duration, seed, and diffusion controls |
+| Lyrics + Style | Uses structured lyrics plus style/arrangement prompt for song generation |
+| Text to Audio | Uses Stable Audio 3 Medium for prompt-based audio generation |
+| Create Variation | Builds a source-conditioned variation while preserving the selected clip's identity |
+| Inpaint Selection | Regenerates a selected range inside a clip while matching the surrounding audio |
+| Continue Clip | Generates a continuation tail from the selected source clip |
+| Stem Separation | Splits source audio into vocals, drums, bass, and other stems for remixing or cleanup |
+| Audio to MIDI | Extracts MIDI from audio with Basic Pitch / ONNX plumbing where available |
+
+The base app does not bundle heavy AI runtimes. Optional AI Tools are installed from inside OpenStudio so the core DAW can stay lean.
+
+## DAW Workflow
+
+### Record
+
+- ASIO, WASAPI, and DirectSound device support on Windows.
+- Track arming, input selection, input monitoring, punch range, and record modes.
+- Audio clips and MIDI clips land directly on the timeline.
+
+### Edit
+
+- Konva-powered arrange view with waveforms, MIDI thumbnails, grid, rulers, time selection, razor areas, and zoom/scroll navigation.
+- Clip splitting, trimming, moving, copying, muting, grouping, locking, color, fades, auto-crossfade, reverse, normalize, time stretch, and pitch shift.
+- Piano roll for note editing, velocity, CC lanes, pitch bend controls, quantize, scale snap, transpose, reverse, invert, and humanize.
+
+### Mix
+
+- Horizontal mixer with channel strips, master strip, detached mixer window, metering, snapshots, routing controls, sends, buses, phase invert, stereo width, sidechain routing, and monitoring FX.
+- Built-in effects and third-party plugins can be used on input FX, track FX, master FX, and monitoring FX chains.
+
+### Tune
+
+- Graphical pitch editor for vocal-style correction with note blobs, contour editing, pitch/drift/vibrato/transition tools, correct-pitch macro, and pitch-editor undo/redo.
+- Real-time pitch corrector FX for auto-tune style workflows.
+- ARA hosting path for compatible pitch/audio editors.
+
+### Deliver
+
+- Render master mixes, selected-track stems, all stems, selected items, selected items through master, razor edit areas, project regions, or selected regions.
+- Export WAV, AIFF, FLAC, MP3, and OGG with mono/stereo, target sample rate, bit depth/quality, normalize, render tail, dither, and secondary output.
+- Use render queue, region render matrix, DDP export, batch converter, MIDI export, archive, project compare, and clean project tools for handoff.
+
+## Project And File Formats
+
+- Project files: `.osproj`
+- Legacy project import/open: `.s13`
+- Theme exports: `.ostheme`
+- Legacy theme import: `.s13theme`
+- Built-in FX presets: `.ospreset`
+- Waveform peak cache: `.ospeaks`
+- Legacy peak cache support: `.s13peaks`
+
+## Architecture
+
+```text
+C++ / JUCE backend                  React / TypeScript frontend
+--------------------------------    --------------------------------
+AudioEngine                         App.tsx
+PlaybackEngine                      useDAWStore / actionRegistry
+AudioRecorder                       NativeBridge.ts
+TrackProcessor                      Timeline / PianoRoll / Mixer
+PluginManager                       Render / FX / Routing panels
+MIDIManager                         Pitch editor stores and canvas
+PitchAnalyzer / PitchResynthesizer  Help, shortcuts, command palette
+StemSeparator / AITrackEngine       AI workflow modals
+ARAHostController                   Theme, scripts, project tools
+```
+
+The backend owns audio I/O, recording, playback, plugin processing, MIDI, metering, rendering, pitch/audio analysis, stem separation, and AI worker orchestration. The frontend owns layout, state, timeline interaction, editor panels, keyboard shortcuts, project serialization, and user workflows. The bridge is exposed through `window.__JUCE__.backend.*` and wrapped by `frontend/src/services/NativeBridge.ts`.
+
+## Quick Start
+
+### Requirements
+
+- Windows 10/11 x64 for the primary local development flow
+- macOS release packaging support for app/DMG builds
+- CMake 3.22 or newer
+- Visual Studio 2022 with C++ workload on Windows
+- Node.js 18 or newer
+- Python 3.10 or newer
+- NASM in `PATH` for YSFX builds
+- ARA SDK and supported third-party SDK/runtime assets as documented in the repo
+
+### Development
+
+```bash
+# Full dev flow: installs deps, builds C++ Debug, starts Vite, launches app
+python build.py dev --run
+```
+
+Partial rebuilds:
+
+```bash
+# Frontend only
+cd frontend && npm run dev
+
+# C++ Debug
+cmake --build build --config Debug
+
+# C++ Release
+cmake --build build --config Release
+
+# Production package path
+python build.py prod
+```
+
+## macOS First Launch Note
+
+The v1 macOS community package is unsigned. If macOS reports that the app is damaged or blocked after installing from the DMG, remove quarantine:
+
 ```bash
 xattr -dr com.apple.quarantine /Applications/OpenStudio.app
 ```
 
-## What is OpenStudio?
+Then open the app from Finder, or right-click and choose **Open** if Gatekeeper asks for confirmation.
 
-**OpenStudio** is a hybrid DAW with a high-performance C++ audio engine and a fully hardware-accelerated React frontend rendered inside a native desktop application. It combines the audio processing power of JUCE with the flexibility and speed of modern web UI tooling — no Electron, no Chromium overhead, just a native embedded web UI on top of the audio engine.
+## Documentation
 
-<!-- Replace with an actual screenshot once available -->
-<!-- <p align="center">
-  <img src="assets/screenshots/main-view.png"/>
-</p> -->
+- [User Manual](docs/USER_MANUAL.md)
+- [Lua Scripting API](docs/API.md)
+- [Runtime Dependency Contract](docs/runtime-dependency-contract.md)
+- [Release Runbook](docs/release-runbook.md)
+- [Release Smoke Checklist](docs/release-smoke-checklist.md)
+- [Implemented Features Audit](docs/implemented_features.md)
 
----
-
-## Architecture
-
-```
-C++ (JUCE) Backend                React/TypeScript Frontend
-┌─────────────────────────┐       ┌──────────────────────────────┐
-│ AudioEngine              │◄─────►│ NativeBridge.ts              │
-│ PlaybackEngine           │       │   (window.__JUCE__ bridge)   │
-│ AudioRecorder            │       ├──────────────────────────────┤
-│ TrackProcessor           │       │ useDAWStore (Zustand)         │
-│ PluginManager            │       ├──────────────────────────────┤
-│ MIDIManager              │       │ Timeline (Konva canvas)       │
-│ Metronome                │       │ MixerPanel / ChannelStrip     │
-│ PitchAnalyzer            │       │ PitchEditorLowerZone          │
-│ PitchResynthesizer       │       │ PianoRoll / FXChainPanel      │
-│ Pitch preview/scrub      │       │ TransportBar / MenuBar        │
-│ PitchCorrector           │       │ PluginBrowser / RenderModal   │
-│ StemSeparator            │       └──────────────────────────────┘
-│ ARAHostController        │
-└─────────────────────────┘
-```
-
-The **C++ backend** handles all audio I/O, recording, plugin hosting, MIDI device management, metering, pitch correction, and offline rendering. The **React frontend** handles all UI, state, canvas-based timeline, keyboard shortcuts, drag-and-drop, and project save/load. They communicate via a synchronous bridge exposed through `window.__JUCE__`.
-
----
-
-## Flow Charts
-
-### Audio Signal Chain (Input → Output)
-
-```mermaid
-flowchart LR
-    subgraph Input
-        MIC[Microphone / Line In\nASIO · WASAPI · DirectSound]
-        MIDI[MIDI Devices]
-        CLIP[Audio Clips on Disk]
-    end
-
-    subgraph Per-Track Processing
-        direction TB
-        REC[AudioRecorder\nThreadedWriter]
-        PB[PlaybackEngine\nSample-rate-aware mixing]
-        IFX[Input FX Chain\nVST3 · CLAP · LV2 · JSFX]
-        TP[TrackProcessor\nVolume · Pan · Meter]
-        TFX[Track FX Chain\nVST3 · CLAP · LV2 · JSFX]
-        PITCH[PitchCorrector\nReal-time auto-tune]
-    end
-
-    subgraph Master
-        MFX[Master FX Chain]
-        MIX[Master Mix]
-    end
-
-    subgraph Output
-        DAC[Audio Output\nDAC / Speakers]
-        RENDER[Offline Render\nWAV · AIFF · FLAC]
-    end
-
-    MIC --> REC --> IFX
-    CLIP --> PB --> IFX
-    MIDI --> TP
-    IFX --> PITCH --> TP --> TFX --> MFX --> MIX
-    MIX --> DAC
-    MIX --> RENDER
-```
-
----
-
-### Pitch Correction Pipeline
-
-```mermaid
-flowchart TD
-    AUDIO[Original Clip Audio]
-
-    subgraph Monophonic Path
-        direction TB
-        YIN[PitchAnalyzer\nYIN Detection · Note Segmentation]
-        NOTES[PitchNotes\npitch · formant · vibrato · drift per note]
-        VSF[Native VSF HQ\npitch-only note render]
-        PREVIEW[Signalsmith Stretch\nlive scrub/fast preview]
-    end
-
-    subgraph Polyphonic Path
-        direction TB
-        POLY[PolyPitchDetector\nBasic-Pitch ONNX · 22050 Hz · 256 hop]
-        MASKS[HarmonicMaskGenerator\nWiener soft masks per note]
-        SPECSHIFT[SpectralPitchShifter\nper-note masked STFT shift]
-    end
-
-    subgraph Real-time Path
-        RTFX[PitchCorrector\nper-block · key/scale-aware\nSignalsmithStretch presetCheaper]
-    end
-
-    AUDIO --> YIN --> NOTES --> BACKEND --> RB --> OUT[Corrected Audio File\nreplaceClipAudioFile]
-    BACKEND --> NATIVE
-    BACKEND --> SS --> SPEAKERS
-    AUDIO --> POLY --> MASKS --> SPECSHIFT --> OUT
-    AUDIO --> RTFX --> SPEAKERS[Live Output]
-```
-
----
-
-### Frontend Component Tree
-
-```mermaid
-flowchart TD
-    APP[App.tsx]
-
-    APP --> MB[MenuBar]
-    APP --> MT[MainToolbar\ntransport · snap · undo/redo]
-    APP --> WS[Workspace]
-    APP --> TB[TransportBar\nBPM · timecode · loop · metronome]
-    APP --> LZ[LowerZone]
-    APP --> MOD[Modals]
-
-    WS --> TCP[Track Control Panel\nTrackHeader · SortableTrackHeader]
-    WS --> TL[Timeline\nKonva canvas · waveforms · clips · playhead]
-
-    LZ --> PE[PitchEditorLowerZone\nPitchEditorCanvas · tools · viewport]
-    LZ --> CP[ClipPropertiesPanel]
-    LZ --> PR[PianoRoll\nKonva canvas]
-
-    MOD --> SM[SettingsModal\naudio device config]
-    MOD --> RM[RenderModal\nexport settings]
-    MOD --> FX[FXChainPanel\nplugin browser · input FX · track FX]
-    MOD --> MX[MixerPanel\nChannelStrip · faders · meters]
-    MOD --> CL[ClipLauncherView\nAbleton-style grid]
-    MOD --> CMD[CommandPalette\nCtrl+Shift+P]
-
-    subgraph State
-        STORE[useDAWStore\nZustand · ~3400 lines]
-        PESTORE[pitchEditorStore\nnotes · viewport · undo]
-        NB[NativeBridge.ts\nwindow.__JUCE__ calls]
-    end
-
-    APP -.-> STORE
-    PE -.-> PESTORE
-    STORE -.-> NB
-    NB -.->|bridge| CPP[C++ AudioEngine]
-```
-
----
-
-### JS ↔ C++ Bridge Data Flow
-
-```mermaid
-sequenceDiagram
-    participant UI as React UI
-    participant NB as NativeBridge.ts
-    participant MC as MainComponent.cpp
-    participant AE as AudioEngine
-
-    UI->>NB: addTrack(id, name, type)
-    NB->>MC: window.__JUCE__.backend.addTrack(json)
-    MC->>AE: audioEngine.addTrack(id, type)
-    AE-->>MC: ok
-    MC-->>NB: return "ok"
-    NB-->>UI: Promise resolved
-
-    UI->>NB: applyPitchCorrection(trackId, clipId, notes)
-    NB->>MC: backend.applyPitchCorrection(json)
-    MC->>AE: applyPitchCorrection(...)
-    AE->>AE: native VSF note-HQ pitch-only render
-    AE->>AE: replaceClipAudioFile(newPath)
-    AE-->>MC: newFilePath
-    MC-->>UI: newFilePath (React re-renders waveform)
-
-    loop 60fps playback
-        AE->>MC: meterLevels via event
-        MC->>UI: dispatchEvent("meterUpdate")
-        UI->>UI: setMeterLevels() — isolated store slice
-    end
-```
-
----
-
-## Features
-
-### Audio Engine
-- **ASIO / WASAPI / DirectSound** driver support
-- Multi-track audio recording with thread-safe `ThreadedWriter`
-- Sample-rate-aware clip playback with linear interpolation
-- Per-track **Input FX chain** + **Track FX chain** + **Master FX chain**
-- PRO DAW-inspired **multi-resolution peak cache** (`.ospeaks` sidecar files, with legacy `.s13peaks` support)
-- Offline render/export to WAV, AIFF, FLAC at 16/24/32-bit
-
-### Plugin Hosting
-- **VST3**, **CLAP**, and **LV2** plugin formats
-- Native plugin editor window management
-- ARA plugin hosting (e.g. Melodyne, RePitch)
-- JSFX / Lua script-based processors with `@gfx` rendering
-- Built-in effects: EQ, compressor, stereo tool, delay, reverb, and more
-
-### Pitch Editor
-- **Graphical pitch editor** (Melodyne/VariAudio-style) — analyze, display, and redraw pitch curves per note
-- **Real-time auto-tune** corrector (built-in pitch corrector FX) — key/scale-aware, inserted as an FX plugin
-- **Native VSF pitch apply** for graphical note-HQ pitch-only edits; Signalsmith Stretch remains limited to live scrub/fast preview and the realtime pitch-corrector FX.
-- **Polyphonic pitch detection** via Spotify's Basic-Pitch ONNX model
-- Formant shift, vibrato, drift, and transition controls per note
-
-### MIDI
-- MIDI device enumeration and input routing
-- Piano Roll editor with Konva canvas
-- Virtual 88-key on-screen keyboard
-- Per-track MIDI clip storage with time-range queries
-- Metronome with BPM, time signature, and accent patterns
-
-### Timeline & UI
-- Konva canvas-based timeline: waveforms, clips, rulers, zoom, drag, multi-selection
-- Mixer panel with channel strips, faders, pan, solo/mute, metering
-- AI stem separation (vocals / drums / bass / other) via optional in-app AI Tools install
-- Automation lanes with envelope editing
-- Clip launcher (Ableton-style grid)
-- Full undo/redo via CommandManager for all data-modifying actions
-- Command palette (`Ctrl+Shift+P`), keyboard shortcuts modal, action registry
-- PRO DAW theme import/export (`.PRO DAWTheme` → `.ostheme`, with legacy `.s13theme` import support)
-
----
-
-## Built-In Effects
-
-| Effect | Description |
-|--------|-------------|
-| EQ | Per-channel graphical equalizer |
-| Compressor | Dynamic range compression |
-| Reverb | Algorithmic reverb |
-| Delay | Stereo delay with feedback and filtering |
-| Stereo Tool | Volume, pan, stereo width |
-| Crusher | Bit-depth and sample-rate reduction |
-| Pitch Corrector | Real-time key/scale-aware auto-tune |
-| JSFX Processor | PRO DAW-compatible JSFX / Lua scripts |
-
----
-
-## Build & Run
-
-### Requirements
-
-- **Windows 10/11** (x64) for the full local toolchain documented below
-- **macOS** release packaging is supported in CI/release tooling, with unsigned DMG distribution for v1
-- [CMake](https://cmake.org/) ≥ 3.22
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with C++ workload
-- [Node.js](https://nodejs.org/) ≥ 18
-- [Python](https://python.org/) ≥ 3.10
-- [NASM](https://nasm.us/) (required for YSFX) — add to `PATH`
-
-### Quick Start
-
-```bash
-# Clone the repo
-git clone https://github.com/your-org/studio13-v3.git && cd studio13-v3
-
-# Full dev build: installs deps, builds C++ Debug, starts Vite HMR, launches app
-python build.py dev --run
-```
-
-### Partial Rebuilds
-
-```bash
-# Frontend only — no C++ rebuild needed for UI changes
-cd frontend && npm run dev
-
-# C++ only — Debug
-cmake --build build --config Debug
-
-# C++ only — Release
-cmake --build build --config Release
-
-# Production — embedded frontend + Release C++ → single .exe
-python build.py prod
-```
-
----
+Historical planning documents remain in `docs/` for traceability, but the codebase and `docs/implemented_features.md` should be treated as the fresher feature inventory.
 
 ## Tech Stack
 
-### C++ Backend
+| Layer | Tools |
+|---|---|
+| Native audio | JUCE 8, ASIO SDK, WASAPI, DirectSound |
+| Embedded UI | JUCE WebBrowserComponent, WebView2 on Windows |
+| Frontend | React 18, TypeScript, Vite, Zustand, Tailwind CSS, Konva |
+| Plugins | JUCE plugin hosting, VST3, CLAP integration, LV2 code paths, ARA SDK |
+| Analysis / AI | ONNX Runtime, Basic Pitch model flow, ACE-Step, Stable Audio 3 optional runtime |
+| Scripting | Lua / sol2, S13FX / JSFX-style script processor |
+| Packaging | CMake, build.py orchestration, platform release scripts |
 
-| Library | Purpose |
-|---------|---------|
-| [JUCE 8](https://juce.com/) | Audio engine, plugin hosting, WebBrowserComponent |
-| [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) | MIT — pitch preview/scrub and realtime pitch-corrector FX |
-| [YSFX](https://github.com/jpcima/ysfx) | JSFX / Lua script processor |
-| [ONNX Runtime](https://onnxruntime.ai/) | Basic-Pitch polyphonic pitch detection |
-| [sol2](https://github.com/ThePhD/sol2) | Lua scripting engine bindings |
-| [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) | Embedded browser for the Windows React UI |
-| ASIO SDK | Low-latency audio I/O |
+## Status
 
-### React Frontend
+OpenStudio is under active development. Many core DAW workflows are implemented, while some professional edge cases remain experimental or partial:
 
-| Library | Purpose |
-|---------|---------|
-| [React 18](https://react.dev/) + TypeScript | UI framework |
-| [Zustand](https://github.com/pmndrs/zustand) | Global state management |
-| [react-konva](https://konvajs.org/) | Canvas-based timeline and piano roll |
-| [Tailwind CSS v4](https://tailwindcss.com/) | Styling with custom `daw-*` color tokens |
-| [@dnd-kit](https://dndkit.com/) | Drag-and-drop track reordering |
-| [Vite](https://vitejs.dev/) | Dev server + production bundler |
-
----
-
-## Project Structure
-
-```
-repo-root/
-├── Source/          # C++ audio engine, plugin hosting, pitch pipeline
-├── frontend/        # React/TypeScript UI (Vite, Tailwind, Zustand, Konva)
-├── resources/       # ONNX models, presets, icons
-├── tools/           # ffmpeg.exe, stem separator, setup scripts
-├── build/           # CMake output (generated)
-├── CMakeLists.txt   # C++ build config (JUCE, ASIO, WebView2, VST3, ONNX)
-└── build.py         # Orchestrator: cmake + npm + Vite dev server
-```
-
----
-
-## Roadmap
-
-### In Progress
-- [ ] Graphical pitch editor — Melodyne/VariAudio parity (vibrato tool, multi-note operations)
-- [ ] Polyphonic pitch correction rewrite
-- [ ] ARA2 deep integration
-
-### Planned
-- [ ] MIDI 2.0 support
-- [ ] Score / notation view
-- [ ] Linux release path
-- [ ] Plugin sandboxing
-
-### Completed
-- [x] VST3 / CLAP / LV2 plugin hosting
-- [x] ARA plugin hosting controller
-- [x] Signalsmith Stretch preview/scrub and realtime pitch-corrector support
-- [x] Real-time auto-tune pitch corrector
-- [x] Polyphonic pitch detection (Basic-Pitch ONNX)
-- [x] PRO DAW-style multi-resolution peak cache
-- [x] Optional AI stem separation install flow
-- [x] JSFX / Lua `@gfx` rendering
-- [x] PRO DAW theme import/export
-- [x] Offline render (WAV / AIFF / FLAC, 16/24/32-bit)
-- [x] Clip launcher (Ableton-style grid)
-- [x] Automation lanes
-- [x] Full undo/redo for all data-modifying actions
-- [x] Command palette
-
----
+- Polyphonic correction/resynthesis is not at the same maturity as monophonic pitch analysis and editing.
+- Some video, control-surface, live-capture, plugin-bridge, and interchange paths are still evolving.
+- Heavy AI runtimes are optional and depend on local hardware, installed models, and runtime setup.
+- Subjective audio quality claims, especially pitch/formant/stem artifacts, require listening tests.
 
 ## License
 
-OpenStudio is currently distributed in this repository under AGPLv3-compatible terms. See `LICENSE` and `THIRD_PARTY_LICENSES.md` for the current licensing and dependency notices.
+OpenStudio is distributed in this repository under AGPLv3-compatible terms. See `LICENSE` and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for licensing and dependency notices.

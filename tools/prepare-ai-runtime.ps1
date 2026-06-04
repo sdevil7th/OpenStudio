@@ -795,34 +795,6 @@ try {
         }
     }
 
-    if ($Platform -eq "windows" -and $resolvedRuntimeFamily -ne "windows-base-x64") {
-        $aceStepSourceRoot = Join-Path $resolvedRuntimeRoot "ace-step-v1.5-source"
-        Invoke-LoggedStep -Description "Preparing the ACE-Step 1.5 runtime source" -Command @(
-            $runtimePython,
-            "-c",
-            @"
-from pathlib import Path
-from huggingface_hub import snapshot_download
-source_root = Path(r'$aceStepSourceRoot')
-source_root.mkdir(parents=True, exist_ok=True)
-snapshot_download(
-    repo_id=r'ACE-Step/Ace-Step-v1.5',
-    repo_type='space',
-    local_dir=str(source_root),
-)
-print('ok')
-"@
-        )
-        Invoke-LoggedStep -Description "Installing the ACE-Step 1.5 runtime bridge into the standalone runtime" -Command @(
-            $runtimePython,
-            "-m",
-            "pip",
-            "install",
-            "--no-deps",
-            $aceStepSourceRoot
-        )
-    }
-
     Optimize-RuntimePayload -RuntimeRootPath $resolvedRuntimeRoot -TargetPlatform $Platform -ResolvedRuntimeFamily $resolvedRuntimeFamily
 
     $installPlansMetadata = @()

@@ -37,7 +37,7 @@ export function getRegisteredActions(): ActionDef[] {
     // ===== Transport =====
     { id: "transport.play", name: "Play / Pause", category: "Transport", shortcut: "Space", execute: () => s().togglePlayPause() },
     { id: "transport.stop", name: "Stop", category: "Transport", shortcut: "Space (while playing)", execute: () => s().stop() },
-    { id: "transport.record", name: "Record", category: "Transport", shortcut: "Ctrl+R", canHandleShortcut: () => s().tracks.some((t) => t.armed), execute: () => s().record() },
+    { id: "transport.record", name: "Record", category: "Transport", shortcut: "Ctrl+R", canHandleShortcut: () => s().transport.isRecording || Boolean(s().recordSession) || s().tracks.some((t) => t.armed), execute: () => s().toggleRecord() },
     { id: "transport.rewind", name: "Go to Start", category: "Transport", execute: () => s().setCurrentTime(0) },
     { id: "transport.loop", name: "Toggle Loop", category: "Transport", shortcut: "L", execute: () => s().toggleLoop() },
 
@@ -335,35 +335,13 @@ export function getRegisteredActions(): ActionDef[] {
     }},
 
     // ===== Polyphonic Pitch Detection (Phase 6) =====
-    { id: "edit.extractMidi", name: "Extract MIDI from Audio", category: "Edit", execute: () => {
+    { id: "edit.extractMidi", name: "Convert Audio to MIDI", category: "Edit", execute: () => {
       const state = s();
       const clipId = state.selectedClipIds[0];
       if (!clipId) return;
       const track = state.tracks.find((t: any) => t.clips.some((c: any) => c.id === clipId));
       if (!track || track.type === "midi") return;
-      void import("../services/NativeBridge").then(({ nativeBridge }) => {
-        void nativeBridge.extractMidiFromAudio(track.id, clipId).then((result) => {
-          if (result && result.notes && result.notes.length > 0) {
-            const st = s();
-            const sourceClip = track.clips.find((c: any) => c.id === clipId);
-            const newTrackId = crypto.randomUUID();
-            st.addTrack({ id: newTrackId, name: `MIDI from ${sourceClip?.name || "Audio"}`, type: "midi" });
-            const maxEnd = Math.max(...result.notes.map((n: any) => n.endTime));
-            const newClipId = st.addMIDIClip(newTrackId, sourceClip?.startTime || 0, maxEnd);
-            const events: any[] = [];
-            for (const n of result.notes) {
-              events.push({ timestamp: n.startTime, type: "noteOn", note: n.midiPitch, velocity: Math.round(n.velocity * 127) });
-              events.push({ timestamp: n.endTime, type: "noteOff", note: n.midiPitch, velocity: 0 });
-            }
-            events.sort((a: any, b: any) => a.timestamp - b.timestamp);
-            useDAWStore.setState((prev) => ({
-              tracks: prev.tracks.map((t: any) => t.id === newTrackId ? {
-                ...t, midiClips: t.midiClips.map((c: any) => c.id === newClipId ? { ...c, events } : c),
-              } : t),
-            }));
-          }
-        });
-      });
+      void state.convertAudioClipToMIDI(track.id, clipId);
     }},
 
     // ===== Sprint 21: Timeline Interaction =====

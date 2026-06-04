@@ -23,8 +23,24 @@ interface ContextMenuProps {
 
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const submenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [submenuOpen, setSubmenuOpen] = useState<number | null>(null);
   const [adjustedPos, setAdjustedPos] = useState({ x, y });
+
+  const clearSubmenuCloseTimer = () => {
+    if (submenuCloseTimerRef.current) {
+      clearTimeout(submenuCloseTimerRef.current);
+      submenuCloseTimerRef.current = null;
+    }
+  };
+
+  const scheduleSubmenuClose = () => {
+    clearSubmenuCloseTimer();
+    submenuCloseTimerRef.current = setTimeout(() => {
+      setSubmenuOpen(null);
+      submenuCloseTimerRef.current = null;
+    }, 180);
+  };
 
   // Adjust position to stay within viewport
   useEffect(() => {
@@ -69,6 +85,8 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     };
   }, [onClose]);
 
+  useEffect(() => () => clearSubmenuCloseTimer(), []);
+
   const handleItemClick = (item: MenuItem) => {
     if (item.disabled) return;
     if (item.submenu) return; // Don't close for submenu items
@@ -102,8 +120,11 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
               ${item.disabled ? "text-neutral-500 cursor-not-allowed" : "text-neutral-200 hover:bg-neutral-700"}
             `}
             onClick={() => handleItemClick(item)}
-            onMouseEnter={() => item.submenu && setSubmenuOpen(index)}
-            onMouseLeave={() => item.submenu && setSubmenuOpen(null)}
+            onMouseEnter={() => {
+              clearSubmenuCloseTimer();
+              setSubmenuOpen(item.submenu ? index : null);
+            }}
+            onMouseLeave={() => item.submenu && scheduleSubmenuClose()}
           >
             <div className="flex items-center gap-2">
               {item.icon && <span className="w-4 h-4">{item.icon}</span>}
@@ -126,7 +147,11 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 
             {/* Submenu */}
             {item.submenu && submenuOpen === index && (
-              <div className="absolute left-full top-0 ml-1 min-w-[160px] py-1 bg-neutral-800 border border-neutral-600 rounded-md shadow-xl">
+              <div
+                className="absolute left-full top-0 -ml-px min-w-[160px] py-1 bg-neutral-800 border border-neutral-600 rounded-md shadow-xl"
+                onMouseEnter={clearSubmenuCloseTimer}
+                onMouseLeave={scheduleSubmenuClose}
+              >
                 {item.submenu.map((subItem, subIndex) => (
                   <div
                     key={subIndex}
