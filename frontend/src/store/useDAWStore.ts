@@ -22,6 +22,7 @@ import { automationActions } from "./actions/automation";
 import { renderingActions } from "./actions/rendering";
 import { projectActions } from "./actions/project";
 import { midiActions } from "./actions/midi";
+import { audioToMidiActions } from "./actions/audioToMidi";
 import { routingActions } from "./actions/routing";
 import { clipLauncherActions } from "./actions/clipLauncher";
 import { markerActions } from "./actions/markers";
@@ -110,7 +111,7 @@ function isMusicGenerationFullyReady(
 ): boolean {
   const availableProfiles = status.musicGenerationAvailableProfiles ?? [];
   const nativeProfileReady =
-    availableProfiles.length === 0 || availableProfiles.includes("native-xl-turbo");
+    availableProfiles.length === 0 || availableProfiles.includes("ace-diffusers");
   return Boolean(
     status.musicGenerationReady
     && status.musicGenerationLayoutValid
@@ -136,13 +137,13 @@ function getAiToolsReadyMessage(status: AiToolsStatus): string {
   }
 
   if ((status.musicGenerationAvailableProfiles ?? []).length > 0
-      && !(status.musicGenerationAvailableProfiles ?? []).includes("native-xl-turbo"))
+      && !(status.musicGenerationAvailableProfiles ?? []).includes("ace-diffusers"))
   {
-    return "Stem separation is ready, but the OpenStudio ACE split profile is still missing required music-generation assets.";
+    return "Stem separation is ready, but the ACE-Step Diffusers backend is still missing required music-generation assets.";
   }
 
   return status.musicGenerationStatusMessage
-    || "Stem separation is ready, but music generation still needs the OpenStudio ACE split backend.";
+    || "Stem separation is ready, but music generation still needs the ACE-Step Diffusers backend.";
 }
 
 const DEFAULT_AI_TOOLS_STATUS: AiToolsStatus = {
@@ -650,6 +651,11 @@ export interface AddGeneratedSourceAudioOptions {
   workflowId: AIWorkflowId;
   filePath: string;
   clipName?: string;
+  extensionDuration?: number;
+}
+
+export interface AddTrackOptions {
+  backendAlreadyCreated?: boolean;
 }
 
 export interface TempoMarker {
@@ -830,6 +836,12 @@ export interface RecordingClip {
   startTime: number;
 }
 
+export interface RecordSession {
+  id: string;
+  startTime: number;
+  trackIds: string[];
+}
+
 export interface RecordingMIDIPreviewActiveNote {
   note: number;
   startTimestamp: number;
@@ -945,6 +957,7 @@ interface DAWState {
   // Transport
   transport: TransportState;
   recordingClips: RecordingClip[]; // Tracks currently being recorded (for live visualization)
+  recordSession: RecordSession | null; // Runtime-only snapshot used to finalize recording if backend transport updates race
   recordingMIDIPreviews: Record<string, RecordingMIDIPreview>; // Runtime-only MIDI note preview data for in-progress recording
   playStartPosition: number; // Position where play/record was started (for stop behavior)
   timeSelection: { start: number; end: number } | null; // Time selection for rendering/looping
@@ -1418,7 +1431,10 @@ interface DAWActions {
   removeVCAGroup: (vcaGroupId: string) => void;
 
   // Track Management
-  addTrack: (track: Partial<Track> & { id: string; name: string }) => void;
+  addTrack: (
+    track: Partial<Track> & { id: string; name: string },
+    options?: AddTrackOptions,
+  ) => void;
   duplicateTrack: (trackId: string) => Promise<void>;
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
@@ -1539,6 +1555,7 @@ interface DAWActions {
   // Transport Controls
   play: () => Promise<void>;
   record: () => Promise<void>;
+  toggleRecord: () => Promise<void>;
   pause: () => void;
   stop: () => Promise<void>;
   togglePlayPause: () => Promise<void>;
@@ -1854,6 +1871,7 @@ interface DAWActions {
   updateMidiEditorSession: (sessionId: string, patch: Partial<MidiEditorSession>) => void;
   syncActiveMidiEditorSessionFromGlobals: (patch?: Partial<MidiEditorSession>) => void;
   addMIDIClip: (trackId: string, startTime: number, duration?: number) => string;
+  convertAudioClipToMIDI: (trackId: string, clipId: string) => Promise<{ trackId: string; clipId: string } | null>;
 
   // Project Settings Actions
   setProjectName: (name: string) => void;
@@ -2477,6 +2495,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     },
     transport: { ...initialTransport },
     recordingClips: [],
+    recordSession: null,
     recordingMIDIPreviews: {},
     playStartPosition: 0,
     timeSelection: null,
@@ -2575,6 +2594,7 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
 
   // Transport runtime (position is reset on load; tempo/loop are saved explicitly)
   "recordingClips",
+  "recordSession",
   "playStartPosition",
 
   // Selection state — ephemeral, not part of the "document"
@@ -2709,6 +2729,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     lastSelectedTrackId: null,
     transport: initialTransport,
     recordingClips: [],
+    recordSession: null,
     recordingMIDIPreviews: {},
     playStartPosition: 0,
     timeSelection: null,
@@ -4854,6 +4875,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       }
 
       const sourceName = sourceClip.name || "Audio";
+      const visibleDuration =
+        options.workflowId === "continue-clip"
+          ? Math.max(0.001, options.extensionDuration || mediaInfo.duration)
+          : sourceClip.duration;
       const generatedClip: AudioClip = {
         id: crypto.randomUUID(),
         filePath: mediaInfo.filePath,
@@ -4865,7 +4890,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           options.workflowId === "continue-clip"
             ? sourceClip.startTime + sourceClip.duration
             : sourceClip.startTime,
-        duration: mediaInfo.duration,
+        duration: visibleDuration,
         offset: 0,
         color: sourceTrack.color || "#4cc9f0",
         volumeDB: 0,
@@ -4945,6 +4970,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             generatedClip.pitchCorrectionSourceFilePath,
             generatedClip.pitchCorrectionSourceOffset,
           ).catch(logBridgeError("sync"));
+          void nativeBridge.refreshWaveformPeaks(generatedClip.filePath).catch(logBridgeError("sync"));
         },
         undo: () => {
           set((store) => {
@@ -5088,6 +5114,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...routingActions(set, get),
     ...clipLauncherActions(set, get),
     ...midiActions(set, get),
+    ...audioToMidiActions(set, get),
     ...markerActions(set, get),
     ...screensetActions(set, get),
     ...macroActions(set, get),

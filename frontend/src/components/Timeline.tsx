@@ -38,7 +38,11 @@ import {
   ticksToSeconds,
 } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
-import { guardModalContextMenu, shouldSuppressWorkspaceContextMenu } from "../utils/modalEventGuards";
+import {
+  guardModalContextMenu,
+  isInsideModalLayer,
+  shouldSuppressWorkspaceContextMenu,
+} from "../utils/modalEventGuards";
 import {
   fadeInCurvePoints,
   fadeOutCurvePoints,
@@ -277,6 +281,10 @@ type TimelineDragState = {
   }>;
 };
 
+function getNewTrackTypeForTimelineClip(isMidi: boolean): "audio" | "midi" {
+  return isMidi ? "midi" : "audio";
+}
+
 type TimelineGestureUndoSnapshot = {
   tracks: Track[];
   selectedClipId: string | null;
@@ -464,6 +472,7 @@ export function Timeline({
   // Drag state for clip movement and resizing
   const [dragState, setDragStateState] = useState<TimelineDragState>(createEmptyTimelineDragState);
   const dragStateRef = useRef<TimelineDragState>(dragState);
+  const finalizingTimelineClipGestureRef = useRef(false);
   const timelineGestureUndoRef = useRef<TimelineGestureUndoSnapshot | null>(null);
   const externalMidiDragRef = useRef<{ clipId: string } | null>(null);
   const suppressShiftGainClickRef = useRef<{ clipId: string; at: number } | null>(null);
@@ -2193,10 +2202,32 @@ export function Timeline({
     return true;
   }, [clearTimelineGestureUndo, slipEditClip]);
 
+  const createTimelineGeneratedTrack = useCallback(async (newTrackType: "audio" | "midi") => {
+    let trackId = crypto.randomUUID();
+    while (useDAWStore.getState().tracks.some((track) => track.id === trackId)) {
+      trackId = crypto.randomUUID();
+    }
+
+    await nativeBridge.addTrack(trackId, newTrackType);
+    addTrack(
+      {
+        id: trackId,
+        name: `${newTrackType === "midi" ? "MIDI" : "Audio"} ${useDAWStore.getState().tracks.length + 1}`,
+        type: newTrackType,
+      },
+      { backendAlreadyCreated: true },
+    );
+    return trackId;
+  }, [addTrack]);
+
   const finalizeTimelineClipGesture = useCallback(async () => {
+    if (finalizingTimelineClipGestureRef.current) return false;
+
     const gesture = dragStateRef.current;
     if (!gesture.clipId || gesture.type === null) return false;
 
+    finalizingTimelineClipGestureRef.current = true;
+    try {
     const found = findCurrentTimelineClip(gesture.clipId);
     if (!found) {
       resetDragState();
@@ -2244,13 +2275,8 @@ export function Timeline({
         : false;
 
       if (showGhostTrack || !targetTrackId || !compatible) {
-        const backendTrackId = await nativeBridge.addTrack(undefined, isMidi ? "midi" : found.track.type);
-        addTrack({
-          id: backendTrackId,
-          name: `Track ${useDAWStore.getState().tracks.length + 1}`,
-          type: isMidi ? "midi" : found.track.type,
-        });
-        targetTrackId = backendTrackId;
+        const newTrackType = getNewTrackTypeForTimelineClip(isMidi);
+        targetTrackId = await createTimelineGeneratedTrack(newTrackType);
       }
 
       if (targetTrackId) {
@@ -2285,17 +2311,10 @@ export function Timeline({
           if (createdTracks.has(desiredTrackIdx)) {
             targetTrackId = createdTracks.get(desiredTrackIdx);
           } else {
-            const backendTrackId = await nativeBridge.addTrack(
-              undefined,
-              info.isMidi ? "midi" : sourceTrack?.type || "audio",
-            );
-            addTrack({
-              id: backendTrackId,
-              name: `Track ${useDAWStore.getState().tracks.length + 1}`,
-              type: info.isMidi ? "midi" : sourceTrack?.type || "audio",
-            });
-            createdTracks.set(desiredTrackIdx, backendTrackId);
-            targetTrackId = backendTrackId;
+            const newTrackType = getNewTrackTypeForTimelineClip(info.isMidi);
+            const generatedTrackId = await createTimelineGeneratedTrack(newTrackType);
+            createdTracks.set(desiredTrackIdx, generatedTrackId);
+            targetTrackId = generatedTrackId;
           }
         }
 
@@ -2307,13 +2326,9 @@ export function Timeline({
         }
       }
     } else if (showGhostTrack) {
-      const backendTrackId = await nativeBridge.addTrack(undefined, isMidi ? "midi" : found.track.type);
-      addTrack({
-        id: backendTrackId,
-        name: `Track ${latestTracks.length + 1}`,
-        type: isMidi ? "midi" : found.track.type,
-      });
-      await moveClipToTrack(gesture.clipId, backendTrackId, found.clip.startTime);
+      const newTrackType = getNewTrackTypeForTimelineClip(isMidi);
+      const generatedTrackId = await createTimelineGeneratedTrack(newTrackType);
+      await moveClipToTrack(gesture.clipId, generatedTrackId, found.clip.startTime);
     } else if (targetIdx !== found.trackIndex && targetIdx >= 0 && targetIdx < latestTracks.length) {
       const targetTrack = latestTracks[targetIdx];
       const compatible = isMidi
@@ -2328,11 +2343,14 @@ export function Timeline({
     commitTimelineGestureUndo(multi ? "Move timeline clips" : isMidi ? "Move MIDI clip" : "Move timeline clip");
     resetDragState();
     return true;
+    } finally {
+      finalizingTimelineClipGestureRef.current = false;
+    }
   }, [
-    addTrack,
     clearTimelineGestureUndo,
     commitPreviewedResizeTimelineClip,
     commitTimelineGestureUndo,
+    createTimelineGeneratedTrack,
     duplicateClipToPosition,
     findCurrentTimelineClip,
     moveClipToTrack,
@@ -2352,6 +2370,8 @@ export function Timeline({
     };
 
     const handleWindowMouseMove = (event: MouseEvent) => {
+      if (isInsideModalLayer(event.target)) return;
+
       const point = toStagePoint(event);
       if (!point) return;
 
@@ -2402,7 +2422,9 @@ export function Timeline({
       }
     };
 
-    const handleWindowMouseUp = () => {
+    const handleWindowMouseUp = (event: MouseEvent) => {
+      if (isInsideModalLayer(event.target)) return;
+
       if (slipEditRef.current) {
         finalizeSlipTimelineGesture();
       }
@@ -5994,6 +6016,10 @@ export function Timeline({
         const clipEnd = clip.startTime + clip.duration;
         if (clipEnd > maxClipEnd) maxClipEnd = clipEnd;
       });
+      track.midiClips.forEach((clip) => {
+        const clipEnd = clip.startTime + clip.duration;
+        if (clipEnd > maxClipEnd) maxClipEnd = clipEnd;
+      });
     });
 
     // Check recording clips - extend timeline to current recording position
@@ -6319,38 +6345,9 @@ export function Timeline({
               onClick: () => state.openPitchEditor(menu.trackId, menu.clipId, -1),
             },
             {
-              label: "Extract MIDI from Audio...",
+              label: "Convert to MIDI...",
               onClick: () => {
-                void (async () => {
-                  const result = await nativeBridge.extractMidiFromAudio(menu.trackId, menu.clipId);
-                  if (result && result.notes && result.notes.length > 0) {
-                    const sourceTrack = state.tracks.find((t: any) => t.id === menu.trackId);
-                    const sourceClip = sourceTrack?.clips.find((c: any) => c.id === menu.clipId);
-                    const clipStartTime = sourceClip?.startTime || 0;
-                    const trackId = crypto.randomUUID();
-                    state.addTrack({
-                      id: trackId,
-                      name: `MIDI from ${sourceClip?.name || "Audio"}`,
-                      type: "midi",
-                    });
-                    const maxEnd = Math.max(...result.notes.map((n: any) => n.endTime));
-                    const newClipId = state.addMIDIClip(trackId, clipStartTime, maxEnd);
-                    const events: any[] = [];
-                    for (const n of result.notes) {
-                      events.push({ timestamp: n.startTime, type: "noteOn", note: n.midiPitch, velocity: Math.round(n.velocity * 127) });
-                      events.push({ timestamp: n.endTime, type: "noteOff", note: n.midiPitch, velocity: 0 });
-                    }
-                    events.sort((a: any, b: any) => a.timestamp - b.timestamp);
-                    useDAWStore.setState((s) => ({
-                      tracks: s.tracks.map((t: any) => t.id === trackId ? {
-                        ...t,
-                        midiClips: t.midiClips.map((c: any) => c.id === newClipId ? { ...c, events } : c),
-                      } : t),
-                    }));
-                  } else if (result?.error) {
-                    alert(result.error);
-                  }
-                })();
+                void useDAWStore.getState().convertAudioClipToMIDI(menu.trackId, menu.clipId);
               },
             },
             {

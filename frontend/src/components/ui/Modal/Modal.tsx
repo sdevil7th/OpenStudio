@@ -4,7 +4,10 @@ import { Fragment } from 'react';
 import classNames from 'classnames';
 import { ModalProps, modalSizeStyles } from './Modal.types';
 import { Button } from '../Button';
-import { guardModalContextMenu } from '../../../utils/modalEventGuards';
+import {
+  guardModalContextMenu,
+  guardModalPointerEvent,
+} from '../../../utils/modalEventGuards';
 
 /**
  * Modal Component
@@ -120,8 +123,15 @@ export function Modal({
             leaveTo="opacity-0 scale-95"
           >
             <DialogPanel
+              data-modal-panel="true"
               onKeyDown={(e) => e.stopPropagation()}
               onContextMenu={guardModalContextMenu}
+              onMouseDown={guardModalPointerEvent}
+              onMouseMove={guardModalPointerEvent}
+              onMouseUp={guardModalPointerEvent}
+              onPointerDown={guardModalPointerEvent}
+              onPointerMove={guardModalPointerEvent}
+              onPointerUp={guardModalPointerEvent}
               className={classNames(
                 'bg-daw-panel border border-daw-border rounded-lg shadow-xl',
                 modalSizeStyles[size],

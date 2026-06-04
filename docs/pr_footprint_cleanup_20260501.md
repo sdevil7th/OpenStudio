@@ -9,7 +9,7 @@
 ## Ignore Or Remove
 
 - `tmp_pitch_runs/` generated pitch regression runs. Pre-cleanup status showed 2951 untracked files in this directory.
-- `tools/openstudio_ace_backend/vendor_runtime/` downloaded/generated ACE/Comfy runtime payloads. Pre-cleanup status showed 429 untracked files in this directory. The installer/probe code reconstructs this runtime from the pinned runtime plan and cache; it should not be committed.
+- `tools/openstudio_ace_backend/vendor_runtime/` downloaded/generated ACE runtime payloads. Pre-cleanup status showed 429 untracked files in this directory. The installer/probe code reconstructs this runtime from the pinned runtime plan and cache; it should not be committed.
 - Generated pitch regression WAV/PNG/JSONL reports under `tests/fixtures/pitch-regression`.
 - Local debug capture output under `pitch_debug_captures/`.
 

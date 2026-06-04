@@ -47,7 +47,7 @@ describe("AI feature installer contract", () => {
     expect(modalSource).toContain("LICENSE_GEMMA.md");
     expect(bridgeSource).toContain("stableAudioModelPath?: string");
     expect(bridgeSource).toContain("stableAudioLicenseAccepted?: boolean");
-    expect(bridgeSource).toContain("modelId?: \"ace-step-v15-xl-turbo\" | \"stable-audio-3-medium\"");
+    expect(bridgeSource).toContain("modelId?: AiMusicModelId");
     expect(mainComponentSource).toContain(".withNativeFunction (\"browseForFolder\"");
     expect(mainComponentSource).toContain("canSelectDirectories");
   });

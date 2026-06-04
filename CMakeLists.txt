@@ -643,37 +643,6 @@ if(EXISTS "${AI_STABLE_AUDIO_GENERATION_SCRIPT}")
     )
 endif()
 
-set(AI_OPENSTUDIO_ACE_RUNNER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_runner.py")
-if(EXISTS "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}")
-    openstudio_copy_runtime_file(
-        "${AI_OPENSTUDIO_ACE_RUNNER_SCRIPT}"
-        "scripts/openstudio_ace_runner.py"
-        "Copying OpenStudio ACE runner script to output directory"
-    )
-endif()
-
-set(AI_OPENSTUDIO_ACE_BACKEND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/openstudio_ace_backend")
-set(AI_PREPARE_OPENSTUDIO_ACE_RUNTIME_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/prepare_openstudio_ace_runtime.py")
-find_package(Python3 COMPONENTS Interpreter QUIET)
-if(Python3_Interpreter_FOUND AND EXISTS "${AI_PREPARE_OPENSTUDIO_ACE_RUNTIME_SCRIPT}")
-    add_custom_command(TARGET OpenStudio PRE_BUILD
-        COMMAND "${Python3_EXECUTABLE}"
-            "${AI_PREPARE_OPENSTUDIO_ACE_RUNTIME_SCRIPT}"
-            "--destination"
-            "${AI_OPENSTUDIO_ACE_BACKEND_DIR}/vendor_runtime"
-        COMMENT "Preparing OpenStudio ACE vendor runtime from local ComfyUI source"
-    )
-else()
-    message(WARNING "OpenStudio ACE vendor runtime preflight could not run because Python3 or tools/prepare_openstudio_ace_runtime.py was not found.")
-endif()
-if(EXISTS "${AI_OPENSTUDIO_ACE_BACKEND_DIR}")
-    openstudio_copy_runtime_directory(
-        "${AI_OPENSTUDIO_ACE_BACKEND_DIR}"
-        "scripts/openstudio_ace_backend"
-        "Copying OpenStudio ACE backend package to output directory"
-    )
-endif()
-
 set(WINDOWS_AI_ACCELERATION_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/tools/windows-ai-acceleration-manifest.json")
 if(EXISTS "${WINDOWS_AI_ACCELERATION_MANIFEST}")
     openstudio_copy_runtime_file(
@@ -729,6 +698,14 @@ openstudio_remove_runtime_file(
 openstudio_remove_runtime_file(
     "scripts/openstudio_ace_backend/parity_debug.py"
     "Removing ACE-Step parity backend helper from output directory"
+)
+openstudio_remove_runtime_file(
+    "scripts/openstudio_ace_runner.py"
+    "Removing legacy OpenStudio ACE split runner from output directory"
+)
+openstudio_remove_runtime_path(
+    "scripts/openstudio_ace_backend"
+    "Removing legacy OpenStudio ACE split backend from output directory"
 )
 set(LEGACY_EXTERNAL_ACE_RUNNER_PATH "scripts/co")
 string(APPEND LEGACY_EXTERNAL_ACE_RUNNER_PATH "mfy_ace_runner.py")

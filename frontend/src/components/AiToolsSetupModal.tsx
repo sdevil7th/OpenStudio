@@ -120,10 +120,8 @@ function sanitizeSetupMessage(message: string): string {
   const lowered = message.toLowerCase();
   if (
     lowered.includes("vendor_runtime")
-    || lowered.includes("comfy")
     || lowered.includes("nodes_ace.py")
     || lowered.includes("folder_paths.py")
-    || lowered.includes("packaged openstudio split backend")
   ) {
     return "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup.";
   }
@@ -135,7 +133,7 @@ function sanitizeSetupMessage(message: string): string {
 
 function isAudioGenerationReady(status: AiToolsStatus): boolean {
   const availableProfiles = status.musicGenerationAvailableProfiles ?? [];
-  const nativeProfileReady = availableProfiles.length === 0 || availableProfiles.includes("native-xl-turbo");
+  const nativeProfileReady = availableProfiles.length === 0 || availableProfiles.includes("ace-diffusers");
   return Boolean(status.musicGenerationReady && status.musicGenerationLayoutValid && nativeProfileReady);
 }
 
@@ -664,7 +662,7 @@ export default function AiToolsSetupModal() {
           <div className="rounded border border-yellow-700/40 bg-yellow-950/20 p-4">
             <p className="text-sm font-semibold text-yellow-200">Runtime file was locked</p>
             <p className="mt-1 text-xs leading-5 text-daw-text-secondary">
-              OpenStudio attempted a runtime-only rebuild. Retry keeps the downloaded stem models and ACE-Step checkpoints in place. Reset AI Tools performs a full cleanup.
+              OpenStudio attempted a runtime-only rebuild. Retry keeps the downloaded stem models and ACE-Step Diffusers cache in place. Reset AI Tools performs a full cleanup.
             </p>
           </div>
         ) : null}

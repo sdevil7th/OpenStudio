@@ -1,5 +1,7 @@
 # Studio13 New Features Implementation Plan
 
+> **Status:** Historical implementation plan. Several items in this document have since moved from "planned" to implemented or partial. For current public-facing support/feature claims, use `README.md`, `docs/implemented_features.md`, and the mounted UI/actions as the source of truth.
+
 ## Current State Summary
 
 | Area | Status | Notes |

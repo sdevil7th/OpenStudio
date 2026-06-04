@@ -166,10 +166,12 @@ def run_persistent_probe(args: argparse.Namespace) -> dict[str, Any]:
         str(python),
         str(script),
         "--worker",
-        "--checkpoint-root",
+        "--cache-root",
         str(checkpoint_root),
         "--music-gen-model",
         args.music_gen_model,
+        "--model-id",
+        args.model_id,
     ]
     print(f"[probe] launching worker: {' '.join(command)}")
     process = subprocess.Popen(
@@ -283,10 +285,12 @@ def run_one_shot_probe(args: argparse.Namespace) -> int:
         str(output_path),
         "--request-id",
         request_id,
-        "--checkpoint-root",
+        "--cache-root",
         str(checkpoint_root),
         "--music-gen-model",
         args.music_gen_model,
+        "--model-id",
+        args.model_id,
         "--session-mode",
         args.session_mode,
     ]
@@ -418,8 +422,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Probe the OpenStudio ACE-Step runtime bridge.")
     parser.add_argument("--python", help="Python interpreter to use")
     parser.add_argument("--script", default="tools/generate_music.py", help="Path to generate_music.py")
-    parser.add_argument("--checkpoint-root", help="Pinned ACE-Step checkpoint root")
-    parser.add_argument("--music-gen-model", default="acestep-v15-xl-turbo")
+    parser.add_argument("--checkpoint-root", help="ACE-Step Diffusers cache root")
+    parser.add_argument("--music-gen-model", default="ace-step-v15-xl-turbo")
+    parser.add_argument("--model-id", default="ACE-Step/acestep-v15-xl-turbo-diffusers")
     parser.add_argument("--output-dir", default=str(Path.cwd() / "tmp"))
     parser.add_argument(
         "--scenario",
@@ -450,7 +455,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--min-p", type=float, default=0.0)
     parser.add_argument("--steps", type=int, default=8)
-    parser.add_argument("--runtime-profile", default="native-xl-turbo")
+    parser.add_argument("--runtime-profile", default="ace-diffusers")
     parser.add_argument("--lm-model", default="auto")
     parser.add_argument(
         "--generation-mode",

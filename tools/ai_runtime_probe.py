@@ -20,45 +20,17 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-DEFAULT_MUSIC_GEN_MODEL = "acestep-v15-xl-turbo"
-DEFAULT_MUSIC_GEN_MODEL_REPO = "Comfy-Org/ace_step_1.5_ComfyUI_files"
-DEFAULT_MUSIC_GEN_SHARED_REPO = "Comfy-Org/ace_step_1.5_ComfyUI_files"
+DEFAULT_MUSIC_GEN_MODEL = "ace-step-v15-xl-turbo"
+DEFAULT_MUSIC_GEN_MODEL_REPO = "ACE-Step/acestep-v15-xl-turbo-diffusers"
+DEFAULT_MUSIC_GEN_SHARED_REPO = DEFAULT_MUSIC_GEN_MODEL_REPO
 REQUIRED_MUSIC_GEN_PYTHON = (3, 11)
-REQUIRED_MUSIC_GEN_NATIVE_FILES: tuple[dict[str, str], ...] = (
-    {
-        "id": "diffusion_model",
-        "label": "ACE-Step XL Turbo diffusion model",
-        "relativePath": "diffusion_models/acestep_v1.5_xl_turbo_bf16.safetensors",
-        "sourceRelativePaths": (
-            "diffusion_models/acestep_v1.5_xl_turbo_bf16.safetensors",
-            "unet/acestep_v1.5_xl_turbo_bf16.safetensors",
-        ),
-    },
-    {
-        "id": "vae",
-        "label": "ACE-Step 1.5 VAE",
-        "relativePath": "vae/ace_1.5_vae.safetensors",
-        "sourceRelativePaths": ("vae/ace_1.5_vae.safetensors",),
-    },
-    {
-        "id": "text_encoder_0_6b",
-        "label": "ACE-Step Qwen 0.6B text encoder",
-        "relativePath": "text_encoders/qwen_0.6b_ace15.safetensors",
-        "sourceRelativePaths": ("text_encoders/qwen_0.6b_ace15.safetensors",),
-    },
-    {
-        "id": "text_encoder_4b",
-        "label": "ACE-Step Qwen 4B text encoder",
-        "relativePath": "text_encoders/qwen_4b_ace15.safetensors",
-        "sourceRelativePaths": ("text_encoders/qwen_4b_ace15.safetensors",),
-    },
-)
+REQUIRED_MUSIC_GEN_NATIVE_FILES: tuple[dict[str, str], ...] = ()
 MUSIC_RUNTIME_PROFILE_SPECS: dict[str, dict[str, Any]] = {
-    "native-xl-turbo": {
-        "label": "OpenStudio ACE Split",
-        "runtimeProfileName": "openstudio-ace-split",
-        "lmModel": "qwen_4b_ace15.safetensors",
-        "requiredAssets": tuple(spec["relativePath"] for spec in REQUIRED_MUSIC_GEN_NATIVE_FILES),
+    "ace-diffusers": {
+        "label": "ACE-Step Diffusers",
+        "runtimeProfileName": "ace-diffusers",
+        "lmModel": "",
+        "requiredAssets": (),
     },
 }
 WINDOWS_ACCELERATION_MANIFEST_PATH = Path(__file__).with_name(
@@ -149,7 +121,7 @@ def _set_music_generation_status(
 
 
 def _is_music_generation_python_compatible() -> bool:
-    return sys.version_info[:2] == REQUIRED_MUSIC_GEN_PYTHON
+    return (3, 11) <= sys.version_info[:2] < (3, 13)
 
 
 def _get_dist_version(package_name: str) -> str | None:
@@ -308,11 +280,10 @@ def _probe_music_generation_acceleration(
 
 def _can_import_music_generation_bridge() -> tuple[bool, str]:
     try:
-        import acestep.handler  # noqa: F401
-        import acestep.inference  # noqa: F401
-        import acestep.llm_inference  # noqa: F401
-        import av  # noqa: F401
-        import torchsde  # noqa: F401
+        from diffusers import AceStepPipeline  # noqa: F401
+        import soundfile  # noqa: F401
+        import torch  # noqa: F401
+        import torchaudio  # noqa: F401
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
     return True, ""
@@ -330,38 +301,18 @@ def _normalize_arch(machine: str) -> str:
 def resolve_music_gen_checkpoint_root(checkpoint_root: str = "") -> Path:
     if checkpoint_root.strip():
         return Path(checkpoint_root).expanduser().resolve()
-    return (Path.home() / ".cache" / "ace-step" / "checkpoints").resolve()
+    return (Path.home() / ".cache" / "ace-step" / "diffusers").resolve()
 
 
-def get_openstudio_native_backend_root() -> Path:
-    return Path(__file__).resolve().parent / "openstudio_ace_backend" / "vendor_runtime"
+def get_candidate_ace_model_roots() -> list[Path]:
+    candidates: list[Path] = []
+    model_dir = os.environ.get("OPENSTUDIO_ACE_MODEL_DIR", "").strip()
+    if model_dir:
+        candidates.append(Path(model_dir).expanduser())
 
-
-def get_openstudio_native_backend_status() -> tuple[bool, str, list[str]]:
-    backend_root = get_openstudio_native_backend_root()
-    required_paths = (
-        backend_root / "nodes.py",
-        backend_root / "folder_paths.py",
-        backend_root / "comfy" / "sd.py",
-        backend_root / "comfy_extras" / "nodes_ace.py",
-    )
-    missing = [str(path) for path in required_paths if not path.exists()]
-    return not missing, str(backend_root), missing
-
-
-def get_candidate_comfy_model_roots() -> list[Path]:
-    candidates = [
-        Path(os.environ.get("COMFYUI_MODEL_DIR", "")).expanduser(),
-        Path(os.environ.get("COMFYUI_ROOT", "")).expanduser() / "models",
-    ]
-    home = Path.home()
-    candidates.extend(
-        [
-            home / "Documents" / "ComfyUI" / "models",
-            home / "Documents" / "Codes" / "ComfyUI" / "models",
-            home / "ComfyUI" / "models",
-        ]
-    )
+    ace_root = os.environ.get("OPENSTUDIO_ACE_ROOT", "").strip()
+    if ace_root:
+        candidates.append(Path(ace_root).expanduser() / "models")
 
     unique_candidates: list[Path] = []
     seen: set[str] = set()
@@ -381,11 +332,27 @@ def get_candidate_comfy_model_roots() -> list[Path]:
     return unique_candidates
 
 
-def find_local_comfy_native_assets() -> tuple[dict[str, Path], list[str]]:
+def find_local_ace_native_assets(
+    extra_roots: list[Path] | None = None,
+) -> tuple[dict[str, Path], list[str]]:
     found: dict[str, Path] = {}
     searched_roots: list[str] = []
 
-    for model_root in get_candidate_comfy_model_roots():
+    candidate_roots = list(extra_roots or []) + get_candidate_ace_model_roots()
+    unique_roots: list[Path] = []
+    seen_roots: set[str] = set()
+    for candidate_root in candidate_roots:
+        try:
+            resolved_root = candidate_root.expanduser().resolve()
+        except OSError:
+            resolved_root = candidate_root.expanduser()
+        root_key = str(resolved_root).lower()
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        unique_roots.append(resolved_root)
+
+    for model_root in unique_roots:
         searched_roots.append(str(model_root))
         if not model_root.is_dir():
             continue
@@ -407,68 +374,39 @@ def get_music_generation_required_paths(
     model_name: str = DEFAULT_MUSIC_GEN_MODEL,
 ) -> dict[str, Any]:
     root = resolve_music_gen_checkpoint_root(checkpoint_root)
-    required_paths = [root / Path(spec["relativePath"]) for spec in REQUIRED_MUSIC_GEN_NATIVE_FILES]
-    missing_paths = [str(path) for path in required_paths if not path.exists()]
 
     return {
         "checkpointRoot": str(root),
         "modelId": model_name,
         "modelRepoId": DEFAULT_MUSIC_GEN_MODEL_REPO,
         "sharedRepoId": DEFAULT_MUSIC_GEN_SHARED_REPO,
-        "mainModelPath": str(required_paths[0]) if required_paths else "",
-        "sharedPaths": [str(path) for path in required_paths[1:]],
-        "requiredPaths": [str(path) for path in required_paths],
-        "missingPaths": missing_paths,
-        "layoutValid": not missing_paths,
-        "requiredAssets": [
-            {
-                "id": spec["id"],
-                "label": spec["label"],
-                "relativePath": spec["relativePath"],
-                "path": str(root / Path(spec["relativePath"])),
-            }
-            for spec in REQUIRED_MUSIC_GEN_NATIVE_FILES
-        ],
+        "mainModelPath": "",
+        "sharedPaths": [],
+        "requiredPaths": [],
+        "missingPaths": [],
+        "layoutValid": True,
+        "requiredAssets": [],
     }
 
 
 def get_music_runtime_profiles(checkpoint_root: str = "") -> dict[str, Any]:
-    root = resolve_music_gen_checkpoint_root(checkpoint_root)
-    installed_assets = (
-        {
-            str(path.relative_to(root)).replace("\\", "/")
-            for path in root.rglob("*")
-            if path.is_file()
-        }
-        if root.exists()
-        else set()
-    )
-
     profiles: dict[str, dict[str, Any]] = {}
     available_profiles: list[str] = []
     unavailable_profiles: list[dict[str, Any]] = []
     for profile_id, spec in MUSIC_RUNTIME_PROFILE_SPECS.items():
-        missing_assets = [asset for asset in spec["requiredAssets"] if asset not in installed_assets]
         profile = {
             "id": profile_id,
             "label": spec["label"],
             "runtimeProfileName": spec["runtimeProfileName"],
             "lmModel": spec["lmModel"],
             "requiredAssets": list(spec["requiredAssets"]),
-            "missingAssets": missing_assets,
-            "available": not missing_assets,
+            "missingAssets": [],
+            "available": True,
         }
         profiles[profile_id] = profile
-        if profile["available"]:
-            available_profiles.append(profile_id)
-        else:
-            unavailable_profiles.append(profile)
+        available_profiles.append(profile_id)
 
-    default_profile = (
-        "native-xl-turbo"
-        if profiles.get("native-xl-turbo", {}).get("available")
-        else next(iter(available_profiles), "")
-    )
+    default_profile = "ace-diffusers"
     return {
         "defaultProfile": default_profile,
         "profiles": profiles,
@@ -503,6 +441,7 @@ def probe_runtime_capabilities(
         "accelerationMode": acceleration_mode,
         "audioSeparatorVersion": None,
         "aceStepVersion": None,
+        "diffusersVersion": None,
         "torchVersion": None,
         "torchvisionVersion": None,
         "torchaudioVersion": None,
@@ -550,8 +489,7 @@ def probe_runtime_capabilities(
     report["musicGenerationUnavailableProfiles"] = runtime_profiles["unavailableProfiles"]
     report["musicGenerationDefaultProfile"] = runtime_profiles["defaultProfile"]
     report["musicGenerationWarmSessionCapable"] = runtime_profiles["warmSessionCapable"]
-    backend_runtime_ok, backend_root, backend_missing = get_openstudio_native_backend_status()
-    report["musicGenerationBackendRoot"] = backend_root
+    report["musicGenerationBackendRoot"] = "diffusers"
 
     report["baseRuntimeReady"] = True
 
@@ -569,6 +507,7 @@ def probe_runtime_capabilities(
     report["runtimeReady"] = True
     report["audioSeparatorVersion"] = _get_dist_version("audio-separator")
     report["aceStepVersion"] = _get_dist_version("ace-step")
+    report["diffusersVersion"] = _get_dist_version("diffusers")
     report["torchVersion"] = getattr(torch, "__version__", None)
     report["torchvisionVersion"] = _get_dist_version("torchvision")
     report["torchaudioVersion"] = _get_dist_version("torchaudio")
@@ -589,106 +528,58 @@ def probe_runtime_capabilities(
         report["backendDecisionTrace"].append("onnxruntime.get_available_providers failed")
     report["onnxProviders"] = ort_providers
 
-    if not music_layout["layoutValid"]:
-        _set_music_generation_status(
-            report,
-            ready=False,
-            message="Pinned ACE-Step native split-model files are still missing.",
-            error_code="missing_checkpoint_files",
-        )
-        report["backendDecisionTrace"].append(
-            "music generation checkpoint layout missing: "
-            + ", ".join(music_layout["missingPaths"])
-        )
-    elif not _is_music_generation_python_compatible():
+    if not _is_music_generation_python_compatible():
         _set_music_generation_status(
             report,
             ready=False,
             message=(
-                "Pinned ACE-Step music generation currently requires Python "
-                f"{REQUIRED_MUSIC_GEN_PYTHON[0]}.{REQUIRED_MUSIC_GEN_PYTHON[1]}.x, "
+                "ACE-Step Diffusers currently requires Python 3.11.x or 3.12.x, "
                 f"but this managed runtime is using Python {report['pythonVersion']}."
             ),
             error_code="music_generation_python_incompatible",
         )
         report["backendDecisionTrace"].append(
-            "music generation python incompatible: "
-            f"expected {REQUIRED_MUSIC_GEN_PYTHON[0]}.{REQUIRED_MUSIC_GEN_PYTHON[1]}.x, "
+            "music generation python incompatible: expected 3.11.x or 3.12.x, "
             f"got {report['pythonVersion']}"
         )
-    elif report["aceStepVersion"] is None:
+    elif report["diffusersVersion"] is None:
         _set_music_generation_status(
             report,
             ready=False,
-            message="ACE-Step is not installed in the managed AI runtime yet.",
-            error_code="missing_ace_step_runtime",
+            message="ACE-Step Diffusers dependencies are not installed in the managed AI runtime yet.",
+            error_code="missing_ace_diffusers_runtime",
         )
-        report["backendDecisionTrace"].append("ace-step package not installed")
-    elif not backend_runtime_ok:
-        _set_music_generation_status(
-            report,
-            ready=False,
-            message=(
-                "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup."
-            ),
-            error_code="missing_openstudio_native_backend",
-        )
-        report["backendDecisionTrace"].append(
-            "openstudio native backend missing: " + ", ".join(backend_missing)
-        )
-    elif str(report["aceStepVersion"]).startswith("1."):
-        try:
-            import torchaudio  # noqa: F401
-        except Exception as exc:
-            _set_music_generation_status(
-                report,
-                ready=False,
-                message=(
-                    "ACE-Step 1.5 dependencies are installed, but this runtime cannot "
-                    f"load torchaudio yet: {exc}"
-                ),
-                error_code="torchaudio_runtime_incompatible",
-            )
-            report["backendDecisionTrace"].append(f"torchaudio import failed: {exc}")
-        else:
-            bridge_import_ok, bridge_import_error = _can_import_music_generation_bridge()
-            if bridge_import_ok:
-                report["musicGenerationComputeBackend"] = "cuda" if torch.cuda.is_available() else "cpu"
-                acceleration_ready, acceleration_message = _probe_music_generation_acceleration(
-                    compute_backend=report["musicGenerationComputeBackend"],
-                    report=report,
-                )
-                report["musicGenerationPerformanceReady"] = acceleration_ready
-                report["musicGenerationPerformanceStatusMessage"] = acceleration_message
-                _set_music_generation_status(
-                    report,
-                    ready=True,
-                    message="OpenStudio ACE split backend is ready.",
-                )
-            else:
+        report["backendDecisionTrace"].append("diffusers package not installed")
+    else:
+        bridge_import_ok, bridge_import_error = _can_import_music_generation_bridge()
+        if bridge_import_ok:
+            report["musicGenerationComputeBackend"] = "cuda" if torch.cuda.is_available() else "cpu"
+            if report["musicGenerationComputeBackend"] != "cuda":
                 _set_music_generation_status(
                     report,
                     ready=False,
-                    message="ACE-Step runtime files are present, but the ACE-Step bridge could not be loaded. Repair or reinstall ACE-Step Audio Generation setup.",
-                    error_code="broken_v15_runtime_bridge",
+                    message="ACE-Step Diffusers requires CUDA on this backend.",
+                    error_code="cuda_required",
                 )
-                report["backendDecisionTrace"].append(
-                    "openstudio split backend ace-step import failed: " + bridge_import_error
+                report["musicGenerationPerformanceReady"] = False
+                report["musicGenerationPerformanceStatusMessage"] = "CUDA is required for ACE-Step Diffusers."
+                report["backendDecisionTrace"].append("ace diffusers cuda unavailable")
+            else:
+                report["musicGenerationPerformanceReady"] = True
+                report["musicGenerationPerformanceStatusMessage"] = "ACE-Step Diffusers CUDA runtime is available."
+                _set_music_generation_status(
+                    report,
+                    ready=True,
+                    message="ACE-Step Diffusers backend is ready.",
                 )
-    else:
-        _set_music_generation_status(
-            report,
-            ready=False,
-            message=(
-                "The managed runtime still has the legacy ACE-Step "
-                f"{report['aceStepVersion']} package, but the pinned model requires the "
-                "ACE-Step 1.5 split backend."
-            ),
-            error_code="legacy_ace_step_runtime",
-        )
-        report["backendDecisionTrace"].append(
-            f"legacy ace-step runtime detected: {report['aceStepVersion']}"
-        )
+        else:
+            _set_music_generation_status(
+                report,
+                ready=False,
+                message="ACE-Step Diffusers dependencies are installed, but the pipeline could not be imported. Repair or reinstall Audio Generation setup.",
+                error_code="broken_ace_diffusers_runtime",
+            )
+            report["backendDecisionTrace"].append("ace diffusers import failed: " + bridge_import_error)
 
     packaged_backends: list[str] = []
     if (
@@ -850,12 +741,12 @@ def main() -> int:
     parser.add_argument(
         "--music-gen-checkpoint-root",
         default="",
-        help="Pinned ACE-Step checkpoint root to validate",
+        help="ACE-Step Diffusers cache root to validate (default: ~/.cache/ace-step/diffusers)",
     )
     parser.add_argument(
         "--music-gen-model",
         default=DEFAULT_MUSIC_GEN_MODEL,
-        help="Pinned ACE-Step model id to validate",
+        help="OpenStudio ACE-Step model id to validate",
     )
     parser.add_argument(
         "--acceleration-mode",

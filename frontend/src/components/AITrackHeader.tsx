@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import classNames from "classnames";
-import { Sparkles, SlidersHorizontal, Wand2 } from "lucide-react";
+import { Power, Sparkles, SlidersHorizontal } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import {
-  AI_MUSIC_MODELS,
+  ACE_STEP_MODEL_ID,
+  type AIWorkflow,
   getAIWorkflow,
-  getAIWorkflowsForSurface,
   getAiMusicModel,
+  mergeWorkflowParams,
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
 import { nativeBridge, type AIGenerationProgress } from "../services/NativeBridge";
@@ -18,8 +19,10 @@ import {
   useDAWStore,
 } from "../store/useDAWStore";
 import { ColorPicker } from "./ColorPicker";
+import { FXChainPanel } from "./FXChainPanel";
 import { AIWorkflowModal } from "./AIWorkflowModal";
-import { Button, Input, Select } from "./ui";
+import { Button, Input, Knob } from "./ui";
+import { automationToBackend } from "../store/automationParams";
 import {
   TCP_HEADER_BUTTON_PAIR_CLASS,
   TCP_HEADER_PRIMARY_BUTTON_CLASS,
@@ -54,17 +57,6 @@ function formatElapsedLabel(elapsedMs?: number) {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
-function formatEtaLabel(etaMs?: number) {
-  if (!etaMs || etaMs <= 0) {
-    return "";
-  }
-
-  const totalSeconds = Math.max(0, Math.floor(etaMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s left` : `${seconds}s left`;
-}
-
 function formatProgressAgeLabel(ageMs?: number) {
   if (!ageMs || ageMs <= 0) {
     return "";
@@ -86,10 +78,9 @@ function sanitizeAiSetupMessage(message: string): string {
   const lowered = message.toLowerCase();
   if (
     lowered.includes("vendor_runtime")
-    || lowered.includes("comfy")
     || lowered.includes("nodes_ace.py")
     || lowered.includes("folder_paths.py")
-    || lowered.includes("packaged openstudio split backend")
+    || lowered.includes("ace-step diffusers dependencies")
   ) {
     return "ACE-Step runtime files are missing. Repair or reinstall ACE-Step Audio Generation setup.";
   }
@@ -98,9 +89,8 @@ function sanitizeAiSetupMessage(message: string): string {
 
 function formatRuntimeProfileLabel(profile?: string) {
   switch (profile) {
-    case "native-xl-turbo":
-    case "openstudio-ace-split":
-      return "OpenStudio ACE Split";
+    case "ace-diffusers":
+      return "ACE-Step Diffusers";
     default:
       return profile ? formatPhaseLabel(profile) : "";
   }
@@ -113,14 +103,7 @@ function formatLmModelLabel(lmModel?: string) {
   if (lmModel === "auto") {
     return "Auto LM";
   }
-  if (lmModel.endsWith(".safetensors")) {
-    return lmModel
-      .replace("qwen_", "Qwen ")
-      .replace("_ace15.safetensors", "")
-      .replace("_", " ")
-      .replace("b", "B");
-  }
-  return lmModel.replace("acestep-5Hz-lm-", "LM ");
+  return lmModel;
 }
 
 function formatSessionModeLabel(sessionMode?: string) {
@@ -144,6 +127,8 @@ function formatAttemptModeLabel(attemptMode?: string) {
       return "Direct DiT";
     case "native_split_graph":
       return "Native Split Graph";
+    case "ace_diffusers":
+      return "ACE Diffusers";
     case "legacy_ace_wrapper":
       return "Legacy Wrapper";
     default:
@@ -267,9 +252,6 @@ function getStatusMeta(track: Track) {
         ? `Attempt ${track.aiGenerationAttemptIndex}`
         : "",
       formatElapsedLabel(track.aiGenerationElapsedMs),
-      track.aiGenerationFailureKind === "decode_stalled"
-        ? ""
-        : formatEtaLabel(track.aiGenerationEtaMs),
       (track.aiGenerationLastProgressAgeMs ?? 0) >= 10000
         ? formatProgressAgeLabel(track.aiGenerationLastProgressAgeMs)
         : "",
@@ -285,6 +267,50 @@ function getStatusMeta(track: Track) {
     : "Audio Generation idle";
 }
 
+function formatHeaderParamValue(key: string, value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+
+  if (key === "duration" || key === "extension_duration") {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? `${Math.round(numeric)}s` : "";
+  }
+
+  if (key === "bpm") {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? `${Math.round(numeric)} BPM` : "";
+  }
+
+  if (key === "inferenceSteps" || key === "steps") {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? `${Math.round(numeric)} steps` : "";
+  }
+
+  return String(value);
+}
+
+function getHeaderParamChips(workflow: AIWorkflow, params: Record<string, unknown>) {
+  const priority = [
+    "bpm",
+    "duration",
+    "extension_duration",
+    "keyscale",
+    "timesignature",
+    "inferenceSteps",
+    "steps",
+  ];
+
+  return priority
+    .map((key) => {
+      if (!workflow.params.some((param) => param.key === key)) return null;
+      const text = formatHeaderParamValue(key, params[key]);
+      return text ? { key, text } : null;
+    })
+    .filter((chip): chip is { key: string; text: string } => Boolean(chip))
+    .slice(0, 3);
+}
+
 export const AITrackHeader = React.memo(function AITrackHeader({
   track,
   isSelected,
@@ -292,6 +318,14 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const {
     updateTrack,
     toggleTrackMute,
+    toggleTrackSolo,
+    toggleTrackFXBypass,
+    setTrackVolume,
+    setTrackPan,
+    beginTrackVolumeEdit,
+    commitTrackVolumeEdit,
+    beginTrackPanEdit,
+    commitTrackPanEdit,
     setAITrackModel,
     setAITrackWorkflow,
     setAITrackParams,
@@ -300,10 +334,20 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     trackHeight,
     aiToolsStatus,
     openAiToolsSetup,
+    autoValues,
+    meterLevel,
   } = useDAWStore(
     useShallow((state) => ({
       updateTrack: state.updateTrack,
       toggleTrackMute: state.toggleTrackMute,
+      toggleTrackSolo: state.toggleTrackSolo,
+      toggleTrackFXBypass: state.toggleTrackFXBypass,
+      setTrackVolume: state.setTrackVolume,
+      setTrackPan: state.setTrackPan,
+      beginTrackVolumeEdit: state.beginTrackVolumeEdit,
+      commitTrackVolumeEdit: state.commitTrackVolumeEdit,
+      beginTrackPanEdit: state.beginTrackPanEdit,
+      commitTrackPanEdit: state.commitTrackPanEdit,
       setAITrackModel: state.setAITrackModel,
       setAITrackWorkflow: state.setAITrackWorkflow,
       setAITrackParams: state.setAITrackParams,
@@ -312,6 +356,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       trackHeight: state.trackHeight,
       aiToolsStatus: state.aiToolsStatus,
       openAiToolsSetup: state.openAiToolsSetup,
+      autoValues: state.automatedParamValues[track.id],
+      meterLevel: state.meterLevels[track.id] ?? 0,
     })),
   );
 
@@ -321,10 +367,12 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const generationStartTimeRef = useRef<number | null>(null);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showParams, setShowParams] = useState(false);
+  const [showFXChain, setShowFXChain] = useState(false);
   const modelId = resolveAiMusicModelId(track.aiMusicModelId);
   const model = getAiMusicModel(modelId);
   const workflow = getAIWorkflow(track.aiWorkflow, modelId, "ai-track");
-  const workflows = getAIWorkflowsForSurface("ai-track", modelId);
+  const workflowParams = mergeWorkflowParams(workflow.id, track.aiWorkflowParams, modelId);
+  const headerParamChips = getHeaderParamChips(workflow, workflowParams);
   const isBusy =
     track.aiGenerationState === "loading"
     || track.aiGenerationState === "generating";
@@ -334,7 +382,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     && Boolean(
       selectedModelStatus?.ready
       ?? (
-        modelId === "ace-step-v15-xl-turbo"
+        modelId === ACE_STEP_MODEL_ID
           ? (
               aiToolsStatus.features?.audioGeneration?.ready
               ?? (
@@ -636,7 +684,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       phaseProgress: undefined,
       etaMs: undefined,
       runMode: "cold",
-      runtimeProfile: "openstudio-ace-split",
+      runtimeProfile: "ace-diffusers",
       lmModel: "",
       statusNote: "",
       failureKind: "",
@@ -644,7 +692,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       workerExitCode: 0,
       lastStdoutLine: "",
       lastStderrLine: "",
-      attemptMode: "native_split_graph",
+      attemptMode: "ace_diffusers",
       attemptIndex: 1,
       protocolVersion: 0,
       scriptVersion: "",
@@ -699,6 +747,31 @@ export const AITrackHeader = React.memo(function AITrackHeader({
 
   const statusHeadline = getStatusHeadline(track);
   const statusMeta = getStatusMeta(track);
+  const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
+  const hasFx = hasBypassableFx;
+  const fxBypassTitle = hasFx
+    ? track.fxBypassed
+      ? "Enable FX"
+      : "Bypass FX"
+    : "No FX loaded";
+  const formatVolume = (db: number) =>
+    db <= -60 ? "-inf dB" : `${db.toFixed(1)} dB`;
+  const formatPan = (pan: number) => {
+    if (Math.abs(pan) < 0.005) return "C";
+    return pan > 0
+      ? `R${Math.round(Math.abs(pan * 100))}`
+      : `L${Math.round(Math.abs(pan * 100))}`;
+  };
+  const meterHeight = `${Math.min(100, meterLevel > 0.001 ? Math.max(0, (20 * Math.log10(meterLevel) + 60) / 72) * 100 : 0)}%`;
+  const meterColor = (() => {
+    const dbNorm =
+      meterLevel > 0.001
+        ? Math.max(0, (20 * Math.log10(meterLevel) + 60) / 72)
+        : 0;
+    if (dbNorm > 0.92) return "#ef4444";
+    if (dbNorm > 0.85) return "#facc15";
+    return "#16a34a";
+  })();
 
   return (
     <>
@@ -733,51 +806,13 @@ export const AITrackHeader = React.memo(function AITrackHeader({
               document.body,
             )}
 
-          <div className="flex-1 min-w-0 px-2 py-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">
+          <div className="flex-1 min-w-0 px-2 py-1">
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 content-center">
+              <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-300">
                 <Sparkles size={11} />
                 AI
               </span>
-              <div className="min-w-0 flex-1" data-no-drag data-no-select>
-                <Select
-                  value={modelId}
-                  onChange={(value) => setAITrackModel(track.id, resolveAiMusicModelId(String(value)))}
-                  options={AI_MUSIC_MODELS.map((entry) => ({
-                    value: entry.id,
-                    label: entry.shortLabel,
-                  }))}
-                  size="sm"
-                  fullWidth
-                />
-              </div>
-              <div className="min-w-0 flex-[1.1]" data-no-drag data-no-select>
-                <Select
-                  value={workflow.id}
-                  onChange={(value) => setAITrackWorkflow(track.id, String(value))}
-                  options={workflows.map((entry) => ({
-                    value: entry.id,
-                    label: entry.label,
-                    disabled: entry.available === false,
-                  }))}
-                  size="sm"
-                  fullWidth
-                />
-              </div>
-              <Button
-                variant={isBusy ? "danger" : "primary"}
-                size="sm"
-                onClick={() => void handleGenerate()}
-                data-no-drag
-                data-no-select
-                className="shrink-0"
-              >
-                <Wand2 size={12} />
-                {isBusy ? "Cancel" : canStartMusicGeneration ? "Generate" : "Set Up"}
-              </Button>
-            </div>
 
-            <div className="mt-1.5">
               <Input
                 type="text"
                 variant="inline"
@@ -785,17 +820,68 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                 value={track.name}
                 onChange={(event) => updateTrack(track.id, { name: event.target.value })}
                 placeholder="AI Track Name"
+                className="min-w-[56px] flex-1 basis-20"
                 inputClassName="w-full min-w-0"
               />
-            </div>
 
-            <div className="mt-1.5 flex items-start gap-2">
-              <span
-                className={classNames(
-                  TCP_HEADER_BUTTON_PAIR_CLASS,
-                  "shrink-0",
-                )}
+              <Button
+                variant="primary"
+                size="icon-sm"
+                shape="square"
+                active={showParams}
+                onClick={() => setShowParams(true)}
+                title="Open AI generation parameters"
+                aria-label="Open AI generation parameters"
+                className="shrink-0"
+                data-no-drag
+                data-no-select
               >
+                <SlidersHorizontal size={13} />
+              </Button>
+
+              <span
+                className="flex items-center gap-1 shrink-0"
+                data-no-drag
+                data-no-select
+              >
+                <Knob
+                  variant="volume"
+                  size="sm"
+                  min={-60}
+                  max={12}
+                  value={
+                    autoValues?.volume !== undefined
+                      ? automationToBackend("volume", autoValues.volume)
+                      : track.volumeDB
+                  }
+                  defaultValue={0}
+                  onChange={(value) => setTrackVolume(track.id, value)}
+                  onBeginEdit={() => beginTrackVolumeEdit(track.id)}
+                  onCommitEdit={() => commitTrackVolumeEdit(track.id)}
+                  formatValue={formatVolume}
+                  label="Volume"
+                />
+                <Knob
+                  variant="pan"
+                  size="sm"
+                  min={-1}
+                  max={1}
+                  value={
+                    autoValues?.pan !== undefined
+                      ? automationToBackend("pan", autoValues.pan)
+                      : track.pan
+                  }
+                  defaultValue={0}
+                  onChange={(value) => setTrackPan(track.id, value)}
+                  onBeginEdit={() => beginTrackPanEdit(track.id)}
+                  onCommitEdit={() => commitTrackPanEdit(track.id)}
+                  formatValue={formatPan}
+                  label="Pan"
+                  bipolarCenter={0}
+                />
+              </span>
+
+              <span className="flex gap-px">
                 <Button
                   variant="default"
                   size="icon-sm"
@@ -804,127 +890,142 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                   onClick={() => toggleTrackMute(track.id)}
                   title={track.muted ? "Unmute track" : "Mute track"}
                   aria-label={track.muted ? "Unmute track" : "Mute track"}
-                  className={TCP_HEADER_PRIMARY_BUTTON_CLASS}
-                  data-no-drag
-                  data-no-select
+                  className="rounded-l"
                 >
                   M
                 </Button>
                 <Button
-                  variant="default"
+                  variant="warning"
                   size="icon-sm"
                   shape="square"
-                  active={showParams}
-                  onClick={() => setShowParams(true)}
-                  title="Open AI parameters"
-                  aria-label="Open AI parameters"
-                  className={TCP_HEADER_TOGGLE_BUTTON_CLASS}
-                  data-no-drag
-                  data-no-select
+                  active={Boolean(track.soloed)}
+                  onClick={() => toggleTrackSolo(track.id)}
+                  title={track.soloed ? "Unsolo track" : "Solo track"}
+                  aria-label={track.soloed ? "Unsolo track" : "Solo track"}
                 >
-                  <SlidersHorizontal size={12} />
+                  S
                 </Button>
               </span>
 
-              <div className="min-w-0 flex-1">
-                <div
+              <span
+                data-tcp-pair="fx"
+                className={classNames(TCP_HEADER_BUTTON_PAIR_CLASS, "shrink-0")}
+              >
+                <Button
+                  variant="default"
+                  size="icon-sm"
+                  shape="square"
+                  onClick={() => setShowFXChain(true)}
+                  title="FX Chain"
                   className={classNames(
-                    "truncate text-[11px] leading-4",
-                    track.aiGenerationState === "error"
-                      ? "text-red-300"
-                      : "text-daw-text",
+                    TCP_HEADER_PRIMARY_BUTTON_CLASS,
+                    hasBypassableFx && track.fxBypassed
+                      ? "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]"
+                      : hasFx
+                        ? "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]"
+                        : "hover:text-green-500 hover:border-green-500",
                   )}
-                  title={statusHeadline}
                 >
-                  {statusHeadline}
-                </div>
-                <div className="mt-0.5 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.12em] text-daw-text-muted">
-                  {track.aiGenerationBackend ? (
-                    <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-1.5 py-0.5 text-[9px] text-daw-text">
-                      {track.aiGenerationBackend.toUpperCase()}
-                    </span>
-                  ) : null}
-                  {track.aiGenerationRunMode ? (
-                    <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-1.5 py-0.5 text-[9px] text-daw-text">
-                      {track.aiGenerationRunMode.toUpperCase()}
-                    </span>
-                  ) : null}
-                  <span className="truncate" title={statusMeta}>
-                    {statusMeta}
-                  </span>
-                </div>
-              </div>
+                  FX
+                </Button>
+                <Button
+                  variant="default"
+                  size="icon-xs"
+                  shape="square"
+                  onClick={() => {
+                    if (!hasBypassableFx) {
+                      setShowFXChain(true);
+                    } else {
+                      toggleTrackFXBypass(track.id);
+                    }
+                  }}
+                  title={fxBypassTitle}
+                  className={classNames(
+                    TCP_HEADER_TOGGLE_BUTTON_CLASS,
+                    hasBypassableFx && track.fxBypassed
+                      ? "text-red-400! border-red-500!"
+                      : hasFx
+                        ? "text-green-400! border-green-500!"
+                        : "hover:text-green-500 hover:border-green-500",
+                  )}
+                >
+                  <Power size={10} strokeWidth={2.5} />
+                </Button>
+              </span>
+            </div>
+
+            <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden text-[10px]">
+              <button
+                type="button"
+                onClick={() => setShowParams(true)}
+                className="min-w-0 max-w-[180px] shrink rounded border border-neutral-700 bg-neutral-900/80 px-2 py-0.5 text-left text-[10px] uppercase tracking-[0.1em] text-daw-text-muted hover:border-cyan-500/70 hover:text-cyan-200"
+                title={`${model.label} - ${workflow.label}`}
+                data-no-drag
+                data-no-select
+              >
+                <span className="block truncate">
+                  {model.shortLabel} / {workflow.label}
+                </span>
+              </button>
+              {headerParamChips.map((chip) => (
+                <span
+                  key={chip.key}
+                  className="hidden shrink-0 rounded-full border border-neutral-700 bg-neutral-950 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.1em] text-daw-text-muted sm:inline-flex"
+                  title={chip.text}
+                >
+                  {chip.text}
+                </span>
+              ))}
+              <span
+                className={classNames(
+                  "min-w-[48px] flex-1 truncate",
+                  track.aiGenerationState === "error"
+                    ? "text-red-300"
+                    : isBusy
+                      ? "text-cyan-200"
+                      : "text-neutral-400",
+                )}
+                title={isBusy || track.aiGenerationState === "error" ? `${statusHeadline} - ${statusMeta}` : statusMeta}
+              >
+                {isBusy || track.aiGenerationState === "error" ? statusHeadline : "Ready"}
+              </span>
             </div>
 
             {isBusy ? (
-              <div className="mt-1.5 space-y-1">
-                <div className="h-1.5 w-full rounded-full bg-neutral-900">
+              <div className="mt-1.5 flex items-center gap-2">
+                <div className="h-1.5 min-w-0 flex-1 rounded-full bg-neutral-900">
                   <div
                     className="h-1.5 rounded-full bg-cyan-400 transition-all duration-200"
-                    style={{
-                      width: getProgressWidth(track.aiGenerationProgress ?? 0),
-                    }}
+                    style={{ width: getProgressWidth(track.aiGenerationProgress ?? 0) }}
                   />
                 </div>
-                <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-daw-text-muted">
-                  <span className="truncate">{formatPhaseLabel(track.aiGenerationPhase)}</span>
-                  <span>{formatProgressLabel(track.aiGenerationProgress ?? 0)}</span>
-                </div>
-                {track.aiGenerationStatusNote ? (
-                  <div
-                    className="text-[10px] leading-4 text-daw-text-muted"
-                    title={track.aiGenerationStatusNote}
-                  >
-                    {track.aiGenerationStatusNote}
-                  </div>
-                ) : null}
-                {track.aiGenerationPriorFailure ? (
-                  <div
-                    className="text-[10px] leading-4 text-daw-text-muted"
-                    title={track.aiGenerationPriorFailure}
-                  >
-                    Prior failure: {track.aiGenerationPriorFailure}
-                  </div>
-                ) : null}
-                {(track.aiGenerationLastProgressAgeMs ?? 0) >= 10000 ? (
-                  <div className="text-[10px] leading-4 text-daw-text-muted">
-                    {formatProgressAgeLabel(track.aiGenerationLastProgressAgeMs)}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {track.aiGenerationState === "error" ? (
-              <div className="mt-1.5 space-y-1 text-[10px] leading-4 text-daw-text-muted">
-                {track.aiGenerationFailureDetail ? (
-                  <div title={track.aiGenerationFailureDetail}>
-                    Detail: {track.aiGenerationFailureDetail}
-                  </div>
-                ) : null}
-                {track.aiGenerationLmBackend ? (
-                  <div title={track.aiGenerationLmBackend}>
-                    LM backend: {track.aiGenerationLmBackend}
-                  </div>
-                ) : null}
-                {track.aiGenerationLmStage ? (
-                  <div title={track.aiGenerationLmStage}>
-                    LM stage: {formatPhaseLabel(track.aiGenerationLmStage)}
-                  </div>
-                ) : null}
-                {track.aiGenerationRequestId ? (
-                  <div className="truncate" title={track.aiGenerationRequestId}>
-                    Request: {track.aiGenerationRequestId}
-                  </div>
-                ) : null}
-                {track.aiGenerationTracePath ? (
-                  <div className="truncate" title={track.aiGenerationTracePath}>
-                    Trace: {track.aiGenerationTracePath}
-                  </div>
-                ) : null}
+                <span className="shrink-0 text-[10px] tabular-nums text-daw-text-muted">
+                  {formatProgressLabel(track.aiGenerationProgress ?? 0)}
+                </span>
               </div>
             ) : null}
           </div>
+
+          <div className="w-2 shrink-0 border-l border-neutral-800 bg-neutral-900 pt-1 mr-1 flex flex-col-reverse">
+            <div
+              className={classNames("w-full transition-all duration-75", meterLevel > 0.01 && "animate-pulse")}
+              style={{
+                height: meterHeight,
+                background: `linear-gradient(to top, ${meterColor}, ${meterColor})`,
+              }}
+            />
+          </div>
         </div>
       </div>
+
+      {showFXChain && (
+        <FXChainPanel
+          trackId={track.id}
+          trackName={track.name}
+          chainType="track"
+          onClose={() => setShowFXChain(false)}
+        />
+      )}
 
       <AIWorkflowModal
         track={track}

@@ -23,6 +23,7 @@ Version 3.0 -- Comprehensive Reference Guide
 15. [Customization](#15-customization)
 16. [Keyboard Shortcuts](#16-keyboard-shortcuts)
 17. [Troubleshooting](#17-troubleshooting)
+18. [AI Music and Assisted Audio](#18-ai-music-and-assisted-audio)
 
 ---
 
@@ -1062,16 +1063,16 @@ Each built-in OpenStudio effect includes:
 - Preset management (save/load presets)
 - Bypass toggle
 
-### 9.4 VST3 Plugin Support
+### 9.4 Plugin Hosting
 
-OpenStudio hosts third-party VST3 plugins for both effects and virtual instruments:
+OpenStudio hosts third-party plugins for effects and virtual instruments. VST3 is the most mature path. CLAP and LV2 code paths are present and exposed in current builds where the plugin format is available, but individual plugin compatibility may vary more than VST3.
 
 **Scanning for plugins:**
 1. Go to the FX Chain Panel or Plugin Browser.
-2. Click **Scan** to scan standard VST3 directories for installed plugins.
+2. Click **Scan** to scan standard plugin directories for installed plugins.
 3. Scanned plugins appear in the plugin list organized by manufacturer and category.
 
-**Adding a VST3 plugin:**
+**Adding a plugin:**
 1. Open the FX Chain Panel for a track.
 2. Click the **+** button or "Add Plugin".
 3. Browse the plugin list (filterable by name, manufacturer, category).
@@ -1079,7 +1080,7 @@ OpenStudio hosts third-party VST3 plugins for both effects and virtual instrumen
 5. The plugin's native editor window opens automatically.
 
 **Plugin editor windows:**
-- VST3 editors open in separate native windows.
+- Native plugin editors open in separate native windows when the hosted plugin exposes an editor.
 - Parameters can be adjusted in the native editor or via the FX Chain Panel's parameter list.
 
 ### 9.5 Plugin Presets
@@ -1298,10 +1299,9 @@ Choose the time range to render:
 | **FLAC**        | Lossless compressed audio            | 16-bit, 24-bit             |
 | **MP3**         | Lossy compressed (128-320 kbps)      | N/A (bitrate-based)        |
 | **OGG Vorbis**  | Lossy compressed (quality 3-10)      | N/A (quality-based)        |
-| **RAW PCM**     | Headerless PCM data                  | 16-bit, 24-bit, 32-bit float |
 
 **Sample rate**: 44100, 48000, 88200, 96000, or 192000 Hz.
-**Note**: The actual render always processes at the current device sample rate.
+**Note**: Rendering processes through the current engine/device configuration, then post-processes when a target sample-rate conversion is requested.
 
 **Channels**: Stereo or Mono.
 
@@ -1311,7 +1311,7 @@ Choose the time range to render:
 |-----------------|------------------------------------------------------------------|
 | **Normalize**   | Peak-normalizes the output to 0 dBFS                             |
 | **Dither**      | Applies dither when reducing bit depth. Types: TPDF, Noise Shaped. Only available for 16-bit and 24-bit output. |
-| **Resample Quality** | Fast, Good, or Best quality for sample rate conversion      |
+| **Resample Quality** | UI placeholder only in the current build; backend support is pending |
 
 ### 12.7 Secondary Output
 
@@ -1323,7 +1323,7 @@ Enable **Secondary output** to simultaneously render a second format (e.g., rend
 
 ### 12.8 Metadata
 
-Expand the **Metadata** section to embed information in the rendered file:
+The **Metadata** section is present as a disabled placeholder in the current build. Metadata embedding is planned, but these fields are not written yet:
 
 - Title
 - Artist
@@ -1337,7 +1337,7 @@ Expand the **Metadata** section to embed information in the rendered file:
 
 | Option                        | Description                                         |
 |-------------------------------|-----------------------------------------------------|
-| **Online render (1x speed)**  | Render in real-time instead of offline (for live capture or plugin compatibility) |
+| **Online render (1x speed)**  | UI placeholder only in the current build; currently disabled |
 | **Add to project after render** | Automatically import rendered files as new clips in the project |
 
 ### 12.10 Render Queue
@@ -1470,11 +1470,10 @@ Convert multiple audio files between formats:
 
 ### 13.15 Capture Output
 
-Record OpenStudio's master output in real-time:
+Live capture is an experimental plumbing path in the current build. The menu action exists, but production-ready real-time master-output capture is not part of the stable user workflow yet:
 
 - Go to **File > Capture Output** to toggle live capture.
-- Audio is recorded to a file as it plays.
-- Useful for capturing improvisations or live performances.
+- Treat this as a development/diagnostic feature until the backend capture path is fully enabled.
 
 ---
 
@@ -1738,7 +1737,7 @@ Press `Ctrl+Shift+P` to open the Command Palette. Type to fuzzy-search through a
 If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environment:
 
 - Toggle via **Options > Toggle 32-bit Plugin Bridge**.
-- This enables a bridging mechanism to load 32-bit plugins.
+- This control is currently experimental. OpenStudio's stable plugin hosting path is 64-bit native plugin hosting.
 
 ---
 
@@ -1931,7 +1930,7 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 **Solutions**:
 1. Ensure the plugin is installed in a standard VST3 directory.
 2. Open the FX Chain Panel and click **Scan** to rescan for plugins.
-3. Verify the plugin is a 64-bit VST3 (OpenStudio only supports 64-bit plugins natively; use the 32-bit bridge for older plugins).
+3. Verify the plugin is a supported 64-bit plugin. VST3 is the most mature path; CLAP/LV2 compatibility may vary by plugin and build.
 4. Check that the plugin file is not corrupted.
 
 ### 17.5 Plugin Causing Crashes or Noise
@@ -2031,17 +2030,68 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 
 ---
 
+## 18. AI Music and Assisted Audio
+
+OpenStudio includes optional AI-assisted workflows that live inside the normal DAW session. These features are not bundled into the base app by default; install the required AI Tools runtime from inside the app when prompted.
+
+### 18.1 AI Tools Setup
+
+Use **AI Tools Setup** when a generation or stem workflow reports that its runtime is missing.
+
+- The installer prepares optional local runtime assets instead of making the base DAW download huge.
+- Installation can be cancelled, reset, or retried from the setup modal.
+- Generated audio is imported back into the project as normal clips/tracks.
+
+### 18.2 AI Tracks
+
+AI tracks are used for prompt-driven generation workflows:
+
+| Workflow | Description |
+|----------|-------------|
+| **Text to Music** | Generates a fresh music clip using ACE-Step from style/arrangement prompt, optional lyrics, BPM, duration, time signature, language, key/scale, seed, and generation controls. |
+| **Lyrics + Style** | Generates a song guided by both structured lyrics and a musical prompt. |
+| **Text to Audio** | Generates audio from a prompt using Stable Audio 3 Medium when that runtime/model is installed. |
+
+Create an AI track from the Insert menu, the command palette, or the `Ctrl+Alt+T` shortcut if it is still bound to its default.
+
+### 18.3 Clip AI Workflows
+
+Right-click an audio clip and open **AI Generation** for source-conditioned workflows:
+
+| Workflow | Description |
+|----------|-------------|
+| **Create Variation** | Generates a related version of the selected clip while preserving source identity according to the source/variation controls. |
+| **Inpaint Selection** | Regenerates the time selection that overlaps the clip while matching the surrounding audio. Create a time selection first. |
+| **Continue Clip** | Generates a continuation tail from the selected clip using the prompt and tail-length/source controls. |
+
+### 18.4 Stem Separation
+
+Stem separation splits a source clip into component tracks for remixing, cleanup, practice, or arrangement work:
+
+- Vocals
+- Drums
+- Bass
+- Other
+
+The resulting stems are imported back into the session as editable clips.
+
+### 18.5 Audio to MIDI
+
+The audio-to-MIDI workflow uses Basic Pitch / ONNX plumbing where available to extract MIDI note data from audio. Use it when you want to turn a recorded or imported performance into MIDI material for editing, layering, or replacement.
+
+---
+
 ## Appendix A: Project File Location
 
 OpenStudio project files (`.osproj`) are saved to the location you choose when saving. Legacy `.s13` files are still supported. Recorded audio files are stored in a subdirectory alongside the project file.
 
 ## Appendix B: Audio Format Support
 
-**Import formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis
+**Import formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and video audio extraction where FFmpeg is available
 
-**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, RAW PCM
+**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export
 
-**Plugin format**: VST3 (64-bit native, with optional 32-bit bridge)
+**Plugin formats**: VST3 is the stable primary path. CLAP and LV2 code paths are present where available. Experimental 32-bit bridging controls are not part of the stable plugin-hosting path.
 
 ## Appendix C: Supported Audio Interfaces
 

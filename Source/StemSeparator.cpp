@@ -7,9 +7,9 @@
 namespace
 {
 constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
-constexpr auto kPinnedMusicGenerationModelId = "acestep-v15-xl-turbo";
-constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo";
-constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/Ace-Step1.5";
+constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
+constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kStableAudioModelId = "stable-audio-3-medium";
 constexpr auto kStableAudioAttribution = "Powered by Stability AI";
 constexpr auto kFeatureStemSeparation = "stemSeparation";
@@ -163,7 +163,7 @@ bool isInstallerTerminalFailureCode (const juce::String& errorCode)
 bool hasNativeMusicProfile (const StemSeparator::AiToolsStatus& status)
 {
     return status.musicGenerationAvailableProfiles.isEmpty()
-        || status.musicGenerationAvailableProfiles.contains("native-xl-turbo");
+        || status.musicGenerationAvailableProfiles.contains("ace-diffusers");
 }
 
 juce::String sanitiseArchiveEntryName (juce::String name)
@@ -296,7 +296,7 @@ juce::File StemSeparator::getMusicGenerationCheckpointRoot() const
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile(".cache")
         .getChildFile("ace-step")
-        .getChildFile("checkpoints");
+        .getChildFile("diffusers");
 }
 
 juce::File StemSeparator::getStableAudioModelRoot() const
@@ -1051,12 +1051,12 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.message = musicGenerationFullyReady
             ? "AI tools are ready."
             : (! hasNativeMusicProfile(status)
-                ? "Stem separation is ready, but the Native XL Turbo ACE-Step profile is still missing required music-generation assets."
+                ? "Stem separation is ready, but the ACE-Step Diffusers backend is still missing required music-generation assets."
                 : (status.musicGenerationPerformanceStatusMessage.isNotEmpty()
                     ? status.musicGenerationPerformanceStatusMessage
                     : (status.musicGenerationStatusMessage.isNotEmpty()
                         ? status.musicGenerationStatusMessage
-                        : "Stem separation is ready, but music generation still needs a compatible ACE-Step runtime bridge.")));
+                        : "Stem separation is ready, but music generation still needs the ACE-Step Diffusers runtime.")));
         status.activityLines.clear();
         status.activityLines.add(status.stepLabel);
         if (status.message != status.stepLabel)

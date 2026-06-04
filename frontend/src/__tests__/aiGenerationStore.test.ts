@@ -39,6 +39,7 @@ describe("AI generation store actions", () => {
     vi.spyOn(nativeBridge, "removeTrack").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "addPlaybackClip").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "removePlaybackClip").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "refreshWaveformPeaks").mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -83,6 +84,7 @@ describe("AI generation store actions", () => {
     expect(tracks).toHaveLength(2);
     expect(tracks[1].name).toBe("AI Variation - Source Loop");
     expect(tracks[1].clips[0].startTime).toBe(10);
+    expect(tracks[1].clips[0].duration).toBe(5);
     expect(useDAWStore.getState().canUndo).toBe(true);
 
     useDAWStore.getState().undo();
@@ -99,12 +101,14 @@ describe("AI generation store actions", () => {
       sourceClipId: "clip-source",
       workflowId: "continue-clip",
       filePath: "C:/audio/generated.wav",
+      extensionDuration: 8,
     });
 
     const tracks = useDAWStore.getState().tracks;
     expect(tracks).toHaveLength(1);
     expect(tracks[0].clips).toHaveLength(2);
     expect(tracks[0].clips[1].startTime).toBe(15);
+    expect(tracks[0].clips[1].duration).toBe(8);
   });
 
   it("places continuation on a new track when the source tail range collides", async () => {

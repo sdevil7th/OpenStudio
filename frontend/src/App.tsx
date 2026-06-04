@@ -24,6 +24,7 @@ import {
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
 import { maybeRunPitchRegressionDriver } from "./utils/pitchRegressionDriver";
+import { shouldAutoStopPlayback } from "./utils/transportAutoStop";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { TimelineRuler } from "./components/TimelineRuler";
@@ -394,7 +395,7 @@ function App() {
   const previousAiToolsInstallInProgressRef = useRef(aiToolsStatus.installInProgress);
   const hasNativeMusicProfile =
     (aiToolsStatus.musicGenerationAvailableProfiles ?? []).length === 0
-    || (aiToolsStatus.musicGenerationAvailableProfiles ?? []).includes("native-xl-turbo");
+    || (aiToolsStatus.musicGenerationAvailableProfiles ?? []).includes("ace-diffusers");
   const previousAiToolsFullReadyRef = useRef(Boolean(
     aiToolsStatus.musicGenerationReady
     && aiToolsStatus.musicGenerationLayoutValid
@@ -509,7 +510,7 @@ function App() {
       } else if (currentPartialReady && readyStateChanged) {
         showToast(
           (!hasNativeMusicProfile
-            ? "Stem separation is ready, but the OpenStudio ACE split profile is still missing required music-generation assets."
+            ? "Stem separation is ready, but the ACE-Step Diffusers backend is still missing required music-generation assets."
             : "")
             ||
           aiToolsStatus.musicGenerationPerformanceStatusMessage
@@ -729,7 +730,7 @@ function App() {
       }
 
       if (command === "transport.record") {
-        void state.record();
+        void state.toggleRecord();
         return;
       }
 
@@ -833,6 +834,7 @@ function App() {
 
     let lastTime = performance.now();
     let lastAutoUpdate = 0; // throttle automation value updates to ~30fps
+    let autoStopInFlight = false;
     let frameId: number;
 
     const loop = () => {
@@ -843,6 +845,31 @@ function App() {
       const currentState = useDAWStore.getState();
       if (currentState.transport.isPlaying) {
         let newTime = currentState.transport.currentTime + dt;
+
+        const autoStopDecision = shouldAutoStopPlayback({
+          tracks: currentState.tracks,
+          transport: currentState.transport,
+          metronomeEnabled: currentState.metronomeEnabled,
+          nextTime: newTime,
+        });
+        if (autoStopDecision.shouldStop) {
+          if (!autoStopInFlight) {
+            autoStopInFlight = true;
+            if (autoStopDecision.stopTime !== null) {
+              currentState.setCurrentTime(autoStopDecision.stopTime);
+            }
+            console.log("[App] Auto-stopping silent playback", {
+              reason: autoStopDecision.reason,
+              stopTime: autoStopDecision.stopTime,
+              latestEndTime: autoStopDecision.bounds.latestEndTime,
+            });
+            void currentState.stop().catch((error) => {
+              console.warn("[App] Auto-stop silent playback failed", error);
+              autoStopInFlight = false;
+            });
+          }
+          return;
+        }
 
         // Loop: wrap back to loopStart when reaching loopEnd
         const { loopEnabled, loopStart, loopEnd } = currentState.transport;
@@ -898,9 +925,9 @@ function App() {
         useDAWStore.setState((current) => ({
           transport: {
             ...current.transport,
-            isPlaying: backendPlaying,
+            isPlaying: backendPlaying || Boolean(current.recordSession),
             isPaused: false,
-            isRecording: backendPlaying ? current.transport.isRecording : false,
+            isRecording: backendPlaying || Boolean(current.recordSession) ? current.transport.isRecording : false,
             currentTime: backendPos,
           },
         }));

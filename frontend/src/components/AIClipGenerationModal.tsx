@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Music2, Settings2, WandSparkles } from "lucide-react";
 import { useShallow } from "zustand/shallow";
 import {
+  ACE_STEP_MODEL_ID,
   AI_WORKFLOW_SECTION_LABELS,
   STABLE_AUDIO_3_MODEL_ID,
   type AIWorkflowParam,
@@ -25,9 +26,9 @@ import {
   ModalFooter,
   ModalHeader,
   Select,
-  Slider,
   Textarea,
 } from "./ui";
+import { NumericWorkflowParamField } from "./AIWorkflowParamField";
 
 const SECTION_ORDER: AIWorkflowSection[] = [
   "prompt",
@@ -55,6 +56,48 @@ const STABLE_SOURCE_WORKFLOW_IDS = new Set([
   "inpaint-selection",
   "continue-clip",
 ]);
+
+export function buildAIClipGenerationRequestParams({
+  params,
+  modelId,
+  sourceTrack,
+  sourceClip,
+  workflowRange,
+  extensionDuration,
+  transportTempo,
+  timeSignature,
+}: {
+  params: Record<string, unknown>;
+  modelId: string;
+  sourceTrack: { id: string; name: string };
+  sourceClip: AudioClip;
+  workflowRange: { start: number; end: number } | null;
+  extensionDuration: number;
+  transportTempo: number;
+  timeSignature: { numerator: number; denominator: number };
+}) {
+  const requestParams: Record<string, unknown> = { ...params };
+  if (modelId === ACE_STEP_MODEL_ID) {
+    requestParams.bpm = Math.round(Number.isFinite(transportTempo) ? transportTempo : 120);
+    requestParams.timesignature = `${timeSignature.numerator}/${timeSignature.denominator}`;
+  }
+
+  return {
+    ...requestParams,
+    source: {
+      filePath: sourceClip.filePath,
+      clipOffset: sourceClip.offset || 0,
+      clipDuration: sourceClip.duration,
+      sourceTrackId: sourceTrack.id,
+      sourceTrackName: sourceTrack.name,
+      sourceClipId: sourceClip.id,
+      sourceClipName: sourceClip.name,
+      sourceClipStartTime: sourceClip.startTime,
+      inpaintRange: workflowRange,
+      extensionDuration,
+    },
+  };
+}
 
 function formatDuration(seconds: number) {
   const safeSeconds = Math.max(0, seconds || 0);
@@ -85,19 +128,10 @@ function formatElapsedLabel(elapsedMs?: number) {
   return minutes > 0 ? `${minutes}m ${seconds}s elapsed` : `${seconds}s elapsed`;
 }
 
-function formatEtaLabel(etaMs?: number) {
-  if (!etaMs || etaMs <= 0) return "";
-  const totalSeconds = Math.max(0, Math.floor(etaMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s left` : `${seconds}s left`;
-}
-
 function formatRuntimeProfileLabel(profile?: string) {
   switch (profile) {
-    case "native-xl-turbo":
-    case "openstudio-ace-split":
-      return "OpenStudio ACE Split";
+    case "ace-diffusers":
+      return "ACE-Step Diffusers";
     default:
       return profile ? formatPhaseLabel(profile) : "";
   }
@@ -128,12 +162,11 @@ function shouldShowParam(workflowId: string, param: AIWorkflowParam) {
       "repainting_end",
       "inpaint_start",
       "inpaint_end",
-      "generate_audio_codes",
     ].includes(param.key);
   }
 
   if (workflowId === "inpaint-selection") {
-    return !["extension_duration", "generate_audio_codes"].includes(param.key);
+    return !["extension_duration"].includes(param.key);
   }
 
   if (workflowId === "continue-clip") {
@@ -143,7 +176,6 @@ function shouldShowParam(workflowId: string, param: AIWorkflowParam) {
       "repainting_end",
       "inpaint_start",
       "inpaint_end",
-      "generate_audio_codes",
     ].includes(param.key);
   }
 
@@ -161,6 +193,8 @@ export default function AIClipGenerationModal() {
     aiClipGenerationRange,
     aiClipGenerationError,
     tracks,
+    transportTempo,
+    timeSignature,
     aiToolsStatus,
     closeAIClipGeneration,
     setAIClipGenerationModel,
@@ -180,6 +214,8 @@ export default function AIClipGenerationModal() {
       aiClipGenerationRange: state.aiClipGenerationRange,
       aiClipGenerationError: state.aiClipGenerationError,
       tracks: state.tracks,
+      transportTempo: state.transport.tempo,
+      timeSignature: state.timeSignature,
       aiToolsStatus: state.aiToolsStatus,
       closeAIClipGeneration: state.closeAIClipGeneration,
       setAIClipGenerationModel: state.setAIClipGenerationModel,
@@ -197,6 +233,8 @@ export default function AIClipGenerationModal() {
   const [progress, setProgress] = useState<AIGenerationProgress>({ state: "idle", progress: 0 });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const completedRef = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const wasGeneratingRef = useRef(false);
 
   const sourceTrack = useMemo(
     () => tracks.find((track) => track.id === aiClipGenerationTrackId),
@@ -221,7 +259,7 @@ export default function AIClipGenerationModal() {
   const isModelReady = Boolean(
     selectedModelStatus?.ready
     ?? (
-      aiClipGenerationModelId === "ace-step-v15-xl-turbo"
+      aiClipGenerationModelId === ACE_STEP_MODEL_ID
         ? (
             aiToolsStatus.features?.audioGeneration?.ready
             ?? (
@@ -320,7 +358,13 @@ export default function AIClipGenerationModal() {
     formatSessionModeLabel(progress.sessionMode),
     formatRuntimeProfileLabel(progress.runtimeProfile),
   ].filter(Boolean);
-  const hasProgressDetails = Boolean(progress.statusNote || progressChips.length || progress.lastStderrLine || progress.lastStdoutLine);
+  const hasProgressDetails = Boolean(
+    progress.statusNote
+    || progress.sourcePatternWarning
+    || progressChips.length
+    || progress.lastStderrLine
+    || progress.lastStdoutLine,
+  );
 
   const handleParamChange = (key: string, value: unknown) => {
     setAIClipGenerationParams(
@@ -330,6 +374,17 @@ export default function AIClipGenerationModal() {
       }, aiClipGenerationModelId),
     );
   };
+
+  const scrollStatusIntoView = () => {
+    contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    if (isGenerating && !wasGeneratingRef.current) {
+      scrollStatusIntoView();
+    }
+    wasGeneratingRef.current = isGenerating;
+  }, [isGenerating]);
 
   const handleCancel = async () => {
     if (isGenerating) {
@@ -365,23 +420,19 @@ export default function AIClipGenerationModal() {
     setIsGenerating(true);
     setProgress({ state: "loading", progress: 0.01, phase: "starting" });
     setAIClipGenerationError("");
+    scrollStatusIntoView();
 
     const extensionDuration = Number(params.extension_duration ?? 20);
-    const requestParams = {
-      ...params,
-      source: {
-        filePath: sourceClip.filePath,
-        clipOffset: sourceClip.offset || 0,
-        clipDuration: sourceClip.duration,
-        sourceTrackId: sourceTrack.id,
-        sourceTrackName: sourceTrack.name,
-        sourceClipId: sourceClip.id,
-        sourceClipName: sourceClip.name,
-        sourceClipStartTime: sourceClip.startTime,
-        inpaintRange: aiClipGenerationRange,
-        extensionDuration,
-      },
-    };
+    const requestParams = buildAIClipGenerationRequestParams({
+      params,
+      modelId: aiClipGenerationModelId,
+      sourceTrack,
+      sourceClip,
+      workflowRange: aiClipGenerationRange,
+      extensionDuration,
+      transportTempo,
+      timeSignature,
+    });
 
     try {
       const result = await nativeBridge.startAIGeneration(
@@ -430,6 +481,7 @@ export default function AIClipGenerationModal() {
             sourceClipId: sourceClip.id,
             workflowId: workflow.id,
             filePath: nextProgress.outputFile,
+            extensionDuration,
           });
           setTimeout(() => closeAIClipGeneration(), 500);
         } else if (nextProgress.state === "error") {
@@ -468,6 +520,18 @@ export default function AIClipGenerationModal() {
       );
     }
 
+    if (param.type === "slider" || (param.type === "number" && param.min !== undefined && param.max !== undefined)) {
+      return (
+        <NumericWorkflowParamField
+          key={param.key}
+          param={param}
+          value={value}
+          disabled={isRangeParam}
+          onChange={(nextValue) => handleParamChange(param.key, nextValue)}
+        />
+      );
+    }
+
     if (param.type === "text" || param.type === "number") {
       return (
         <Input
@@ -486,36 +550,6 @@ export default function AIClipGenerationModal() {
           size="sm"
           fullWidth
         />
-      );
-    }
-
-    if (param.type === "slider") {
-      const numericValue =
-        typeof value === "number" ? value : Number(value ?? param.default ?? 0);
-      return (
-        <div
-          key={param.key}
-          className="rounded border border-neutral-800 bg-neutral-950/70 p-3"
-        >
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <span className="text-xs font-medium uppercase tracking-[0.12em] text-daw-text-muted">
-              {param.label}
-            </span>
-            <span className="rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-[11px] text-daw-text">
-              {numericValue}
-            </span>
-          </div>
-          <Slider
-            value={numericValue}
-            min={param.min ?? 0}
-            max={param.max ?? 100}
-            step={param.step ?? 1}
-            onChange={(nextValue) => handleParamChange(param.key, nextValue)}
-          />
-          {param.description ? (
-            <p className="mt-2 text-xs leading-5 text-daw-text-muted">{param.description}</p>
-          ) : null}
-        </div>
       );
     }
 
@@ -581,7 +615,7 @@ export default function AIClipGenerationModal() {
   return (
     <Modal isOpen={showAIClipGeneration} onClose={() => void handleCancel()} size="xl">
       <ModalHeader title={workflow.label} onClose={() => void handleCancel()} />
-      <ModalContent>
+      <ModalContent ref={contentRef}>
         <div className="space-y-4">
           <section className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -705,11 +739,6 @@ export default function AIClipGenerationModal() {
                       {formatElapsedLabel(progress.elapsedMs)}
                     </span>
                   ) : null}
-                  {progress.etaMs ? (
-                    <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
-                      {formatEtaLabel(progress.etaMs)}
-                    </span>
-                  ) : null}
                 </div>
               </div>
               <div className="mt-3 h-2.5 w-full rounded-full bg-neutral-900">
@@ -732,6 +761,9 @@ export default function AIClipGenerationModal() {
                     <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-black/30 p-3">
                       {progress.statusNote ? (
                         <p className="text-xs leading-5 text-daw-text-secondary">{progress.statusNote}</p>
+                      ) : null}
+                      {progress.sourcePatternWarning ? (
+                        <p className="text-xs leading-5 text-amber-300">{progress.sourcePatternWarning}</p>
                       ) : null}
                       {progressChips.length > 0 ? (
                         <div className="flex flex-wrap gap-2">

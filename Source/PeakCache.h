@@ -42,6 +42,9 @@ public:
     /** Check if a valid, up-to-date cache exists for this audio file. */
     bool hasCachedPeaks(const juce::File& audioFile) const;
 
+    /** Drop in-memory and sidecar peak data for this audio file. */
+    void invalidate(const juce::File& audioFile);
+
     /**
      * Generate peak cache on a background thread.
      * Calls onComplete (on the message thread) when done.

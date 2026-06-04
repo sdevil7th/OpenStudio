@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Settings2, Sparkles } from "lucide-react";
 import { type AiFeatureId, type AiToolsStatus } from "../services/NativeBridge";
 import { type Track } from "../store/useDAWStore";
 import {
+  ACE_STEP_MODEL_ID,
   AI_MUSIC_MODELS,
   AI_WORKFLOW_SECTION_LABELS,
   type AIWorkflowParam,
@@ -23,9 +24,9 @@ import {
   ModalFooter,
   ModalHeader,
   Select,
-  Slider,
   Textarea,
 } from "./ui";
+import { NumericWorkflowParamField } from "./AIWorkflowParamField";
 
 interface AIWorkflowModalProps {
   track: Track;
@@ -82,22 +83,10 @@ function formatElapsedLabel(elapsedMs?: number) {
   return minutes > 0 ? `${minutes}m ${seconds}s elapsed` : `${seconds}s elapsed`;
 }
 
-function formatEtaLabel(etaMs?: number) {
-  if (!etaMs || etaMs <= 0) {
-    return "";
-  }
-
-  const totalSeconds = Math.max(0, Math.floor(etaMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s left` : `${seconds}s left`;
-}
-
 function formatRuntimeProfileLabel(profile?: string) {
   switch (profile) {
-    case "native-xl-turbo":
-    case "openstudio-ace-split":
-      return "OpenStudio ACE Split";
+    case "ace-diffusers":
+      return "ACE-Step Diffusers";
     default:
       return profile ? formatPhaseLabel(profile) : "";
   }
@@ -110,14 +99,7 @@ function formatLmModelLabel(lmModel?: string) {
   if (lmModel === "auto") {
     return "Auto LM";
   }
-  if (lmModel.endsWith(".safetensors")) {
-    return lmModel
-      .replace("qwen_", "Qwen ")
-      .replace("_ace15.safetensors", "")
-      .replace("_", " ")
-      .replace("b", "B");
-  }
-  return lmModel.replace("acestep-5Hz-lm-", "LM ");
+  return lmModel;
 }
 
 function formatSessionModeLabel(sessionMode?: string) {
@@ -168,6 +150,8 @@ export function AIWorkflowModal({
 }: AIWorkflowModalProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const wasBusyRef = useRef(false);
   const modelId = resolveAiMusicModelId(track.aiMusicModelId);
   const model = getAiMusicModel(modelId);
   const workflow = getAIWorkflow(track.aiWorkflow, modelId, "ai-track");
@@ -183,7 +167,7 @@ export function AIWorkflowModal({
   const isMusicGenerationReady = Boolean(
     selectedModelStatus?.ready
     ?? (
-      modelId === "ace-step-v15-xl-turbo"
+      modelId === ACE_STEP_MODEL_ID
         ? (
             aiToolsStatus.features?.audioGeneration?.ready
             ?? (
@@ -236,6 +220,22 @@ export function AIWorkflowModal({
     onParamsChange(nextParams);
   };
 
+  const scrollStatusIntoView = () => {
+    contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    if (isBusy && !wasBusyRef.current) {
+      scrollStatusIntoView();
+    }
+    wasBusyRef.current = isBusy;
+  }, [isBusy]);
+
+  const handleGenerateClick = () => {
+    scrollStatusIntoView();
+    void onGenerate();
+  };
+
   const renderParam = (param: AIWorkflowParam) => {
     const value = params[param.key];
 
@@ -249,6 +249,17 @@ export function AIWorkflowModal({
           placeholder={param.placeholder}
           rows={param.key === "lyrics" ? 10 : 6}
           fullWidth
+        />
+      );
+    }
+
+    if (param.type === "slider" || (param.type === "number" && param.min !== undefined && param.max !== undefined)) {
+      return (
+        <NumericWorkflowParamField
+          key={param.key}
+          param={param}
+          value={value}
+          onChange={(nextValue) => handleParamChange(param.key, nextValue)}
         />
       );
     }
@@ -270,39 +281,6 @@ export function AIWorkflowModal({
           size="sm"
           fullWidth
         />
-      );
-    }
-
-    if (param.type === "slider") {
-      const numericValue =
-        typeof value === "number"
-          ? value
-          : Number(value ?? param.default ?? 0);
-
-      return (
-        <div
-          key={param.key}
-          className="rounded border border-neutral-800 bg-neutral-950/70 p-3"
-        >
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <span className="text-xs font-medium uppercase tracking-[0.12em] text-daw-text-muted">
-              {param.label}
-            </span>
-            <span className="rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-[11px] text-daw-text">
-              {numericValue}
-            </span>
-          </div>
-          <Slider
-            value={numericValue}
-            min={param.min ?? 0}
-            max={param.max ?? 100}
-            step={param.step ?? 1}
-            onChange={(nextValue) => handleParamChange(param.key, nextValue)}
-          />
-          {param.description ? (
-            <p className="mt-2 text-xs leading-5 text-daw-text-muted">{param.description}</p>
-          ) : null}
-        </div>
       );
     }
 
@@ -360,7 +338,7 @@ export function AIWorkflowModal({
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="xl">
       <ModalHeader title="AI Generation" onClose={onClose} />
-      <ModalContent>
+      <ModalContent ref={contentRef}>
         <div className="space-y-4">
           <section className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -501,11 +479,6 @@ export function AIWorkflowModal({
                       {formatElapsedLabel(track.aiGenerationElapsedMs)}
                     </span>
                   ) : null}
-                  {track.aiGenerationEtaMs ? (
-                    <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
-                      {formatEtaLabel(track.aiGenerationEtaMs)}
-                    </span>
-                  ) : null}
                 </div>
               </div>
 
@@ -608,7 +581,7 @@ export function AIWorkflowModal({
             ) : null}
             <Button
               variant="primary"
-              onClick={() => void onGenerate()}
+              onClick={handleGenerateClick}
               disabled={!canSubmitGeneration}
             >
               Generate

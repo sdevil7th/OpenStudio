@@ -1,7 +1,7 @@
 audio-separator[dml]==0.41.1
-transformers==4.57.6
-diffusers==0.35.2
-accelerate==1.12.0
-vector-quantize-pytorch>=1.27.15
+git+https://github.com/huggingface/diffusers.git
+transformers
+accelerate
+soundfile
+numpy
 huggingface_hub>=0.34,<1.0
-loguru>=0.7.3

@@ -175,8 +175,8 @@ const ACE_BASE_PARAMS: AIWorkflowParam[] = [
     label: "Duration (seconds)",
     type: "slider",
     section: "music",
-    min: 5,
-    max: 240,
+    min: 10,
+    max: 600,
     step: 1,
     default: 30,
   },
@@ -205,15 +205,6 @@ const ACE_BASE_PARAMS: AIWorkflowParam[] = [
     default: "C major",
   },
   {
-    key: "generate_audio_codes",
-    label: "Generate Audio Codes",
-    type: "toggle",
-    section: "generation",
-    default: true,
-    description:
-      "Matches the OpenStudio ACE split-graph workflow. Disable only for manual direct DiT troubleshooting.",
-  },
-  {
     key: "inferenceSteps",
     label: "Diffusion Steps",
     type: "slider",
@@ -224,74 +215,14 @@ const ACE_BASE_PARAMS: AIWorkflowParam[] = [
     default: 8,
   },
   {
-    key: "cfg_scale",
-    label: "Text Encoder CFG",
-    type: "slider",
-    section: "sampling",
-    min: 0,
-    max: 10,
-    step: 0.05,
-    default: 2,
-  },
-  {
-    key: "guidance_scale",
-    label: "Sampler CFG",
-    type: "slider",
-    section: "generation",
-    min: 0,
-    max: 20,
-    step: 0.5,
-    default: 1,
-  },
-  {
     key: "shift",
     label: "Turbo Shift",
     type: "slider",
     section: "generation",
     min: 1,
-    max: 5,
+    max: 10,
     step: 0.05,
     default: 3,
-  },
-  {
-    key: "temperature",
-    label: "Temperature",
-    type: "slider",
-    section: "sampling",
-    min: 0,
-    max: 2,
-    step: 0.01,
-    default: 0.85,
-  },
-  {
-    key: "top_p",
-    label: "Top P",
-    type: "slider",
-    section: "sampling",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    default: 0.9,
-  },
-  {
-    key: "top_k",
-    label: "Top K",
-    type: "number",
-    section: "sampling",
-    min: 0,
-    max: 200,
-    step: 1,
-    default: 0,
-  },
-  {
-    key: "min_p",
-    label: "Min P",
-    type: "slider",
-    section: "sampling",
-    min: 0,
-    max: 1,
-    step: 0.001,
-    default: 0,
   },
 ];
 
@@ -300,7 +231,7 @@ const ACE_VARIATION_PROMPT_PARAM: AIWorkflowParam = {
   label: "Variation Direction",
   placeholder: "Describe the musical change while preserving the source instrumentation",
   default:
-    "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, and arrangement density. Do not add vocals or unrelated instruments unless requested.",
+    "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, and arrangement density. Do not add vocals or unrelated instruments.",
 };
 
 const ACE_INPAINT_PROMPT_PARAM: AIWorkflowParam = {
@@ -326,7 +257,7 @@ const ACE_SOURCE_STRENGTH_PARAM: AIWorkflowParam = {
   min: 0,
   max: 1,
   step: 0.01,
-  default: 0.55,
+  default: 0.85,
   description: "Higher values keep more of the source clip's identity.",
 };
 
@@ -341,13 +272,7 @@ const ACE_SOURCE_EXTENSION_PARAM: AIWorkflowParam = {
   default: 20,
 };
 
-const ACE_SOURCE_AUDIO_CODES_PARAM: AIWorkflowParam = {
-  ...ACE_BASE_PARAMS.find((param) => param.key === "generate_audio_codes")!,
-  default: false,
-};
-
 const ACE_SOURCE_SAMPLING_PARAMS: AIWorkflowParam[] = [
-  ACE_SOURCE_AUDIO_CODES_PARAM,
   {
     key: "seed",
     label: "Seed",
@@ -366,24 +291,14 @@ const ACE_SOURCE_SAMPLING_PARAMS: AIWorkflowParam[] = [
     default: 8,
   },
   {
-    key: "cfg_scale",
-    label: "Text Encoder CFG",
-    type: "slider",
-    section: "sampling",
-    min: 0,
-    max: 10,
-    step: 0.05,
-    default: 2,
-  },
-  {
-    key: "guidance_scale",
-    label: "Sampler CFG",
+    key: "shift",
+    label: "Turbo Shift",
     type: "slider",
     section: "generation",
-    min: 0,
-    max: 20,
-    step: 0.5,
-    default: 1,
+    min: 1,
+    max: 10,
+    step: 0.05,
+    default: 3,
   },
 ];
 
@@ -487,7 +402,7 @@ const STABLE_VARIATION_PROMPT_PARAM: AIWorkflowParam = {
   label: "Variation Direction",
   placeholder: "Describe the musical change while preserving the source instrumentation",
   default:
-    "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, arrangement density, and mix character. Do not add vocals or unrelated instruments unless requested.",
+    "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, arrangement density, and mix character. Do not add vocals or unrelated instruments.",
 };
 
 const STABLE_INPAINT_PROMPT_PARAM: AIWorkflowParam = {
@@ -657,6 +572,13 @@ export const AI_WORKFLOWS: AIWorkflow[] = AI_WORKFLOW_DEFINITIONS.map((workflow)
 export function resolveAiMusicModelId(
   modelId?: string | null,
 ): AiMusicModelId {
+  if (
+    modelId === "ace-step-v15-turbo"
+    || modelId === "ace-step-v15-xl-turbo"
+    || modelId === "acestep-v15-xl-turbo"
+  ) {
+    return ACE_STEP_MODEL_ID;
+  }
   return AI_MUSIC_MODELS.some((model) => model.id === modelId)
     ? (modelId as AiMusicModelId)
     : DEFAULT_AI_MUSIC_MODEL_ID;

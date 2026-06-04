@@ -37,16 +37,29 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
     }
   };
 
+  const syncBackendTrackState = async () => {
+    if (!track || track.type === "bus") return;
+
+    await nativeBridge.addTrack(trackId, track.type).catch(() => false);
+    await nativeBridge.setTrackType(trackId, track.type).catch(() => false);
+    await nativeBridge.setTrackRecordArm(trackId, track.armed).catch(() => false);
+  };
+
   const handleDeviceChange = async (deviceName: string) => {
     if (!track) return;
 
     try {
-      // Open the new device if not already open
       if (deviceName && !openDevices.includes(deviceName)) {
         await nativeBridge.openMIDIDevice(deviceName);
+      } else if (!deviceName) {
+        for (const availableDevice of availableInputDevices) {
+          if (!openDevices.includes(availableDevice)) {
+            await nativeBridge.openMIDIDevice(availableDevice);
+          }
+        }
       }
 
-      // Set the device for this track
+      await syncBackendTrackState();
       await nativeBridge.setTrackMIDIInput(
         trackId,
         deviceName,
@@ -71,6 +84,16 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
     if (!track) return;
 
     try {
+      await syncBackendTrackState();
+      if (track.midiInputDevice && !openDevices.includes(track.midiInputDevice)) {
+        await nativeBridge.openMIDIDevice(track.midiInputDevice).catch(() => false);
+      } else if (!track.midiInputDevice) {
+        for (const availableDevice of availableInputDevices) {
+          if (!openDevices.includes(availableDevice)) {
+            await nativeBridge.openMIDIDevice(availableDevice).catch(() => false);
+          }
+        }
+      }
       await nativeBridge.setTrackMIDIInput(
         trackId,
         track.midiInputDevice || "",

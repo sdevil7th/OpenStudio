@@ -184,6 +184,8 @@ function buildGuideSteps(): GuideStep[] {
       details: [
         "Pitch editing and pitch correction inside the session",
         "Stem separation for remixing, cleanup, practice, and creative extraction",
+        "AI tracks for text-to-music and lyrics+style generation",
+        "Clip AI workflows for variation, inpaint selection, and continuation",
         "Routing matrix, buses, sends, and monitoring FX for larger mixes",
         "Theme editing, toolbar customization, scripting, templates, and project utilities",
       ],

@@ -152,7 +152,29 @@ async function clearTrackBoundUiBeforeRemoval(state: any, trackId: string, track
   await nativeBridge.closeAllPluginWindows().catch(() => false);
 }
 
-async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: boolean }) {
+function isMidiInputTrack(track: any) {
+  return track.type === "midi" || track.type === "instrument" || track.inputType === "midi";
+}
+
+async function ensureMIDIInputDeviceReady(track: any, options?: { openAllWhenUnassigned?: boolean }) {
+  if (!isMidiInputTrack(track)) return;
+
+  const deviceName = track.midiInputDevice?.trim();
+  if (deviceName) {
+    await nativeBridge.openMIDIDevice(deviceName).catch(logBridgeError("midi:openInput"));
+    return;
+  }
+
+  if (!options?.openAllWhenUnassigned) return;
+
+  const devices = await nativeBridge.getMIDIInputDevices().catch(logBridgeError("midi:getInputDevices"));
+  const availableDevices = Array.isArray(devices) ? devices : [];
+  for (const availableDevice of availableDevices) {
+    await nativeBridge.openMIDIDevice(availableDevice).catch(logBridgeError("midi:openInput"));
+  }
+}
+
+async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: boolean; openAllMIDIInputs?: boolean }) {
   if (options?.includeAddTrack) {
     await nativeBridge.addTrack(track.id, track.type);
   }
@@ -166,11 +188,8 @@ async function syncTrackCoreToBackend(track: any, options?: { includeAddTrack?: 
     track.inputChannelCount ?? 2,
   ).catch(() => false);
 
-  if (track.type === "midi" || track.type === "instrument" || track.inputType === "midi") {
-    if (track.midiInputDevice) {
-      await nativeBridge.openMIDIDevice(track.midiInputDevice).catch(() => false);
-    }
-
+  if (isMidiInputTrack(track)) {
+    await ensureMIDIInputDeviceReady(track, { openAllWhenUnassigned: options?.openAllMIDIInputs });
     await nativeBridge.setTrackMIDIInput(
       track.id,
       track.midiInputDevice || "",
@@ -298,7 +317,7 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
 }
 
 export const trackActions = (set: SetFn, get: GetFn) => ({
-    addTrack: (trackData) => {
+    addTrack: (trackData, options = {}) => {
       const requestedType = trackData.type || "audio";
       const newTrack = createDefaultTrack(
         trackData.id,
@@ -308,13 +327,26 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         get().tracks,
       );
       const fullTrack = { ...newTrack, ...trackData };
+      if (get().tracks.some((track) => track.id === fullTrack.id)) {
+        console.warn(`[DAW] Ignoring duplicate addTrack for existing track id: ${fullTrack.id}`);
+        return;
+      }
+
+      let hasExecutedOnce = false;
 
       const command: Command = {
         type: "ADD_TRACK",
         description: `Add track "${trackData.name}"`,
         timestamp: Date.now(),
         execute: () => {
+          let inserted = false;
           set((state) => {
+            if (state.tracks.some((track) => track.id === fullTrack.id)) {
+              console.warn(`[DAW] Ignoring duplicate addTrack execute for existing track id: ${fullTrack.id}`);
+              return state;
+            }
+
+            inserted = true;
             const insertAfter = (trackData as any).insertAfterTrackId as string | undefined;
             if (insertAfter) {
               const idx = state.tracks.findIndex((t) => t.id === insertAfter);
@@ -326,7 +358,14 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
             }
             return { tracks: [...state.tracks, fullTrack] };
           });
-          syncTrackCoreToBackend(fullTrack, { includeAddTrack: true })
+
+          if (!inserted) {
+            return;
+          }
+
+          const includeAddTrack = !(options.backendAlreadyCreated && !hasExecutedOnce);
+          hasExecutedOnce = true;
+          syncTrackCoreToBackend(fullTrack, { includeAddTrack })
             .catch((e) =>
               console.error("[DAW] Failed to sync new track with backend:", e),
             );
@@ -339,6 +378,9 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
             tracks: state.tracks.filter((t) => t.id !== trackData.id),
             selectedTrackId:
               state.selectedTrackId === trackData.id ? null : state.selectedTrackId,
+            selectedTrackIds: state.selectedTrackIds.filter((id) => id !== trackData.id),
+            lastSelectedTrackId:
+              state.lastSelectedTrackId === trackData.id ? null : state.lastSelectedTrackId,
           }));
         },
       };
@@ -863,7 +905,17 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         ),
       }));
 
-      for (const tid of effectiveIds) await nativeBridge.setTrackRecordArm(tid, newArmed);
+      for (const tid of effectiveIds) {
+        const updatedTrack = get().tracks.find((t) => t.id === tid);
+        if (newArmed && updatedTrack && isMidiInputTrack(updatedTrack)) {
+          await syncTrackCoreToBackend(updatedTrack, {
+            includeAddTrack: true,
+            openAllMIDIInputs: true,
+          });
+        } else {
+          await nativeBridge.setTrackRecordArm(tid, newArmed);
+        }
+      }
     },
 
     toggleTrackFXBypass: async (id) => {

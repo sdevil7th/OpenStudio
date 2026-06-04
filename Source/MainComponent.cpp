@@ -2191,6 +2191,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            completion(juce::Array<juce::var>());
                        }
                    })
+                   .withNativeFunction ("refreshWaveformPeaks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 1) {
+                           completion(audioEngine.refreshWaveformPeaks(args[0].toString()));
+                       } else {
+                           completion(false);
+                       }
+                   })
                    .withNativeFunction ("getRecordingPeaks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 3) {
                            juce::String trackId = args[0].toString();
@@ -6020,18 +6027,34 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         {
                             auto trackId = args[0].toString();
                             auto clipId  = args[1].toString();
-                            // Run on background thread to avoid blocking UI
-                            std::thread([this, trackId, clipId, completion]() {
-                                auto result = audioEngine.analyzePolyphonic(trackId, clipId);
-                                completion(result);
-                            }).detach();
+                            auto* engine = &audioEngine;
+                            juce::Component::SafePointer<MainComponent> safeThis(this);
+                            polyAnalysisBridgePool.addJob([engine, safeThis, trackId, clipId, completion]() mutable {
+                                auto result = engine->analyzePolyphonic(trackId, clipId);
+                                juce::MessageManager::callAsync([safeThis, completion, result]() mutable {
+                                    if (safeThis != nullptr)
+                                        completion(result);
+                                });
+                            });
                         }
                         else
                             completion(juce::var());
                     })
                     .withNativeFunction ("extractMidiFromAudio", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 2)
-                            completion(audioEngine.extractMidiFromAudio(args[0].toString(), args[1].toString()));
+                        {
+                            auto trackId = args[0].toString();
+                            auto clipId = args[1].toString();
+                            auto* engine = &audioEngine;
+                            juce::Component::SafePointer<MainComponent> safeThis(this);
+                            polyAnalysisBridgePool.addJob([engine, safeThis, trackId, clipId, completion]() mutable {
+                                auto result = engine->extractMidiFromAudio(trackId, clipId);
+                                juce::MessageManager::callAsync([safeThis, completion, result]() mutable {
+                                    if (safeThis != nullptr)
+                                        completion(result);
+                                });
+                            });
+                        }
                         else
                             completion(juce::var());
                     })
@@ -6742,6 +6765,7 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
 MainComponent::~MainComponent()
 {
     stopTimer();
+    polyAnalysisBridgePool.removeAllJobs(true, 5000);
     mediaPreviewPool.removeAllJobs(true, 2000);
 #if JUCE_WINDOWS
     externalMediaDropTarget.reset();

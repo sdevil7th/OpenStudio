@@ -39,7 +39,7 @@ from ai_runtime_probe import (
     DEFAULT_MUSIC_GEN_MODEL_REPO,
     DEFAULT_MUSIC_GEN_SHARED_REPO,
     REQUIRED_MUSIC_GEN_NATIVE_FILES,
-    find_local_comfy_native_assets,
+    find_local_ace_native_assets,
     get_windows_cuda_pytorch_index_url,
     get_windows_cuda_pytorch_packages,
     get_windows_flash_attn_asset,
@@ -65,9 +65,9 @@ MIN_AUDIO_GPU_MEMORY_MB = 8 * 1024
 FALLBACK_MIN_PYTHON = (3, 10)
 FALLBACK_MAX_PYTHON_EXCLUSIVE = (3, 13)
 MUSIC_GEN_REQUIRED_PYTHON = (3, 11)
-MUSIC_GEN_SPACE_REPO = "ACE-Step/Ace-Step-v1.5"
-MUSIC_GEN_SPACE_REPO_TYPE = "space"
-MUSIC_GEN_SOURCE_DIRNAME = "ace-step-v1.5-source"
+MUSIC_GEN_SPACE_REPO = DEFAULT_MUSIC_GEN_MODEL_REPO
+MUSIC_GEN_SPACE_REPO_TYPE = "model"
+MUSIC_GEN_SOURCE_DIRNAME = "ace-step-diffusers-source"
 MUSIC_GEN_HUB_CACHE_DIRNAME = ".hub-cache"
 MODEL_DOWNLOAD_MANIFEST_URL = "https://raw.githubusercontent.com/TRvlvr/application_data/main/filelists/download_checks.json"
 UVR_MODEL_REPO_URL_PREFIX = "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models"
@@ -79,58 +79,9 @@ DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_HEARTBEAT_SECONDS = 5.0
 MODEL_DOWNLOAD_PROGRESS_START = 0.82
 MODEL_DOWNLOAD_PROGRESS_END = 0.95
-ACE15_COMFY_TEXT_ENCODER_FILENAMES: dict[str, str] = {
-    "acestep-5Hz-lm-0.6B": "qwen_0.6b_ace15.safetensors",
-    "acestep-5Hz-lm-1.7B": "qwen_1.7b_ace15.safetensors",
-    "acestep-5Hz-lm-4B": "qwen_4b_ace15.safetensors",
-}
-ACE15_MANAGED_LM_CONFIG_OVERRIDES: dict[str, dict[str, Any]] = {
-    "acestep-5Hz-lm-0.6B": {
-        "hidden_size": 1024,
-        "intermediate_size": 3072,
-        "num_hidden_layers": 28,
-        "num_attention_heads": 16,
-        "num_key_value_heads": 8,
-        "max_position_embeddings": 32768,
-        "max_window_layers": 28,
-        "vocab_size": 151669,
-        "architectures": ["Qwen3Model"],
-        "model_type": "qwen3",
-    },
-    "acestep-5Hz-lm-1.7B": {
-        "hidden_size": 2048,
-        "intermediate_size": 6144,
-        "num_hidden_layers": 28,
-        "num_attention_heads": 16,
-        "num_key_value_heads": 8,
-        "max_position_embeddings": 40960,
-        "max_window_layers": 28,
-        "vocab_size": 217204,
-        "architectures": ["Qwen3Model"],
-        "model_type": "qwen3",
-    },
-    "acestep-5Hz-lm-4B": {
-        "hidden_size": 2560,
-        "intermediate_size": 9728,
-        "num_hidden_layers": 36,
-        "num_attention_heads": 32,
-        "num_key_value_heads": 8,
-        "max_position_embeddings": 40960,
-        "max_window_layers": 36,
-        "vocab_size": 217204,
-        "architectures": ["Qwen3Model"],
-        "model_type": "qwen3",
-    },
-}
-ACE15_MANAGED_LM_SHARED_FILES = (
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "vocab.json",
-    "merges.txt",
-    "added_tokens.json",
-    "chat_template.jinja",
-)
+ACE15_LEGACY_TEXT_ENCODER_FILENAMES: dict[str, str] = {}
+ACE15_MANAGED_LM_CONFIG_OVERRIDES: dict[str, dict[str, Any]] = {}
+ACE15_MANAGED_LM_SHARED_FILES: tuple[str, ...] = ()
 WINDOWS_REUSED_RUNTIME_REPAIR_PACKAGES = (
     "audio-separator==0.41.1",
     "requests>=2",
@@ -335,7 +286,7 @@ def probe_hardware_requirements() -> dict[str, Any]:
         "gpuMemoryMb": int(gpu.get("gpuMemoryMb", 0) or 0),
         "gpuMemoryGb": round(int(gpu.get("gpuMemoryMb", 0) or 0) / 1024, 2),
         "gpuMemoryDetected": bool(gpu.get("gpuMemoryDetected", False)),
-        "audioGenerationGpuSupported": gpu.get("gpuBackend") in {"cuda", "rocm"},
+        "audioGenerationGpuSupported": gpu.get("gpuBackend") == "cuda",
         "requirements": {
             FEATURE_STEM_SEPARATION: {
                 "minSystemRamMb": MIN_STEM_SYSTEM_RAM_MB,
@@ -343,7 +294,7 @@ def probe_hardware_requirements() -> dict[str, Any]:
             FEATURE_AUDIO_GENERATION: {
                 "minSystemRamMb": MIN_AUDIO_SYSTEM_RAM_MB,
                 "minGpuMemoryMb": MIN_AUDIO_GPU_MEMORY_MB,
-                "supportedGpuBackends": ["cuda", "rocm"],
+                "supportedGpuBackends": ["cuda"],
             },
         },
     }
@@ -606,7 +557,7 @@ def format_python_version(version: tuple[int, int, int] | None) -> str:
 
 
 def is_music_generation_python_compatible(version: tuple[int, int, int] | None) -> bool:
-    return version is not None and version[:2] == MUSIC_GEN_REQUIRED_PYTHON
+    return version is not None and (3, 11) <= version[:2] < (3, 13)
 
 
 def find_windows_python_311() -> Path | None:
@@ -800,25 +751,16 @@ def remove_tree_with_retries(target: Path, *, retries: int = 3, retry_delay_seco
     return terminated_processes
 
 
-def get_candidate_comfy_text_encoder_dirs() -> list[Path]:
+def get_candidate_ace_text_encoder_dirs() -> list[Path]:
     candidates: list[Path] = []
 
     for env_name in (
         "OPENSTUDIO_ACESTEP_TEXT_ENCODER_DIR",
-        "COMFYUI_TEXT_ENCODER_DIR",
+        "OPENSTUDIO_ACE_TEXT_ENCODER_DIR",
     ):
         raw = os.environ.get(env_name, "").strip()
         if raw:
             candidates.append(Path(raw).expanduser())
-
-    home = Path.home()
-    candidates.extend(
-        [
-            home / "Documents" / "ComfyUI" / "models" / "text_encoders",
-            home / "Documents" / "Codes" / "ComfyUI" / "models" / "text_encoders",
-            home / "ComfyUI" / "models" / "text_encoders",
-        ]
-    )
 
     unique_candidates: list[Path] = []
     seen: set[str] = set()
@@ -835,15 +777,15 @@ def get_candidate_comfy_text_encoder_dirs() -> list[Path]:
     return unique_candidates
 
 
-def find_local_comfy_text_encoder_assets() -> tuple[dict[str, Path], list[str]]:
+def find_local_ace_text_encoder_assets() -> tuple[dict[str, Path], list[str]]:
     found: dict[str, Path] = {}
     searched_dirs: list[str] = []
 
-    for candidate_dir in get_candidate_comfy_text_encoder_dirs():
+    for candidate_dir in get_candidate_ace_text_encoder_dirs():
         searched_dirs.append(str(candidate_dir))
         if not candidate_dir.is_dir():
             continue
-        for target_name, source_filename in ACE15_COMFY_TEXT_ENCODER_FILENAMES.items():
+        for target_name, source_filename in ACE15_LEGACY_TEXT_ENCODER_FILENAMES.items():
             if target_name in found:
                 continue
             candidate = candidate_dir / source_filename
@@ -912,22 +854,22 @@ def synthesize_managed_ace15_lm_checkpoint(
     return target_dir
 
 
-def hydrate_comfy_runtime_profiles(checkpoint_root: Path) -> dict[str, Any]:
+def hydrate_legacy_runtime_profiles(checkpoint_root: Path) -> dict[str, Any]:
     template_dir = checkpoint_root / "acestep-5Hz-lm-1.7B"
     if not template_dir.is_dir():
         return {
             "importedTargets": [],
             "searchedDirs": [],
             "foundSources": {},
-            "missingTargets": list(ACE15_COMFY_TEXT_ENCODER_FILENAMES.keys()),
+            "missingTargets": list(ACE15_LEGACY_TEXT_ENCODER_FILENAMES.keys()),
             "error": f"Template checkpoint is missing: {template_dir}",
         }
 
-    found_sources, searched_dirs = find_local_comfy_text_encoder_assets()
+    found_sources, searched_dirs = find_local_ace_text_encoder_assets()
     imported_targets: list[str] = []
     missing_targets: list[str] = []
 
-    for target_name in ACE15_COMFY_TEXT_ENCODER_FILENAMES:
+    for target_name in ACE15_LEGACY_TEXT_ENCODER_FILENAMES:
         target_dir = checkpoint_root / target_name
         if (target_dir / "model.safetensors").exists():
             continue
@@ -955,7 +897,9 @@ def hydrate_comfy_runtime_profiles(checkpoint_root: Path) -> dict[str, Any]:
 
 
 def hydrate_native_split_assets(checkpoint_root: Path) -> dict[str, Any]:
-    found_sources, searched_dirs = find_local_comfy_native_assets()
+    found_sources, searched_dirs = find_local_ace_native_assets(
+        extra_roots=[checkpoint_root, checkpoint_root / "split_files"],
+    )
     imported_assets: list[str] = []
     missing_assets: list[str] = []
 
@@ -1021,15 +965,12 @@ def get_music_generation_runtime_requirements(
         return []
 
     return [
-        "transformers==4.57.6",
-        "diffusers==0.35.2",
-        "accelerate==1.12.0",
-        "vector-quantize-pytorch>=1.27.15",
-        "torchsde>=0.2.6",
-        "av>=12.0.0",
+        "git+https://github.com/huggingface/diffusers.git",
+        "transformers",
+        "accelerate",
+        "soundfile",
+        "numpy",
         "huggingface_hub>=0.34,<1.0",
-        "loguru>=0.7.3",
-        "xxhash>=3.5.0",
     ]
 
 
@@ -1315,7 +1256,7 @@ def download_music_generation_source(
         ],
         state="installing",
         progress=0.52,
-        description="Preparing the ACE-Step 1.5 runtime source",
+        description="Preparing the ACE-Step Diffusers runtime source",
         install_source=install_source,
         requires_external_python=requires_external_python,
         error_code="dependency_bootstrap_failed",
@@ -3383,7 +3324,7 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_featu
                     stepLabel="Removing incompatible ACE-Step runtime entries",
                     activityLines=[
                         f"Removed incompatible ACE-Step package entries: {removed_names}",
-                        f"Music generation requires Python {MUSIC_GEN_REQUIRED_PYTHON[0]}.{MUSIC_GEN_REQUIRED_PYTHON[1]}.x; current runtime is Python {format_python_version(runtime_python_version)}.",
+                        f"Music generation requires Python 3.11.x or 3.12.x; current runtime is Python {format_python_version(runtime_python_version)}.",
                     ],
                     installSource=install_source,
                     requiresExternalPython=requires_external_python,
@@ -3491,17 +3432,6 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_featu
                     python_detected=python_detected,
                     build_runtime_mode=build_runtime_mode,
                 )
-                install_windows_music_acceleration_stack(
-                    runtime_python,
-                    runtime_root,
-                    state="installing",
-                    install_source=install_source,
-                    requires_external_python=requires_external_python,
-                    python_detected=python_detected,
-                    build_runtime_mode=build_runtime_mode,
-                    raise_on_error=True,
-                    error_code="music_acceleration_setup_failed",
-                )
 
             run_step(
                 [
@@ -3513,37 +3443,7 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_featu
                 ],
                 state="installing",
                 progress=0.6,
-                description="Installing ACE-Step 1.5 runtime dependencies",
-                install_source=install_source,
-                requires_external_python=requires_external_python,
-                error_code="music_generation_runtime_install_failed",
-                python_detected=python_detected,
-                build_runtime_mode=build_runtime_mode,
-                raise_on_error=True,
-            )
-
-            ace_step_source_root = download_music_generation_source(
-                runtime_python,
-                runtime_root,
-                install_source=install_source,
-                requires_external_python=requires_external_python,
-                python_detected=python_detected,
-                build_runtime_mode=build_runtime_mode,
-                raise_on_error=True,
-            )
-
-            run_step(
-                [
-                    str(runtime_python),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-deps",
-                    str(ace_step_source_root),
-                ],
-                state="installing",
-                progress=0.62,
-                description="Installing the ACE-Step 1.5 split backend",
+                description="Installing ACE-Step Diffusers runtime dependencies",
                 install_source=install_source,
                 requires_external_python=requires_external_python,
                 error_code="music_generation_runtime_install_failed",
@@ -3717,12 +3617,87 @@ def download_music_gen_model(
     build_runtime_mode: str,
 ) -> None:
     checkpoint_root = resolve_music_gen_checkpoint_root(str(music_gen_checkpoint_root))
+    runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    log_event(
+        "installer",
+        "downloading_model",
+        "music_generation_prepare_start",
+        musicGenModel=music_gen_model,
+        musicGenCheckpointRoot=str(checkpoint_root),
+        musicGenModelRepo=DEFAULT_MUSIC_GEN_MODEL_REPO,
+        musicGenerationAvailableProfiles=runtime_profiles.get("availableProfiles", []),
+    )
+
+    bootstrap = "\n".join(
+        [
+            "import os",
+            "from pathlib import Path",
+            "from huggingface_hub import snapshot_download",
+            f"cache_root = Path(r'{checkpoint_root}')",
+            "cache_root.mkdir(parents=True, exist_ok=True)",
+            "os.environ.setdefault('HF_HOME', str(cache_root))",
+            "os.environ.setdefault('HF_ENABLE_PARALLEL_LOADING', 'YES')",
+            "snapshot_download(",
+            f"    repo_id=r'{DEFAULT_MUSIC_GEN_MODEL_REPO}',",
+            "    cache_dir=str(cache_root),",
+            ")",
+            "print('ok')",
+        ]
+    )
+
+    stream_step(
+        [str(runtime_python), "-c", bootstrap],
+        state="downloading_model",
+        progress=0.97,
+        description="Downloading the ACE-Step Diffusers model cache",
+        install_source=install_source,
+        requires_external_python=requires_external_python,
+        error_code="music_model_download_failed",
+        python_detected=python_detected,
+        build_runtime_mode=build_runtime_mode,
+        step_label="Downloading ACE-Step Diffusers model",
+        step_index=1,
+        step_count=1,
+        download_hint="OpenStudio is downloading ACE-Step/acestep-v15-xl-turbo-diffusers into the managed Hugging Face cache.",
+        is_large_download=True,
+    )
+
+    runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
+    emit(
+        "downloading_model",
+        0.99,
+        message="ACE-Step Diffusers model cache is ready.",
+        stepLabel="ACE-Step Diffusers model cache is ready",
+        stepIndex=1,
+        stepCount=1,
+        installSource=install_source,
+        requiresExternalPython=requires_external_python,
+        pythonDetected=python_detected,
+        buildRuntimeMode=build_runtime_mode,
+        musicGenerationModelId=music_gen_model,
+        musicGenerationModelRepoId=DEFAULT_MUSIC_GEN_MODEL_REPO,
+        musicGenerationCheckpointRoot=str(checkpoint_root),
+        musicGenerationLayoutValid=True,
+        musicGenerationAvailableProfiles=runtime_profiles.get("availableProfiles", []),
+        musicGenerationDefaultProfile=runtime_profiles.get("defaultProfile", ""),
+    )
+    log_event(
+        "installer",
+        "downloading_model",
+        "music_generation_prepare_succeeded",
+        musicGenModel=music_gen_model,
+        musicGenCheckpointRoot=str(checkpoint_root),
+        musicGenerationAvailableProfiles=runtime_profiles.get("availableProfiles", []),
+    )
+    return
+
     layout = get_music_generation_required_paths(
         checkpoint_root=str(checkpoint_root),
         model_name=music_gen_model,
     )
     runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
-    native_profile = runtime_profiles["profiles"].get("native-xl-turbo", {})
+    native_profile = runtime_profiles["profiles"].get("ace-diffusers", {})
     missing_profile_assets = list(native_profile.get("missingAssets", []))
     log_event(
         "installer",
@@ -3737,6 +3712,23 @@ def download_music_gen_model(
     )
 
     checkpoint_root.mkdir(parents=True, exist_ok=True)
+    cached_native_asset_import = hydrate_native_split_assets(checkpoint_root)
+    if cached_native_asset_import.get("importedAssets"):
+        layout = get_music_generation_required_paths(
+            checkpoint_root=str(checkpoint_root),
+            model_name=music_gen_model,
+        )
+        runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
+        native_profile = runtime_profiles["profiles"].get("ace-diffusers", {})
+        missing_profile_assets = list(native_profile.get("missingAssets", []))
+        log_event(
+            "installer",
+            "downloading_model",
+            "music_generation_imported_cached_native_assets",
+            musicGenModel=music_gen_model,
+            musicGenCheckpointRoot=str(checkpoint_root),
+            importedAssets=cached_native_asset_import.get("importedAssets", []),
+        )
 
     if layout["layoutValid"] and not missing_profile_assets:
         emit(
@@ -3776,11 +3768,19 @@ def download_music_gen_model(
         "    local_dir_use_symlinks=False,",
     ]
     if missing_profile_assets:
-        patterns = [
-            f"{asset}/*" for asset in missing_profile_assets
-        ] + [
-            f"{asset}/**" for asset in missing_profile_assets
-        ]
+        asset_specs = {
+            str(spec["relativePath"]): spec
+            for spec in REQUIRED_MUSIC_GEN_NATIVE_FILES
+        }
+        patterns = []
+        for asset in missing_profile_assets:
+            spec = asset_specs.get(asset)
+            source_paths = (
+                list(spec.get("sourceRelativePaths", (asset,)))
+                if spec is not None
+                else [asset]
+            )
+            patterns.extend(source_paths)
         shared_repo_download_lines.append(f"    allow_patterns={patterns!r},")
     shared_repo_download_lines.append(")")
 
@@ -3820,7 +3820,7 @@ def download_music_gen_model(
         description=(
             "Downloading the pinned ACE-Step XL Turbo model"
             if not missing_profile_assets
-            else "Downloading the pinned ACE-Step fast runtime profile assets"
+            else "Downloading the pinned ACE-Step XL Turbo runtime profile assets"
         ),
         install_source=install_source,
         requires_external_python=requires_external_python,
@@ -3842,6 +3842,36 @@ def download_music_gen_model(
         is_large_download=True,
     )
 
+    imported_profile_targets: list[str] = []
+    native_asset_import = hydrate_native_split_assets(checkpoint_root)
+    imported_native_assets = list(native_asset_import.get("importedAssets", []))
+    if imported_native_assets:
+        emit(
+            "downloading_model",
+            0.972,
+            message="Importing local ACE-Step model assets",
+            stepLabel="Importing local ACE-Step model assets",
+            stepIndex=1,
+            stepCount=1,
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+            musicGenerationModelId=music_gen_model,
+            musicGenerationCheckpointRoot=str(checkpoint_root),
+            musicGenerationImportedNativeAssets=imported_native_assets,
+        )
+        log_event(
+            "installer",
+            "downloading_model",
+            "music_generation_imported_native_assets",
+            musicGenModel=music_gen_model,
+            musicGenCheckpointRoot=str(checkpoint_root),
+            importedAssets=imported_native_assets,
+            searchedDirs=native_asset_import.get("searchedDirs", []),
+            foundSources=native_asset_import.get("foundSources", {}),
+        )
+
     layout = get_music_generation_required_paths(
         checkpoint_root=str(checkpoint_root),
         model_name=music_gen_model,
@@ -3858,56 +3888,23 @@ def download_music_gen_model(
             buildRuntimeMode=build_runtime_mode,
             musicGenerationModelId=music_gen_model,
             musicGenerationCheckpointRoot=str(checkpoint_root),
+            musicGenerationImportedNativeAssets=imported_native_assets,
         )
-    imported_profile_targets: list[str] = []
-    native_asset_import = {
-        "importedAssets": [],
-        "searchedDirs": [],
-        "foundSources": {},
-        "missingAssets": [],
-    }
-    comfy_profile_import = {
+    legacy_profile_import = {
         "importedTargets": [],
         "searchedDirs": [],
         "foundSources": {},
         "missingTargets": [],
         "error": "",
     }
-    if "native-xl-turbo" not in runtime_profiles.get("availableProfiles", []):
-        native_asset_import = hydrate_native_split_assets(checkpoint_root)
-        imported_native_assets = list(native_asset_import.get("importedAssets", []))
-        if imported_native_assets:
-            emit(
-                "downloading_model",
-                0.972,
-                message="Importing local ACE-Step split-model assets",
-                stepLabel="Importing local ACE-Step split-model assets",
-                stepIndex=1,
-                stepCount=1,
-                installSource=install_source,
-                requiresExternalPython=requires_external_python,
-                pythonDetected=python_detected,
-                buildRuntimeMode=build_runtime_mode,
-                musicGenerationModelId=music_gen_model,
-                musicGenerationCheckpointRoot=str(checkpoint_root),
-                musicGenerationImportedNativeAssets=imported_native_assets,
-            )
-            log_event(
-                "installer",
-                "downloading_model",
-                "music_generation_imported_native_assets",
-                musicGenModel=music_gen_model,
-                musicGenCheckpointRoot=str(checkpoint_root),
-                importedAssets=imported_native_assets,
-                searchedDirs=native_asset_import.get("searchedDirs", []),
-                foundSources=native_asset_import.get("foundSources", {}),
-            )
-
+    if "ace-diffusers" not in runtime_profiles.get("availableProfiles", []):
+        if not imported_native_assets:
+            native_asset_import = hydrate_native_split_assets(checkpoint_root)
         runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
 
     if use_legacy_wrapper and not (checkpoint_root / "acestep-5Hz-lm-4B" / "model.safetensors").exists():
-        comfy_profile_import = hydrate_comfy_runtime_profiles(checkpoint_root)
-        imported_profile_targets = list(comfy_profile_import.get("importedTargets", []))
+        legacy_profile_import = hydrate_legacy_runtime_profiles(checkpoint_root)
+        imported_profile_targets = list(legacy_profile_import.get("importedTargets", []))
         if imported_profile_targets:
             emit(
                 "downloading_model",
@@ -3931,33 +3928,33 @@ def download_music_gen_model(
                 musicGenModel=music_gen_model,
                 musicGenCheckpointRoot=str(checkpoint_root),
                 importedTargets=imported_profile_targets,
-                searchedDirs=comfy_profile_import.get("searchedDirs", []),
-                foundSources=comfy_profile_import.get("foundSources", {}),
+                searchedDirs=legacy_profile_import.get("searchedDirs", []),
+                foundSources=legacy_profile_import.get("foundSources", {}),
             )
-        elif comfy_profile_import.get("error"):
+        elif legacy_profile_import.get("error"):
             log_event(
                 "installer",
                 "downloading_model",
                 "music_generation_local_profile_import_skipped",
                 musicGenModel=music_gen_model,
                 musicGenCheckpointRoot=str(checkpoint_root),
-                error=comfy_profile_import.get("error", ""),
-                searchedDirs=comfy_profile_import.get("searchedDirs", []),
+                error=legacy_profile_import.get("error", ""),
+                searchedDirs=legacy_profile_import.get("searchedDirs", []),
             )
 
         runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
 
-    if "native-xl-turbo" not in runtime_profiles.get("availableProfiles", []):
-        native_profile = runtime_profiles["profiles"].get("native-xl-turbo", {})
+    if "ace-diffusers" not in runtime_profiles.get("availableProfiles", []):
+        native_profile = runtime_profiles["profiles"].get("ace-diffusers", {})
         missing_profile_assets = list(native_profile.get("missingAssets", []))
         searched_dirs = list(
             dict.fromkeys(
                 list(native_asset_import.get("searchedDirs", []))
-                + list(comfy_profile_import.get("searchedDirs", []))
+                + list(legacy_profile_import.get("searchedDirs", []))
             )
         )
         fail(
-            "OpenStudio installed the ACE-Step split backend, but could not verify the Native XL Turbo split-model assets afterward. "
+            "OpenStudio installed the ACE-Step Diffusers backend, but could not verify the model cache afterward. "
             + (
                 "Still missing: " + ", ".join(missing_profile_assets) + ". "
                 if missing_profile_assets
@@ -3980,7 +3977,10 @@ def download_music_gen_model(
             musicGenerationDefaultProfile=runtime_profiles.get("defaultProfile", ""),
             musicGenerationMissingProfileAssets=missing_profile_assets,
             musicGenerationLocalProfileImportSearchedDirs=searched_dirs,
-            musicGenerationLocalProfileImportFoundSources=found_sources,
+            musicGenerationLocalProfileImportFoundSources={
+                **dict(native_asset_import.get("foundSources", {})),
+                **dict(legacy_profile_import.get("foundSources", {})),
+            },
         )
 
     log_event(
@@ -4003,7 +4003,11 @@ def main() -> None:
     parser.add_argument("--models-dir", required=True, help="Directory where stem-separation models should be stored")
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME, help="Stem-separation model filename")
     parser.add_argument("--music-gen-model", default=DEFAULT_MUSIC_GEN_MODEL, help="Music-generation model identifier")
-    parser.add_argument("--music-gen-checkpoint-root", default="", help="Pinned ACE-Step checkpoint root")
+    parser.add_argument(
+        "--music-gen-checkpoint-root",
+        default="",
+        help="ACE-Step Diffusers cache root (default: ~/.cache/ace-step/diffusers)",
+    )
     parser.add_argument("--bootstrap-with", help="Python executable to use for dev fallback bootstrapping")
     parser.add_argument("--verify-existing-runtime", action="store_true", help="Verify the already-prepared OpenStudio runtime and download the model")
     parser.add_argument("--log-path", help="Detailed installer log file path")

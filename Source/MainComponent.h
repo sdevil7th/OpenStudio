@@ -144,6 +144,7 @@ private:
     std::atomic<int> pitchAnalysisGeneration { 0 };
     std::atomic<int> pitchNoteHqPriorityGeneration { 0 };
     juce::ThreadPool pitchAnalysisPool { 1 };
+    juce::ThreadPool polyAnalysisBridgePool { 1 };
     juce::var lastPitchAnalysisResult;  // Cached result for fetch-after-event pattern
     juce::CriticalSection pitchResultLock;
 

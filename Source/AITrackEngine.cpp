@@ -2,7 +2,8 @@
 
 namespace
 {
-constexpr auto kPinnedMusicGenerationModelId = "acestep-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
+constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kStableAudioModelId = "stable-audio-3-medium";
 constexpr auto kReaderSleepMs = 50;
 constexpr auto kWorkerStartupTimeoutMs = 45000;
@@ -257,7 +258,7 @@ juce::File AITrackEngine::getMusicGenerationCheckpointRoot() const
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile(".cache")
         .getChildFile("ace-step")
-        .getChildFile("checkpoints");
+        .getChildFile("diffusers");
 }
 
 juce::File AITrackEngine::getStableAudioModelRoot() const
@@ -582,10 +583,12 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
         }
         else
         {
-            command.add("--checkpoint-root");
+            command.add("--cache-root");
             command.add(getMusicGenerationCheckpointRoot().getFullPathName());
             command.add("--music-gen-model");
             command.add(kPinnedMusicGenerationModelId);
+            command.add("--model-id");
+            command.add(kPinnedMusicGenerationModelRepoId);
         }
 
         const auto commandLine = buildCommandLineForLog(command);

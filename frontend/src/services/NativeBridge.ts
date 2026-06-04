@@ -853,6 +853,8 @@ export interface AIGenerationProgress {
   runtimeProfile?: string;
   lmModel?: string;
   statusNote?: string;
+  sourceStructureConditioning?: boolean;
+  sourcePatternWarning?: string;
   failureKind?: string;
   sessionMode?: "persistent" | "oneshot" | "oneshot-fallback" | string;
   workerExitCode?: number;
@@ -882,7 +884,7 @@ export interface InstallAiToolsOptions {
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
-  modelId?: "ace-step-v15-xl-turbo" | "stable-audio-3-medium";
+  modelId?: AiMusicModelId;
   stableAudioModelPath?: string;
   stableAudioLicenseAccepted?: boolean;
 }
@@ -1352,6 +1354,7 @@ declare global {
           startSample: number,
           numPixels: number,
         ) => Promise<WaveformPeak[]>;
+        refreshWaveformPeaks?: (filePath: string) => Promise<boolean>;
 
         // Playback clip management
         addPlaybackClip?: (
@@ -3067,6 +3070,13 @@ class NativeBridge {
       }
       return peaks;
     }
+  }
+
+  async refreshWaveformPeaks(filePath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.refreshWaveformPeaks) {
+      return await window.__JUCE__.backend.refreshWaveformPeaks(filePath);
+    }
+    return true;
   }
 
   // Playback clip management
@@ -5459,14 +5469,14 @@ class NativeBridge {
         musicGenerationReady: false,
         musicGenerationLayoutValid: false,
         musicGenerationPerformanceReady: true,
-        musicGenerationModelId: "acestep-v15-xl-turbo",
-        musicGenerationModelRepoId: "ACE-Step/acestep-v15-xl-turbo",
-        musicGenerationSharedRepoId: "ACE-Step/Ace-Step1.5",
+        musicGenerationModelId: "ace-step-v15-xl-turbo",
+        musicGenerationModelRepoId: "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        musicGenerationSharedRepoId: "ACE-Step/acestep-v15-xl-turbo-diffusers",
         musicGenerationCheckpointRoot: null,
         musicGenerationPerformanceStatusMessage: "",
         musicModels: {
-          "ace-step-v15-xl-turbo": {
-            id: "ace-step-v15-xl-turbo",
+          [DEFAULT_AI_MUSIC_MODEL_ID]: {
+            id: DEFAULT_AI_MUSIC_MODEL_ID,
             label: "ACE-Step 1.5 XL Turbo",
             installed: false,
             ready: false,

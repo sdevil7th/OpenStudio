@@ -23,14 +23,8 @@ describe("AI workflow params", () => {
       timesignature: "4/4",
       language: "en",
       keyscale: "C major",
-      generate_audio_codes: true,
-      cfg_scale: 2,
-      guidance_scale: 1,
+      inferenceSteps: 8,
       shift: 3,
-      temperature: 0.85,
-      top_p: 0.9,
-      top_k: 0,
-      min_p: 0,
     });
   });
 
@@ -44,14 +38,8 @@ describe("AI workflow params", () => {
       timesignature: "3",
       language: "xx",
       keyscale: "not-a-key",
-      generate_audio_codes: "false",
-      cfg_scale: "4.5",
-      guidance_scale: "21",
       shift: "9.5",
-      temperature: "1.25",
-      top_p: "0.95",
-      top_k: "12",
-      min_p: "0.123",
+      inferenceSteps: "99",
       ignored: "value",
     });
 
@@ -60,23 +48,16 @@ describe("AI workflow params", () => {
       lyrics: "",
       seed: 42,
       bpm: 240,
-      duration: 5,
+      duration: 10,
       timesignature: "3/4",
       language: "en",
       keyscale: "C major",
-      generate_audio_codes: false,
-      inferenceSteps: 8,
-      cfg_scale: 4.5,
-      guidance_scale: 20,
-      shift: 5,
-      temperature: 1.25,
-      top_p: 0.95,
-      top_k: 12,
-      min_p: 0.123,
+      inferenceSteps: 24,
+      shift: 9.5,
     });
   });
 
-  it("preserves explicit musical metadata in the native parity request surface", () => {
+  it("preserves explicit musical metadata in the Diffusers request surface", () => {
     const normalized = normalizeWorkflowParams("text-to-music", {
       bpm: 170,
       duration: 191,
@@ -89,21 +70,19 @@ describe("AI workflow params", () => {
       duration: 191,
       timesignature: "3/4",
       keyscale: "C# minor",
-      generate_audio_codes: true,
     });
   });
 
-  it("keeps generate_audio_codes enabled by default", () => {
-    const normalized = normalizeWorkflowParams("text-to-music", {
-      generate_audio_codes: true,
-    });
+  it("keeps Diffusers-only ACE params visible by default", () => {
+    const normalized = normalizeWorkflowParams("text-to-music", {});
 
     expect(normalized).toMatchObject({
       bpm: 120,
       duration: 30,
       timesignature: "4/4",
       keyscale: "C major",
-      generate_audio_codes: true,
+      inferenceSteps: 8,
+      shift: 3,
     });
   });
 
@@ -153,7 +132,7 @@ describe("AI workflow params", () => {
   it("keeps clip source workflow forms source-specific", () => {
     const stableVariation = getDefaultWorkflowParams("variation", STABLE_AUDIO_3_MODEL_ID);
     expect(stableVariation).toMatchObject({
-      prompt: "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, arrangement density, and mix character. Do not add vocals or unrelated instruments unless requested.",
+      prompt: "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, arrangement density, and mix character. Do not add vocals or unrelated instruments.",
       negative_prompt: "unrelated instruments, unexpected vocals, full band arrangement unless present in the source, distorted, noisy, clipped, abrupt transition, low quality",
       seed: -1,
       noise_amount: 0.5,
@@ -182,11 +161,11 @@ describe("AI workflow params", () => {
 
     const aceVariation = getDefaultWorkflowParams("variation", ACE_STEP_MODEL_ID);
     expect(aceVariation).toMatchObject({
-      prompt: "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, and arrangement density. Do not add vocals or unrelated instruments unless requested.",
+      prompt: "Create a close musical variation that preserves the source clip's tempo, key, primary instrument, and arrangement density. Do not add vocals or unrelated instruments.",
       seed: -1,
-      audio_cover_strength: 0.55,
-      generate_audio_codes: false,
+      audio_cover_strength: 0.85,
       inferenceSteps: 8,
+      shift: 3,
     });
     expect(aceVariation).not.toHaveProperty("lyrics");
     expect(aceVariation).not.toHaveProperty("duration");

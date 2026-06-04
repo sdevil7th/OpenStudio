@@ -112,7 +112,7 @@ export function TransportBar() {
   const {
     tracks,
     play,
-    record,
+    toggleRecord,
     pause,
     stop,
     toggleLoop,
@@ -127,7 +127,7 @@ export function TransportBar() {
     useShallow((state) => ({
       tracks: state.tracks,
       play: state.play,
-      record: state.record,
+      toggleRecord: state.toggleRecord,
       pause: state.pause,
       stop: state.stop,
       toggleLoop: state.toggleLoop,
@@ -163,9 +163,7 @@ export function TransportBar() {
   };
 
   const handleRecord = async () => {
-    if (!isPlaying || isPaused) {
-      await record();
-    }
+    await toggleRecord();
   };
 
   const handleStop = async () => {
@@ -253,10 +251,10 @@ export function TransportBar() {
             variant="danger"
             size="icon-lg"
             active={isRecording}
-            disabled={!hasArmedTracks}
+            disabled={!hasArmedTracks && !isRecording}
             onClick={handleRecord}
-            title={hasArmedTracks ? `Record (${formatShortcut("Ctrl+R")})` : "Arm a track to record"}
-            aria-label={hasArmedTracks ? "Record" : "Arm a track to record"}
+            title={isRecording || hasArmedTracks ? `Record (${formatShortcut("Ctrl+R")})` : "Arm a track to record"}
+            aria-label={isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
           >
             <Circle size={16} fill="currentColor" />
           </Button>
