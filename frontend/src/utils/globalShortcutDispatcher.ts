@@ -5,6 +5,7 @@ import { isMac } from "./platform";
 import { windowRole, windowSessionId } from "./windowEnvironment";
 
 let _lastSpacebarMs = 0;
+let _lastRecordShortcutMs = 0;
 
 export interface GlobalShortcutPayload extends NativeGlobalShortcutEvent {
   targetIsEditable?: boolean;
@@ -89,6 +90,13 @@ function publishDetachedCommand(command: string, payload: Record<string, unknown
   });
 }
 
+function shouldDebounceRecordShortcut(): boolean {
+  const now = Date.now();
+  if (now - _lastRecordShortcutMs < 150) return true;
+  _lastRecordShortcutMs = now;
+  return false;
+}
+
 export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean {
   if (payload.repeat) {
     return false;
@@ -119,6 +127,7 @@ export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean 
         const action = getRegisteredActions().find((candidate) => candidate.id === actionId);
         if (action && isGlobalShortcutAction(action) && (!action.canHandleShortcut || action.canHandleShortcut())) {
           markHandled(payload);
+          if (action.id === "transport.record" && shouldDebounceRecordShortcut()) return true;
           action.execute();
           return true;
         }
@@ -138,6 +147,7 @@ export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean 
 
     if (pressed === "Ctrl+R") {
       markHandled(payload);
+      if (shouldDebounceRecordShortcut()) return true;
       publishDetachedCommand("transport.record");
       return true;
     }
@@ -178,6 +188,7 @@ export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean 
     const action = findMatchingGlobalAction(pressed);
     if (action && (!action.canHandleShortcut || action.canHandleShortcut())) {
       markHandled(payload);
+      if (action.id === "transport.record" && shouldDebounceRecordShortcut()) return true;
       action.execute();
       return true;
     }

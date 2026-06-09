@@ -3,6 +3,15 @@
  * These are pure state setters with no backend interaction.
  */
 
+import {
+  DEFAULT_AI_MUSIC_MODEL_ID,
+  type AIWorkflowId,
+  type AiMusicModelId,
+  getAIModelsForWorkflow,
+  getDefaultWorkflowParams,
+  resolveAiMusicModelId,
+} from "../../data/aiWorkflows";
+
 // Zustand's `set` accepts partial state or updater functions. We type it loosely here
 // because the extracted actions are spread into the store, which enforces the real types.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -70,6 +79,57 @@ export const uiStateActions = (set: SetFn) => ({
         ? { showStemSeparation: true }
         : {}
     ),
+  openAIClipGeneration: (
+    trackId: string,
+    clipId: string,
+    workflowId: AIWorkflowId,
+    modelId?: AiMusicModelId,
+  ) => {
+    const supportedModels = getAIModelsForWorkflow(workflowId);
+    const requestedModelId = resolveAiMusicModelId(modelId);
+    const resolvedModelId = supportedModels.some((model) => model.id === requestedModelId)
+      ? requestedModelId
+      : supportedModels[0]?.id ?? DEFAULT_AI_MUSIC_MODEL_ID;
+    set({
+      showAIClipGeneration: true,
+      aiClipGenerationTrackId: trackId,
+      aiClipGenerationClipId: clipId,
+      aiClipGenerationWorkflowId: workflowId,
+      aiClipGenerationModelId: resolvedModelId,
+      aiClipGenerationParams: getDefaultWorkflowParams(workflowId, resolvedModelId),
+      aiClipGenerationRange: null,
+      aiClipGenerationError: "",
+    });
+  },
+  closeAIClipGeneration: () =>
+    set({
+      showAIClipGeneration: false,
+      aiClipGenerationTrackId: null,
+      aiClipGenerationClipId: null,
+      aiClipGenerationWorkflowId: null,
+      aiClipGenerationModelId: DEFAULT_AI_MUSIC_MODEL_ID,
+      aiClipGenerationParams: {},
+      aiClipGenerationRange: null,
+      aiClipGenerationError: "",
+    }),
+  setAIClipGenerationModel: (modelId: AiMusicModelId) =>
+    set((state: any) => {
+      const workflowId = state.aiClipGenerationWorkflowId as AIWorkflowId | null;
+      const resolvedModelId = resolveAiMusicModelId(modelId);
+      return {
+        aiClipGenerationModelId: resolvedModelId,
+        aiClipGenerationParams: workflowId
+          ? getDefaultWorkflowParams(workflowId, resolvedModelId)
+          : {},
+        aiClipGenerationError: "",
+      };
+    }),
+  setAIClipGenerationParams: (params: Record<string, unknown>) =>
+    set({ aiClipGenerationParams: params, aiClipGenerationError: "" }),
+  setAIClipGenerationRange: (range: { start: number; end: number } | null) =>
+    set({ aiClipGenerationRange: range }),
+  setAIClipGenerationError: (error: string) =>
+    set({ aiClipGenerationError: error }),
   toggleMediaExplorer: () =>
     set((state: any) => ({ showMediaExplorer: !state.showMediaExplorer })),
   toggleCleanProject: () =>

@@ -22,6 +22,8 @@ Metronome::~Metronome()
 
 void Metronome::prepareToPlay(double newSampleRate, int samplesPerBlock)
 {
+    juce::ignoreUnused(samplesPerBlock);
+
     if (sampleRate != newSampleRate)
     {
         sampleRate = newSampleRate;
@@ -68,7 +70,8 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     if (!enabled) return;
 
     int numSamples = buffer.getNumSamples();
-    double samplesPerBeat = (60.0 / bpm) * sampleRate;
+    const double denominatorScale = denominator > 0 ? (4.0 / static_cast<double>(denominator)) : 1.0;
+    double samplesPerBeat = (60.0 / bpm) * sampleRate * denominatorScale;
 
     // Safety check
     if (samplesPerBeat <= 0.0) return;
@@ -76,22 +79,13 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     auto* leftConfig = buffer.getWritePointer(0);
     auto* rightConfig = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
 
-    // Detect playback restart: if position jumped backwards (e.g., from >0 back to 0)
-    // or if this is the very first call (lastSamplePosition is -1)
-    bool playbackRestarted = (lastSamplePosition < 0) || (currentSamplePosition < lastSamplePosition);
-
-    // If playback restarted at or near position 0, immediately trigger the first click
-    if (playbackRestarted && currentSamplePosition < samplesPerBeat && !isClicking)
+    const bool transportDiscontinuity = lastSamplePosition < 0.0
+                                      || std::abs(currentSamplePosition - lastSamplePosition) > 1.0;
+    if (transportDiscontinuity)
     {
-        // Force the first beat to be triggered
-        isClicking = true;
+        isClicking = false;
         clickSampleCounter = 0;
-        // First beat is always accented (beat 0)
-        if (!accentBeats.empty()) {
-            isHighClick = accentBeats[0];
-        } else {
-            isHighClick = true;
-        }
+        isHighClick = false;
     }
 
     for (int i = 0; i < numSamples; ++i)
@@ -106,7 +100,7 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
         double prevBeatPos = (currentPos - 1.0) / samplesPerBeat;
         int currentBeatIdx = static_cast<int>(std::floor(beatPos));
         int prevBeatIdx    = static_cast<int>(std::floor(prevBeatPos));
-        bool isBeatStart   = (currentBeatIdx > prevBeatIdx) && (currentPos > 0 || !playbackRestarted);
+        bool isBeatStart = currentBeatIdx > prevBeatIdx;
 
         if (isBeatStart && !isClicking)
         {

@@ -22,9 +22,9 @@ export function startSharedTransportSync(options: SharedTransportSyncOptions = {
       useDAWStore.setState((current) => ({
         transport: {
           ...current.transport,
-          isPlaying: backendPlaying,
+          isPlaying: backendPlaying || Boolean(current.recordSession),
           isPaused: false,
-          isRecording: backendPlaying ? current.transport.isRecording : false,
+          isRecording: backendPlaying || Boolean(current.recordSession) ? current.transport.isRecording : false,
           currentTime: backendPos,
         },
       }));

@@ -1,4 +1,5 @@
 import classNames from 'classnames';
+import { forwardRef } from 'react';
 import { ModalContentProps } from './Modal.types';
 
 /**
@@ -18,6 +19,16 @@ import { ModalContentProps } from './Modal.types';
  * </Modal>
  * ```
  */
-export function ModalContent({ children, className }: ModalContentProps) {
-  return <div className={classNames('min-h-0 flex-1 overflow-y-auto p-4', className)}>{children}</div>;
-}
+export const ModalContent = forwardRef<HTMLDivElement, ModalContentProps>(
+  ({ children, className }, ref) => (
+    <div
+      ref={ref}
+      data-modal-scroll="true"
+      className={classNames('min-h-0 flex-1 overflow-y-auto p-4', className)}
+    >
+      {children}
+    </div>
+  ),
+);
+
+ModalContent.displayName = 'ModalContent';

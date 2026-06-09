@@ -1,5 +1,5 @@
 import { type TrackType, useDAWStore } from "../store/useDAWStore";
-import { getDefaultWorkflowParams } from "../data/aiWorkflows";
+import { DEFAULT_AI_MUSIC_MODEL_ID, getDefaultWorkflowParams } from "../data/aiWorkflows";
 
 export type InsertableTrackType = Extract<TrackType, "audio" | "midi" | "instrument" | "ai">;
 
@@ -39,9 +39,10 @@ export async function createTrackOfType(
     inputChannelCount: isMidiType ? 1 : 2,
     armed: type === "instrument",
     monitorEnabled: type === "instrument",
+    aiMusicModelId: isAiType ? DEFAULT_AI_MUSIC_MODEL_ID : undefined,
     aiWorkflow: isAiType ? "text-to-music" : undefined,
     aiWorkflowParams: isAiType
-      ? getDefaultWorkflowParams("text-to-music")
+      ? getDefaultWorkflowParams("text-to-music", DEFAULT_AI_MUSIC_MODEL_ID)
       : undefined,
     aiGenerationState: isAiType ? "idle" : undefined,
     aiGenerationProgress: isAiType ? 0 : undefined,

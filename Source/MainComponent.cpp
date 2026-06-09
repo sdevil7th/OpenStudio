@@ -2191,6 +2191,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            completion(juce::Array<juce::var>());
                        }
                    })
+                   .withNativeFunction ("refreshWaveformPeaks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() >= 1) {
+                           completion(audioEngine.refreshWaveformPeaks(args[0].toString()));
+                       } else {
+                           completion(false);
+                       }
+                   })
                    .withNativeFunction ("getRecordingPeaks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 3) {
                            juce::String trackId = args[0].toString();
@@ -2513,6 +2520,50 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
 
                         completion(juce::URL(args[0].toString()).launchInDefaultBrowser());
+                    })
+                    .withNativeFunction ("browseForFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto title = args.size() > 0 && args[0].isString()
+                            ? args[0].toString()
+                            : juce::String("Select File");
+                        const auto filters = args.size() > 1 && args[1].isString()
+                            ? args[1].toString()
+                            : juce::String("*");
+                        auto initialDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            title,
+                            initialDir,
+                            filters.isNotEmpty() ? filters : juce::String("*"),
+                            true);
+
+                        const auto chooserFlags = juce::FileBrowserComponent::openMode
+                                                | juce::FileBrowserComponent::canSelectFiles;
+                        fileChooser->launchAsync(chooserFlags, [completion] (const juce::FileChooser& fc) {
+                            auto result = fc.getResult();
+                            completion(result.existsAsFile() ? result.getFullPathName() : juce::String());
+                        });
+                    })
+                    .withNativeFunction ("browseForFolder", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto title = args.size() > 0 && args[0].isString()
+                            ? args[0].toString()
+                            : juce::String("Select Folder");
+                        auto initialDir = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                            .getChildFile("Downloads");
+                        if (! initialDir.isDirectory())
+                            initialDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            title,
+                            initialDir,
+                            "*",
+                            true);
+
+                        const auto chooserFlags = juce::FileBrowserComponent::openMode
+                                                | juce::FileBrowserComponent::canSelectDirectories;
+                        fileChooser->launchAsync(chooserFlags, [completion] (const juce::FileChooser& fc) {
+                            auto result = fc.getResult();
+                            completion(result.isDirectory() ? result.getFullPathName() : juce::String());
+                        });
                     })
                     // ========== Project Save/Load (F2) ==========
                     .withNativeFunction ("showSaveDialog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -5976,18 +6027,34 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         {
                             auto trackId = args[0].toString();
                             auto clipId  = args[1].toString();
-                            // Run on background thread to avoid blocking UI
-                            std::thread([this, trackId, clipId, completion]() {
-                                auto result = audioEngine.analyzePolyphonic(trackId, clipId);
-                                completion(result);
-                            }).detach();
+                            auto* engine = &audioEngine;
+                            juce::Component::SafePointer<MainComponent> safeThis(this);
+                            polyAnalysisBridgePool.addJob([engine, safeThis, trackId, clipId, completion]() mutable {
+                                auto result = engine->analyzePolyphonic(trackId, clipId);
+                                juce::MessageManager::callAsync([safeThis, completion, result]() mutable {
+                                    if (safeThis != nullptr)
+                                        completion(result);
+                                });
+                            });
                         }
                         else
                             completion(juce::var());
                     })
                     .withNativeFunction ("extractMidiFromAudio", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 2)
-                            completion(audioEngine.extractMidiFromAudio(args[0].toString(), args[1].toString()));
+                        {
+                            auto trackId = args[0].toString();
+                            auto clipId = args[1].toString();
+                            auto* engine = &audioEngine;
+                            juce::Component::SafePointer<MainComponent> safeThis(this);
+                            polyAnalysisBridgePool.addJob([engine, safeThis, trackId, clipId, completion]() mutable {
+                                auto result = engine->extractMidiFromAudio(trackId, clipId);
+                                juce::MessageManager::callAsync([safeThis, completion, result]() mutable {
+                                    if (safeThis != nullptr)
+                                        completion(result);
+                                });
+                            });
+                        }
                         else
                             completion(juce::var());
                     })
@@ -6155,8 +6222,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(juce::var());
                     })
                     .withNativeFunction ("startAIGeneration", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        if (args.size() >= 3)
-                            completion(audioEngine.startAIGeneration(args[0].toString(), args[1].toString(), args[2].toString()));
+                        if (args.size() >= 4)
+                            completion(audioEngine.startAIGeneration(args[0].toString(), args[1].toString(), args[2].toString(), args[3].toString()));
+                        else if (args.size() >= 3)
+                            completion(audioEngine.startAIGeneration(args[0].toString(), "ace-step-v15-xl-turbo", args[1].toString(), args[2].toString()));
                         else
                             completion(juce::var());
                     })
@@ -6696,6 +6765,7 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
 MainComponent::~MainComponent()
 {
     stopTimer();
+    polyAnalysisBridgePool.removeAllJobs(true, 5000);
     mediaPreviewPool.removeAllJobs(true, 2000);
 #if JUCE_WINDOWS
     externalMediaDropTarget.reset();

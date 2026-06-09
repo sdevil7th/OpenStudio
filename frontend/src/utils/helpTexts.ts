@@ -156,10 +156,52 @@ function buildHelpTexts(): Record<string, HelpEntry> {
         "Use the pitch tools for detailed correction, note editing, contour analysis, and advanced vocal tuning workflows directly inside the session.",
       shortcut: `${shortcut("edit.editPitch", "P")}: Open Pitch Editing`,
     },
+    "ai.overview": {
+      title: "AI Music & Assisted Audio",
+      description:
+        "OpenStudio keeps AI workflows inside the DAW session: generate new music, create source-conditioned variations, inpaint a selected range, continue a clip, extract stems, or convert audio to MIDI while keeping the results editable on tracks.",
+      shortcut: `${shortcut("insert.aiTrack", "Ctrl+Alt+T")}: AI Track | ${commandPalettePath}`,
+    },
+    "ai.tools": {
+      title: "AI Tools Setup",
+      description:
+        "AI generation and stem separation use optional local AI Tools. If a workflow says the runtime is missing, open AI Tools Setup, choose the needed feature/model, and let the installer prepare the runtime while the main DAW remains usable.",
+    },
+    "ai.textToMusic": {
+      title: "Text to Music",
+      description:
+        "Use an AI track to generate a fresh music clip from a style or arrangement prompt. ACE-Step workflows include controls such as lyrics, BPM, duration, time signature, language, key/scale, seed, diffusion steps, and turbo shift.",
+      shortcut: `${shortcut("insert.aiTrack", "Ctrl+Alt+T")}: Insert AI Track`,
+    },
+    "ai.lyricsStyle": {
+      title: "Lyrics + Style",
+      description:
+        "Lyrics + Style combines structured lyrics with a musical prompt so you can guide both song content and arrangement direction before importing the generated clip into the project.",
+    },
+    "ai.textToAudio": {
+      title: "Text to Audio",
+      description:
+        "Stable Audio 3 Medium workflows generate audio from a text prompt with optional negative prompt, seed, duration, step, CFG, and LoRA controls when the Stable Audio runtime/model is installed.",
+    },
+    "ai.variation": {
+      title: "Create Variation",
+      description:
+        "Create Variation starts from a selected audio clip and generates a related version on a new track. Use source-preservation or variation controls to decide how closely the result should follow the original.",
+    },
+    "ai.inpaint": {
+      title: "Inpaint Selection",
+      description:
+        "Inpaint Selection regenerates only the selected time range inside a source clip while trying to match the audio around it. Create a time selection that overlaps the clip before launching this workflow.",
+    },
+    "ai.continue": {
+      title: "Continue Clip",
+      description:
+        "Continue Clip generates a continuation tail from the selected audio clip. Use the direction prompt and tail-length/source controls to preserve the existing idea or intentionally steer the next section.",
+    },
     "stem.separation": {
       title: "Stem Separation",
       description:
-        "Stem Separation can split a source clip into component stems for remixing, cleanup, practice, arrangement, or sound-design work. It is integrated into the broader edit and mix workflow.",
+        "Stem Separation can split a source clip into vocals, drums, bass, and other stems for remixing, cleanup, practice, arrangement, or sound-design work. It uses the optional AI Tools runtime and imports generated stems back into the project.",
     },
     "routing": {
       title: "Routing & Buses",

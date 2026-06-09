@@ -187,6 +187,7 @@ interface LoopBoundaryDragState {
   edge: "start" | "end";
   startX: number;
   currentX: number;
+  currentSourceTime: number;
   initialLoopOffset: number;
   initialLoopLength: number;
 }
@@ -255,6 +256,10 @@ const NOTE_HEIGHT = 12;
 const PIANO_WIDTH = 0;
 const PIANO_KEY_STRIP_MIN_WIDTH = 56;
 const PIANO_KEY_STRIP_MAX_WIDTH = 86;
+const EDITOR_HORIZONTAL_PADDING_BARS = 4;
+const EDITOR_HORIZONTAL_PADDING_VIEWPORT_RATIO = 0.75;
+const LOOP_BOUNDARY_EDGE_SCROLL_ZONE_PX = 56;
+const LOOP_BOUNDARY_EDGE_SCROLL_MAX_STEP_PX = 36;
 const VELOCITY_LANE_HEIGHT = 60;
 const CC_LANE_HEIGHT = 80;
 const LANE_DIVIDER_HEIGHT = 1;
@@ -860,13 +865,21 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       .sort((a, b) => a.time - b.time);
   }, [clipCCEvents, clipEvents, isCC14BitMode, notePairs, selectedCC, selectedNoteMetadataLaneType, selectedScalarMIDIEventMatches, selectedScalarMIDIEventType]);
 
+  const getEditorPaddingSeconds = useCallback((pps = pixelsPerSecond) => {
+    const safePps = Math.max(1, pps || 1);
+    const secondsPerBar = Math.max(0.001, timeSignature.numerator / Math.max(0.001, beatsPerSecond));
+    const viewportPadding = (visibleGridWidth / safePps) * EDITOR_HORIZONTAL_PADDING_VIEWPORT_RATIO;
+    return Math.max(secondsPerBar * EDITOR_HORIZONTAL_PADDING_BARS, viewportPadding, 1);
+  }, [beatsPerSecond, pixelsPerSecond, timeSignature.numerator, visibleGridWidth]);
+
   const contentDuration = useMemo(() => {
     const noteEnd = notePairs.reduce((max, pair) => Math.max(max, pair.startTime + pair.duration), 0);
     const ccEnd = (clipCCEvents || []).reduce((max, event) => Math.max(max, event.time), 0);
     const drawEnd = drawingState ? Math.max(drawingState.startTime, drawingState.endTime) : 0;
+    const loopDragEnd = loopBoundaryDrag ? loopBoundaryDrag.currentSourceTime : 0;
     const visibleItemEnd = clip?.duration ?? 0;
-    return Math.max(clipDuration, visibleItemEnd, noteEnd, ccEnd, drawEnd, stepInputPosition + stepDurationSeconds, 1);
-  }, [clip?.duration, clipDuration, notePairs, clipCCEvents, drawingState, stepInputPosition, stepDurationSeconds]);
+    return Math.max(clipDuration, visibleItemEnd, noteEnd, ccEnd, drawEnd, loopDragEnd, stepInputPosition + stepDurationSeconds, 1);
+  }, [clip?.duration, clipDuration, notePairs, clipCCEvents, drawingState, loopBoundaryDrag, stepInputPosition, stepDurationSeconds]);
 
   const eventContentLength = useMemo(() => {
     const noteEnd = notePairs.reduce((max, pair) => Math.max(max, pair.startTime + pair.duration), 0);
@@ -876,7 +889,9 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   }, [clipCCEvents, clipEvents, notePairs]);
 
   const sourceLength = Math.max(0.01, clip?.sourceLength || clip?.loopLength || clipDuration || 0.01);
-  const contentWidth = Math.max(visibleGridWidth, (clipStartTime + contentDuration) * pixelsPerSecond);
+  const editorPaddingSeconds = getEditorPaddingSeconds(pixelsPerSecond);
+  const editorContentEnd = clipStartTime + contentDuration + editorPaddingSeconds;
+  const contentWidth = Math.max(visibleGridWidth, editorContentEnd * pixelsPerSecond);
   const maxScrollX = Math.max(0, contentWidth - visibleGridWidth);
   const maxScrollY = Math.max(0, TOTAL_NOTES * NOTE_HEIGHT - noteGridHeight);
   const formatSeconds = useCallback((value: number) => value.toFixed(3), []);
@@ -1185,12 +1200,6 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   }, []);
 
   useEffect(() => {
-    if (timelineScrollX > maxScrollX) {
-      setTimelineScroll(maxScrollX, timelineScrollY);
-    }
-  }, [maxScrollX, setTimelineScroll, timelineScrollX, timelineScrollY]);
-
-  useEffect(() => {
     setScrollY((previous) => clamp(previous, 0, maxScrollY));
   }, [maxScrollY]);
 
@@ -1320,7 +1329,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         const projectTimeAtCursor = (timelineScrollX + cursorGridX) / pixelsPerSecond;
         const factor = Math.exp(-event.deltaY * 0.0015);
         const nextPixelsPerSecond = clamp(pixelsPerSecond * factor, 1, 1000);
-        const nextContentWidth = Math.max(visibleGridWidth, (clipStartTime + contentDuration) * nextPixelsPerSecond);
+        const nextEditorContentEnd = clipStartTime + contentDuration + getEditorPaddingSeconds(nextPixelsPerSecond);
+        const nextContentWidth = Math.max(visibleGridWidth, nextEditorContentEnd * nextPixelsPerSecond);
         const nextMaxScrollX = Math.max(0, nextContentWidth - visibleGridWidth);
         const nextScrollX = clamp(projectTimeAtCursor * nextPixelsPerSecond - cursorGridX, 0, nextMaxScrollX);
         setTimelineZoom(nextPixelsPerSecond);
@@ -1341,6 +1351,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   }, [
     clipStartTime,
     contentDuration,
+    getEditorPaddingSeconds,
     maxScrollX,
     maxScrollY,
     pixelsPerSecond,
@@ -3198,6 +3209,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         edge: hitTarget.edge,
         startX: pos.x,
         currentX: pos.x,
+        currentSourceTime: hitTarget.edge === "start" ? currentLoopOffset : currentLoopOffset + currentLoopLength,
         initialLoopOffset: currentLoopOffset,
         initialLoopLength: currentLoopLength,
       });
@@ -3231,7 +3243,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const cursorGridX = clamp(pos.x - PIANO_WIDTH, 0, visibleGridWidth);
       const projectTimeAtCursor = (cursorGridX + timelineScrollX) / pixelsPerSecond;
       const nextPixelsPerSecond = clamp(pixelsPerSecond * (direction > 0 ? 1.18 : 0.85), 1, 1000);
-      const nextContentWidth = Math.max(visibleGridWidth, (clipStartTime + contentDuration) * nextPixelsPerSecond);
+      const nextEditorContentEnd = clipStartTime + contentDuration + getEditorPaddingSeconds(nextPixelsPerSecond);
+      const nextContentWidth = Math.max(visibleGridWidth, nextEditorContentEnd * nextPixelsPerSecond);
       const nextMaxScrollX = Math.max(0, nextContentWidth - visibleGridWidth);
       setTimelineZoom(nextPixelsPerSecond);
       setTimelineScroll(clamp(projectTimeAtCursor * nextPixelsPerSecond - cursorGridX, 0, nextMaxScrollX), timelineScrollY);
@@ -3326,6 +3339,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     clipStartTime,
     activeLane,
     activeControllerLane,
+    getEditorPaddingSeconds,
     getNoteFromY,
     getTimeFromX,
     handleCCMouseDown,
@@ -3413,11 +3427,28 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const nativeEvent = event.evt as MouseEvent;
       setStageCursor("ew-resize");
       const nextX = clamp(pos.x, PIANO_WIDTH, stageWidth);
-      setLoopBoundaryDrag((current) => current ? { ...current, currentX: nextX } : null);
-      setPianoRollEditCursorTime(snapTime(getTimeFromX(nextX), {
+      const rightEdgeAmount = Math.max(0, nextX - (stageWidth - LOOP_BOUNDARY_EDGE_SCROLL_ZONE_PX));
+      const leftEdgeAmount = Math.max(0, (PIANO_WIDTH + LOOP_BOUNDARY_EDGE_SCROLL_ZONE_PX) - nextX);
+      const scrollStep = rightEdgeAmount > 0
+        ? Math.min(LOOP_BOUNDARY_EDGE_SCROLL_MAX_STEP_PX, Math.max(2, rightEdgeAmount * 0.65))
+        : leftEdgeAmount > 0
+          ? -Math.min(LOOP_BOUNDARY_EDGE_SCROLL_MAX_STEP_PX, Math.max(2, leftEdgeAmount * 0.65))
+          : 0;
+      const nextScrollX = clamp(timelineScrollX + scrollStep, 0, maxScrollX);
+      if (Math.abs(nextScrollX - timelineScrollX) > 0.5) {
+        setTimelineScroll(nextScrollX, timelineScrollY);
+      }
+      const rawSourceTime = projectXToMidiSourceTime(nextX - PIANO_WIDTH, {
+        pixelsPerSecond,
+        scrollX: nextScrollX,
+        clipStartTime,
+      });
+      const nextSourceTime = snapTime(rawSourceTime, {
         bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
-        originalTime: getTimeFromX(nextX),
-      }));
+        originalTime: rawSourceTime,
+      });
+      setLoopBoundaryDrag((current) => current ? { ...current, currentX: nextX, currentSourceTime: nextSourceTime } : null);
+      setPianoRollEditCursorTime(nextSourceTime);
       return;
     }
 
@@ -3523,6 +3554,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     clip,
     clipDuration,
     clipId,
+    clipStartTime,
     dragState,
     drawingState,
     getLatestCCEvents,
@@ -3543,12 +3575,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     pianoRollControllerHitEvents,
     pianoRollHitLanes,
     pianoRollHitNotes,
+    pixelsPerSecond,
     previewMIDIClipEvents,
     rangeDragState,
     snapTime,
     setTimelineScroll,
     setPianoRollEditCursorTime,
     stageWidth,
+    timelineScrollX,
     timelineScrollY,
     trackId,
     updateDragPreview,
@@ -3579,7 +3613,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const loopOffset = loopBoundaryDrag.initialLoopOffset;
       const loopLength = Math.max(snapDuration, loopBoundaryDrag.initialLoopLength);
       const loopEnd = loopOffset + loopLength;
-      const sourceTime = Math.max(0, snapTime(getTimeFromX(loopBoundaryDrag.currentX)));
+      const sourceTime = Math.max(0, loopBoundaryDrag.currentSourceTime);
 
       if (loopBoundaryDrag.edge === "start") {
         const nextOffset = clamp(sourceTime, 0, Math.max(0, loopEnd - snapDuration));
@@ -3745,7 +3779,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     const lastRow = Math.min(TOTAL_NOTES, Math.ceil((scrollY + noteGridHeight) / NOTE_HEIGHT) + 1);
     const visibleProjectStart = Math.max(0, timelineScrollX / pixelsPerSecond - beatInterval);
     const visibleProjectEnd = (timelineScrollX + stageWidth) / pixelsPerSecond + beatInterval;
-    const projectContentEnd = clipStartTime + contentDuration;
+    const projectContentEnd = editorContentEnd;
 
     const firstBeatIndex = Math.max(0, Math.floor(visibleProjectStart / beatInterval));
     const lastBeatIndex = Math.ceil(Math.min(visibleProjectEnd, projectContentEnd) / beatInterval);

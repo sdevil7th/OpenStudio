@@ -1,8 +1,10 @@
-const searchParams = new URLSearchParams(window.location.search);
+const browserWindow = typeof window !== "undefined" ? window : undefined;
+const browserNavigator = typeof navigator !== "undefined" ? navigator : undefined;
+const searchParams = new URLSearchParams(browserWindow?.location.search ?? "");
 
 function detectHostPlatform(): string {
-  const platform = navigator.platform.toLowerCase();
-  const userAgent = navigator.userAgent.toLowerCase();
+  const platform = browserNavigator?.platform.toLowerCase() ?? "";
+  const userAgent = browserNavigator?.userAgent.toLowerCase() ?? "";
 
   if (platform.includes("mac") || userAgent.includes("mac os")) {
     return "macos";

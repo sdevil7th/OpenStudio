@@ -27,6 +27,7 @@ function categorizeEntries(entries: Record<string, HelpEntry>): Record<string, A
     fx: "Effects (FX)",
     automation: "Automation",
     pitch: "Pitch",
+    ai: "AI Music",
     stem: "Stem Separation",
     routing: "Routing",
     render: "Render & Export",

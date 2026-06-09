@@ -14,6 +14,9 @@ struct AIGenerationProgress
     juce::String message;
     juce::String backend { "unknown" };
     juce::String outputFile;
+    juce::String modelId;
+    juce::String workflowId;
+    juce::String sourceClipId;
     juce::String error;
     double elapsedMs = 0.0;
     double heartbeatTs = 0.0;
@@ -47,7 +50,8 @@ public:
     AITrackEngine() = default;
     ~AITrackEngine();
 
-    bool startGeneration(const juce::String& workflowId,
+    bool startGeneration(const juce::String& modelId,
+                         const juce::String& workflowId,
                          const juce::String& paramsJson,
                          const juce::File& outputDir);
 
@@ -58,16 +62,22 @@ public:
 private:
     juce::File getUserDataRoot() const;
     juce::File getUserRuntimeRoot() const;
+    juce::File getStableAudioRuntimeRoot() const;
     juce::File getMusicGenerationCheckpointRoot() const;
+    juce::File getStableAudioModelRoot() const;
     juce::File findPython() const;
+    juce::File findStableAudioPython() const;
     juce::File findScript() const;
+    juce::File findStableAudioScript() const;
     void cleanupLegacyWorkerProcesses(const juce::File& python, const juce::File& script) const;
-    bool ensureWorkerAvailable(const juce::File& python, const juce::File& script);
-    bool sendGenerateRequest(const juce::String& workflowId,
+    bool ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId);
+    bool sendGenerateRequest(const juce::String& modelId,
+                             const juce::String& workflowId,
                              const juce::String& paramsJson,
                              const juce::File& outputFile);
     void launchGenerationTask(const juce::File& python,
                               const juce::File& script,
+                              const juce::String& modelId,
                               const juce::String& workflowId,
                               const juce::String& paramsJson,
                               const juce::File& outputFile);

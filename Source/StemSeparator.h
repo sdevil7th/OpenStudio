@@ -162,20 +162,32 @@ private:
     /** Get the preferred stem-runtime root directory under user app-data. */
     juce::File getUserRuntimeRoot() const;
 
+    /** Get the separate Stable Audio runtime root directory under user app-data. */
+    juce::File getStableAudioRuntimeRoot() const;
+
     /** Get the preferred models directory under user app-data. */
     juce::File getUserModelsDir() const;
 
     /** Get the pinned ACE-Step checkpoint root used for music generation. */
     juce::File getMusicGenerationCheckpointRoot() const;
 
+    /** Get the managed Stable Audio 3 Medium snapshot root. */
+    juce::File getStableAudioModelRoot() const;
+
     /** Find the prepared user-runtime Python executable. */
     juce::File findPython() const;
+
+    /** Find the prepared Stable Audio runtime Python executable. */
+    juce::File findStableAudioPython() const;
 
     /** Find a user-managed Python interpreter suitable for bootstrapping installs. */
     juce::File findSystemPython() const;
 
     /** Return true when this build is allowed to use external Python fallback. */
     bool isExternalPythonFallbackEnabled() const;
+
+    /** Return true when the separate Stable Audio runtime is present. */
+    bool hasStableAudioRuntime() const;
 
     /** Resolve a Python executable from a runtime root. */
     juce::File findPythonInRuntimeRoot (const juce::File& runtimeRoot) const;
@@ -243,6 +255,9 @@ private:
         bool userConfirmedDownload = false;
         juce::StringArray selectedFeatures;
         juce::String requestedFeature;
+        juce::String modelId;
+        juce::String stableAudioModelPath;
+        bool stableAudioLicenseAccepted = false;
     };
 
     struct HardwareStatus
@@ -279,6 +294,12 @@ private:
 
     /** Return true if the preferred stem model is available. */
     bool hasRequiredModel (const juce::File& modelsDir) const;
+
+    /** Return missing required files for a Stable Audio 3 Medium snapshot. */
+    juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot) const;
+
+    /** Return true if a Stable Audio 3 Medium snapshot contains the required files. */
+    bool isStableAudioModelFolderValid (const juce::File& modelRoot) const;
 
     /** Poll a running AI tools install and refresh the cached status. */
     void pollInstallProgress();
@@ -333,7 +354,7 @@ private:
                                 juce::String& errorCode) const;
 
     /** Serialize AI tools status to juce::var for the native bridge. */
-    static juce::var aiToolsStatusToVar (const AiToolsStatus& status);
+    juce::var aiToolsStatusToVar (const AiToolsStatus& status) const;
 
     std::unique_ptr<juce::ChildProcess> childProcess;
     std::shared_ptr<juce::ChildProcess> installProcess;

@@ -14,7 +14,14 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
 import { createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
-import { getDefaultWorkflowParams, normalizeWorkflowParams } from "../../data/aiWorkflows";
+import {
+  DEFAULT_AI_MUSIC_MODEL_ID,
+  getDefaultWorkflowForModel,
+  getDefaultWorkflowParams,
+  normalizeWorkflowId,
+  normalizeWorkflowParams,
+  resolveAiMusicModelId,
+} from "../../data/aiWorkflows";
 import { normalizeMIDIClipLoopLength, serializeMIDIClipsForBackend, syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
 import { FACTORY_QUANTIZE_PRESETS } from "../../utils/snapToGrid";
 
@@ -236,6 +243,14 @@ function buildProjectResetState() {
     stemSepClipId: null,
     stemSepClipName: "",
     stemSepClipDuration: 0,
+    showAIClipGeneration: false,
+    aiClipGenerationTrackId: null,
+    aiClipGenerationClipId: null,
+    aiClipGenerationWorkflowId: null,
+    aiClipGenerationModelId: DEFAULT_AI_MUSIC_MODEL_ID,
+    aiClipGenerationParams: {},
+    aiClipGenerationRange: null,
+    aiClipGenerationError: "",
     showProjectCompare: false,
     projectCompareData: null,
     showRegionRenderMatrix: false,
@@ -619,6 +634,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             samplerSourceType: track.samplerSourceType,
             builtInInstrument: track.builtInInstrument,
             icon: track.icon,
+            aiMusicModelId: track.aiMusicModelId,
             aiWorkflow: track.aiWorkflow,
             aiWorkflowParams: track.aiWorkflowParams,
             inputFXPaths,
@@ -1028,18 +1044,30 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               automationReadEnabled,
             );
 
+            const aiMusicModelId = trackData.type === "ai"
+              ? resolveAiMusicModelId(trackData.aiMusicModelId)
+              : trackData.aiMusicModelId;
+            const aiWorkflowId = trackData.type === "ai"
+              ? (
+                  normalizeWorkflowId(trackData.aiWorkflow)
+                  ?? getDefaultWorkflowForModel(aiMusicModelId, "ai-track").id
+                )
+              : trackData.aiWorkflow;
+
             const frontendTrack: Track = {
               ...trackData,
               type: restoredInstrumentPlugin || restoredBuiltInInstrumentFX ? "instrument" : trackData.type,
+              aiMusicModelId,
               aiWorkflow:
                 trackData.type === "ai"
-                  ? trackData.aiWorkflow || "text-to-music"
+                  ? aiWorkflowId
                   : trackData.aiWorkflow,
               aiWorkflowParams:
                 trackData.type === "ai"
                   ? normalizeWorkflowParams(
-                      trackData.aiWorkflow || "text-to-music",
-                      trackData.aiWorkflowParams || getDefaultWorkflowParams(trackData.aiWorkflow || "text-to-music"),
+                      aiWorkflowId,
+                      trackData.aiWorkflowParams || getDefaultWorkflowParams(aiWorkflowId, aiMusicModelId),
+                      aiMusicModelId,
                     )
                   : trackData.aiWorkflowParams,
               aiGenerationState:

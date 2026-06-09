@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { applyTheme, createDefaultRenderDialogOptions } from "../useDAWStore";
+import { applyTheme, createDefaultRenderDialogOptions, createDefaultTrack } from "../useDAWStore";
 import { usePitchEditorStore } from "../pitchEditorStore";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
@@ -15,6 +15,34 @@ import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { prepareForManualRender } from "../../utils/renderPreparation";
 import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
+
+async function syncRenderInPlaceExecute(
+  get: GetFn,
+  renderedTrackId: string,
+  insertIndex: number,
+  renderedFilePath: string,
+  syncSource?: () => Promise<void>,
+) {
+  await nativeBridge.addTrack(renderedTrackId, "audio");
+  await nativeBridge.reorderTrack(renderedTrackId, insertIndex);
+  if (syncSource) {
+    await syncSource();
+  }
+  await get().syncClipsWithBackend?.();
+  await nativeBridge.refreshWaveformPeaks(renderedFilePath);
+}
+
+async function syncRenderInPlaceUndo(
+  get: GetFn,
+  renderedTrackId: string,
+  syncSource?: () => Promise<void>,
+) {
+  if (syncSource) {
+    await syncSource();
+  }
+  await get().syncClipsWithBackend?.();
+  await nativeBridge.removeTrack(renderedTrackId);
+}
 
 export const renderingActions = (set: SetFn, get: GetFn) => ({
 
@@ -471,34 +499,21 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         bitDepth: state.projectBitDepth || 24,
         channels: 2,
         normalize: false,
-        addTail: true,
-        tailLength: 1000,
+        addTail: false,
+        tailLength: 0,
         includeMetronome: false,
       });
       if (!success) return;
 
-      // Import rendered file for accurate duration
       const mediaInfo = await nativeBridge.importMediaFile(filePath);
-      const renderedDuration = mediaInfo?.duration || (endTime - startTime);
-
-      // Create new track below source
+      const renderedDuration = endTime - startTime;
+      const sourceLength = mediaInfo?.duration || renderedDuration;
       const newTrackId = crypto.randomUUID();
-      get().addTrack({ id: newTrackId, name: `${sourceTrack.name} (Rendered)`, type: "audio", color: sourceTrack.color });
-
-      // Move new track to right below source track
-      set((s) => {
-        const tracks = [...s.tracks];
-        const newIdx = tracks.findIndex((t) => t.id === newTrackId);
-        if (newIdx !== -1) {
-          const [moved] = tracks.splice(newIdx, 1);
-          tracks.splice(sourceTrackIndex + 1, 0, moved);
-        }
-        return { tracks };
-      });
-      nativeBridge.reorderTrack(newTrackId, sourceTrackIndex + 1).catch(logBridgeError("sync"));
-
-      // Add rendered clip to new track
-      get().addClip(newTrackId, {
+      const newTrack = {
+        ...createDefaultTrack(newTrackId, `${sourceTrack.name} (Rendered)`, sourceTrack.color, "audio", state.tracks),
+        clips: [],
+      };
+      const renderedClip = {
         id: crypto.randomUUID(),
         filePath,
         name: `${sourceClipName} (Rendered)`,
@@ -510,11 +525,81 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         fadeIn: 0,
         fadeOut: 0,
         sampleRate: mediaInfo?.sampleRate,
-        sourceLength: renderedDuration,
-      });
+        sourceLength,
+      };
+      const oldMuted = !!sourceClip.muted;
+      const isMidi = sourceTrack.midiClips.some((clip) => clip.id === clipId);
+      const selectionBefore = {
+        selectedClipId: state.selectedClipId,
+        selectedClipIds: [...state.selectedClipIds],
+        selectedTrackId: state.selectedTrackId,
+        selectedTrackIds: [...state.selectedTrackIds],
+        lastSelectedTrackId: state.lastSelectedTrackId,
+      };
 
-      // Mute the original clip
-      get().toggleClipMute(clipId);
+      commandManager.execute({
+        type: "RENDER_CLIP_IN_PLACE",
+        description: `Render "${sourceClipName}" in place`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => {
+            const tracks = s.tracks.map((track) => ({
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === clipId ? { ...clip, muted: true } : clip,
+              ),
+              midiClips: track.midiClips.map((clip) =>
+                clip.id === clipId ? { ...clip, muted: true } : clip,
+              ),
+            }));
+            const insertIndex = Math.max(0, Math.min(sourceTrackIndex + 1, tracks.length));
+            tracks.splice(insertIndex, 0, { ...newTrack, clips: [renderedClip] });
+            return {
+              tracks,
+              selectedClipId: renderedClip.id,
+              selectedClipIds: [renderedClip.id],
+              selectedTrackId: null,
+              selectedTrackIds: [],
+              lastSelectedTrackId: null,
+              isModified: true,
+            };
+          });
+          void syncRenderInPlaceExecute(
+            get,
+            newTrackId,
+            sourceTrackIndex + 1,
+            renderedClip.filePath,
+            isMidi
+              ? () => get().syncMIDITrackToBackend?.(sourceTrack.id, { debounce: false }) ?? Promise.resolve()
+              : undefined,
+          ).catch(logBridgeError("sync"));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks
+              .filter((track) => track.id !== newTrackId)
+              .map((track) => ({
+                ...track,
+                clips: track.clips.map((clip) =>
+                  clip.id === clipId ? { ...clip, muted: oldMuted } : clip,
+                ),
+                midiClips: track.midiClips.map((clip) =>
+                  clip.id === clipId ? { ...clip, muted: oldMuted } : clip,
+                ),
+              })),
+            ...selectionBefore,
+            isModified: true,
+          }));
+          void syncRenderInPlaceUndo(
+            get,
+            newTrackId,
+            isMidi
+              ? () => get().syncMIDITrackToBackend?.(sourceTrack.id, { debounce: false }) ?? Promise.resolve()
+              : undefined,
+          ).catch(logBridgeError("sync"));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     renderTrackInPlace: async (trackId) => {
@@ -542,31 +627,21 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         bitDepth: state.projectBitDepth || 24,
         channels: 2,
         normalize: false,
-        addTail: true,
-        tailLength: 1000,
+        addTail: false,
+        tailLength: 0,
         includeMetronome: false,
       });
       if (!success) return;
 
       const mediaInfo = await nativeBridge.importMediaFile(filePath);
-      const renderedDuration = mediaInfo?.duration || (latest - earliest);
-
-      // Create new track below source
+      const renderedDuration = latest - earliest;
+      const sourceLength = mediaInfo?.duration || renderedDuration;
       const newTrackId = crypto.randomUUID();
-      get().addTrack({ id: newTrackId, name: `${track.name} (Rendered)`, type: "audio", color: track.color });
-
-      set((s) => {
-        const tracks = [...s.tracks];
-        const newIdx = tracks.findIndex((t) => t.id === newTrackId);
-        if (newIdx !== -1) {
-          const [moved] = tracks.splice(newIdx, 1);
-          tracks.splice(sourceTrackIndex + 1, 0, moved);
-        }
-        return { tracks };
-      });
-      nativeBridge.reorderTrack(newTrackId, sourceTrackIndex + 1).catch(logBridgeError("sync"));
-
-      get().addClip(newTrackId, {
+      const newTrack = {
+        ...createDefaultTrack(newTrackId, `${track.name} (Rendered)`, track.color, "audio", state.tracks),
+        clips: [],
+      };
+      const renderedClip = {
         id: crypto.randomUUID(),
         filePath,
         name: `${track.name} (Rendered)`,
@@ -578,13 +653,62 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         fadeIn: 0,
         fadeOut: 0,
         sampleRate: mediaInfo?.sampleRate,
-        sourceLength: renderedDuration,
-      });
+        sourceLength,
+      };
+      const oldMuted = !!track.muted;
+      const selectionBefore = {
+        selectedClipId: state.selectedClipId,
+        selectedClipIds: [...state.selectedClipIds],
+        selectedTrackId: state.selectedTrackId,
+        selectedTrackIds: [...state.selectedTrackIds],
+        lastSelectedTrackId: state.lastSelectedTrackId,
+      };
 
-      // Mute the original track
-      if (!track.muted) {
-        get().toggleTrackMute(trackId);
-      }
+      commandManager.execute({
+        type: "RENDER_TRACK_IN_PLACE",
+        description: `Render "${track.name}" in place`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((s) => {
+            const tracks = s.tracks.map((entry) =>
+              entry.id === trackId ? { ...entry, muted: true } : entry,
+            );
+            const insertIndex = Math.max(0, Math.min(sourceTrackIndex + 1, tracks.length));
+            tracks.splice(insertIndex, 0, { ...newTrack, clips: [renderedClip] });
+            return {
+              tracks,
+              selectedClipId: renderedClip.id,
+              selectedClipIds: [renderedClip.id],
+              selectedTrackId: null,
+              selectedTrackIds: [],
+              lastSelectedTrackId: null,
+              isModified: true,
+            };
+          });
+          void syncRenderInPlaceExecute(
+            get,
+            newTrackId,
+            sourceTrackIndex + 1,
+            renderedClip.filePath,
+            () => nativeBridge.setTrackMute(trackId, true).then(() => undefined),
+          ).catch(logBridgeError("sync"));
+        },
+        undo: () => {
+          set((s) => ({
+            tracks: s.tracks
+              .filter((entry) => entry.id !== newTrackId)
+              .map((entry) => entry.id === trackId ? { ...entry, muted: oldMuted } : entry),
+            ...selectionBefore,
+            isModified: true,
+          }));
+          void syncRenderInPlaceUndo(
+            get,
+            newTrackId,
+            () => nativeBridge.setTrackMute(trackId, oldMuted).then(() => undefined),
+          ).catch(logBridgeError("sync"));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ===== Phase 13: Advanced Editing =====
