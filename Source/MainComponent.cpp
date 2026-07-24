@@ -456,6 +456,25 @@ juce::File getWebView2UserDataFolder()
         .getChildFile("WebView2UserData");
 }
 
+// juce::WebBrowserComponent::areOptionsSupported() does not merely report a compile-time
+// capability on Windows: it actually creates a WebView2 environment with the supplied options.
+// Without an explicit user data folder, WebView2 defaults to "<exe dir>\OpenStudio.exe.WebView2",
+// which is not writable for a normal user under "C:\Program Files\OpenStudio", so environment
+// creation fails with E_ACCESSDENIED and the backend is misreported as unavailable.
+// Probe with the same options the real WebBrowserComponent uses.
+juce::WebBrowserComponent::Options makeBrowserBackendProbeOptions()
+{
+    auto options = juce::WebBrowserComponent::Options().withBackend(getPreferredBrowserBackend());
+
+#if JUCE_WINDOWS
+    options = options.withWinWebView2Options(
+        juce::WebBrowserComponent::Options::WinWebView2()
+            .withUserDataFolder(getWebView2UserDataFolder()));
+#endif
+
+    return options;
+}
+
 juce::File getStartupLogFile()
 {
     auto logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -1115,9 +1134,7 @@ juce::Array<MainComponent*> MainComponent::activeInstances;
 
 juce::var MainComponent::buildStartupSelfTestReport()
 {
-    const auto preferredBackend = getPreferredBrowserBackend();
-    const auto supported = juce::WebBrowserComponent::areOptionsSupported(
-        juce::WebBrowserComponent::Options().withBackend(preferredBackend));
+    const auto supported = juce::WebBrowserComponent::areOptionsSupported(makeBrowserBackendProbeOptions());
     const auto dependencyStatus = evaluateStartupDependencies(supported);
 
     auto* report = new juce::DynamicObject();
@@ -1178,9 +1195,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 #if JUCE_WINDOWS
                    .withWinWebView2Options (
                        juce::WebBrowserComponent::Options::WinWebView2()
-                           .withUserDataFolder (juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                                                    .getChildFile ("OpenStudio")
-                                                    .getChildFile ("WebView2UserData"))
+                           .withUserDataFolder (getWebView2UserDataFolder())
                            .withStatusBarDisabled())
 #endif
                    .withNativeIntegrationEnabled()
@@ -6281,8 +6296,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
     const auto packagedFrontend = getPackagedFrontendEntryPoint();
     const auto webViewUserDataDir = getWebView2UserDataFolder();
 
-    auto checkOptions = juce::WebBrowserComponent::Options()
-                            .withBackend(preferredBackend);
+    const auto checkOptions = makeBrowserBackendProbeOptions();
 
     const bool supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
     const auto dependencyStatus = evaluateStartupDependencies(supported);
@@ -7134,8 +7148,7 @@ void MainComponent::repairWindowsPrerequisites()
 juce::var MainComponent::buildStartupDiagnostics() const
 {
     const auto dependencyStatus = evaluateStartupDependencies(
-        juce::WebBrowserComponent::areOptionsSupported(
-            juce::WebBrowserComponent::Options().withBackend(getPreferredBrowserBackend())));
+        juce::WebBrowserComponent::areOptionsSupported(makeBrowserBackendProbeOptions()));
     auto* diagnostics = new juce::DynamicObject();
     const auto selfTestReport = buildStartupSelfTestReport();
     diagnostics->setProperty("windowRole", getWindowRoleQueryValue(windowRole));
