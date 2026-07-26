@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:5173";
+const DEFAULT_BASE_URL = "http://127.0.0.1:5183";
 const DEFAULT_CDP_URL = "http://127.0.0.1:9222";
 const DEFAULT_OUT_DIR = `qa/ai-generation/${new Date().toISOString().slice(0, 10)}`;
 const SCENARIOS = [
@@ -69,7 +69,7 @@ function printHelp() {
 
 Options:
   --scenario all|${SCENARIOS.join("|")}
-  --base http://127.0.0.1:5173
+  --base http://127.0.0.1:5183
   --cdp http://127.0.0.1:9222
   --out qa/ai-generation/YYYY-MM-DD
   --edge "C:/Path/To/msedge.exe"

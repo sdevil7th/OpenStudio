@@ -10,10 +10,17 @@ param(
     [string]$Destination = "thirdparty/onnxruntime",
 
     [Parameter(Mandatory = $false)]
+    [string]$ExpectedSha256 = "d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357",
+
+    [Parameter(Mandatory = $false)]
     [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Version -ne "1.24.4" -and -not $PSBoundParameters.ContainsKey("ExpectedSha256")) {
+    throw "Pass -ExpectedSha256 when installing an ONNX Runtime version other than 1.24.4."
+}
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $destinationPath = Join-Path $repoRoot $Destination
@@ -39,6 +46,11 @@ New-Item -ItemType Directory -Path $downloadRoot | Out-Null
 
 Write-Host "Downloading $assetName from $downloadUrl"
 Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+
+$actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
+if (-not $actualSha256.Equals($ExpectedSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "ONNX Runtime archive checksum mismatch. Expected $ExpectedSha256, received $actualSha256."
+}
 
 Write-Host "Extracting ONNX Runtime package"
 Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force

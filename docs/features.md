@@ -1,4 +1,4 @@
-# OpenStudio / Studio13-v3 Feature Inventory
+# OpenStudio Feature Inventory
 
 > **Last updated:** 2026-06-01
 >

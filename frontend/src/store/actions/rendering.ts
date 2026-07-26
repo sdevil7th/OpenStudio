@@ -408,7 +408,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         get().showToast("No MIDI clips to export.", "info");
         return false;
       }
-      const filePath = await nativeBridge.showSaveDialog("Studio13 Project.mid", "Export Project MIDI", "*.mid;*.midi");
+      const filePath = await nativeBridge.showSaveDialog("OpenStudio Project.mid", "Export Project MIDI", "*.mid;*.midi");
       if (!filePath) return false;
       const success = await nativeBridge.exportProjectMIDI(filePath, midiTracks);
       get().showToast(success ? "Project MIDI exported" : "Failed to export project MIDI", success ? "success" : "error");

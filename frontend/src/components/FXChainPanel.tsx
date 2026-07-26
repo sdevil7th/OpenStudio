@@ -27,12 +27,12 @@ import {
   Star,
   ExternalLink,
 } from "lucide-react";
-import { nativeBridge } from "../services/NativeBridge";
+import { nativeBridge, type BuiltInPluginAddress, type PluginParameterInfo } from "../services/NativeBridge";
 import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
 import { BuiltInPluginPanel } from "./BuiltInPluginPanel";
 import { MIDIFXControls } from "./MIDIFXControls";
 import { useDAWStore } from "../store/useDAWStore";
-import { pluginAutomationParamId } from "../store/automationParams";
+import { builtInAutomationParamId, pluginAutomationParamId } from "../store/automationParams";
 import { useShallow } from "zustand/react/shallow";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
 import { Button, Input, Select } from "./ui";
@@ -53,6 +53,7 @@ import {
   waitForFXChainLength,
 } from "../utils/fxChain";
 import "./FXChainPanel.css";
+import "./NAMRackPanel.css";
 
 interface FXChainPanelProps {
   trackId: string;
@@ -82,11 +83,22 @@ interface S13FXSlider {
   enumNames?: string[];
 }
 
-interface PluginParam {
-  index: number;
-  name: string;
-  value: number;
-  text: string;
+type PluginParam = PluginParameterInfo;
+
+function formatPluginParameterValue(param: PluginParam, normalizedValue: number): string {
+  if (!param.builtIn) return `${Math.round(normalizedValue * 100)}%`;
+  const minimum = Number(param.min ?? 0);
+  const maximum = Number(param.max ?? 1);
+  let rawValue = minimum + normalizedValue * (maximum - minimum);
+  if (param.discrete) rawValue = Math.round(rawValue);
+  if (param.type === "toggle") return rawValue >= 0.5 ? "On" : "Off";
+  if (param.type === "enum") {
+    return param.enumOptions?.find((option) => Math.round(option.value) === Math.round(rawValue))?.label
+      ?? String(Math.round(rawValue));
+  }
+  const span = Math.abs(maximum - minimum);
+  const decimals = span <= 2 ? 2 : span <= 50 ? 1 : 0;
+  return `${rawValue.toFixed(decimals)}${param.unit ? ` ${param.unit}` : ""}`;
 }
 
 interface Plugin {
@@ -204,9 +216,6 @@ export function FXChainPanel({
   const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<
     number | null
   >(null);
-  const [expandedBuiltInFX, setExpandedBuiltInFX] = useState<number | null>(
-    null,
-  );
   const [expandedFallbackInstrument, setExpandedFallbackInstrument] =
     useState(false);
   const [showPresetMenu, setShowPresetMenu] = useState(false);
@@ -231,19 +240,27 @@ export function FXChainPanel({
   // MIDI Learn state
   const [midiLearnActive, setMidiLearnActive] = useState<{
     fxIndex: number;
-    paramIndex: number;
+    paramKey: string;
   } | null>(null);
   const midiLearnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleStartMIDILearn = useCallback(
-    async (fxIndex: number, paramIndex: number) => {
+    async (fxIndex: number, param: PluginParam) => {
       // Cancel any existing learn session
       if (midiLearnActive) {
         await nativeBridge.cancelPluginMIDILearn();
         if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
       }
-      setMidiLearnActive({ fxIndex, paramIndex });
-      await nativeBridge.startPluginMIDILearn(trackId, fxIndex, paramIndex);
+      const paramKey = param.builtIn && param.paramId ? `builtin:${param.paramId}` : `plugin:${param.index}`;
+      setMidiLearnActive({ fxIndex, paramKey });
+      if (param.builtIn && param.paramId) {
+        await nativeBridge.startBuiltInMIDILearn(
+          { trackId, chain: chainType === "input" ? "input" : "track", fxIndex },
+          param.paramId,
+        );
+      } else {
+        await nativeBridge.startPluginMIDILearn(trackId, fxIndex, param.index, chainType === "input");
+      }
       // Auto-cancel after 10 seconds
       midiLearnTimerRef.current = setTimeout(async () => {
         await nativeBridge.cancelPluginMIDILearn();
@@ -251,7 +268,7 @@ export function FXChainPanel({
         midiLearnTimerRef.current = null;
       }, 10000);
     },
-    [midiLearnActive, trackId],
+    [chainType, midiLearnActive, trackId],
   );
 
   const handleCancelMIDILearn = useCallback(async () => {
@@ -334,9 +351,11 @@ export function FXChainPanel({
     name === "OpenStudio Piano" ||
     name === "OpenStudio Drums" ||
     name === "OpenStudio Basic Synth" ||
+    name === "OpenStudio Clean Guitar" ||
     name === "Studio13 Piano" ||
     name === "Studio13 Drums" ||
-    name === "Studio13 Basic Synth";
+    name === "Studio13 Basic Synth" ||
+    name === "Studio13 Clean Guitar";
 
   const hasBuiltInInstrumentFX =
     chainType === "track" &&
@@ -686,7 +705,7 @@ export function FXChainPanel({
         if (plugin.pluginType === "builtin" && updatedFx.length > 0) {
           const lastFx = updatedFx[updatedFx.length - 1];
           if (lastFx) {
-            setExpandedBuiltInFX(lastFx.index);
+            await handleOpenBuiltInEditor(lastFx);
             setExpandedPitchCorrector(null);
           }
         }
@@ -725,6 +744,40 @@ export function FXChainPanel({
       console.error("[FXChain] Failed to open instrument editor:", e);
     }
   };
+
+  async function handleOpenBuiltInEditor(fx: FXSlot) {
+    const title = fx.name || "OpenStudio Plugin";
+    const address: BuiltInPluginAddress = {
+      trackId,
+      chain: chainType,
+      fxIndex: fx.index,
+    };
+    const isNAMRack = title.toLowerCase().includes("nam rack");
+    const sessionId = JSON.stringify({
+      address,
+      title,
+      fallbackName: title,
+    });
+
+    try {
+      const opened = await nativeBridge.openBuiltInPluginEditorWindow(
+        sessionId,
+        {
+          x: isNAMRack ? 140 : 220,
+          y: isNAMRack ? 70 : 130,
+          width: isNAMRack ? 1320 : 980,
+          height: isNAMRack ? 860 : 720,
+        },
+      );
+      if (!opened) {
+        console.error(
+          `[FXChain] Failed to open built-in editor window for ${title}`,
+        );
+      }
+    } catch (e) {
+      console.error("[FXChain] Failed to open built-in editor window:", e);
+    }
+  }
 
   const handleRemoveInstrument = async () => {
     try {
@@ -970,11 +1023,9 @@ export function FXChainPanel({
 
   const handleAutomateParam = (fxIndex: number, param: PluginParam) => {
     if (chainType === "master") return; // Master automation not supported
-    const automationParam = pluginAutomationParamId(
-      chainType === "input",
-      fxIndex,
-      param.index,
-    );
+    const automationParam = param.builtIn && param.paramId
+      ? builtInAutomationParamId(chainType === "input", fxIndex, param.paramId)
+      : pluginAutomationParamId(chainType === "input", fxIndex, param.index);
     addAutomationLane(
       trackId,
       automationParam,
@@ -984,30 +1035,34 @@ export function FXChainPanel({
 
   const handlePluginParamChange = async (
     fxIndex: number,
-    paramIndex: number,
+    changedParam: PluginParam,
     value: number,
   ) => {
     const isInputFX = chainType === "input";
-    const automationParam = pluginAutomationParamId(
-      isInputFX,
-      fxIndex,
-      paramIndex,
-    );
+    const automationParam = changedParam.builtIn && changedParam.paramId
+      ? builtInAutomationParamId(isInputFX, fxIndex, changedParam.paramId)
+      : pluginAutomationParamId(isInputFX, fxIndex, changedParam.index);
     setAutomationWriteValue(trackId, automationParam, value);
     setPluginParams((params) =>
       params.map((param) =>
-        param.index === paramIndex
-          ? { ...param, value, text: `${Math.round(value * 100)}%` }
+        param.index === changedParam.index && param.paramId === changedParam.paramId
+          ? { ...param, value, text: formatPluginParameterValue(changedParam, value) }
           : param,
       ),
     );
-    await nativeBridge.setPluginParameter(
-      trackId,
-      fxIndex,
-      isInputFX,
-      paramIndex,
-      value,
-    );
+    if (changedParam.builtIn && changedParam.paramId) {
+      const minimum = Number(changedParam.min ?? 0);
+      const maximum = Number(changedParam.max ?? 1);
+      let rawValue = minimum + value * (maximum - minimum);
+      if (changedParam.discrete) rawValue = Math.round(rawValue);
+      await nativeBridge.setBuiltInPluginParam(
+        { trackId, chain: isInputFX ? "input" : "track", fxIndex },
+        changedParam.paramId,
+        rawValue,
+      );
+    } else {
+      await nativeBridge.setPluginParameter(trackId, fxIndex, isInputFX, changedParam.index, value);
+    }
   };
 
   // ---- Plugin Presets handlers ----
@@ -1400,20 +1455,8 @@ export function FXChainPanel({
                           onClick={() => {
                             if (isS13FX) handleToggleS13FXSliders(fx.index);
                             else if (isBuiltIn) {
-                              setExpandedBuiltInFX(
-                                expandedBuiltInFX === fx.index
-                                  ? null
-                                  : fx.index,
-                              );
-                              if (fx.name.includes("Pitch Correct")) {
-                                setExpandedPitchCorrector(
-                                  expandedPitchCorrector === fx.index
-                                    ? null
-                                    : fx.index,
-                                );
-                              } else {
-                                setExpandedPitchCorrector(null);
-                              }
+                              void handleOpenBuiltInEditor(fx);
+                              setExpandedPitchCorrector(null);
                             } else handleOpenEditor(fx.index);
                           }}
                         >
@@ -1469,7 +1512,7 @@ export function FXChainPanel({
                                 isS13FX
                                   ? "Click to show sliders"
                                   : isBuiltIn
-                                    ? "Click to edit built-in plugin"
+                                    ? "Click to open editor window"
                                     : "Click to open editor"
                               }
                             >
@@ -1505,6 +1548,21 @@ export function FXChainPanel({
                                 <RefreshCw size={12} />
                               </Button>
                             </>
+                          )}
+                          {isBuiltIn && (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleOpenBuiltInEditor(fx);
+                              }}
+                              title="Open editor window"
+                              aria-label={`Open editor window for ${fx.name}`}
+                              className="fx-remove-btn"
+                            >
+                              <ExternalLink size={12} />
+                            </Button>
                           )}
                           {/* A/B Comparison Toggle */}
                           {!isS13FX &&
@@ -1645,19 +1703,6 @@ export function FXChainPanel({
                             </div>
                           )}
 
-                        {/* React built-in editor panel */}
-                        {isBuiltIn && expandedBuiltInFX === fx.index && (
-                          <BuiltInPluginPanel
-                            address={{
-                              trackId,
-                              chain: chainType,
-                              fxIndex: fx.index,
-                            }}
-                            fallbackName={fx.name}
-                            onClose={() => setExpandedBuiltInFX(null)}
-                          />
-                        )}
-
                         {/* Plugin Parameter Automation List */}
                         {!isS13FX && expandedParamsFx === fx.index && (
                           <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
@@ -1677,7 +1722,12 @@ export function FXChainPanel({
                                 {pluginParams.map((param) => {
                                   const isLearning =
                                     midiLearnActive?.fxIndex === fx.index &&
-                                    midiLearnActive?.paramIndex === param.index;
+                                    midiLearnActive?.paramKey === (param.builtIn && param.paramId
+                                      ? `builtin:${param.paramId}`
+                                      : `plugin:${param.index}`);
+                                  const automationParamId = param.builtIn && param.paramId
+                                    ? builtInAutomationParamId(chainType === "input", fx.index, param.paramId)
+                                    : pluginAutomationParamId(chainType === "input", fx.index, param.index);
                                   return (
                                     <div
                                       key={param.index}
@@ -1706,11 +1756,7 @@ export function FXChainPanel({
                                           if (chainType !== "master") {
                                             beginAutomationParamTouch(
                                               trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
+                                              automationParamId,
                                             );
                                           }
                                         }}
@@ -1718,11 +1764,7 @@ export function FXChainPanel({
                                           if (chainType !== "master") {
                                             endAutomationParamTouch(
                                               trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
+                                              automationParamId,
                                             );
                                           }
                                         }}
@@ -1730,11 +1772,7 @@ export function FXChainPanel({
                                           if (chainType !== "master") {
                                             endAutomationParamTouch(
                                               trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
+                                              automationParamId,
                                             );
                                           }
                                         }}
@@ -1742,25 +1780,21 @@ export function FXChainPanel({
                                           if (chainType !== "master") {
                                             endAutomationParamTouch(
                                               trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
+                                              automationParamId,
                                             );
                                           }
                                         }}
                                         onChange={(event) => {
                                           void handlePluginParamChange(
                                             fx.index,
-                                            param.index,
+                                            param,
                                             Number(event.currentTarget.value),
                                           );
                                         }}
                                         title={`Set ${param.name}`}
                                       />
                                       {/* MIDI Learn button */}
-                                      {isLearning ? (
+                                      {chainType !== "master" && (isLearning ? (
                                         <button
                                           className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-300 hover:bg-amber-700/70 transition-colors shrink-0 animate-pulse"
                                           onClick={() =>
@@ -1776,7 +1810,7 @@ export function FXChainPanel({
                                           onClick={() =>
                                             handleStartMIDILearn(
                                               fx.index,
-                                              param.index,
+                                              param,
                                             )
                                           }
                                           title={`MIDI Learn: assign a CC to "${param.name}"`}
@@ -1787,7 +1821,7 @@ export function FXChainPanel({
                                           />
                                           Learn
                                         </button>
-                                      )}
+                                      ))}
                                       {chainType !== "master" && (
                                         <button
                                           className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/30 text-cyan-400 hover:bg-cyan-700/60 transition-colors opacity-60 group-hover:opacity-100 shrink-0"

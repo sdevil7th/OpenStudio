@@ -1,5 +1,18 @@
 cmake_minimum_required(VERSION 3.22)
 
+if(POLICY CMP0184)
+    cmake_policy(SET CMP0184 NEW)
+endif()
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+# YSFX enables the generic ASM language on Windows even though it has no ASM
+# sources. CMake 4.1+ otherwise rejects MSVC's driver during that declaration.
+if(POLICY CMP0194)
+    cmake_policy(SET CMP0194 OLD)
+    set(CMAKE_POLICY_DEFAULT_CMP0194 OLD)
+endif()
+
 set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled into OpenStudio")
 
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
@@ -59,13 +72,21 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(juce)
+if(MSVC)
+    # JUCE 8.0.0's VST3 wrapper has two benign C4458 warnings in vendor code.
+    set_source_files_properties(
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+        PROPERTIES COMPILE_OPTIONS "/wd4458"
+    )
+endif()
 
 # Fetch YSFX — open-source JSFX runtime (Apache 2.0)
 FetchContent_Declare(
     ysfx
     GIT_REPOSITORY https://github.com/jpcima/ysfx.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
+    GIT_TAG        8077347ccf4115567aed81400281dca57acbb0cc
+    GIT_SUBMODULES thirdparty/dr_libs
+    GIT_SUBMODULES_RECURSE FALSE
 )
 set(YSFX_PLUGIN OFF CACHE BOOL "" FORCE)
 set(YSFX_TOOLS OFF CACHE BOOL "" FORCE)
@@ -94,11 +115,16 @@ if (_ysfx_is_valid)
 else()
     FetchContent_MakeAvailable(ysfx)
 endif()
+if(MSVC AND TARGET ysfx-private)
+    # Third-party YSFX currently emits C4297 from its public noexcept C API.
+    target_compile_options(ysfx-private PRIVATE /W0)
+endif()
 
 # Fetch Lua 5.4 — scripting engine (MIT license)
 FetchContent_Declare(
     lua
     URL "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+    URL_HASH SHA256=9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
 )
 FetchContent_MakeAvailable(lua)
 
@@ -110,6 +136,67 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(clap)
+
+# NeuralAmpModelerCore v0.5.4 -- native NAM/A1/A2 DSP loader.
+# The upstream project primarily builds tools, so OpenStudio wraps the NAM source
+# files in a local static library and links that into the native rack processor.
+FetchContent_Declare(
+    neural_amp_modeler_core
+    GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
+    GIT_TAG        v0.5.4
+    GIT_SHALLOW    TRUE
+    GIT_SUBMODULES Dependencies/eigen
+)
+FetchContent_GetProperties(neural_amp_modeler_core)
+if(NOT neural_amp_modeler_core_POPULATED)
+    if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
+    FetchContent_Populate(neural_amp_modeler_core)
+    if(POLICY CMP0169)
+        cmake_policy(POP)
+    endif()
+endif()
+
+file(GLOB OPENSTUDIO_NAMCORE_SOURCES CONFIGURE_DEPENDS
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM/*.cpp"
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM/*/*.cpp"
+)
+add_library(openstudio_namcore STATIC ${OPENSTUDIO_NAMCORE_SOURCES})
+if(MSVC)
+    # This target is intentionally optimized in Debug and cannot use /RTC1.
+    set_property(TARGET openstudio_namcore PROPERTY MSVC_RUNTIME_CHECKS "")
+endif()
+target_include_directories(openstudio_namcore SYSTEM PUBLIC
+    "${neural_amp_modeler_core_SOURCE_DIR}"
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM"
+    "${neural_amp_modeler_core_SOURCE_DIR}/Dependencies/eigen"
+    "${neural_amp_modeler_core_SOURCE_DIR}/Dependencies/nlohmann"
+)
+target_compile_features(openstudio_namcore PRIVATE cxx_std_20)
+target_compile_definitions(openstudio_namcore PUBLIC
+    NAM_SAMPLE_FLOAT
+    NAM_ENABLE_A2_FAST
+    NAM_DEFAULT_MAX_BUFFER_SIZE=8192
+)
+target_compile_definitions(openstudio_namcore PRIVATE
+    $<$<CONFIG:Debug>:NDEBUG>
+)
+if(MSVC)
+    target_compile_options(openstudio_namcore PRIVATE
+        /W0
+        $<$<CONFIG:Debug>:/O2>
+        $<$<CONFIG:Debug>:/Ob2>
+        $<$<CONFIG:Debug>:/Oi>
+        $<$<CONFIG:Debug>:/Ot>
+    )
+else()
+    target_compile_options(openstudio_namcore PRIVATE
+        -w
+        $<$<CONFIG:Debug>:-O3>
+    )
+endif()
 
 
 # Build Lua as a static library (it ships as raw C sources)
@@ -169,7 +256,12 @@ juce_add_gui_app(OpenStudio
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )
-
+if(MSVC)
+    # Three audio hot-path translation units below are intentionally optimized
+    # in Debug. CMP0184 controls runtime checks at target scope, so the target
+    # must opt out to avoid MSVC's incompatible /O2 + /RTC1 combination.
+    set_property(TARGET OpenStudio PROPERTY MSVC_RUNTIME_CHECKS "")
+endif()
 # Source files
 target_sources(OpenStudio PRIVATE
     Source/Main.cpp
@@ -219,6 +311,32 @@ target_sources(OpenStudio PRIVATE
     Source/AITrackEngine.cpp
     Source/ARAHostController.cpp
 )
+
+# Keep the production audio callback hot path optimized even in the app's
+# developer build. `build.py dev --run` uses Debug, and compiling these
+# translation units with /Od makes tiny ASIO callback sizes unrepresentative:
+# the NAM core is optimized, but its resampler, track wrapper, and host callback
+# otherwise are not.
+if(MSVC)
+    set_property(SOURCE
+        Source/AudioEngine.cpp
+        Source/TrackProcessor.cpp
+        Source/BuiltInEffects2.cpp
+        APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Debug>:/O2>
+        $<$<CONFIG:Debug>:/Ob2>
+        $<$<CONFIG:Debug>:/Oi>
+        $<$<CONFIG:Debug>:/Ot>
+    )
+else()
+    set_property(SOURCE
+        Source/AudioEngine.cpp
+        Source/TrackProcessor.cpp
+        Source/BuiltInEffects2.cpp
+        APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Debug>:-O3>
+    )
+endif()
 
 # Include directories — common to all platforms
 target_include_directories(OpenStudio PRIVATE
@@ -274,6 +392,7 @@ target_link_libraries(OpenStudio PRIVATE
     juce::juce_osc
     ysfx
     lua_static
+    openstudio_namcore
 )
 
 # ONNX Runtime link (optional)
@@ -302,6 +421,7 @@ endif()
 
 set(OPENSTUDIO_UPDATE_APPCAST_URL_VALUE "${_OPENSTUDIO_DEFAULT_APPCAST_URL}" CACHE STRING "Updater appcast URL compiled into OpenStudio")
 set(OPENSTUDIO_AI_RUNTIME_MANIFEST_URL_VALUE "https://openstudio.org.in/releases/ai-runtime/stable/latest.json" CACHE STRING "AI runtime manifest URL compiled into OpenStudio")
+set(OPENSTUDIO_TONE3000_CLIENT_ID_VALUE "" CACHE STRING "TONE3000 publishable OAuth client_id compiled into OpenStudio")
 
 # Common definitions (all platforms)
 target_compile_definitions(OpenStudio PRIVATE
@@ -316,6 +436,7 @@ target_compile_definitions(OpenStudio PRIVATE
     OPENSTUDIO_RELEASES_PAGE_URL="${OPENSTUDIO_RELEASES_PAGE_URL_VALUE}"
     OPENSTUDIO_UPDATE_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}"
     OPENSTUDIO_AI_RUNTIME_MANIFEST_URL="${OPENSTUDIO_AI_RUNTIME_MANIFEST_URL_VALUE}"
+    OPENSTUDIO_TONE3000_CLIENT_ID="${OPENSTUDIO_TONE3000_CLIENT_ID_VALUE}"
     OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=$<IF:$<BOOL:${OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK}>,1,0>
 )
 
@@ -361,6 +482,7 @@ if(WIN32)
     FetchContent_Declare(
         webview2
         URL "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1901.177"
+        URL_HASH SHA256=464360d5eedcae0e95b0a3fe13c74b496bc9b542980ff8ecebd9ff7ea37ca39e
     )
     FetchContent_MakeAvailable(webview2)
 
@@ -373,6 +495,7 @@ if(WIN32)
             "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
             dbghelp
             dwmapi
+            crypt32
         )
     endif()
 endif()
@@ -643,6 +766,15 @@ if(EXISTS "${AI_STABLE_AUDIO_GENERATION_SCRIPT}")
     )
 endif()
 
+set(NAM_CATALOG_UPDATER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/update_nam_catalog.py")
+if(EXISTS "${NAM_CATALOG_UPDATER_SCRIPT}")
+    openstudio_copy_runtime_file(
+        "${NAM_CATALOG_UPDATER_SCRIPT}"
+        "scripts/update_nam_catalog.py"
+        "Copying NAM catalog updater script to output directory"
+    )
+endif()
+
 set(WINDOWS_AI_ACCELERATION_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/tools/windows-ai-acceleration-manifest.json")
 if(EXISTS "${WINDOWS_AI_ACCELERATION_MANIFEST}")
     openstudio_copy_runtime_file(
@@ -736,4 +868,4 @@ endif()
 #         # For now, placeholder.
 # )
 # Ensure binary data is linked (generated by juce_add_binary_data)
-# target_link_libraries(Studio13_v2 PRIVATE Studio13_rc_lib)
+# target_link_libraries(OpenStudio PRIVATE OpenStudio_rc_lib)

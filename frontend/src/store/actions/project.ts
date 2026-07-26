@@ -8,7 +8,7 @@ type GetFn = () => any;
  * Project management — save, load, new, settings, templates, auto-backup.
  * Extracted from useDAWStore.ts.
  */
-import { nativeBridge } from "../../services/NativeBridge";
+import { nativeBridge, type MissingMediaEntry } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
@@ -24,14 +24,25 @@ import {
 } from "../../data/aiWorkflows";
 import { normalizeMIDIClipLoopLength, serializeMIDIClipsForBackend, syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
 import { FACTORY_QUANTIZE_PRESETS } from "../../utils/snapToGrid";
+import {
+  findNAMAssetByIdentity,
+  withStableNAMAssetIdentity,
+} from "../../utils/namAssetIdentity";
+import {
+  collectNAMProjectAssetReferences,
+  summarizeNAMProjectStateIssues,
+  type NAMProjectStateIssue,
+} from "../../utils/namProjectState";
 
 const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Piano",
   "OpenStudio Drums",
   "OpenStudio Basic Synth",
+  "OpenStudio Clean Guitar",
   "Studio13 Piano",
   "Studio13 Drums",
   "Studio13 Basic Synth",
+  "Studio13 Clean Guitar",
   "OpenStudio EQ",
   "OpenStudio Compressor",
   "OpenStudio Gate",
@@ -40,6 +51,7 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Reverb",
   "OpenStudio Chorus",
   "OpenStudio Saturator",
+  "OpenStudio NAM Rack",
   "OpenStudio Pitch Correct",
   "S13 EQ",
   "S13 Compressor",
@@ -49,6 +61,7 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "S13 Reverb",
   "S13 Chorus",
   "S13 Saturator",
+  "S13 NAM Rack",
   "S13 Pitch Correct",
 ]);
 
@@ -60,9 +73,166 @@ function isBuiltInInstrumentPluginPath(pluginPath: string | undefined): boolean 
   return pluginPath === "OpenStudio Piano" ||
     pluginPath === "OpenStudio Drums" ||
     pluginPath === "OpenStudio Basic Synth" ||
+    pluginPath === "OpenStudio Clean Guitar" ||
     pluginPath === "Studio13 Piano" ||
     pluginPath === "Studio13 Drums" ||
-    pluginPath === "Studio13 Basic Synth";
+    pluginPath === "Studio13 Basic Synth" ||
+    pluginPath === "Studio13 Clean Guitar";
+}
+
+function isNAMRackPluginPath(pluginPath: string | undefined): boolean {
+  return pluginPath === "OpenStudio NAM Rack" || pluginPath === "S13 NAM Rack";
+}
+
+function pathKey(path: unknown): string {
+  return String(path || "").replace(/\\/g, "/").toLowerCase();
+}
+
+function buildNAMInstalledPathIndex(installed: any[] = []) {
+  const byPath = new Map<string, any>();
+  for (const record of installed) {
+    const key = pathKey(record?.localPath);
+    if (key) byPath.set(key, record);
+  }
+  return byPath;
+}
+
+function enrichNAMAssetTarget(target: any, metadata: any = {}) {
+  return withStableNAMAssetIdentity({
+    ...target,
+    modelId: Number(metadata.modelId ?? metadata.id ?? metadata.model_id ?? target.modelId ?? 0) || undefined,
+    toneId: Number(metadata.toneId ?? metadata.tone_id ?? target.toneId ?? 0) || undefined,
+    modelUrl: String(metadata.modelUrl ?? metadata.model_url ?? target.modelUrl ?? ""),
+    sourceUrl: String(metadata.sourceUrl ?? metadata.source_url ?? target.sourceUrl ?? ""),
+    license: String(metadata.license ?? metadata.license_name ?? target.license ?? ""),
+    creator: String(metadata.creator ?? metadata.creator_name ?? target.creator ?? ""),
+    gearType: String(metadata.gearType ?? metadata.gear_type ?? target.gearType ?? ""),
+    toneTitle: String(metadata.toneTitle ?? metadata.tone_title ?? metadata.name ?? target.toneTitle ?? ""),
+    architecture: metadata.architecture ?? metadata.architecture_version ?? target.architecture,
+    checksum: metadata.fileSha256 ?? metadata.checksum ?? metadata.sha256 ?? target.checksum,
+    assetId: metadata.assetId ?? target.assetId,
+    fileSizeBytes: Number(metadata.fileSizeBytes ?? target.fileSizeBytes ?? 0) || undefined,
+    originalFileName: String(metadata.originalFileName ?? target.originalFileName ?? ""),
+    lastSeenMetadata: metadata.lastSeenMetadata ?? target.lastSeenMetadata,
+  });
+}
+
+function savedNAMAssetKey(asset: any) {
+  return `${asset?.trackId || ""}:${asset?.chain || ""}:${Number(asset?.fxIndex ?? -1)}:${asset?.slot || ""}:${asset?.compareSlot || ""}:${pathKey(asset?.path)}`;
+}
+
+function collectNAMAssetsFromPluginState(
+  state: any,
+  baseTarget: any,
+  installedByPath: Map<string, any>,
+) {
+  return collectNAMProjectAssetReferences(state, baseTarget).map((asset) =>
+    enrichNAMAssetTarget(asset, installedByPath.get(pathKey(asset.path))),
+  );
+}
+
+function indexSavedNAMAssets(savedAssets: any[] = []) {
+  const byKey = new Map<string, any>();
+  const byPath = new Map<string, any>();
+  for (const asset of savedAssets) {
+    if (!asset?.path) continue;
+    byKey.set(savedNAMAssetKey(asset), asset);
+    byPath.set(pathKey(asset.path), asset);
+  }
+  return { byKey, byPath };
+}
+
+function addMissingNAMTarget(entries: any[], target: any) {
+  const key = pathKey(target.path);
+  if (!key) return;
+  let entry = entries.find((candidate) => candidate.kind === "nam" && pathKey(candidate.path) === key);
+  if (!entry) {
+    entry = { path: target.path, kind: "nam", clipIds: [], namTargets: [] };
+    entries.push(entry);
+  }
+  const targetKey = `${target.trackId}:${target.chain}:${target.fxIndex}:${target.slot}:${target.compareSlot || ""}`;
+  if (!entry.namTargets.some((candidate: any) => `${candidate.trackId}:${candidate.chain}:${candidate.fxIndex}:${candidate.slot}:${candidate.compareSlot || ""}` === targetKey)) {
+    entry.namTargets.push(target);
+  }
+}
+
+async function collectRestoredMissingNAMAssets(data: any) {
+  const savedAssetIndex = indexSavedNAMAssets(Array.isArray(data.namAssets) ? data.namAssets : []);
+  const libraryPayload = await nativeBridge.getNAMLibrary().catch(() => ({ installed: [] }));
+  const installedRecords = libraryPayload.installed || [];
+  const installedByPath = buildNAMInstalledPathIndex(installedRecords);
+  const targets = new Map<string, any>();
+
+  const addTarget = (target: any) => {
+    const saved = savedAssetIndex.byKey.get(savedNAMAssetKey(target)) || savedAssetIndex.byPath.get(pathKey(target.path));
+    const installed = installedByPath.get(pathKey(target.path))
+      || findNAMAssetByIdentity(installedRecords, saved || target);
+    targets.set(savedNAMAssetKey(target), enrichNAMAssetTarget(target, installed || saved || {}));
+  };
+
+  for (const trackData of data.tracks || []) {
+    for (const chainInfo of [
+      { chain: "input", paths: trackData.inputFXPaths || [] },
+      { chain: "track", paths: trackData.trackFXPaths || [] },
+    ]) {
+      for (let fxIndex = 0; fxIndex < chainInfo.paths.length; fxIndex++) {
+        const pluginPath = chainInfo.paths[fxIndex];
+        if (!isNAMRackPluginPath(pluginPath)) continue;
+        const state = await nativeBridge.getBuiltInPluginState({
+          trackId: trackData.id,
+          chain: chainInfo.chain,
+          fxIndex,
+        }).catch(() => null);
+        const assets = collectNAMAssetsFromPluginState(state, {
+          trackId: trackData.id,
+          trackName: trackData.name,
+          chain: chainInfo.chain,
+          fxIndex,
+          pluginName: pluginPath,
+        }, installedByPath);
+        for (const asset of assets) addTarget(asset);
+      }
+    }
+  }
+
+  for (let fxIndex = 0; fxIndex < (data.masterFXPaths || []).length; fxIndex++) {
+    const pluginPath = data.masterFXPaths[fxIndex];
+    if (!isNAMRackPluginPath(pluginPath)) continue;
+    const state = await nativeBridge.getBuiltInPluginState({
+      trackId: "",
+      chain: "master",
+      fxIndex,
+    }).catch(() => null);
+    const assets = collectNAMAssetsFromPluginState(state, {
+      trackId: "",
+      trackName: "Master",
+      chain: "master",
+      fxIndex,
+      pluginName: pluginPath,
+    }, installedByPath);
+    for (const asset of assets) addTarget(asset);
+  }
+
+  for (const saved of savedAssetIndex.byKey.values()) {
+    addTarget(saved);
+  }
+
+  const missing: any[] = [];
+  for (const target of targets.values()) {
+    if (!target.path) continue;
+    const exists = await nativeBridge.fileExists(target.path).catch(() => true);
+    if (!exists) {
+      const installedCandidate = findNAMAssetByIdentity(installedRecords, target);
+      const candidatePath = String(installedCandidate?.localPath || "");
+      const candidateExists = candidatePath && pathKey(candidatePath) !== pathKey(target.path)
+        ? await nativeBridge.fileExists(candidatePath).catch(() => false)
+        : false;
+      addMissingNAMTarget(missing, candidateExists
+        ? { ...target, relinkCandidatePath: candidatePath }
+        : target);
+    }
+  }
+  return missing;
 }
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
@@ -265,9 +435,11 @@ function buildSerializedProjectData(
   serializedTracks: any[],
   masterFXPaths: string[],
   masterFXStates: string[],
+  namAssets: any[] = [],
+  midiLearnMappings: any[] = [],
 ) {
   return {
-    version: "1.1.0",
+    version: "1.2.0",
     savedAt: Date.now(),
     projectName: state.projectName,
     projectNotes: state.projectNotes,
@@ -315,6 +487,8 @@ function buildSerializedProjectData(
     tracks: serializedTracks,
     masterFXPaths,
     masterFXStates,
+    namAssets,
+    midiLearnMappings,
     mixerSnapshots: state.mixerSnapshots,
     trackGroups: state.trackGroups,
     clipLauncher: state.clipLauncher,
@@ -333,8 +507,47 @@ function buildSerializedProjectData(
 
 async function teardownCurrentProject(get: GetFn, set: SetFn) {
   const freshProjectState = createFreshProjectDocumentState();
+  const removalIssues: NAMProjectStateIssue[] = [];
   await get().stop();
   await nativeBridge.closeAllPluginWindows().catch(() => false);
+
+  const currentMasterFX = await nativeBridge.getMasterFX().catch((error) => {
+    removalIssues.push({
+      phase: "remove",
+      location: "Master FX",
+      detail: `could not inspect the current chain (${String(error)})`,
+    });
+    return null;
+  });
+  if (currentMasterFX) {
+    for (let index = currentMasterFX.length - 1; index >= 0; index--) {
+      const plugin = currentMasterFX[index];
+      const removed = await nativeBridge.removeMasterFX(plugin.index).catch(() => false);
+      if (!removed) {
+        removalIssues.push({
+          phase: "remove",
+          location: `Master FX ${plugin.name || plugin.pluginPath || plugin.index}`,
+          detail: "native removal failed",
+        });
+      }
+    }
+
+    const remainingMasterFX = await nativeBridge.getMasterFX().catch(() => currentMasterFX);
+    for (const plugin of remainingMasterFX) {
+      const location = `Master FX ${plugin.name || plugin.pluginPath || plugin.index}`;
+      if (!removalIssues.some((issue) => issue.location === location)) {
+        removalIssues.push({
+          phase: "remove",
+          location,
+          detail: "remained in the native chain after project reset",
+        });
+      }
+    }
+  }
+
+  if (removalIssues.length > 0) {
+    return removalIssues;
+  }
 
   if (typeof get().closePitchEditor === "function")
     get().closePitchEditor();
@@ -375,11 +588,13 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
   await nativeBridge.setMasterVolume(freshProjectState.masterVolume).catch(logBridgeError("sync"));
   await nativeBridge.setMasterPan(freshProjectState.masterPan).catch(logBridgeError("sync"));
   await nativeBridge.setMasterMono(Boolean(freshProjectState.masterMono)).catch(logBridgeError("sync"));
+  await nativeBridge.setMIDILearnMappings([]).catch(logBridgeError("sync"));
   syncTempoMarkersToBackend([]);
   for (const lane of freshProjectState.masterAutomationLanes) {
     syncAutomationLaneToBackend("master", lane);
   }
   commandManager.clear();
+  return removalIssues;
 }
 
 async function performPendingProjectAction(action: any, get: GetFn) {
@@ -388,8 +603,7 @@ async function performPendingProjectAction(action: any, get: GetFn) {
   switch (action.type) {
     case "newProject":
     case "closeProject":
-      await get().newProject();
-      return true;
+      return Boolean(await get().newProject());
     case "openProject":
       return await get().loadProject(action.path, action.options);
     case "quit":
@@ -452,7 +666,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
     },
 
     newProject: async () => {
-      await teardownCurrentProject(get, set);
+      const removalIssues = await teardownCurrentProject(get, set);
+      if (removalIssues.length > 0) {
+        const detail = removalIssues
+          .slice(0, 3)
+          .map((issue) => `${issue.location}: ${issue.detail}`)
+          .join("; ");
+        console.error("[newProject] Native project teardown failed", removalIssues);
+        get().showToast(`Could not reset project. ${detail}`, "error");
+        return false;
+      }
+      return true;
     },
 
     requestNewProject: async () => {
@@ -567,11 +791,14 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       try {
       const state = get();
       console.log(`[DEBUG SAVE] Starting save. ${state.tracks.length} tracks.`);
+      const namLibraryPayload = await nativeBridge.getNAMLibrary().catch(() => ({ installed: [] }));
+      const namInstalledByPath = buildNAMInstalledPathIndex(namLibraryPayload.installed || []);
 
       // 1. Serialize Tracks with Plugin States
-      const serializedTracks = await Promise.all(
+      const serializedTrackResults = await Promise.all(
         state.tracks.map(async (track) => {
           const inputFXStates: string[] = [];
+          const trackNAMAssets: any[] = [];
 
           const inputFXList = await nativeBridge.getTrackInputFX(track.id);
           console.log(`[DEBUG SAVE] Track "${track.name}" (${track.id}): getTrackInputFX returned`, JSON.stringify(inputFXList));
@@ -582,7 +809,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             if (item.pluginPath) inputFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, true);
             console.log(`[DEBUG SAVE]   inputFX[${i}] state length: ${fxState ? fxState.length : 0}`);
-            if (fxState) inputFXStates.push(fxState);
+            inputFXStates.push(fxState || "");
+            if (isNAMRackPluginPath(item.pluginPath)) {
+              const builtInState = await nativeBridge.getBuiltInPluginState({ trackId: track.id, chain: "input", fxIndex: i }).catch(() => null);
+              trackNAMAssets.push(...collectNAMAssetsFromPluginState(builtInState, {
+                trackId: track.id,
+                trackName: track.name,
+                chain: "input",
+                fxIndex: i,
+                pluginName: item.pluginPath,
+              }, namInstalledByPath));
+            }
           }
 
           const trackFXStates: string[] = [];
@@ -595,7 +832,17 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             if (item.pluginPath) trackFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, false);
             console.log(`[DEBUG SAVE]   trackFX[${i}] state length: ${fxState ? fxState.length : 0}`);
-            if (fxState) trackFXStates.push(fxState);
+            trackFXStates.push(fxState || "");
+            if (isNAMRackPluginPath(item.pluginPath)) {
+              const builtInState = await nativeBridge.getBuiltInPluginState({ trackId: track.id, chain: "track", fxIndex: i }).catch(() => null);
+              trackNAMAssets.push(...collectNAMAssetsFromPluginState(builtInState, {
+                trackId: track.id,
+                trackName: track.name,
+                chain: "track",
+                fxIndex: i,
+                pluginName: item.pluginPath,
+              }, namInstalledByPath));
+            }
           }
 
           console.log(`[DEBUG SAVE] Track "${track.name}" RESULT: ${inputFXPaths.length} input FX paths, ${trackFXPaths.length} track FX paths`);
@@ -605,7 +852,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             : "";
           const trackAutomationReadEnabled = deriveAutomationReadEnabled(track, track.automationLanes || []);
 
-          return {
+          const serializedTrack = {
             id: track.id,
             name: track.name,
             color: track.color,
@@ -650,8 +897,12 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             automationEnabled: trackAutomationReadEnabled,
             suspendedAutomationState: null,
           };
+
+          return { track: serializedTrack, namAssets: trackNAMAssets };
         }),
       );
+      const serializedTracks = serializedTrackResults.map((result) => result.track);
+      const rawNAMAssets = serializedTrackResults.flatMap((result) => result.namAssets);
 
       // 2. Master Bus FX serialization
       const masterFXPaths: string[] = [];
@@ -659,20 +910,55 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       try {
         const masterFXList = await nativeBridge.getMasterFX();
         for (let i = 0; i < masterFXList.length; i++) {
-          const path = masterFXList[i].pluginPath;
-          if (path) masterFXPaths.push(path);
+          const path = masterFXList[i].pluginPath || masterFXList[i].name;
+          masterFXPaths.push(path || "");
           const fxState = await nativeBridge.getMasterPluginState(i);
-          if (fxState) masterFXStates.push(fxState);
+          masterFXStates.push(fxState || "");
+          if (isNAMRackPluginPath(path)) {
+            const builtInState = await nativeBridge.getBuiltInPluginState({
+              trackId: "",
+              chain: "master",
+              fxIndex: i,
+            }).catch(() => null);
+            rawNAMAssets.push(...collectNAMAssetsFromPluginState(builtInState, {
+              trackId: "",
+              trackName: "Master",
+              chain: "master",
+              fxIndex: i,
+              pluginName: path,
+            }, namInstalledByPath));
+          }
         }
       } catch (e) {
         console.warn("[saveProject] Failed to serialize master FX:", e);
       }
+
+      const inspectionByPath = new Map<string, Promise<any>>();
+      const namAssets = await Promise.all(rawNAMAssets.map(async (asset) => {
+        const identified = withStableNAMAssetIdentity(asset);
+        const key = pathKey(asset.path);
+        if (!inspectionByPath.has(key)) {
+          inspectionByPath.set(key, nativeBridge.inspectNAMAsset(asset.path).catch(() => null));
+        }
+        const inspection = await inspectionByPath.get(key);
+        if (!inspection?.success) return identified;
+        return withStableNAMAssetIdentity({
+          ...identified,
+          checksum: inspection.checksum,
+          assetId: inspection.assetId,
+          fileSizeBytes: inspection.fileSizeBytes,
+          originalFileName: inspection.fileName,
+        });
+      }));
+      const midiLearnMappings = await nativeBridge.getMIDILearnMappings().catch(() => []);
 
       const projectData = buildSerializedProjectData(
         state,
         serializedTracks,
         masterFXPaths,
         masterFXStates,
+        namAssets,
+        midiLearnMappings,
       );
 
       const success = await nativeBridge.saveProjectToFile(
@@ -762,6 +1048,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
       try {
         const data = JSON.parse(json);
+        const namProjectStateIssues: NAMProjectStateIssue[] = [];
+        const recordNAMProjectStateIssue = (
+          phase: NAMProjectStateIssue["phase"],
+          location: string,
+          detail: string,
+        ) => {
+          namProjectStateIssues.push({ phase, location, detail });
+          console.error(`[loadProject] NAM ${phase} failure at ${location}: ${detail}`);
+        };
         console.log(`[DEBUG LOAD] Parsed project. ${data.tracks?.length || 0} tracks.`);
         for (const t of data.tracks || []) {
           console.log(`[DEBUG LOAD] Saved track "${t.name}": inputFXPaths=${JSON.stringify(t.inputFXPaths || [])}, trackFXPaths=${JSON.stringify(t.trackFXPaths || [])}, inputFXStates=${(t.inputFXStates || []).length} states, trackFXStates=${(t.trackFXStates || []).length} states`);
@@ -773,7 +1068,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         set({ projectLoadingMessage: "Resetting current project..." });
         await new Promise((r) => setTimeout(r, 0));
 
-        await get().newProject();
+        const resetSucceeded = await get().newProject();
+        if (!resetSucceeded) {
+          set({ isProjectLoading: false, projectLoadingMessage: "" });
+          return false;
+        }
         const freshProjectState = createFreshProjectDocumentState();
         const loadedTempo = data.tempo || 120;
         const loadedTimeSignature = data.timeSignature || freshProjectState.timeSignature;
@@ -988,16 +1287,45 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               for (let i = 0; i < trackData.inputFXPaths.length; i++) {
                 console.log(`[DEBUG LOAD]   Restoring input FX[${i}]: "${trackData.inputFXPaths[i]}"`);
                 const fxPath = trackData.inputFXPaths[i];
-                const success = isBuiltInPluginPath(fxPath)
-                  ? await nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, true)
-                  : await nativeBridge.addTrackInputFX(trackData.id, fxPath, false);
+                const isNAMRack = isNAMRackPluginPath(fxPath);
+                const restoredFxIndex = inputFxRestored;
+                const success = await (
+                  isBuiltInPluginPath(fxPath)
+                    ? nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, true)
+                    : nativeBridge.addTrackInputFX(trackData.id, fxPath, false)
+                ).catch((error) => {
+                  if (isNAMRack) {
+                    recordNAMProjectStateIssue(
+                      "add",
+                      `${trackData.name} / Input FX ${i + 1}`,
+                      `${fxPath} threw while being added (${String(error)})`,
+                    );
+                  }
+                  return false;
+                });
                 console.log(`[DEBUG LOAD]   addInputFX result: ${success}`);
                 if (success) {
                   if (trackData.inputFXStates && trackData.inputFXStates[i]) {
-                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, true, trackData.inputFXStates[i]);
+                    const stateResult = await nativeBridge
+                      .setPluginState(trackData.id, restoredFxIndex, true, trackData.inputFXStates[i])
+                      .catch(() => false);
                     console.log(`[DEBUG LOAD]   setPluginState(input) result: ${stateResult}`);
+                    if (isNAMRack && !stateResult) {
+                      recordNAMProjectStateIssue(
+                        "restore",
+                        `${trackData.name} / Input FX ${i + 1}`,
+                        `${fxPath} was added, but its saved NAM state was rejected`,
+                      );
+                    }
                   }
                   inputFxRestored++;
+                } else if (isNAMRack && !namProjectStateIssues.some((issue) =>
+                  issue.phase === "add" && issue.location === `${trackData.name} / Input FX ${i + 1}`)) {
+                  recordNAMProjectStateIssue(
+                    "add",
+                    `${trackData.name} / Input FX ${i + 1}`,
+                    `${fxPath} could not be added`,
+                  );
                 }
               }
             }
@@ -1010,17 +1338,46 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               for (let i = 0; i < trackData.trackFXPaths.length; i++) {
                 console.log(`[DEBUG LOAD]   Restoring track FX[${i}]: "${trackData.trackFXPaths[i]}"`);
                 const fxPath = trackData.trackFXPaths[i];
+                const isNAMRack = isNAMRackPluginPath(fxPath);
+                const restoredFxIndex = trackFxRestored;
                 restoredBuiltInInstrumentFX = restoredBuiltInInstrumentFX || isBuiltInInstrumentPluginPath(fxPath);
-                const success = isBuiltInPluginPath(fxPath)
-                  ? await nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, false)
-                  : await nativeBridge.addTrackFX(trackData.id, fxPath, false);
+                const success = await (
+                  isBuiltInPluginPath(fxPath)
+                    ? nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, false)
+                    : nativeBridge.addTrackFX(trackData.id, fxPath, false)
+                ).catch((error) => {
+                  if (isNAMRack) {
+                    recordNAMProjectStateIssue(
+                      "add",
+                      `${trackData.name} / Track FX ${i + 1}`,
+                      `${fxPath} threw while being added (${String(error)})`,
+                    );
+                  }
+                  return false;
+                });
                 console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
                 if (success) {
                   if (trackData.trackFXStates && trackData.trackFXStates[i]) {
-                    const stateResult = await nativeBridge.setPluginState(trackData.id, i, false, trackData.trackFXStates[i]);
+                    const stateResult = await nativeBridge
+                      .setPluginState(trackData.id, restoredFxIndex, false, trackData.trackFXStates[i])
+                      .catch(() => false);
                     console.log(`[DEBUG LOAD]   setPluginState(track) result: ${stateResult}`);
+                    if (isNAMRack && !stateResult) {
+                      recordNAMProjectStateIssue(
+                        "restore",
+                        `${trackData.name} / Track FX ${i + 1}`,
+                        `${fxPath} was added, but its saved NAM state was rejected`,
+                      );
+                    }
                   }
                   trackFxRestored++;
+                } else if (isNAMRack && !namProjectStateIssues.some((issue) =>
+                  issue.phase === "add" && issue.location === `${trackData.name} / Track FX ${i + 1}`)) {
+                  recordNAMProjectStateIssue(
+                    "add",
+                    `${trackData.name} / Track FX ${i + 1}`,
+                    `${fxPath} could not be added`,
+                  );
                 }
               }
             }
@@ -1241,14 +1598,43 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           await new Promise((r) => setTimeout(r, 0));
           for (let i = 0; i < data.masterFXPaths.length; i++) {
             const masterFxPath = data.masterFXPaths[i];
-            const success = isBuiltInPluginPath(masterFxPath)
-              ? await nativeBridge.addMasterBuiltInFX(masterFxPath)
-              : await nativeBridge.addMasterFX(masterFxPath);
+            const isNAMRack = isNAMRackPluginPath(masterFxPath);
+            const restoredFxIndex = restoredMasterFxCount;
+            const success = await (
+              isBuiltInPluginPath(masterFxPath)
+                ? nativeBridge.addMasterBuiltInFX(masterFxPath)
+                : nativeBridge.addMasterFX(masterFxPath)
+            ).catch((error) => {
+              if (isNAMRack) {
+                recordNAMProjectStateIssue(
+                  "add",
+                  `Master / FX ${i + 1}`,
+                  `${masterFxPath} threw while being added (${String(error)})`,
+                );
+              }
+              return false;
+            });
             if (success && data.masterFXStates && data.masterFXStates[i]) {
-              await nativeBridge.setMasterPluginState(i, data.masterFXStates[i]);
+              const stateResult = await nativeBridge
+                .setMasterPluginState(restoredFxIndex, data.masterFXStates[i])
+                .catch(() => false);
+              if (isNAMRack && !stateResult) {
+                recordNAMProjectStateIssue(
+                  "restore",
+                  `Master / FX ${i + 1}`,
+                  `${masterFxPath} was added, but its saved NAM state was rejected`,
+                );
+              }
             }
             if (success) {
               restoredMasterFxCount++;
+            } else if (isNAMRack && !namProjectStateIssues.some((issue) =>
+              issue.phase === "add" && issue.location === `Master / FX ${i + 1}`)) {
+              recordNAMProjectStateIssue(
+                "add",
+                `Master / FX ${i + 1}`,
+                `${masterFxPath} could not be added`,
+              );
             }
           }
         }
@@ -1277,9 +1663,13 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         });
         persistRecentProjects(get().recentProjects);
 
+        await nativeBridge.setMIDILearnMappings(
+          Array.isArray(data.midiLearnMappings) ? data.midiLearnMappings : [],
+        ).catch(logBridgeError("sync"));
+
         set({ projectLoadingMessage: "Checking media files..." });
         await new Promise((r) => setTimeout(r, 0));
-        const missingFiles: Array<{ path: string; clipIds: string[] }> = [];
+        const missingFiles: MissingMediaEntry[] = [];
         const checkedPaths = new Map<string, boolean>();
         for (const track of get().tracks) {
           for (const clip of track.clips) {
@@ -1289,21 +1679,32 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               checkedPaths.set(clip.filePath, exists);
             }
             if (!checkedPaths.get(clip.filePath)) {
-              const existing = missingFiles.find((entry) => entry.path === clip.filePath);
+              const existing = missingFiles.find((entry) => entry.kind === "media" && entry.path === clip.filePath);
               if (existing) {
                 existing.clipIds.push(clip.id);
               } else {
-                missingFiles.push({ path: clip.filePath, clipIds: [clip.id] });
+                missingFiles.push({ path: clip.filePath, kind: "media", clipIds: [clip.id] });
               }
             }
           }
         }
+        const missingNAMAssets = await collectRestoredMissingNAMAssets(data);
+        missingFiles.push(...missingNAMAssets);
         if (missingFiles.length > 0) {
           set({ showMissingMedia: true, missingMediaFiles: missingFiles });
         }
 
         set({ isProjectLoading: false, projectLoadingMessage: "" });
-        get().showToast(`Loaded project "${data.projectName || "Untitled Project"}"`, "success");
+        if (namProjectStateIssues.length > 0) {
+          get().showToast(summarizeNAMProjectStateIssues(namProjectStateIssues), "error");
+        } else if (missingNAMAssets.length > 0) {
+          get().showToast(
+            `Project loaded with ${missingNAMAssets.length} missing NAM resource file${missingNAMAssets.length === 1 ? "" : "s"}. Relink or reinstall them in Missing Media.`,
+            "error",
+          );
+        } else {
+          get().showToast(`Loaded project "${data.projectName || "Untitled Project"}"`, "success");
+        }
         return true;
       } catch (e) {
         console.error("[loadProject]", e);
@@ -1366,7 +1767,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         timestamp: Date.now(),
         execute: async () => {
           // Clear current project
-          await get().newProject();
+          if (!(await get().newProject())) {
+            return;
+          }
 
           // Restore global settings from template
           get().setTempo(template.tempo);

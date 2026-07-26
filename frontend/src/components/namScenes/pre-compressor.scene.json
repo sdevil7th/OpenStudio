@@ -1,0 +1,18 @@
+{
+  "id": "pre-compressor-design-a",
+  "skinId": "pre-compressor-design-a",
+  "artboard": { "width": 720, "height": 1040 },
+  "device": { "kind": "pedal", "title": "Gate Drive", "subtitle": "OpenStudio Pre Gate", "color": "#536b8a", "accent": "#70c8ff" },
+  "composition": { "targetDeviceCount": 5, "layout": "pre-fx-stompbox-row", "requiredModules": ["Gate Drive", "Booster", "Tone Shaper", "Compressor", "Overdrive"] },
+  "controls": [
+    { "id": "comp-meter", "kind": "meter", "x": 360, "y": 126, "width": 370, "height": 44, "label": "Compression", "labelPlacement": "hidden", "zIndex": 3 },
+    { "id": "comp-detail", "paramId": "compressorDetail", "kind": "knob", "x": 166, "y": 198, "width": 150, "height": 150, "diameter": 132, "label": "Detail", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "comp-mix", "paramId": "compressorMix", "kind": "knob", "x": 552, "y": 198, "width": 150, "height": 150, "diameter": 132, "label": "Mix", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "comp-volume", "paramId": "compressorVolumeDb", "kind": "knob", "x": 166, "y": 404, "width": 150, "height": 150, "diameter": 132, "label": "Volume", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "comp-comp", "paramId": "compressorComp", "kind": "knob", "x": 552, "y": 404, "width": 150, "height": 150, "diameter": 132, "label": "Comp", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "comp-display", "kind": "display", "x": 360, "y": 610, "width": 410, "height": 82, "label": "Gate drive", "zIndex": 4 },
+    { "id": "comp-led", "kind": "led", "x": 360, "y": 770, "width": 60, "height": 60, "diameter": 48, "zIndex": 7 },
+    { "id": "comp-engage", "paramId": "compressorEnabled", "kind": "footswitch", "x": 360, "y": 875, "width": 140, "height": 140, "diameter": 112, "label": "Engage", "labelPlacement": "above", "zIndex": 9 }
+  ],
+  "hitboxes": []
+}

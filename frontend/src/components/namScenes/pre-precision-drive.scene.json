@@ -1,0 +1,18 @@
+{
+  "id": "pre-precision-drive-design-a",
+  "skinId": "pre-precision-drive-design-a",
+  "artboard": { "width": 720, "height": 1040 },
+  "device": { "kind": "pedal", "title": "Precision Drive", "subtitle": "Tight Overdrive", "color": "#8a4d4a", "accent": "#55d9ff" },
+  "composition": { "targetDeviceCount": 5, "layout": "pre-fx-stompbox-row", "requiredModules": ["Gate Drive", "Booster", "Tone Shaper", "Compressor", "Overdrive"] },
+  "controls": [
+    { "id": "drive-volume", "paramId": "precisionDriveVolumeDb", "kind": "knob", "x": 170, "y": 190, "width": 154, "height": 154, "diameter": 136, "label": "Vol", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "drive-bright", "paramId": "precisionDriveBright", "kind": "knob", "x": 550, "y": 190, "width": 154, "height": 154, "diameter": 136, "label": "Bright", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "drive-attack", "paramId": "precisionDriveAttack", "kind": "knob", "x": 155, "y": 405, "width": 142, "height": 142, "diameter": 124, "label": "Attack", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "drive-gate", "paramId": "precisionDriveGate", "kind": "knob", "x": 360, "y": 390, "width": 106, "height": 106, "diameter": 92, "label": "Gate", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "drive-drive", "paramId": "precisionDriveDrive", "kind": "knob", "x": 565, "y": 405, "width": 142, "height": 142, "diameter": 124, "label": "Drive", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "drive-display", "kind": "display", "x": 360, "y": 610, "width": 390, "height": 74, "label": "Precision", "zIndex": 5 },
+    { "id": "drive-led", "kind": "led", "x": 360, "y": 765, "width": 58, "height": 58, "diameter": 46, "zIndex": 7 },
+    { "id": "drive-engage", "paramId": "precisionDriveEnabled", "kind": "footswitch", "x": 360, "y": 875, "width": 140, "height": 140, "diameter": 112, "label": "Engage", "labelPlacement": "above", "zIndex": 9 }
+  ],
+  "hitboxes": []
+}

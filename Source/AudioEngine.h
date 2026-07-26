@@ -80,7 +80,14 @@ public:
 
     // Device Management
     juce::var getAudioDeviceSetup();
-    void setAudioDeviceSetup(const juce::String& type, const juce::String& input, const juce::String& output, double sampleRate, int bufferSize);
+    juce::var openAudioDeviceControlPanel();
+    void setAudioDeviceSetup(
+        const juce::String& type,
+        const juce::String& input,
+        const juce::String& output,
+        double sampleRate,
+        int bufferSize,
+        std::function<void(bool, const juce::String&)> completion = {});
     
     // Track control (Phase 1) - ID-based
     void setTrackRecordArm(const juce::String& trackId, bool armed);
@@ -179,10 +186,19 @@ public:
     
     // Built-in FX Preset System
     juce::var getBuiltInFXPresets(const juce::String& pluginName);
-    bool saveBuiltInFXPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
+    bool saveBuiltInFXPreset(const juce::String& trackId, const juce::String& chainType, int fxIndex,
                              const juce::String& presetName, bool isFactory = false);
-    bool loadBuiltInFXPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
-                             const juce::String& presetName);
+    bool loadBuiltInFXPreset(const juce::String& trackId, const juce::String& chainType, int fxIndex,
+                             const juce::String& presetName,
+                             const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
+    juce::String getBuiltInFXPresetData(const juce::String& pluginName,
+                                        const juce::String& presetName);
+    bool saveBuiltInFXPresetData(const juce::String& pluginName,
+                                 const juce::String& presetName,
+                                 const juce::String& base64Data);
+    bool copyBuiltInFXPreset(const juce::String& pluginName,
+                             const juce::String& sourcePresetName,
+                             const juce::String& targetPresetName);
     bool deleteBuiltInFXPreset(const juce::String& pluginName, const juce::String& presetName);
 
     // Plugin Editor Windows (Phase 3) - ID-based
@@ -221,6 +237,11 @@ public:
     bool setMonitoringFXPrecisionOverride(int fxIndex, const juce::String& mode);
     juce::var runReleaseGuardrails();
     juce::var runAutomatedRegressionSuite();
+    juce::var runCleanGuitarPitchBendRegression();
+    juce::var runNAMRackRegression();
+    juce::var runNAMRackDIRegression(const juce::File& inputFile,
+                                     const juce::File& outputDirectory,
+                                     const juce::File& modelFile = juce::File());
     
     // Get loaded plugins info - ID-based
     juce::var getTrackInputFX(const juce::String& trackId);
@@ -228,13 +249,17 @@ public:
     juce::var getPluginParameters(const juce::String& trackId, int fxIndex, bool isInputFX);
     bool setPluginParameter(const juce::String& trackId, int fxIndex, bool isInputFX, int paramIndex, float value);
     juce::var getBuiltInPluginSchema(const juce::String& trackId, const juce::String& chainType, int fxIndex);
+    juce::var getNAMRackDiagnostics(const juce::String& trackId,
+                                    const juce::String& chainType,
+                                    int fxIndex);
     juce::var getBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex);
     bool setBuiltInPluginParam(const juce::String& trackId, const juce::String& chainType, int fxIndex,
                                const juce::String& paramId, float value);
     bool setBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex,
-                               const juce::String& stateJSON);
-    void removeTrackInputFX(const juce::String& trackId, int fxIndex);
-    void removeTrackFX(const juce::String& trackId, int fxIndex);
+                               const juce::String& stateJSON,
+                               const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
+    bool removeTrackInputFX(const juce::String& trackId, int fxIndex);
+    bool removeTrackFX(const juce::String& trackId, int fxIndex);
     void bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed);
     void bypassTrackFX(const juce::String& trackId, int fxIndex, bool bypassed);
     bool reorderTrackInputFX(const juce::String& trackId, int fromIndex, int toIndex);
@@ -243,7 +268,7 @@ public:
     // Master \u0026 Monitoring (Phase 4)
     bool addMasterFX(const juce::String& pluginPath);
     juce::var getMasterFX();
-    void removeMasterFX(int fxIndex);
+    bool removeMasterFX(int fxIndex);
     void openMasterFXEditor(int fxIndex);
     void bypassMasterFX(int fxIndex, bool bypassed);
     bool addMonitoringFX(const juce::String& pluginPath);
@@ -268,9 +293,18 @@ public:
     
     // Plugin State Serialization (F2 - Project Save/Load)
     juce::String getPluginState(const juce::String& trackId, int fxIndex, bool isInputFX);
-    bool setPluginState(const juce::String& trackId, int fxIndex, bool isInputFX, const juce::String& base64State);
+    bool setPluginState(
+        const juce::String& trackId,
+        int fxIndex,
+        bool isInputFX,
+        const juce::String& base64State,
+        const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
     juce::String getMasterPluginState(int fxIndex);
-    bool setMasterPluginState(int fxIndex, const juce::String& base64State);
+    bool isMasterNAMRackPlugin(int fxIndex);
+    bool setMasterPluginState(
+        int fxIndex,
+        const juce::String& base64State,
+        const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
     
     // Waveform Visualization
     juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels);
@@ -421,15 +455,20 @@ public:
     // MIDI Learn (Phase 19.7)
     struct MIDILearnMapping
     {
-        int ccNumber;
+        int ccNumber = -1;
         juce::String trackId;
-        int pluginIndex;
-        int paramIndex;
+        juce::String chainType { "track" };
+        int pluginIndex = -1;
+        int paramIndex = -1;
+        juce::String builtInParamId;
     };
-    void startMIDILearnForPlugin(const juce::String& trackId, int pluginIndex, int paramIndex);
+    void startMIDILearnForPlugin(const juce::String& trackId, int pluginIndex, int paramIndex, bool isInputFX = false);
+    void startMIDILearnForBuiltIn(const juce::String& trackId, const juce::String& chainType,
+                                  int fxIndex, const juce::String& paramId);
     void stopMIDILearnMode();
     void clearMIDILearnMapping(int ccNumber);
     juce::var getMIDILearnMappings();
+    bool setMIDILearnMappings(const juce::var& mappings);
 
     // MIDI Import/Export (Phase 19.9)
     juce::var importMIDIFile(const juce::String& filePath);
@@ -438,9 +477,11 @@ public:
                         const juce::String& eventsJSON, const juce::String& outputPath, double clipTempo);
 
     // Plugin Presets (Phase 19.14)
+    bool isNAMRackPlugin(const juce::String& trackId, int fxIndex, bool isInputFX);
     juce::var getPluginPresets(const juce::String& trackId, int fxIndex, bool isInputFX);
     bool loadPluginPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
-                          const juce::String& presetPath);
+                          const juce::String& presetPath,
+                          const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
     bool savePluginPreset(const juce::String& trackId, int fxIndex, bool isInputFX,
                           const juce::String& presetPath, const juce::String& presetName);
 
@@ -448,7 +489,8 @@ public:
     bool storePluginABState(const juce::String& trackId, int fxIndex, bool isInputFX,
                             const juce::String& slot);
     bool loadPluginABState(const juce::String& trackId, int fxIndex, bool isInputFX,
-                           const juce::String& slot);
+                           const juce::String& slot,
+                           const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
     juce::String getPluginActiveSlot(const juce::String& trackId, int fxIndex, bool isInputFX);
 
     // Session Archive (Phase 20.5)
@@ -652,8 +694,21 @@ private:
     void loadDeviceSettingsWithChannelCounts(int inputChannels, int outputChannels);
     bool isMicrophonePermissionGrantedForInput() const;
     void requestMicrophonePermissionIfNeeded(std::function<void(bool)> completion);
-    void applyAudioDeviceSetup(const juce::String& type, const juce::String& input, const juce::String& output, double sampleRate, int bufferSize);
+    bool applyAudioDeviceSetup(
+        const juce::String& type,
+        const juce::String& input,
+        const juce::String& output,
+        double sampleRate,
+        int bufferSize,
+        juce::String& errorMessage);
     juce::File getDeviceSettingsFile() const;
+    void resetTunerState() noexcept;
+    void feedTunerFromInput(const float* const* inputChannelData,
+                            int numInputChannels,
+                            int startChannel,
+                            int channelCount,
+                            int numSamples,
+                            uint64 callbackCounter) noexcept;
 
     // MIDI message routing (Phase 2)
     void handleMIDIMessage(const juce::String& deviceName, int channel, const juce::MidiMessage& message);
@@ -679,6 +734,7 @@ private:
     std::atomic<bool> isPlaying { false };
     std::atomic<bool> isRecordMode { false };
     std::atomic<bool> isRendering { false };  // Blocks audio callback during offline render
+    juce::CriticalSection offlineRenderTransactionLock;
     bool isLooping = false;
     double currentSamplePosition = 0.0;
     double currentSampleRate = 44100.0;
@@ -690,10 +746,33 @@ private:
     std::atomic<double> maxAudioCallbackProcessMs { 0.0 };
     std::atomic<uint64> audioCallbackCounter { 0 };
     std::atomic<uint64> audioCallbackDeadlineMissCount { 0 };
+    std::atomic<uint64> lastAudioCallbackDeadlineMissCounter { 0 };
+    std::atomic<uint64> audioCallbackDeadlineMissBurstCount { 0 };
+    std::atomic<double> lastAudioCallbackDeadlineMissProcessMs { 0.0 };
+    std::atomic<bool> lastAudioCallbackDeadlineMissWhileRecording { false };
     std::atomic<uint64> audioCallbackScopedNoDenormalsCount { 0 };
     std::atomic<int> audioCallbackTrackBufferResizeCount { 0 };
     std::atomic<int> audioCallbackPitchScrubBufferResizeCount { 0 };
     std::atomic<int> audioCallbackSidechainBufferResizeCount { 0 };
+    std::atomic<float> tunerDetectedFrequencyHz { 0.0f };
+    std::atomic<float> tunerConfidence { 0.0f };
+    std::atomic<float> tunerInputLevelDb { -120.0f };
+    std::atomic<uint64> tunerLastInputCallbackCounter { 0 };
+    std::atomic<int> tunerInputStartChannel { -1 };
+    std::atomic<int> tunerInputChannelCount { 0 };
+    int tunerSamplesSinceCrossing { 0 };
+    int tunerLastPeriodSamples { 0 };
+    bool tunerSeenNegativeHalfCycle { false };
+    float tunerSmoothedFrequencyHz { 0.0f };
+    float tunerEnvelope { 0.0f };
+    static constexpr int tunerHistoryCapacity = 4096;
+    std::array<float, tunerHistoryCapacity> tunerHistory {};
+    int tunerHistoryWriteIndex { 0 };
+    int tunerValidHistorySamples { 0 };
+    int tunerSamplesSinceAnalysis { 0 };
+    int tunerSamplesSinceReliablePitch { 0 };
+    float tunerDcInputState { 0.0f };
+    float tunerDcOutputState { 0.0f };
     std::atomic<bool> firstCallbackAfterTransportStartPending { false };
     std::atomic<bool> pendingRecordStartCapture { false };  // Audio thread captures start time
     double tempo = 120.0;  // BPM (global default / fallback)
@@ -840,14 +919,33 @@ private:
     juce::String midiLearnTrackId;
     int midiLearnPluginIndex = -1;
     int midiLearnParamIndex = -1;
+    juce::String midiLearnChainType { "track" };
+    juce::String midiLearnBuiltInParamId;
     std::vector<MIDILearnMapping> midiLearnMappings;
     juce::CriticalSection midiLearnLock;
 
     // A/B Comparison (Phase 19.16)
-    // Key: "trackId:fxIndex:isInputFX:slot" -> base64 plugin state
-    std::map<juce::String, juce::String> pluginABStates;
-    // Key: "trackId:fxIndex:isInputFX" -> "A" or "B"
-    std::map<juce::String, juce::String> pluginActiveSlots;
+    struct StoredPluginABState
+    {
+        juce::String base64State;
+        std::weak_ptr<juce::AudioProcessor> processorIdentity;
+        juce::String trackId;
+        bool isInputFX = false;
+    };
+    struct ActivePluginABSlot
+    {
+        juce::String slot;
+        std::weak_ptr<juce::AudioProcessor> processorIdentity;
+        juce::String trackId;
+        bool isInputFX = false;
+    };
+    // Index-based lookup remains convenient, but every value is bound to the
+    // exact processor owner so reorder/remove/reinsert cannot misapply state.
+    void invalidatePluginABStatesForTrack(const juce::String& trackId);
+    void invalidatePluginABStatesForTrackChain(const juce::String& trackId, bool isInputFX);
+    mutable juce::CriticalSection pluginABStateLock;
+    std::map<juce::String, StoredPluginABState> pluginABStates;
+    std::map<juce::String, ActivePluginABSlot> pluginActiveSlots;
 
     // Phase Correlation Meter (Phase 20.10)
     std::atomic<float> phaseCorrelationValue { 1.0f };  // -1 to +1

@@ -1,5 +1,5 @@
 ---
-description: Project-specific settings and preferences for Studio13-v3
+description: Project-specific settings and preferences for OpenStudio
 ---
 
 # Project Settings

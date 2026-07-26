@@ -1,6 +1,10 @@
 #include "TrackProcessor.h"
+#include "BuiltInParameterSupport.h"
+#include "BuiltInEffects2.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 // Maximum channel count for the pre-allocated FX processing buffer.
 // Must be large enough for multi-output instruments (e.g. Komplete Kontrol = 32 out).
@@ -16,9 +20,26 @@ static bool isBuiltInInstrumentProcessor(const juce::AudioProcessor* processor)
     return name == "OpenStudio Piano"
         || name == "OpenStudio Drums"
         || name == "OpenStudio Basic Synth"
+        || name == "OpenStudio Clean Guitar"
         || name == "Studio13 Piano"
         || name == "Studio13 Drums"
-        || name == "Studio13 Basic Synth";
+        || name == "Studio13 Basic Synth"
+        || name == "Studio13 Clean Guitar";
+}
+
+static bool hasInternalAuditionSourceActive(const std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>>& processors)
+{
+    if (! processors)
+        return false;
+
+    for (const auto& processor : *processors)
+    {
+        if (auto* rack = dynamic_cast<S13NAMRack*>(processor.get()))
+            if (rack->hasAuditionSourceActive())
+                return true;
+    }
+
+    return false;
 }
 
 // Debug logging — always active for FX diagnostics
@@ -287,6 +308,27 @@ TrackProcessor::~TrackProcessor()
 
 std::optional<TrackProcessor::PluginAutomationParameterRef> TrackProcessor::parsePluginAutomationParameterId(const juce::String& parameterId) const
 {
+    if (parameterId.startsWith("builtin_"))
+    {
+        const auto suffix = parameterId.substring(8);
+        const int firstSeparator = suffix.indexOfChar('_');
+        const int secondSeparator = suffix.indexOfChar(firstSeparator + 1, '_');
+        if (firstSeparator <= 0 || secondSeparator <= firstSeparator + 1)
+            return std::nullopt;
+
+        const auto chain = suffix.substring(0, firstSeparator);
+        PluginAutomationParameterRef ref;
+        if (chain != "input" && chain != "track")
+            return std::nullopt;
+
+        ref.isInputFX = chain == "input";
+        ref.fxIndex = suffix.substring(firstSeparator + 1, secondSeparator).getIntValue();
+        ref.builtInParamId = juce::URL::removeEscapeChars(suffix.substring(secondSeparator + 1));
+        if (ref.fxIndex < 0 || ref.builtInParamId.isEmpty())
+            return std::nullopt;
+        return ref;
+    }
+
     if (!parameterId.startsWith("plugin_"))
         return std::nullopt;
 
@@ -352,12 +394,30 @@ std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::getOrCrea
     route->isInputFX = parsedRef.isInputFX;
     route->fxIndex = parsedRef.fxIndex;
     route->paramIndex = parsedRef.paramIndex;
+    route->builtInParamId = parsedRef.builtInParamId;
 
     const bool validRoute = route->isInputFX
         ? route->fxIndex < getNumInputFX()
         : route->fxIndex < getNumTrackFX();
     if (!validRoute)
         return nullptr;
+
+    auto* processor = route->isInputFX
+        ? getInputFXProcessor(route->fxIndex)
+        : getTrackFXProcessor(route->fxIndex);
+    if (route->builtInParamId.isNotEmpty())
+    {
+        OpenStudioBuiltInAutomationDescriptor descriptor;
+        if (! getOpenStudioBuiltInAutomationDescriptor(processor, route->builtInParamId, descriptor))
+            return nullptr;
+        route->builtInMinimum = descriptor.minimum;
+        route->builtInMaximum = descriptor.maximum;
+        route->builtInDiscrete = descriptor.discrete;
+        route->automation->setDefaultValue(juce::jlimit(
+            0.0f,
+            1.0f,
+            (descriptor.currentValue - descriptor.minimum) / (descriptor.maximum - descriptor.minimum)));
+    }
 
     const juce::ScopedLock sl(pluginAutomationRouteLock);
     if (auto existing = findPluginAutomationRoute(parameterId))
@@ -516,6 +576,7 @@ std::optional<TrackProcessor::AutomationTarget> TrackProcessor::resolveAutomatio
     target.isInputFX = route->isInputFX;
     target.fxIndex = route->fxIndex;
     target.paramIndex = route->paramIndex;
+    target.builtInParamId = route->builtInParamId;
     return target;
 }
 
@@ -558,6 +619,22 @@ float TrackProcessor::getAutomationDefaultValue(const AutomationTarget& target) 
 
             if (processor == nullptr)
                 return 0.0f;
+
+            if (target.builtInParamId.isNotEmpty())
+            {
+                OpenStudioBuiltInAutomationDescriptor descriptor;
+                if (! getOpenStudioBuiltInAutomationDescriptor(
+                        const_cast<juce::AudioProcessor*>(processor),
+                        target.builtInParamId,
+                        descriptor))
+                {
+                    return 0.0f;
+                }
+                return juce::jlimit(
+                    0.0f,
+                    1.0f,
+                    (descriptor.currentValue - descriptor.minimum) / (descriptor.maximum - descriptor.minimum));
+            }
 
             const auto& params = processor->getParameters();
             if (target.paramIndex < 0 || target.paramIndex >= params.size() || params[target.paramIndex] == nullptr)
@@ -675,24 +752,25 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
         return;
 
     auto& params = proc->getParameters();
-    if (params.isEmpty())
-        return;
 
     for (const auto& route : *snapshot)
     {
         if (!route
             || route->isInputFX != isInputFX
             || route->fxIndex != fxIndex
-            || route->automation == nullptr
-            || route->paramIndex < 0
-            || route->paramIndex >= params.size())
+            || route->automation == nullptr)
         {
             continue;
         }
 
-        auto* param = params[route->paramIndex];
-        if (param == nullptr)
+        // Legacy projects may still contain an automation lane for the retired
+        // NAM live-transpose parameter. Ignore it permanently so old sessions
+        // cannot reactivate or repeatedly publish an unsupported control.
+        if (dynamic_cast<S13NAMRack*>(proc) != nullptr
+            && route->builtInParamId == "transposeSemitones")
+        {
             continue;
+        }
 
         const float automatedValue = shouldApplyAutomation(*route->automation)
             ? route->automation->eval(blockTimeSeconds)
@@ -702,7 +780,24 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
         if (std::isfinite(lastValue) && std::abs(lastValue - clampedValue) <= 1.0e-6f)
             continue;
 
-        param->setValue(clampedValue);
+        if (route->builtInParamId.isNotEmpty())
+        {
+            auto rawValue = route->builtInMinimum
+                + clampedValue * (route->builtInMaximum - route->builtInMinimum);
+            if (route->builtInDiscrete)
+                rawValue = std::round(rawValue);
+            if (! setOpenStudioBuiltInParameterValue(proc, route->builtInParamId, rawValue))
+                continue;
+        }
+        else
+        {
+            if (route->paramIndex < 0 || route->paramIndex >= params.size())
+                continue;
+            auto* param = params[route->paramIndex];
+            if (param == nullptr)
+                continue;
+            param->setValue(clampedValue);
+        }
         route->lastAppliedValue.store(clampedValue, std::memory_order_relaxed);
     }
 }
@@ -731,7 +826,113 @@ bool TrackProcessor::isMidiEffect() const
 
 double TrackProcessor::getTailLengthSeconds() const
 {
-    return 0.0;
+    double serialTailSeconds = 0.0;
+    const auto addProcessorTail = [&serialTailSeconds] (const juce::AudioProcessor* processor)
+    {
+        if (processor == nullptr)
+            return;
+
+        const double processorTail = processor->getTailLengthSeconds();
+        if (std::isfinite(processorTail) && processorTail > 0.0)
+            serialTailSeconds += processorTail;
+    };
+
+    for (int index = 0; index < static_cast<int>(inputFXPlugins.size()); ++index)
+    {
+        const auto& plugin = inputFXPlugins[static_cast<size_t>(index)];
+        if (plugin && ! getInputFXBypassed(index))
+            addProcessorTail(plugin.get());
+    }
+
+    addProcessorTail(instrumentPlugin.get());
+
+    for (int index = 0; index < static_cast<int>(trackFXPlugins.size()); ++index)
+    {
+        const auto& plugin = trackFXPlugins[static_cast<size_t>(index)];
+        if (plugin && ! getTrackFXBypassed(index))
+            addProcessorTail(plugin.get());
+    }
+
+    return serialTailSeconds;
+}
+
+double TrackProcessor::getOfflineRenderTailLengthSeconds() const
+{
+    double serialTailSeconds = 0.0;
+    const auto automationSnapshot = std::atomic_load_explicit(
+        &pluginAutomationSnapshot, std::memory_order_acquire);
+    const auto getNAMTailAutomationModule = [] (const juce::String& parameterId)
+    {
+        if (parameterId == "tapeEchoEnabled" || parameterId == "tapeEchoMix"
+            || parameterId == "tapeEchoTimeMs" || parameterId == "tapeEchoFeedback"
+            || parameterId == "tapeEchoMod")
+            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationTapeEcho);
+        if (parameterId == "delayEnabled" || parameterId == "delayMix"
+            || parameterId == "delayTimeMs" || parameterId == "delayFeedback"
+            || parameterId == "delayMod" || parameterId == "delayMode"
+            || parameterId == "delayPingPong" || parameterId == "delayTempoSync")
+            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationDelay);
+        if (parameterId == "reverbEnabled" || parameterId == "reverbMix"
+            || parameterId == "reverbDecaySec" || parameterId == "reverbPreDelayMs"
+            || parameterId == "reverbShimmer")
+            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationReverb);
+        if (parameterId == "modulatorEnabled" || parameterId == "chorusMix"
+            || parameterId == "modulatorMode" || parameterId == "modulatorFeedback")
+            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationModulator);
+        if (parameterId == "cabEnabled")
+            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationCab);
+        return static_cast<std::uint32_t>(S13NAMRack::tailAutomationNone);
+    };
+    const auto getTailAutomationMask = [&] (bool isInputFX, int fxIndex)
+    {
+        std::uint32_t mask = S13NAMRack::tailAutomationNone;
+        if (! automationSnapshot)
+            return mask;
+        for (const auto& route : *automationSnapshot)
+        {
+            if (route && route->isInputFX == isInputFX && route->fxIndex == fxIndex
+                && route->automation && route->automation->getNumPoints() > 0
+                && route->automation->shouldPlaybackForRead())
+            {
+                mask |= getNAMTailAutomationModule(route->builtInParamId);
+            }
+        }
+        return mask;
+    };
+    const auto addProcessorTail = [&serialTailSeconds, &getTailAutomationMask]
+        (const juce::AudioProcessor* processor, bool isInputFX, int fxIndex)
+    {
+        if (processor == nullptr)
+            return;
+
+        double processorTail = processor->getTailLengthSeconds();
+        if (const auto* rack = dynamic_cast<const S13NAMRack*>(processor))
+            processorTail = rack->getAutomatedTailLengthSeconds(
+                getTailAutomationMask(isInputFX, fxIndex));
+        if (std::isfinite(processorTail) && processorTail > 0.0)
+            serialTailSeconds += processorTail;
+    };
+
+    for (int index = 0; index < static_cast<int>(inputFXPlugins.size()); ++index)
+    {
+        const auto& plugin = inputFXPlugins[static_cast<size_t>(index)];
+        if (plugin && ! getInputFXBypassed(index))
+            addProcessorTail(plugin.get(), true, index);
+    }
+    // Instruments do not use track/input FX automation route identities.
+    if (instrumentPlugin)
+    {
+        const double instrumentTail = instrumentPlugin->getTailLengthSeconds();
+        if (std::isfinite(instrumentTail) && instrumentTail > 0.0)
+            serialTailSeconds += instrumentTail;
+    }
+    for (int index = 0; index < static_cast<int>(trackFXPlugins.size()); ++index)
+    {
+        const auto& plugin = trackFXPlugins[static_cast<size_t>(index)];
+        if (plugin && ! getTrackFXBypassed(index))
+            addProcessorTail(plugin.get(), false, index);
+    }
+    return serialTailSeconds;
 }
 
 int TrackProcessor::getNumPrograms()
@@ -860,9 +1061,7 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         spec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
         spec.numChannels = 2;
         pdcDelayLine.prepare(spec);
-        const int preparedPdcDelaySamples = pdcDelaySamples.load(std::memory_order_relaxed);
-        if (preparedPdcDelaySamples > 0)
-            pdcDelayLine.setDelay(static_cast<float>(preparedPdcDelaySamples));
+        pdcDelayLine.setDelay(static_cast<float>(pdcDelaySamples.load(std::memory_order_relaxed)));
     }
 
     // Prepare plugins with the actual device block size so realtime hosting
@@ -914,6 +1113,7 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     automationGainBuffer.setSize(8, samplesPerBlock);
     realtimeFallbackBuffer.setSize(2, samplesPerBlock);
     midiOutputResetBuffer.ensureSize(512);
+    invalidatePluginAutomationCache();
 }
 
 void TrackProcessor::releaseResources()
@@ -998,12 +1198,11 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     if (pdcDelayDirty.exchange(false, std::memory_order_acq_rel))
         pdcDelayLine.setDelay(static_cast<float>(pdcDelaySamples.load(std::memory_order_relaxed)));
 
-    if (pdcDelaySamples.load(std::memory_order_relaxed) > 0)
-    {
-        juce::dsp::AudioBlock<float> block(buffer);
-        juce::dsp::ProcessContextReplacing<float> context(block);
-        pdcDelayLine.process(context);
-    }
+    // Process even at zero delay so the ring buffer always contains current
+    // audio. A later 0 -> positive PDC change then cannot replay stale samples.
+    juce::dsp::AudioBlock<float> pdcBlock(buffer);
+    juce::dsp::ProcessContextReplacing<float> pdcContext(pdcBlock);
+    pdcDelayLine.process(pdcContext);
 
     bool hasAnyFX = (inputFXSnapshot && !inputFXSnapshot->empty())
                  || (trackFXSnapshot && !trackFXSnapshot->empty());
@@ -3434,6 +3633,13 @@ void TrackProcessor::buildMidiBuffer(juce::MidiBuffer& destination, double block
 bool TrackProcessor::needsProcessing(double blockTimeSeconds, int numSamples,
                                      double sampleRate, bool playing) const
 {
+    const auto trackFXSnapshot = std::atomic_load_explicit(&realtimeTrackFXSnapshot, std::memory_order_acquire);
+    const auto inputFXSnapshot = std::atomic_load_explicit(&realtimeInputFXSnapshot, std::memory_order_acquire);
+
+    if (hasInternalAuditionSourceActive(trackFXSnapshot)
+        || hasInternalAuditionSourceActive(inputFXSnapshot))
+        return true;
+
     // Instrument tracks must always be processed so they can respond to
     // live MIDI input and produce sustain / reverb tails after note-off.
     if (trackType.load(std::memory_order_acquire) == TrackType::Instrument)
@@ -3441,7 +3647,6 @@ bool TrackProcessor::needsProcessing(double blockTimeSeconds, int numSamples,
         if (std::atomic_load_explicit(&realtimeInstrumentSnapshot, std::memory_order_acquire) != nullptr)
             return true;
 
-        auto trackFXSnapshot = std::atomic_load_explicit(&realtimeTrackFXSnapshot, std::memory_order_acquire);
         if (trackFXSnapshot)
         {
             for (const auto& plugin : *trackFXSnapshot)
@@ -3640,26 +3845,73 @@ void TrackProcessor::setProcessingPrecisionMode(ProcessingPrecisionMode mode)
 
 int TrackProcessor::getChainLatency() const
 {
-    int totalLatency = 0;
+    juce::int64 totalLatency = 0;
+    const auto addProcessorLatency = [&totalLatency] (const juce::AudioProcessor* processor)
+    {
+        if (processor != nullptr)
+            totalLatency += juce::jmax(0, processor->getLatencySamples());
+    };
+
     for (int index = 0; index < static_cast<int>(inputFXPlugins.size()); ++index)
     {
         const auto& plugin = inputFXPlugins[static_cast<size_t>(index)];
         if (plugin && !getInputFXBypassed(index))
-            totalLatency += plugin->getLatencySamples();
+            addProcessorLatency(plugin.get());
     }
+    addProcessorLatency(instrumentPlugin.get());
     for (int index = 0; index < static_cast<int>(trackFXPlugins.size()); ++index)
     {
         const auto& plugin = trackFXPlugins[static_cast<size_t>(index)];
         if (plugin && !getTrackFXBypassed(index))
-            totalLatency += plugin->getLatencySamples();
+            addProcessorLatency(plugin.get());
     }
-    return totalLatency;
+    return static_cast<int>(juce::jmin<juce::int64>(totalLatency,
+                                                    std::numeric_limits<int>::max()));
 }
 
 void TrackProcessor::setPDCDelay(int delaySamples)
 {
     pdcDelaySamples.store(delaySamples, std::memory_order_relaxed);
     pdcDelayDirty.store(true, std::memory_order_release);
+}
+
+void TrackProcessor::resetPDCDelayState()
+{
+    pdcDelayLine.reset();
+    pdcDelayLine.setDelay(static_cast<float>(pdcDelaySamples.load(std::memory_order_relaxed)));
+    pdcDelayDirty.store(false, std::memory_order_release);
+}
+
+void TrackProcessor::resetOfflineRenderState()
+{
+    resetPDCDelayState();
+    channelStripEQ.reset();
+    dcFilterStateL = 0.0f;
+    dcFilterStateR = 0.0f;
+    dcPrevInputL = 0.0f;
+    dcPrevInputR = 0.0f;
+    clearFallbackInstrumentState();
+    for (auto& channelNotes : activeMIDINotes)
+        channelNotes.fill(false);
+    fallbackInstrumentResetRequested.store(false, std::memory_order_release);
+    preFaderBuffer.clear();
+    automationGainBuffer.clear();
+    realtimeFallbackBuffer.clear();
+
+    // State/preset restoration can change a parameter without changing its
+    // automation lane value. Force the first block of every offline pass to
+    // re-apply that value instead of trusting a cache from realtime/pass 1.
+    invalidatePluginAutomationCache();
+}
+
+void TrackProcessor::invalidatePluginAutomationCache() noexcept
+{
+    auto snapshot = std::atomic_load_explicit(&pluginAutomationSnapshot, std::memory_order_acquire);
+    if (snapshot)
+        for (const auto& route : *snapshot)
+            if (route)
+                route->lastAppliedValue.store(std::numeric_limits<float>::quiet_NaN(),
+                                              std::memory_order_relaxed);
 }
 
 void TrackProcessor::setChannelStripEQParam(int paramIndex, float value)

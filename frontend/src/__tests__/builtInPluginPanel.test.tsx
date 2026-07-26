@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   BuiltInPluginPanel,
   BuiltInParamControl,
+  createSchemaRequestGate,
   formatParamValue,
   getPluginKind,
   groupLabel,
@@ -165,6 +166,18 @@ const panelSchemas = [
 ];
 
 describe("BuiltInPluginPanel schema model", () => {
+  it("rejects stale schema refreshes so an old empty rack cannot replace a loaded capture", () => {
+    const gate = createSchemaRequestGate();
+    const emptyRackRequest = gate.begin();
+    const loadedRackRequest = gate.begin();
+
+    expect(gate.isLatest(emptyRackRequest)).toBe(false);
+    expect(gate.isLatest(loadedRackRequest)).toBe(true);
+
+    gate.invalidate();
+    expect(gate.isLatest(loadedRackRequest)).toBe(false);
+  });
+
   it("classifies built-in plugin schemas and selects primary controls", () => {
     const drums = schema("OpenStudio Drums", "Instrument");
     const reverb = schema("S13 Reverb", "Reverb");

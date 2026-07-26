@@ -17,11 +17,14 @@ export default defineConfig({
     },
   ],
   server: {
-    port: 5173,
+    port: 5183,
     strictPort: true,
   },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // NAM Rack is deliberately isolated as an on-demand feature chunk. Its
+    // minified 650–700 kB payload is ~175 kB gzip and does not block app boot.
+    chunkSizeWarningLimit: 750,
   }
 })

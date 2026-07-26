@@ -126,7 +126,8 @@ bool AudioConverter::needsConversion(
     if (reader == nullptr)
         return false;
     
-    return reader->numChannels != targetChannels || reader->sampleRate != targetSampleRate;
+    return reader->numChannels != static_cast<unsigned int>(targetChannels)
+        || reader->sampleRate != targetSampleRate;
 }
 
 void AudioConverter::monoToStereo(

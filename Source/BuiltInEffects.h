@@ -3,6 +3,9 @@
 #include <JuceHeader.h>
 #include <array>
 #include <mutex>
+#include <vector>
+
+using S13IIRCoefficientSet = std::array<float, 5>;
 
 //==============================================================================
 /**
@@ -67,6 +70,7 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
     void getStateInformation(juce::MemoryBlock& destData) override;
@@ -240,6 +244,7 @@ private:
     juce::dsp::IIR::Filter<float> scHPF_L;
     juce::dsp::IIR::Filter<float> scHPF_R;
     float lastSCHPFFreq = 20.0f;
+    std::vector<S13IIRCoefficientSet> scHPFCoefficientLut;
 
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayL { 2048 };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayR { 2048 };

@@ -124,7 +124,15 @@ export function Modal({
           >
             <DialogPanel
               data-modal-panel="true"
-              onKeyDown={(e) => e.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' && closeOnEscape) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onClose();
+                  return;
+                }
+                event.stopPropagation();
+              }}
               onContextMenu={guardModalContextMenu}
               onMouseDown={guardModalPointerEvent}
               onMouseMove={guardModalPointerEvent}

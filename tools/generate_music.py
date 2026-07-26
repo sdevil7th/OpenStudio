@@ -216,6 +216,13 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+def format_sample_rate_label(sample_rate: int) -> str:
+    if sample_rate % 1000 == 0:
+        return f"{sample_rate // 1000} kHz"
+    label = f"{sample_rate / 1000.0:.1f}".rstrip("0").rstrip(".")
+    return f"{label} kHz"
+
+
 def normalize_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -1001,8 +1008,13 @@ class DiffusersAcePipelineManager:
         if spec.mode == "audio_to_audio":
             if source_request is None:
                 raise GenerationFailure("ACE-Step source workflow requires source audio.", progress=0.2)
-            reporter.update("generating", 0.22, phase="preprocessing_audio", message="Converting source audio to 48 kHz stereo.")
-            wav_path = output_path.parent / f"{trace_safe_request_id(reporter.request_id)}_48k_stereo.wav"
+            reporter.update(
+                "generating",
+                0.22,
+                phase="preprocessing_audio",
+                message=f"Converting source audio to {format_sample_rate_label(sample_rate)} stereo.",
+            )
+            wav_path = output_path.parent / f"{trace_safe_request_id(reporter.request_id)}_{sample_rate}hz_stereo.wav"
             convert_to_wav(source_request.path, wav_path, sample_rate)
             audio_tensor = load_audio_tensor(wav_path, sample_rate)
             source_audio_tensor = audio_tensor

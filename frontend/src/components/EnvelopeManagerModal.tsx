@@ -2,16 +2,11 @@ import { useState, useEffect, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import { useDAWStore, type AutomationWriteBehavior } from "../store/useDAWStore";
-import { nativeBridge } from "../services/NativeBridge";
+import { nativeBridge, type PluginParameterInfo } from "../services/NativeBridge";
 import { Modal } from "./ui";
-import { getTrackAutomationParams, getMasterAutomationParams, pluginAutomationParamId } from "../store/automationParams";
+import { builtInAutomationParamId, getTrackAutomationParams, getMasterAutomationParams, pluginAutomationParamId } from "../store/automationParams";
 
-interface PluginParam {
-  index: number;
-  name: string;
-  value: number;
-  text: string;
-}
+type PluginParam = PluginParameterInfo;
 
 interface FXSlotInfo {
   index: number;
@@ -183,7 +178,9 @@ export function EnvelopeManagerModal() {
       const fxCategory = fx.isInputFX ? `Input FX: ${fx.name}` : `FX: ${fx.name}`;
 
       for (const param of params) {
-        const paramId = pluginAutomationParamId(fx.isInputFX, fx.index, param.index);
+        const paramId = param.builtIn && param.paramId
+          ? builtInAutomationParamId(fx.isInputFX, fx.index, param.paramId)
+          : pluginAutomationParamId(fx.isInputFX, fx.index, param.index);
         const lane = automationLanes.find((l) => l.param === paramId);
         rows.push({
           paramId,

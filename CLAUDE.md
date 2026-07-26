@@ -1,4 +1,4 @@
-# Studio13-v3
+# OpenStudio
 
 A hybrid DAW (Digital Audio Workstation) with a **JUCE C++ backend** for audio processing and a **React/TypeScript frontend** rendered in WebView2.
 
@@ -26,7 +26,7 @@ C++ (JUCE) Backend          React/TypeScript Frontend
 ## Directory Structure
 
 ```
-Studio13-v3/
+OpenStudio/
 ├── Source/                      # C++ backend
 │   ├── Main.cpp                 # JUCE app entry point
 │   ├── MainComponent.h/cpp      # Hosts WebBrowserComponent + AudioEngine, exposes native functions to JS

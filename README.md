@@ -5,11 +5,11 @@
 <h1 align="center">OpenStudio</h1>
 
 <p align="center">
-  <strong>A native, open DAW for recording, editing, mixing, pitch work, plugin hosting, and local AI-assisted music production.</strong>
+  <strong>The open-source local-first DAW + AI music production alternative.</strong>
 </p>
 
 <p align="center">
-  Built with a JUCE C++ audio engine and a React/TypeScript interface. No Electron shell, no cloud-only workflow, no locked session model.
+  Native JUCE audio, real timeline editing, plugin hosting, local project files, and optional AI tools. No Electron shell, no cloud-only workflow, no locked session model.
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
   <img src="https://img.shields.io/badge/UI-React%20%2B%20TypeScript-61dafb?logo=react" alt="React and TypeScript"/>
   <img src="https://img.shields.io/badge/audio-ASIO%20%7C%20WASAPI%20%7C%20DirectSound-green" alt="Audio drivers"/>
   <img src="https://img.shields.io/badge/plugins-VST3%20%7C%20CLAP%20%7C%20LV2-orange" alt="Plugin formats"/>
+  <img src="https://img.shields.io/badge/guitar-NAM%20A1%20%7C%20A2-f5ae27" alt="Neural Amp Modeler A1 and A2"/>
   <img src="https://img.shields.io/badge/AI-ACE--Step%20%7C%20Stable%20Audio%203-purple" alt="AI music models"/>
 </p>
 
@@ -26,7 +27,7 @@
   |
   <a href="#features-at-a-glance">Features</a>
   |
-  <a href="#comparison">Comparison</a>
+  <a href="#why-openstudio">Why OpenStudio?</a>
   |
   <a href="docs/USER_MANUAL.md">User Manual</a>
   |
@@ -37,11 +38,11 @@
 
 ---
 
-## Why OpenStudio?
+## OpenStudio In One Sentence
 
-OpenStudio is for people who want a real DAW surface, not just a prompt box, and a modern production workflow without giving up native audio performance. It combines classic multitrack production with newer tools such as stem separation, audio-to-MIDI, source-conditioned AI generation, graphical pitch editing, and scriptable project operations.
+OpenStudio is for people who want a real DAW surface, not just a prompt box: record or import material, edit it deeply, host plugins, tune vocals, split stems, generate or transform ideas with local AI tools, and render deliverables without leaving the session.
 
-The goal is direct: record or import material, edit it deeply, route and mix it like a DAW, generate or transform ideas with local AI tools when useful, then render deliverables without leaving the session.
+It combines classic multitrack production with newer tools such as stem separation, audio-to-MIDI, source-conditioned AI generation, graphical pitch editing, and scriptable project operations.
 
 ## Features At A Glance
 
@@ -53,6 +54,7 @@ The goal is direct: record or import material, edit it deeply, route and mix it 
 | Mixing | Mixer, detached mixer, sends, buses, routing matrix, master strip, meter isolation, mixer snapshots |
 | Plugins | VST3, CLAP, LV2 code paths, native plugin editors, input/track/master/monitoring FX, plugin presets, A/B states, MIDI learn |
 | Built-in FX | EQ, compressor, gate, limiter, delay, reverb, chorus, saturator, pitch corrector, basic synth/piano/drums |
+| Guitar / NAM Rack | Free A1/A2 amp and full-rig capture host, native pedalboard, cabinet IRs, EQ/mod/delay/reverb/shimmer, presets, calibration, project recall, optional TONE3000 connection |
 | Pitch | Graphical pitch editor, YIN analysis, note blobs, drift/vibrato tools, real-time auto-tune style FX, Basic Pitch polyphonic detection |
 | AI | Optional AI Tools runtime, stem separation, ACE-Step music generation, Stable Audio 3 text-to-audio, clip variation, inpaint, continuation |
 | Render | WAV, AIFF, FLAC, MP3, OGG, mono/stereo, sample-rate conversion, normalize, tail, dither, secondary output, stems, regions, razor areas |
@@ -63,42 +65,91 @@ The goal is direct: record or import material, edit it deeply, route and mix it 
 
 Some advanced features are still evolving. See [Implemented But Partial / Caveated](docs/implemented_features.md#implemented-but-partial--caveated) for the honest edges.
 
-## Comparison
+## Why OpenStudio?
 
-These comparisons are meant to position OpenStudio clearly, not pretend a young open DAW replaces decades of commercial engineering in every studio tomorrow.
+Cubase, Pro Tools, and Suno AI are strong products. OpenStudio is aimed at a different lane: a native, open, local-first DAW where recording, editing, mixing, plugin hosting, pitch work, and AI-assisted generation live in the same project.
+
+### OpenStudio NAM Rack vs AmpliTube, Guitar Rig, and Neural DSP
+
+OpenStudio's NAM Rack is a free, open-source alternative for guitarists who want
+modern Neural Amp Modeler A1/A2 captures, pedals, cabinets, effects, and the DAW
+session in one application. It competes in the same creative category as
+AmpliTube, Guitar Rig, and Neural DSP plug-ins without charging to unlock the
+rack. Third-party captures and IRs keep their own licenses.
+
+| Capability | OpenStudio NAM Rack | AmpliTube 5 | Guitar Rig 7 | Neural DSP plug-ins |
+|---|---|---|---|---|
+| Core price/model | ✅ Free and open source; no paid NAM Rack tier | ⚠️ Free CS edition with a limited gear set; larger commercial editions/gear | ⚠️ Free Player with a limited component/preset set; commercial Pro edition | ⚠️ Commercial plug-ins sold by product; time-limited trials available |
+| Product shape | ✅ Guitar rig inside a full recording, MIDI, editing, mixing, automation, and render DAW | Amp/effects suite as plug-in and standalone app | Modular guitar/effects rack as plug-in and standalone app | Focused artist/amp suites as plug-ins and standalone apps |
+| NAM A1/A2 | ✅ Native open NAM A1/A2 amp and full-rig capture support | ❌ No native NAM A1/A2 host; IK's TONEX uses its own capture ecosystem | ❌ No native NAM A1/A2 host | ❌ No native NAM A1/A2 host |
+| Captures and IRs | ✅ Local NAM files, local cabinet IRs, and optional approved TONE3000 discovery/download | ✅ TONEX ecosystem; custom IR capability depends on edition/workflow | ✅ ICM components and custom IR in Guitar Rig Pro | ⚠️ Curated product-specific rigs and cabinets rather than a general NAM library |
+| Pedals/effects | ✅ Native compressor, tape echo, octaver, Precision Drive, distortion, creative FX, EQ, modulation, delay, reverb, and shimmer | ✅ Large polished commercial gear ecosystem | ✅ Flexible modular rack; Player includes a smaller selection | ✅ Highly polished chains designed around each product/artist |
+| Full DAW project | ✅ Tone, recording, arrangement, automation, mix, and export live in one project | ❌ Requires a host DAW for full production | ❌ Requires a host DAW for full production | ❌ Requires a host DAW for full production |
+| Open/customizable | ✅ Inspect, fork, script, and extend the source | ❌ Closed source | ❌ Closed source | ❌ Closed source |
+| Where the commercial product still wins | ⚠️ OpenStudio still needs broader musician audition, bundled licensed starter tones, and commercial support maturity | ✅ Very large branded gear catalog and mature commercial polish | ✅ Mature modular UX, broad presets, and established ecosystem | ✅ Curated artist suites, polished presets, and focused commercial support |
+
+Product facts and free-tier distinctions should be rechecked at release time:
+[AmpliTube 5](https://www.ikmultimedia.com/products/amplitube5/),
+[Guitar Rig 7 Player](https://www.native-instruments.com/en/products/komplete/guitar/guitar-rig-7-player/),
+[Guitar Rig 7 Pro](https://www.native-instruments.com/en/products/komplete/guitar/guitar-rig-7-pro/),
+[Neural DSP plug-ins](https://neuraldsp.com/plugins), and
+[NAM A2](https://www.tone3000.com/guides/nam-a2-the-complete-guide).
 
 ### OpenStudio vs Cubase
 
-| Need | Cubase | OpenStudio |
+Cubase is a mature commercial composition DAW. OpenStudio is the open local-first alternative for people who want DAW depth, hackability, and AI workflows without moving the session into a closed product lane.
+
+| Capability | Cubase | OpenStudio |
 |---|---|---|
-| Composition DAW | Mature commercial DAW with deep MIDI, scoring, VariAudio, built-in instruments, and large content libraries | Native open DAW with MIDI, instrument tracks, piano roll, audio-to-MIDI, pitch editor, and scriptable workflows |
-| Pitch editing | VariAudio and ARA-compatible workflows | Built-in graphical pitch editor, real-time pitch corrector FX, Basic Pitch detection, and ARA hosting |
-| AI assistance | Cubase Pro includes modern assisted tools such as stem separation | Optional local AI Tools runtime for stem separation plus text-to-music, text-to-audio, variation, inpaint, and continuation workflows |
-| Extensibility | VST ecosystem, commercial extension model | VST3/CLAP/LV2, JSFX/S13FX, Lua API, open source codebase |
-| Best fit | Established production/composition rooms that need Steinberg's mature ecosystem | Builders, indie producers, researchers, and power users who want DAW depth plus local AI and hackability |
+| Pricing / model | ❌ Commercial closed-source DAW | ✅ Open-source app with local project files |
+| Full DAW timeline | ✅ Mature arrange, MIDI, scoring, MixConsole, VariAudio | ✅ Multitrack timeline, MIDI, mixer, routing, pitch editor, render tools |
+| Recording / editing / mixing | ✅ Decades of polished DAW workflows | ✅ Native JUCE engine, clip editing, takes, razor/ripple edits, sends, buses, mixer snapshots |
+| Pitch / stems / audio-to-MIDI | ✅ VariAudio, audio alignment, stem separation in current Cubase Pro | ✅ Graphical pitch editor, real-time pitch corrector, stem separation, Basic Pitch audio-to-MIDI |
+| AI generation | ⚠️ Assisted tools, but not a local AI music-generation DAW workflow | ✅ Optional local AI Tools runtime for ACE-Step, Stable Audio 3, variation, inpaint, continuation, stems |
+| Plugin ecosystem | ✅ VST ecosystem and Steinberg tooling | ✅ VST3 plus CLAP/LV2 code paths, input/track/master/monitoring FX, JSFX/S13FX, Lua |
+| Local / private workflow | ⚠️ Local DAW, but closed commercial product | ✅ Local project files, optional local AI runtime, source-visible implementation |
+| Open / customizable | ❌ Closed source | ✅ Fork it, script it, extend it, inspect the engine |
+| Where Cubase still wins | ✅ Mature scoring, VariAudio polish, bundled content, commercial support | ⚠️ Some advanced OpenStudio features remain partial or release-hardening dependent |
 
 ### OpenStudio vs Pro Tools
 
-| Need | Pro Tools | OpenStudio |
+Pro Tools is the facility standard. OpenStudio is for producers and builders who want modern DAW workflows, integrated AI creation, and transparent native code without AAX/HDX/session-ecosystem lock-in.
+
+| Capability | Pro Tools | OpenStudio |
 |---|---|---|
-| Studio standard | Mature industry-standard audio/post platform with AAX, HDX, large facility workflows, and advanced immersive/post tooling | Open native DAW focused on fast iteration, local-first production, and transparent implementation |
-| Editing | Deep editing, recording, comping, post-production workflows | Multitrack recording, takes, razor/ripple editing, slip edit, clip properties, freeze, region tools |
-| Pitch / repair | Strong third-party ecosystem through ARA partners and plugins | Built-in graphical pitch editor, real-time pitch corrector, ARA host controller, source-aware pitch render diagnostics |
-| Delivery | Strong broadcast/post pipelines and collaboration tooling | Offline render, stems, region render matrix, render queue, DDP export, archive tools |
-| Best fit | Commercial facilities and sessions that need Pro Tools compatibility | Producers and developers who want open workflows, modern UI, and integrated AI generation inside a DAW |
+| Pricing / model | ❌ Commercial closed-source platform | ✅ Open-source app with local-first project control |
+| Studio / post standard | ✅ Industry-standard facility workflow, AAX, HDX, advanced post tooling | ⚠️ Strong DAW foundations, but not a Pro Tools session-compatibility replacement |
+| Recording / editing / mixing | ✅ Deep tracking, comping, editing, post-production, automation | ✅ Multitrack recording, takes, razor/ripple edits, routing, automation, mixer, render queue |
+| Pitch / repair | ✅ Strong ARA and third-party repair ecosystem | ✅ Built-in graphical pitch editor, real-time pitch corrector, ARA host plumbing |
+| AI generation | ⚠️ Integrations and assisted workflows, but not a local AI music generator inside the DAW core | ✅ Text-to-music, lyrics+style, text-to-audio, variation, inpaint, continuation, stems |
+| Plugin ecosystem | ⚠️ AAX-centered ecosystem | ✅ VST3 plus CLAP/LV2 code paths, built-in FX, JSFX/S13FX, Lua scripting |
+| Local / private workflow | ⚠️ Local DAW, but tied to a proprietary ecosystem | ✅ Local files, optional local AI runtime, inspectable source |
+| Open / customizable | ❌ Closed source | ✅ Source-visible, scriptable, hackable |
+| Where Pro Tools still wins | ✅ Commercial facilities, HDX/AAX workflows, immersive/post pipelines, support ecosystem | ⚠️ OpenStudio is not claiming facility-standard interchange parity |
 
 ### OpenStudio vs Suno AI
 
-| Need | Suno AI | OpenStudio |
-|---|---|---|
-| Product shape | Cloud AI song generation service | Full DAW with optional local AI-assisted generation |
-| Starting point | Prompt to generated song | Record, import, generate, edit, arrange, mix, render |
-| Control | Fast idea generation with plan/credit limits and cloud queues | Timeline-level control over clips, tracks, routing, plugins, MIDI, pitch, stems, and exports |
-| AI workflows | Song generation, editing, uploads, stems depending on plan | ACE-Step text-to-music and lyrics+style, Stable Audio 3 text-to-audio, source variation, inpaint, continuation, stem separation |
-| Ownership/privacy model | Depends on Suno plan and terms; free plan is non-commercial as of the current Suno pricing/help pages | Local project files and local optional AI tooling; users decide what media enters the session |
-| Best fit | Quickly making complete AI songs | Turning recordings, generated ideas, stems, and MIDI into editable productions |
+Suno is fast when you want a whole AI song from a prompt. OpenStudio is for when that idea needs to become an editable production with tracks, clips, MIDI, plugins, pitch work, stems, and export control.
 
-Reference pages used for the comparison: [Cubase editions](https://www.steinberg.net/cubase/compare-editions/), [Pro Tools](https://www.avid.com/en/pro-tools), [Suno pricing](https://suno.com/pricing), and [Suno rights help](https://help.suno.com/en/categories/550145-rights-ownership).
+| Capability | Suno AI | OpenStudio |
+|---|---|---|
+| Product shape | ✅ Cloud AI song-generation service | ✅ Full DAW with optional local AI-assisted generation |
+| Full DAW timeline | ❌ Prompt/song workspace, not a native multitrack DAW | ✅ Tracks, clips, timeline editing, MIDI, routing, mixer, render workflows |
+| Recording / editing / mixing | ❌ Not built around live recording, native plugins, buses, or deep mix routing | ✅ Record, import, arrange, edit, tune, mix, host plugins, render |
+| Pitch / stems / audio-to-MIDI | ⚠️ Stems and editor features depend on Suno plan/workspace | ✅ Stem separation, graphical pitch editor, real-time pitch correction, Basic Pitch audio-to-MIDI |
+| AI generation | ✅ Very fast prompt-to-song workflow | ✅ Local/optional ACE-Step and Stable Audio 3 workflows inside a DAW session |
+| Plugin ecosystem | ❌ No VST3/CLAP/LV2 DAW plugin chain | ✅ Input, track, master, monitoring FX plus built-in FX and script effects |
+| Local / private workflow | ❌ Cloud service; uploads and outputs depend on Suno terms | ✅ Local projects and optional local runtime; users choose what media enters the session |
+| Commercial rights | ⚠️ Suno free/basic output is non-commercial; paid tiers grant commercial use rights under Suno terms | ✅ Local DAW project workflow; generated/recorded media remains in the user's production pipeline |
+| Where Suno still wins | ✅ Fastest path from prompt to finished AI song | ⚠️ OpenStudio's local AI setup depends on hardware, models, runtime install, and licenses |
+
+### The Honest Edge
+
+OpenStudio is not pretending Cubase and Pro Tools vanish overnight. They have decades of polish, commercial support, huge ecosystems, and deep specialist workflows. Suno is also better when the only goal is instant prompt-to-song output.
+
+OpenStudio's edge is different: a real DAW, local files, native audio, open source, scriptability, plugin hosting, and AI tools that serve the session instead of replacing it.
+
+Comparison style reference: [OmniVoice Studio README](https://github.com/debpalash/OmniVoice-Studio). Product references checked June 12, 2026: [Cubase features](https://www.steinberg.net/cubase/features/), [Cubase editions](https://www.steinberg.net/cubase/compare-editions/), [Pro Tools](https://www.avid.com/pro-tools), [Pro Tools comparison](https://www.avid.com/pro-tools/comparison), [Suno rights help](https://help.suno.com/en/categories/550145-rights-ownership), and [Suno terms](https://suno.com/terms-of-service).
 
 ## AI Music And Assisted Audio
 
@@ -230,8 +281,13 @@ Then open the app from Finder, or right-click and choose **Open** if Gatekeeper 
 - [Release Runbook](docs/release-runbook.md)
 - [Release Smoke Checklist](docs/release-smoke-checklist.md)
 - [Implemented Features Audit](docs/implemented_features.md)
+- [Documentation Index](docs/README.md)
+- [NAM Rack](docs/nam-rack.md)
+- [MIDI Editor](docs/midi-editor.md)
+- [Release Roadmap](docs/roadmap.md)
 
-Historical planning documents remain in `docs/` for traceability, but the codebase and `docs/implemented_features.md` should be treated as the fresher feature inventory.
+Stable guides describe the current product; implementation history remains
+available in Git instead of accumulating as dated plan documents.
 
 ## Tech Stack
 

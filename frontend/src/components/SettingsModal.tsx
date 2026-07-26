@@ -1,11 +1,19 @@
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
-import { nativeBridge } from "../services/NativeBridge";
+import { ExternalLink, X } from "lucide-react";
+import {
+  nativeBridge,
+  type AudioDebugSnapshot,
+} from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, NativeSelect } from "./ui";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import {
+  resolveAudioBufferSizeOptions,
+  resolveAudioBufferSizeRequest,
+} from "../utils/audioBufferOptions";
+import { resolveAudioPerformanceAdvisory } from "../utils/audioPerformanceAdvisory";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -18,6 +26,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [switching, setSwitching] = useState(false); // Track when switching audio types
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [openingDriverPanel, setOpeningDriverPanel] = useState(false);
+  const [driverPanelMessage, setDriverPanelMessage] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [audioDiagnostics, setAudioDiagnostics] =
+    useState<AudioDebugSnapshot | null>(null);
   const { refreshAudioDeviceSetup, stop } = useDAWStore(useShallow((s) => ({
     refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
     stop: s.stop,
@@ -25,6 +40,17 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   // Combined loading state for disabling dropdowns
   const isLoading = loading || switching || applying;
+  const bufferSizeOptions = resolveAudioBufferSizeOptions(
+    config?.bufferSizes,
+    config?.current?.bufferSize,
+  );
+  const selectedBufferSize = resolveAudioBufferSizeRequest(
+    config?.current?.bufferSize,
+    config?.bufferSizes,
+  );
+  const performanceAdvisory =
+    resolveAudioPerformanceAdvisory(audioDiagnostics);
+  const { deadlineStatus } = performanceAdvisory;
 
   // Fetch initial config
   useEffect(() => {
@@ -46,6 +72,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       }
 
       setConfig(data);
+      const diagnostics = await nativeBridge.getAudioDebugSnapshot()
+        .catch((diagnosticError) => {
+          console.warn(
+            "[SettingsModal] Audio diagnostics are unavailable:",
+            diagnosticError,
+          );
+          return null;
+        });
+      setAudioDiagnostics(diagnostics);
     } catch (e) {
       console.error("[SettingsModal] Failed to get audio config:", e);
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -59,7 +94,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     inputDevice: current.inputDevice || "",
     outputDevice: current.outputDevice || "",
     sampleRate: Number(current.sampleRate) || 44100,
-    bufferSize: Number(current.bufferSize) || 512,
+    bufferSize: resolveAudioBufferSizeRequest(
+      current.bufferSize,
+      config?.bufferSizes,
+    ),
   });
 
   const handleApply = async () => {
@@ -118,12 +156,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       await stop();
       await nativeBridge.panicMIDI().catch(() => false);
       // Tell backend to switch audio device type
+      const switchBufferSize = resolveAudioBufferSizeRequest(
+        config?.current?.bufferSize,
+        config?.bufferSizes,
+      );
       const applied = await nativeBridge.setAudioDeviceSetup({
         type: newType,
         inputDevice: "", // Will use default
         outputDevice: "", // Will use default
         sampleRate: 44100,
-        bufferSize: 512,
+        bufferSize: switchBufferSize,
       });
       if (!applied) {
         throw new Error("Audio device rejected the selected audio system");
@@ -140,6 +182,38 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setError(e instanceof Error ? e.message : "Failed to switch audio system");
     } finally {
       setSwitching(false);
+    }
+  };
+
+  const handleOpenAudioDeviceControlPanel = async () => {
+    setOpeningDriverPanel(true);
+    setDriverPanelMessage(null);
+
+    try {
+      const result = await nativeBridge.openAudioDeviceControlPanel();
+      if (!result.success || !result.opened) {
+        throw new Error(
+          result.error || "The active ASIO driver did not open its control panel.",
+        );
+      }
+
+      await refreshConfig();
+      const deviceLabel = result.deviceName?.trim() || "ASIO driver";
+      setDriverPanelMessage({
+        tone: "success",
+        text: result.restartRequested
+          ? `${deviceLabel} restarted and its settings were refreshed.`
+          : `${deviceLabel} settings were refreshed after the control panel closed.`,
+      });
+    } catch (controlPanelError) {
+      setDriverPanelMessage({
+        tone: "error",
+        text: controlPanelError instanceof Error
+          ? controlPanelError.message
+          : "Could not open the ASIO control panel.",
+      });
+    } finally {
+      setOpeningDriverPanel(false);
     }
   };
 
@@ -222,26 +296,56 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
               {/* ASIO Driver Selection (only show when ASIO is selected) */}
               {config.current.audioDeviceType === "ASIO" && (
-                <NativeSelect
-                  label="ASIO Driver"
-                  options={config.outputs || []}
-                  value={config.current.outputDevice || (config.outputs && config.outputs[0]) || ""}
-                  onChange={(val) => {
-                    console.log("[SettingsModal] ASIO driver selected:", val);
-                    // For ASIO, input and output use the same driver
-                    const newConfig = {
-                      ...config,
-                      current: {
-                        ...config.current,
-                        inputDevice: val,
-                        outputDevice: val,
-                      },
-                    };
-                    setConfig(newConfig);
-                  }}
-                  loading={isLoading}
-                  fullWidth
-                />
+                <div>
+                  <NativeSelect
+                    label="ASIO Driver"
+                    options={config.outputs || []}
+                    value={config.current.outputDevice || (config.outputs && config.outputs[0]) || ""}
+                    onChange={(val) => {
+                      console.log("[SettingsModal] ASIO driver selected:", val);
+                      // For ASIO, input and output use the same driver
+                      const newConfig = {
+                        ...config,
+                        current: {
+                          ...config.current,
+                          inputDevice: val,
+                          outputDevice: val,
+                        },
+                      };
+                      setConfig(newConfig);
+                      setDriverPanelMessage(null);
+                    }}
+                    loading={isLoading}
+                    fullWidth
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    <span className="text-xs leading-snug text-neutral-500">
+                      Opens the active driver&apos;s native hardware settings.
+                    </span>
+                    <Button
+                      variant="default"
+                      size="sm"
+                      icon={<ExternalLink size={14} />}
+                      onClick={handleOpenAudioDeviceControlPanel}
+                      loading={openingDriverPanel}
+                      disabled={isLoading || openingDriverPanel}
+                      className="shrink-0"
+                    >
+                      Open ASIO Control Panel
+                    </Button>
+                  </div>
+                  {driverPanelMessage && (
+                    <div
+                      className={`mt-2 text-xs leading-relaxed ${
+                        driverPanelMessage.tone === "error"
+                          ? "text-red-400"
+                          : "text-emerald-400"
+                      }`}
+                    >
+                      {driverPanelMessage.text}
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Input Device (hide for ASIO, show for others) */}
@@ -283,18 +387,62 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               />
 
               {/* Buffer Size */}
-              <NativeSelect
-                label="Buffer Size"
-                options={config.bufferSizes?.length > 0 ? config.bufferSizes : [512]}
-                value={config.current.bufferSize || (config.bufferSizes && config.bufferSizes[0]) || 512}
-                onChange={(val) => {
-                  console.log("[SettingsModal] Buffer size selected:", val);
-                  updateConfig("bufferSize", Number(val));
-                }}
-                formatLabel={(val) => `${val} samples`}
-                loading={isLoading}
-                fullWidth
-              />
+              <div>
+                <NativeSelect
+                  label="Buffer Size"
+                  options={bufferSizeOptions}
+                  value={selectedBufferSize}
+                  onChange={(val) => {
+                    console.log("[SettingsModal] Buffer size selected:", val);
+                    updateConfig("bufferSize", Number(val));
+                  }}
+                  formatLabel={(val) => `${val} samples`}
+                  loading={isLoading}
+                  fullWidth
+                />
+                <div className="mt-2 text-xs leading-relaxed text-neutral-500">
+                  Every size reported by the active driver is available. Smaller
+                  buffers reduce latency but leave less time for audio processing.
+                </div>
+                {performanceAdvisory.shouldWarn && (
+                  <div className="mt-2 rounded border border-amber-500/45 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200">
+                    {performanceAdvisory.deviceXRunCount > 0 && (
+                      <div>
+                        The audio device path recorded{" "}
+                        {performanceAdvisory.deviceXRunCount}{" "}
+                        {performanceAdvisory.deviceXRunCount === 1
+                          ? "x-run"
+                          : "x-runs"}{" "}
+                        this session. This includes device or host delivery
+                        interruptions.
+                      </div>
+                    )}
+                    {deadlineStatus.shouldWarn && (
+                      <div
+                        className={
+                          performanceAdvisory.deviceXRunCount > 0 ? "mt-1" : ""
+                        }
+                      >
+                        OpenStudio separately observed{" "}
+                        {Math.max(1, deadlineStatus.burstMissCount)} recent{" "}
+                        {deadlineStatus.burstMissCount === 1
+                          ? "callback"
+                          : "callbacks"}{" "}
+                        missing its processing deadline
+                        {audioDiagnostics?.blockSize
+                          ? ` at ${audioDiagnostics.blockSize} samples`
+                          : ""}
+                        .
+                      </div>
+                    )}
+                    <div className="mt-1 text-amber-200/80">
+                      Either condition can sound like crackling or dropouts. If
+                      it continues, try the next larger size supported by your
+                      driver.
+                    </div>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>

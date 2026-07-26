@@ -5,9 +5,22 @@
 #include "MainComponent.h"
 #include "MixerWindowManager.h"
 
+#include "NAM/container.h"
+#include "NAM/convnet.h"
+#include "NAM/dsp.h"
+#include "NAM/get_dsp.h"
+#include "NAM/lstm.h"
+#include "NAM/model_config.h"
+#include "NAM/wavenet/model.h"
+
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <vector>
 
 #if JUCE_WINDOWS
  #include <dwmapi.h>
@@ -141,6 +154,178 @@ bool writeHeadlessResult(const juce::File& resultFile, const juce::var& result)
 
     resultFile.getParentDirectory().createDirectory();
     return resultFile.replaceWithText(juce::JSON::toString(result, true));
+}
+
+void ensureNAMProbeParsersRegistered()
+{
+    static std::once_flag once;
+    std::call_once(once, []
+    {
+        auto& registry = nam::ConfigParserRegistry::instance();
+
+        if (! registry.has("Linear"))
+            registry.registerParser("Linear", nam::linear::create_config);
+        if (! registry.has("LSTM"))
+            registry.registerParser("LSTM", nam::lstm::create_config);
+        if (! registry.has("ConvNet"))
+            registry.registerParser("ConvNet", nam::convnet::create_config);
+        if (! registry.has("WaveNet"))
+            registry.registerParser("WaveNet", nam::wavenet::create_config);
+        if (! registry.has("SlimmableContainer"))
+            registry.registerParser("SlimmableContainer", nam::container::create_config);
+    });
+}
+
+float namProbeInputSample(int absoluteSample, double sampleRate)
+{
+    const double t = static_cast<double>(absoluteSample) / juce::jmax(1.0, sampleRate);
+    const double phrase = std::fmod(t, 0.78);
+    const double envelope = phrase < 0.006 ? phrase / 0.006 : std::exp(-phrase / 0.21);
+    const double f0 = phrase < 0.26 ? 110.0 : (phrase < 0.52 ? 146.832 : 195.998);
+    const double harmonic = std::sin(juce::MathConstants<double>::twoPi * f0 * t)
+        + 0.35 * std::sin(juce::MathConstants<double>::twoPi * f0 * 2.01 * t + 0.2)
+        + 0.16 * std::sin(juce::MathConstants<double>::twoPi * f0 * 3.02 * t + 0.6);
+    return static_cast<float>(harmonic * envelope * 0.075);
+}
+
+int runHeadlessNAMModelProbe(const juce::File& modelFile, const juce::File& reportFile)
+{
+    juce::Array<juce::var> checks;
+    auto* root = new juce::DynamicObject();
+    root->setProperty("harnessMode", "nam_model_probe");
+    root->setProperty("claimLevel", "objective_only");
+    root->setProperty("subjectiveQuality", "not_asserted");
+    root->setProperty("modelPath", modelFile.getFullPathName());
+
+    auto finish = [&] (bool pass, const juce::String& error = {})
+    {
+        root->setProperty("objectiveGateStatus", pass ? "pass" : "fail");
+        root->setProperty("success", pass);
+        if (error.isNotEmpty())
+            root->setProperty("error", error);
+        root->setProperty("checks", juce::var(checks));
+        const bool wrote = writeHeadlessResult(reportFile, juce::var(root));
+        juce::Logger::writeToLog("[namModelProbe.headless] report=" + reportFile.getFullPathName()
+            + " wroteReport=" + juce::String(wrote ? "true" : "false")
+            + " objectiveGateStatus=" + juce::String(pass ? "pass" : "fail")
+            + (error.isNotEmpty() ? " error=" + error : juce::String()));
+        return wrote && pass ? 0 : 2;
+    };
+
+    if (! modelFile.existsAsFile())
+    {
+        addHarnessCheck(checks, "model_file_exists", "fail", "NAM model file must exist before loading.", modelFile.getFullPathName());
+        return finish(false, "NAM model file does not exist.");
+    }
+    addHarnessCheck(checks, "model_file_exists", "pass", "NAM model file exists.", modelFile.getFullPathName());
+
+    const auto parsed = juce::JSON::parse(modelFile.loadFileAsString());
+    if (! parsed.isObject()
+        || ! parsed.hasProperty("version")
+        || ! parsed.hasProperty("architecture")
+        || ! parsed.hasProperty("config")
+        || ! parsed.getProperty("weights", {}).isArray())
+    {
+        addHarnessCheck(checks, "nam_json_shape", "fail", "NAM file must contain version, architecture, config, and weights.", {});
+        return finish(false, "Invalid NAM model file shape.");
+    }
+
+    const auto architecture = parsed.getProperty("architecture", {}).toString();
+    root->setProperty("architecture", architecture);
+    root->setProperty("version", parsed.getProperty("version", {}).toString());
+    root->setProperty("sampleRate", parsed.getProperty("sample_rate", {}));
+    addHarnessCheck(checks, "nam_json_shape", "pass", "NAM JSON shape looks loadable.", architecture);
+
+    try
+    {
+        ensureNAMProbeParsersRegistered();
+        auto dsp = nam::get_dsp(std::filesystem::path(modelFile.getFullPathName().toStdString()));
+        if (dsp == nullptr)
+        {
+            addHarnessCheck(checks, "core_get_dsp", "fail", "NeuralAmpModelerCore returned no DSP instance.", {});
+            return finish(false, "NeuralAmpModelerCore returned no DSP instance.");
+        }
+
+        const int inChannels = juce::jmax(1, dsp->NumInputChannels());
+        const int outChannels = juce::jmax(1, dsp->NumOutputChannels());
+        const double sampleRate = dsp->GetExpectedSampleRate() > 1000.0 ? dsp->GetExpectedSampleRate() : 48000.0;
+        constexpr int blockSize = 512;
+        constexpr int blockCount = 10;
+        dsp->ResetAndPrewarm(sampleRate, blockSize);
+
+        std::vector<std::vector<NAM_SAMPLE>> inputBuffers(static_cast<size_t>(inChannels));
+        std::vector<std::vector<NAM_SAMPLE>> outputBuffers(static_cast<size_t>(outChannels));
+        std::vector<NAM_SAMPLE*> inputPtrs(static_cast<size_t>(inChannels));
+        std::vector<NAM_SAMPLE*> outputPtrs(static_cast<size_t>(outChannels));
+        for (int ch = 0; ch < inChannels; ++ch)
+        {
+            inputBuffers[static_cast<size_t>(ch)].assign(blockSize, static_cast<NAM_SAMPLE>(0));
+            inputPtrs[static_cast<size_t>(ch)] = inputBuffers[static_cast<size_t>(ch)].data();
+        }
+        for (int ch = 0; ch < outChannels; ++ch)
+        {
+            outputBuffers[static_cast<size_t>(ch)].assign(blockSize, static_cast<NAM_SAMPLE>(0));
+            outputPtrs[static_cast<size_t>(ch)] = outputBuffers[static_cast<size_t>(ch)].data();
+        }
+
+        int nonFinite = 0;
+        float peak = 0.0f;
+        double rmsAccum = 0.0;
+        int rmsCount = 0;
+        for (int block = 0; block < blockCount; ++block)
+        {
+            for (int sample = 0; sample < blockSize; ++sample)
+            {
+                const auto value = namProbeInputSample(block * blockSize + sample, sampleRate);
+                for (int ch = 0; ch < inChannels; ++ch)
+                    inputBuffers[static_cast<size_t>(ch)][static_cast<size_t>(sample)] = static_cast<NAM_SAMPLE>(value);
+            }
+
+            dsp->process(inputPtrs.data(), outputPtrs.data(), blockSize);
+
+            for (int ch = 0; ch < outChannels; ++ch)
+            {
+                const auto& output = outputBuffers[static_cast<size_t>(ch)];
+                for (int sample = 0; sample < blockSize; ++sample)
+                {
+                    const float value = static_cast<float>(output[static_cast<size_t>(sample)]);
+                    if (! std::isfinite(value))
+                        ++nonFinite;
+                    peak = juce::jmax(peak, std::abs(value));
+                    rmsAccum += static_cast<double>(value) * static_cast<double>(value);
+                    ++rmsCount;
+                }
+            }
+        }
+
+        const double rms = rmsCount > 0 ? std::sqrt(rmsAccum / static_cast<double>(rmsCount)) : 0.0;
+        root->setProperty("expectedSampleRate", sampleRate);
+        root->setProperty("inputChannels", inChannels);
+        root->setProperty("outputChannels", outChannels);
+        root->setProperty("peak", peak);
+        root->setProperty("rms", rms);
+        root->setProperty("nonFiniteCount", nonFinite);
+
+        const bool pass = nonFinite == 0 && peak < 32.0f;
+        addHarnessCheck(checks,
+                        "core_load_and_process",
+                        pass ? "pass" : "fail",
+                        "NAM Core should load the model and process a short finite probe without exploding.",
+                        "peak=" + juce::String(peak, 6) + " rms=" + juce::String(rms, 6));
+        return finish(pass, pass ? juce::String() : juce::String("NAM model produced invalid probe output."));
+    }
+    catch (const std::exception& ex)
+    {
+        const auto error = juce::String("NAM Core rejected model: ") + ex.what();
+        addHarnessCheck(checks, "core_load_and_process", "fail", "NAM Core threw while probing the model.", error);
+        return finish(false, error);
+    }
+    catch (...)
+    {
+        const auto error = juce::String("NAM Core rejected model: unknown exception");
+        addHarnessCheck(checks, "core_load_and_process", "fail", "NAM Core threw while probing the model.", error);
+        return finish(false, error);
+    }
 }
 
 int runHeadlessPitchRegressionJob(AudioEngine& audioEngine, const juce::String& jobPath)
@@ -479,6 +664,55 @@ int runHeadlessAutomatedRegressionSuite(AudioEngine& audioEngine, const juce::Fi
 
     return wroteReport && overallPass ? 0 : 2;
 }
+
+int runHeadlessCleanGuitarRegression(AudioEngine& audioEngine, const juce::File& reportFile)
+{
+    auto result = audioEngine.runCleanGuitarPitchBendRegression();
+    const bool wroteReport = writeHeadlessResult(reportFile, result);
+    const bool pass = result.isObject()
+        && result.getProperty("objectiveGateStatus", {}).toString() == "pass";
+
+    juce::Logger::writeToLog("[cleanGuitarRegression.headless] report=" + reportFile.getFullPathName()
+        + " wroteReport=" + juce::String(wroteReport ? "true" : "false")
+        + " objectiveGateStatus=" + result.getProperty("objectiveGateStatus", {}).toString());
+
+    return wroteReport && pass ? 0 : 2;
+}
+
+int runHeadlessNAMRackRegression(AudioEngine& audioEngine, const juce::File& reportFile)
+{
+    auto result = audioEngine.runNAMRackRegression();
+    const bool wroteReport = writeHeadlessResult(reportFile, result);
+    const bool pass = result.isObject()
+        && result.getProperty("objectiveGateStatus", {}).toString() == "pass";
+
+    juce::Logger::writeToLog("[namRackRegression.headless] report=" + reportFile.getFullPathName()
+        + " wroteReport=" + juce::String(wroteReport ? "true" : "false")
+        + " objectiveGateStatus=" + result.getProperty("objectiveGateStatus", {}).toString());
+
+    return wroteReport && pass ? 0 : 2;
+}
+
+int runHeadlessNAMRackDIRegression(AudioEngine& audioEngine,
+                                   const juce::File& inputFile,
+                                   const juce::File& outputDirectory,
+                                   const juce::File& reportFile,
+                                   const juce::File& modelFile)
+{
+    auto result = audioEngine.runNAMRackDIRegression(inputFile, outputDirectory, modelFile);
+    const bool wroteReport = writeHeadlessResult(reportFile, result);
+    const bool pass = result.isObject()
+        && result.getProperty("objectiveGateStatus", {}).toString() == "pass";
+
+    juce::Logger::writeToLog("[namRackDIRegression.headless] input=" + inputFile.getFullPathName()
+        + " outputDir=" + outputDirectory.getFullPathName()
+        + " report=" + reportFile.getFullPathName()
+        + " model=" + modelFile.getFullPathName()
+        + " wroteReport=" + juce::String(wroteReport ? "true" : "false")
+        + " objectiveGateStatus=" + result.getProperty("objectiveGateStatus", {}).toString());
+
+    return wroteReport && pass ? 0 : 2;
+}
 }
 
 //==============================================================================
@@ -507,6 +741,13 @@ public:
         const auto startupSelfTestReportPath = getCommandLineOptionValue(commandLine, "--report");
         const auto pitchRegressionHeadlessJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression-headless");
         const auto pitchRegressionJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression");
+        const auto cleanGuitarRegressionReportPath = getCommandLineOptionValue(commandLine, "--clean-guitar-regression-headless");
+        const auto namRackRegressionReportPath = getCommandLineOptionValue(commandLine, "--nam-rack-regression-headless");
+        const auto namRackDIRegressionInputPath = getCommandLineOptionValue(commandLine, "--nam-rack-di-regression-headless");
+        const auto headlessOutputDirectoryPath = getCommandLineOptionValue(commandLine, "--output-dir");
+        const auto namRackDIRegressionModelPath = getCommandLineOptionValue(commandLine, "--model-path");
+        const auto namModelProbePath = getCommandLineOptionValue(commandLine, "--nam-model-probe-headless");
+        const auto windowLifecycleHarnessMode = commandLineHasFlag(commandLine, "--window-lifecycle-harness");
         startupMode = commandLineHasFlag(commandLine, "--ui-safe-mode")
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
@@ -525,6 +766,37 @@ public:
         {
             juce::Logger::writeToLog("Pitch regression headless job path: " + pitchRegressionHeadlessJobPath);
             juce::Logger::writeToLog("OPENSTUDIO_PITCH_DEBUG=" + juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_PITCH_DEBUG", "<unset>"));
+        }
+        if (cleanGuitarRegressionReportPath.isNotEmpty())
+        {
+            juce::Logger::writeToLog("Clean guitar regression report path: " + cleanGuitarRegressionReportPath);
+        }
+        if (namRackRegressionReportPath.isNotEmpty())
+        {
+            juce::Logger::writeToLog("NAM rack regression report path: " + namRackRegressionReportPath);
+        }
+        if (namRackDIRegressionInputPath.isNotEmpty())
+        {
+            juce::Logger::writeToLog("NAM rack DI regression input path: " + namRackDIRegressionInputPath);
+            if (headlessOutputDirectoryPath.isNotEmpty())
+                juce::Logger::writeToLog("NAM rack DI regression output directory: " + headlessOutputDirectoryPath);
+            if (startupSelfTestReportPath.isNotEmpty())
+                juce::Logger::writeToLog("NAM rack DI regression report path: " + startupSelfTestReportPath);
+            if (namRackDIRegressionModelPath.isNotEmpty())
+                juce::Logger::writeToLog("NAM rack DI regression model path: " + namRackDIRegressionModelPath);
+        }
+        if (namModelProbePath.isNotEmpty())
+        {
+            juce::Logger::writeToLog("NAM model probe path: " + namModelProbePath);
+            if (startupSelfTestReportPath.isNotEmpty())
+                juce::Logger::writeToLog("NAM model probe report path: " + startupSelfTestReportPath);
+        }
+        if (windowLifecycleHarnessMode)
+        {
+            const auto reportPath = startupSelfTestReportPath.isNotEmpty()
+                ? startupSelfTestReportPath
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_WindowLifecycleHarness.json").getFullPathName();
+            juce::Logger::writeToLog("Window lifecycle harness enabled. Report path: " + reportPath);
         }
 
         if (startupSelfTestMode)
@@ -555,6 +827,55 @@ public:
         if (pitchRegressionHeadlessJobPath.isNotEmpty())
         {
             const auto exitCode = runHeadlessPitchRegressionJob(audioEngine, pitchRegressionHeadlessJobPath);
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        if (cleanGuitarRegressionReportPath.isNotEmpty())
+        {
+            const auto exitCode = runHeadlessCleanGuitarRegression(audioEngine, juce::File(cleanGuitarRegressionReportPath.trim().unquoted()));
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        if (namRackRegressionReportPath.isNotEmpty())
+        {
+            const auto exitCode = runHeadlessNAMRackRegression(audioEngine, juce::File(namRackRegressionReportPath.trim().unquoted()));
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        if (namRackDIRegressionInputPath.isNotEmpty())
+        {
+            const auto outputDirectory = headlessOutputDirectoryPath.isNotEmpty()
+                ? juce::File(headlessOutputDirectoryPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile("nam_rack_di_regression");
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : outputDirectory.getChildFile("nam_rack_di_regression_result.json");
+            const auto modelFile = namRackDIRegressionModelPath.isNotEmpty()
+                ? juce::File(namRackDIRegressionModelPath.trim().unquoted())
+                : juce::File();
+
+            const auto exitCode = runHeadlessNAMRackDIRegression(audioEngine,
+                                                                 juce::File(namRackDIRegressionInputPath.trim().unquoted()),
+                                                                 outputDirectory,
+                                                                 reportFile,
+                                                                 modelFile);
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        if (namModelProbePath.isNotEmpty())
+        {
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_NAMModelProbe.json");
+            const auto exitCode = runHeadlessNAMModelProbe(juce::File(namModelProbePath.trim().unquoted()), reportFile);
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -602,12 +923,25 @@ public:
         });
 
         juce::Logger::writeToLog("MainWindow Created.");
+
+        if (windowLifecycleHarnessMode)
+        {
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_WindowLifecycleHarness.json");
+
+            juce::Timer::callAfterDelay(1000, [this, reportFile]()
+            {
+                runWindowLifecycleHarness(reportFile);
+            });
+        }
     }
 
     void shutdown() override
     {
         juce::Logger::writeToLog("Application Check-out.");
 
+        pluginEditorWindowManagers.clear();
         midiEditorWindowManagers.clear();
         mixerWindowManager = nullptr;
         mainWindow = nullptr;
@@ -619,6 +953,9 @@ public:
     {
         if (mixerWindowManager != nullptr)
             mixerWindowManager->close();
+        for (auto& entry : pluginEditorWindowManagers)
+            if (entry.second != nullptr)
+                entry.second->close();
         for (auto& entry : midiEditorWindowManagers)
             if (entry.second != nullptr)
             {
@@ -780,6 +1117,14 @@ private:
         {
             return getMidiEditorUISnapshot(sessionId);
         };
+        callbacks.openPluginEditorWindow = [this](const juce::String& sessionId, const juce::var& bounds)
+        {
+            return openPluginEditorWindow(sessionId, bounds);
+        };
+        callbacks.closePluginEditorWindow = [this](const juce::String& sessionId, const juce::String& reason)
+        {
+            return closePluginEditorWindow(sessionId, reason);
+        };
         return callbacks;
     }
 
@@ -803,6 +1148,7 @@ private:
     {
         auto* obj = new juce::DynamicObject();
         obj->setProperty("isOpen", mixerWindowManager != nullptr && mixerWindowManager->isOpen());
+        obj->setProperty("state", mixerWindowManager != nullptr ? mixerWindowManager->getStateDescription() : juce::String("idle"));
         return juce::var(obj);
     }
 
@@ -826,6 +1172,29 @@ private:
     {
         const auto trimmed = sessionId.trim();
         return trimmed.isNotEmpty() ? trimmed : juce::String("default-midi-editor");
+    }
+
+    juce::String normalisePluginEditorSessionId(const juce::String& sessionId) const
+    {
+        const auto trimmed = sessionId.trim();
+        return trimmed.isNotEmpty() ? trimmed : juce::String("default-plugin-editor");
+    }
+
+    juce::String getPluginEditorTitleFromSession(const juce::String& sessionId) const
+    {
+        auto parsed = juce::JSON::parse(sessionId);
+        if (auto* object = parsed.getDynamicObject())
+        {
+            const auto title = object->getProperty("title").toString().trim();
+            if (title.isNotEmpty())
+                return title;
+
+            const auto fallbackName = object->getProperty("fallbackName").toString().trim();
+            if (fallbackName.isNotEmpty())
+                return fallbackName;
+        }
+
+        return "OpenStudio Plugin";
     }
 
     MixerWindowManager* getOrCreateMidiEditorWindowManager(const juce::String& sessionId)
@@ -910,6 +1279,9 @@ private:
         obj->setProperty("isOpen", existing != midiEditorWindowManagers.end()
                                    && existing->second != nullptr
                                    && existing->second->isOpen());
+        obj->setProperty("state", existing != midiEditorWindowManagers.end() && existing->second != nullptr
+                                    ? existing->second->getStateDescription()
+                                    : juce::String("idle"));
         obj->setProperty("sessionId", safeSessionId);
         return juce::var(obj);
     }
@@ -931,6 +1303,57 @@ private:
         const juce::ScopedLock sl(midiEditorSnapshotLock);
         const auto existing = latestMidiEditorUISnapshots.find(safeSessionId);
         return existing != latestMidiEditorUISnapshots.end() ? existing->second : juce::var();
+    }
+
+    MixerWindowManager* getOrCreatePluginEditorWindowManager(const juce::String& sessionId)
+    {
+        const auto safeSessionId = normalisePluginEditorSessionId(sessionId);
+        auto existing = pluginEditorWindowManagers.find(safeSessionId);
+        if (existing != pluginEditorWindowManagers.end())
+            return existing->second.get();
+
+        auto manager = std::make_unique<MixerWindowManager>(
+            [this, safeSessionId]()
+            {
+                return std::make_unique<MainComponent>(audioEngine,
+                                                       appUpdater,
+                                                       startupMode,
+                                                       MainComponent::WindowRole::pluginEditor,
+                                                       createWindowCallbacks(),
+                                                       juce::String(),
+                                                       safeSessionId);
+            },
+            [this, safeSessionId](const juce::Rectangle<int>& bounds)
+            {
+                handlePluginEditorWindowClosed(safeSessionId, bounds);
+            },
+            getPluginEditorTitleFromSession(safeSessionId),
+            juce::Rectangle<int>(180, 90, 1320, 860),
+            980,
+            620);
+
+        auto* result = manager.get();
+        pluginEditorWindowManagers[safeSessionId] = std::move(manager);
+        return result;
+    }
+
+    bool openPluginEditorWindow(const juce::String& sessionId, const juce::var& boundsValue)
+    {
+        if (auto* manager = getOrCreatePluginEditorWindowManager(sessionId))
+            return manager->open(rectangleFromVar(boundsValue));
+
+        return false;
+    }
+
+    bool closePluginEditorWindow(const juce::String& sessionId, const juce::String& reason)
+    {
+        juce::ignoreUnused(reason);
+        const auto safeSessionId = normalisePluginEditorSessionId(sessionId);
+        auto existing = pluginEditorWindowManagers.find(safeSessionId);
+        if (existing == pluginEditorWindowManagers.end() || existing->second == nullptr)
+            return false;
+
+        return existing->second->close();
     }
 
     void handleMixerWindowClosed(const juce::Rectangle<int>& bounds)
@@ -959,12 +1382,165 @@ private:
         MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "midiEditorWindowClosed", juce::var(payload));
     }
 
+    void handlePluginEditorWindowClosed(const juce::String& sessionId, const juce::Rectangle<int>& bounds)
+    {
+        if (auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr)
+            audioEngine.setPluginWindowOwnerComponent(component);
+
+        auto* payload = new juce::DynamicObject();
+        payload->setProperty("sessionId", sessionId);
+        payload->setProperty("bounds", rectangleToVar(bounds));
+        MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "builtInPluginEditorWindowClosed", juce::var(payload));
+    }
+
+    void runWindowLifecycleHarness(const juce::File& reportFile)
+    {
+        struct HarnessStep
+        {
+            juce::String id;
+            int delayAfterMs = 400;
+            std::function<bool()> action;
+        };
+
+        const auto mixerBounds = juce::Rectangle<int>(120, 120, 1180, 520);
+        const auto midiBounds = juce::Rectangle<int>(140, 100, 1180, 720);
+        const auto pluginBounds = juce::Rectangle<int>(180, 90, 1040, 680);
+        const juce::String midiSessionId = "window-lifecycle-midi";
+        const juce::String pluginSessionId = R"({"title":"Window Lifecycle Harness","fallbackName":"OpenStudio Built-in","address":{"trackId":"window-lifecycle","chain":"track","fxIndex":0}})";
+
+        auto checks = std::make_shared<juce::Array<juce::var>>();
+        auto steps = std::make_shared<std::vector<HarnessStep>>();
+
+        steps->push_back({ "mixer_prewarm", 700, [this, mixerBounds]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->prewarm(mixerBounds);
+        }});
+        steps->push_back({ "mixer_open", 700, [this, mixerBounds]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->open(mixerBounds);
+        }});
+        steps->push_back({ "mixer_focus", 300, [this]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->focus();
+        }});
+        steps->push_back({ "mixer_close", 50, [this]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->close();
+        }});
+        steps->push_back({ "mixer_reopen_while_closing", 3000, [this, mixerBounds]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->open(mixerBounds);
+        }});
+        steps->push_back({ "mixer_final_close", 2200, [this]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->close();
+        }});
+
+        steps->push_back({ "midi_prewarm", 700, [this, midiSessionId, midiBounds]()
+        {
+            return prewarmMidiEditorWindow(midiSessionId, rectangleToVar(midiBounds));
+        }});
+        steps->push_back({ "midi_focus", 300, [this, midiSessionId]()
+        {
+            return focusMidiEditorWindow(midiSessionId);
+        }});
+        steps->push_back({ "midi_close", 50, [this, midiSessionId]()
+        {
+            return closeMidiEditorWindow(midiSessionId, "close");
+        }});
+        steps->push_back({ "midi_reopen_while_closing", 3000, [this, midiSessionId, midiBounds]()
+        {
+            return openMidiEditorWindow(midiSessionId, rectangleToVar(midiBounds));
+        }});
+        steps->push_back({ "midi_final_close", 2200, [this, midiSessionId]()
+        {
+            return closeMidiEditorWindow(midiSessionId, "close");
+        }});
+
+        steps->push_back({ "plugin_open", 700, [this, pluginSessionId, pluginBounds]()
+        {
+            return openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
+        }});
+        steps->push_back({ "plugin_close", 50, [this, pluginSessionId]()
+        {
+            return closePluginEditorWindow(pluginSessionId, "close");
+        }});
+        steps->push_back({ "plugin_reopen_while_closing", 3000, [this, pluginSessionId, pluginBounds]()
+        {
+            return openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
+        }});
+        steps->push_back({ "plugin_final_close", 2200, [this, pluginSessionId]()
+        {
+            return closePluginEditorWindow(pluginSessionId, "close");
+        }});
+
+        auto stepIndex = std::make_shared<size_t>(0);
+        auto runner = std::make_shared<std::function<void()>>();
+        *runner = [this, reportFile, checks, steps, stepIndex, runner, midiSessionId]() mutable
+        {
+            if (*stepIndex >= steps->size())
+            {
+                const bool success = ! hasFailedHarnessCheck(*checks);
+                auto* root = new juce::DynamicObject();
+                root->setProperty("harnessMode", "window_lifecycle");
+                root->setProperty("success", success);
+                root->setProperty("checks", juce::var(*checks));
+                root->setProperty("mixerState", getMixerWindowState());
+                root->setProperty("midiState", getMidiEditorWindowState(midiSessionId));
+                root->setProperty("generatedAtMs", static_cast<double>(juce::Time::currentTimeMillis()));
+
+                const bool wrote = writeHeadlessResult(reportFile, juce::var(root));
+                juce::Logger::writeToLog("[windowLifecycleHarness] report=" + reportFile.getFullPathName()
+                                         + " wroteReport=" + juce::String(wrote ? "true" : "false")
+                                         + " success=" + juce::String(success ? "true" : "false"));
+
+                setApplicationReturnValue(wrote && success ? 0 : 2);
+
+                juce::Timer::callAfterDelay(200, []()
+                {
+                    if (auto* app = juce::JUCEApplication::getInstance())
+                        app->systemRequestedQuit();
+                });
+                return;
+            }
+
+            const auto& step = (*steps)[*stepIndex];
+            bool ok = false;
+            juce::String detail;
+
+            try
+            {
+                ok = step.action != nullptr && step.action();
+                detail = ok ? "accepted" : "rejected";
+            }
+            catch (...)
+            {
+                ok = false;
+                detail = "exception";
+            }
+
+            addHarnessCheck(*checks, step.id, ok ? "pass" : "fail", detail);
+            juce::Logger::writeToLog("[windowLifecycleHarness] " + step.id + " " + detail);
+            ++(*stepIndex);
+
+            juce::Timer::callAfterDelay(step.delayAfterMs, [runner]()
+            {
+                if (runner != nullptr && *runner)
+                    (*runner)();
+            });
+        };
+
+        juce::Logger::writeToLog("[windowLifecycleHarness] starting");
+        (*runner)();
+    }
+
     AudioEngine audioEngine;
     AppUpdater appUpdater;
     MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<MixerWindowManager> mixerWindowManager;
     std::map<juce::String, std::unique_ptr<MixerWindowManager>> midiEditorWindowManagers;
+    std::map<juce::String, std::unique_ptr<MixerWindowManager>> pluginEditorWindowManagers;
     mutable juce::CriticalSection mixerSnapshotLock;
     juce::var latestMixerUISnapshot;
     mutable juce::CriticalSection midiEditorSnapshotLock;

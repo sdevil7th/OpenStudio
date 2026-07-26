@@ -1,4 +1,4 @@
-# Studio13-v3
+# OpenStudio
 
 A hybrid DAW (Digital Audio Workstation) with a **JUCE C++ backend** for audio processing and a **React/TypeScript frontend** rendered in WebView2.
 
@@ -26,7 +26,7 @@ C++ (JUCE) Backend          React/TypeScript Frontend
 ## Directory Structure
 
 ```
-Studio13-v3/
+OpenStudio/
 ├── Source/                      # C++ backend
 │   ├── Main.cpp                 # JUCE app entry point
 │   ├── MainComponent.h/cpp      # Hosts WebBrowserComponent + AudioEngine, exposes native functions to JS
@@ -177,7 +177,7 @@ Before asking for manual testing:
 - Make sure the latest frontend code is built into `frontend/dist` when packaged fallback could be used.
 - Run `cmake --build build --config Debug` after frontend or C++ changes so the Debug app and copied `webui` assets are current.
 - Do not require the user to pre-run Vite, npm, or any other server. `python build.py dev --run` must start what it needs.
-- Stop any Codex-started dev servers, harness browsers, or background Vite/npm processes before handing off. Verify port `5173` is not left occupied by a Codex-started process.
+- Stop any Codex-started dev servers, harness browsers, or background Vite/npm processes before handing off. Verify port `5183` is not left occupied by a Codex-started process.
 - In the handoff, state that the CMake Debug build was completed and that no pre-running server is required.
 
 ## Key Technical Details

@@ -484,7 +484,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
 
       const command: Command = {
         type: "LOAD_INSTRUMENT",
-        description: `Load Studio13 ${instrument}`,
+        description: `Load OpenStudio ${instrument}`,
         timestamp: Date.now(),
         execute: async () => {
           await nativeBridge.removeInstrument(trackId).catch(() => false);

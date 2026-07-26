@@ -15,12 +15,12 @@
       "Bash(dir:*)",
       "Bash(python -c:*)",
       "Bash(python:*)",
-      "Bash(# Check if there are leftover Studio13 processes or WebView2 processes tasklist)",
+      "Bash(# Check if there are leftover OpenStudio processes or WebView2 processes tasklist)",
       "Bash(echo:*)",
       "Read(//c/Users/srvds/AppData/Local/Temp/**)",
-      "Read(//c/Users/srvds/Documents/Studio13/**)",
+      "Read(//c/Users/srvds/Documents/OpenStudio/**)",
       "Read(//c/Users/srvds/Documents/**)",
-      "Read(//c/Users/srvds/OneDrive/Documents/Studio13/**)",
+      "Read(//c/Users/srvds/OneDrive/Documents/OpenStudio/**)",
       "Read(//c/Users/srvds/**)",
       "Bash(find . -name \"*.tsx\" -type f -exec grep -l \"useSortable\\\\|@dnd-kit\" {} ;)",
       "WebFetch(domain:forums.steinberg.net)",
@@ -28,26 +28,26 @@
       "Bash(cmake -B build -DCMAKE_BUILD_TYPE=Debug)",
       "WebSearch",
       "Bash(gh release:*)",
-      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3/resources -type f -name *model* -o -name *.onnx -o -name *.ckpt)",
+      "Bash(find /c/Users/srvds/Documents/Codes/OpenStudio/resources -type f -name *model* -o -name *.onnx -o -name *.ckpt)",
       "Bash(find Source -type f \\\\\\( -name \"*.cpp\" -o -name \"*.h\" \\\\\\) -exec wc -l {} +)",
-      "Bash(find \"c:/Users/srvds/Documents/Codes/Studio13-v3/frontend/src\" -type f \\\\\\( -name \"*.tsx\" -o -name \"*.ts\" -o -name \"*.css\" \\\\\\) -exec wc -l {} +)",
-      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3/Source -type f \\\\\\( -name \"*.cpp\" -o -name \"*.h\" \\\\\\) -exec wc -l {} +)",
-      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3/frontend/src -type f \\\\\\( -name \"*.ts\" -o -name \"*.tsx\" \\\\\\) -exec wc -l {} +)",
-      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3 -type f \\\\\\(-name *test* -o -name *spec* -o -name .github -o -name .gitlab-ci* -o -name azure-pipelines* \\\\\\))",
-      "Bash(du -sh /c/Users/srvds/Documents/Codes/Studio13-v3/*)",
+      "Bash(find \"c:/Users/srvds/Documents/Codes/OpenStudio/frontend/src\" -type f \\\\\\( -name \"*.tsx\" -o -name \"*.ts\" -o -name \"*.css\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find /c/Users/srvds/Documents/Codes/OpenStudio/Source -type f \\\\\\( -name \"*.cpp\" -o -name \"*.h\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find /c/Users/srvds/Documents/Codes/OpenStudio/frontend/src -type f \\\\\\( -name \"*.ts\" -o -name \"*.tsx\" \\\\\\) -exec wc -l {} +)",
+      "Bash(find /c/Users/srvds/Documents/Codes/OpenStudio -type f \\\\\\(-name *test* -o -name *spec* -o -name .github -o -name .gitlab-ci* -o -name azure-pipelines* \\\\\\))",
+      "Bash(du -sh /c/Users/srvds/Documents/Codes/OpenStudio/*)",
       "Bash(xargs grep:*)",
       "Bash(for file:*)",
       "Bash(do echo:*)",
-      "Read(//c/Users/srvds/Documents/Codes/Studio13-v3/**)",
+      "Read(//c/Users/srvds/Documents/Codes/OpenStudio/**)",
       "Bash(done)",
       "Bash(wc -l Source/*.cpp Source/*.h)",
       "Bash(grep -o \"include.*signalsmith\\\\|include.*ysfx\\\\|include.*lua\\\\|include.*onnx\\\\|include.*clap\" Source/*.h)",
       "Bash(grep -r \"^[[:space:]]*\\\\/\\\\/\" Source/*.cpp)",
       "Bash(grep -h \"^[[:space:]]*\\\\/\\\\*\" Source/*.cpp)",
-      "Bash(find /c/Users/srvds/Documents/Codes/Studio13-v3 -type d -iname *test* -o -type d -iname *spec*)"
+      "Bash(find /c/Users/srvds/Documents/Codes/OpenStudio -type d -iname *test* -o -type d -iname *spec*)"
     ],
     "additionalDirectories": [
-      "C:\\Users\\srvds\\OneDrive\\Documents\\Studio13"
+      "C:\\Users\\srvds\\OneDrive\\Documents\\OpenStudio"
     ]
   }
 }

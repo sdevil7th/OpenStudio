@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, SlidersHorizontal, X } from "lucide-react";
 import {
   BuiltInParamDescriptor,
@@ -8,7 +8,16 @@ import {
 } from "../services/NativeBridge";
 import { ParametricGraph } from "./ParametricGraph";
 import type { GraphAxis, GraphNode, GraphNodeConfig } from "./ParametricGraph";
+import { NAMRackPanel } from "./NAMRackPanel";
 import { Button } from "./ui";
+import {
+  clampNumber as clamp,
+  formatParamValue,
+  normalizeParam as normalize,
+  stepForParam,
+} from "../utils/builtInParamValue";
+
+export { formatParamValue, stepForParam };
 
 interface BuiltInPluginPanelProps {
   address: BuiltInPluginAddress;
@@ -17,30 +26,121 @@ interface BuiltInPluginPanelProps {
   initialSchema?: BuiltInPluginSchema;
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-export function formatParamValue(param: BuiltInParamDescriptor) {
-  if (param.type === "toggle") return param.value >= 0.5 ? "On" : "Off";
-  if (param.type === "enum") {
-    return (
-      param.enumOptions?.find((option) => Math.round(option.value) === Math.round(param.value))
-        ?.label ?? String(Math.round(param.value))
-    );
-  }
-  const span = Math.abs(param.max - param.min);
-  const decimals = span <= 2 ? 2 : span <= 50 ? 1 : 0;
-  return `${param.value.toFixed(decimals)}${param.unit ? ` ${param.unit}` : ""}`;
-}
-
-function normalize(param: BuiltInParamDescriptor) {
-  if (param.max <= param.min) return 0;
-  return clamp((param.value - param.min) / (param.max - param.min), 0, 1);
-}
-
 function getParam(params: BuiltInParamDescriptor[], id: string) {
   return params.find((param) => param.id === id);
+}
+
+function makeFallbackParam(
+  id: string,
+  label: string,
+  value: number,
+  min: number,
+  max: number,
+  defaultValue: number,
+  unit = "",
+  graphRole = "controls",
+  type: BuiltInParamDescriptor["type"] = "continuous",
+): BuiltInParamDescriptor {
+  return {
+    id,
+    label,
+    type,
+    value,
+    min,
+    max,
+    defaultValue,
+    unit,
+    automatable: type !== "meter",
+    graphRole,
+  };
+}
+
+function isNAMPluginName(name: string) {
+  return name.toLowerCase().includes("nam");
+}
+
+function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string): BuiltInPluginSchema {
+  return {
+    schemaVersion: 1,
+    name: fallbackName || "OpenStudio NAM Rack",
+    category: "NAM",
+    chain: address.chain,
+    fxIndex: address.fxIndex ?? -1,
+    parameters: [
+      makeFallbackParam("inputTrimDb", "Input", 0, -24, 24, 0, "dB", "gain"),
+      makeFallbackParam("gateThresholdDb", "Gate", -80, -100, 0, -80, "dB", "dynamics"),
+      makeFallbackParam("gateReleaseMs", "Gate Rel", 80, 5, 1000, 80, "ms", "dynamics"),
+      makeFallbackParam("pedalMix", "Pedal Mix", 1, 0, 1, 1, "", "model"),
+      makeFallbackParam("ampMix", "Amp Mix", 1, 0, 1, 1, "", "model"),
+      makeFallbackParam("bassDb", "Bass", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("midDb", "Mid", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("trebleDb", "Treble", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("presenceDb", "Presence", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("cabEnabled", "Cab/IR", 0, 0, 1, 0, "", "cab", "toggle"),
+      makeFallbackParam("cabLevelDb", "Cab Level", 0, -24, 12, 0, "dB", "cab"),
+      makeFallbackParam("cabHPFHz", "Cab HPF", 80, 20, 500, 80, "Hz", "cab"),
+      makeFallbackParam("cabLPFHz", "Cab LPF", 8500, 1000, 20000, 8500, "Hz", "cab"),
+      makeFallbackParam("cabPhaseInvert", "Phase", 0, 0, 1, 0, "", "cab", "toggle"),
+      makeFallbackParam("chorusMix", "Chorus", 0, 0, 1, 0, "", "modulation"),
+      makeFallbackParam("chorusRateHz", "Chorus Rate", 0.75, 0.05, 8, 0.75, "Hz", "modulation"),
+      makeFallbackParam("chorusDepth", "Chorus Depth", 0.32, 0, 1, 0.32, "", "modulation"),
+      makeFallbackParam("delayMix", "Delay", 0, 0, 1, 0, "", "time"),
+      makeFallbackParam("delayTimeMs", "Delay Time", 360, 1, 2000, 360, "ms", "time"),
+      makeFallbackParam("delayFeedback", "Delay Fdbk", 0.22, 0, 0.85, 0.22, "", "time"),
+      makeFallbackParam("reverbMix", "Reverb", 0, 0, 1, 0, "", "space"),
+      makeFallbackParam("reverbDecaySec", "Decay", 2.2, 0.2, 12, 2.2, "s", "space"),
+      makeFallbackParam("reverbTone", "Verb Tone", 0.62, 0, 1, 0.62, "", "space"),
+      makeFallbackParam("outputTrimDb", "Output", 0, -24, 24, 0, "dB", "gain"),
+      makeFallbackParam("auditionSource", "Demo Source", 0, 0, 1, 0, "", "utility", "toggle"),
+    ],
+    modelState: {
+      pedalModelPath: "",
+      ampModelPath: "",
+      cabIRPath: "",
+      hasPedalModel: false,
+      hasAmpModel: false,
+      hasCabIR: false,
+      lastLoadError: "",
+    },
+    visualization: {
+      inputLevelDb: -90,
+      outputLevelDb: -90,
+    },
+  };
+}
+
+function isUsableSchema(schema: BuiltInPluginSchema | null | undefined) {
+  return Boolean(schema && Array.isArray(schema.parameters) && schema.parameters.length > 0);
+}
+
+function valuesClose(param: BuiltInParamDescriptor, value: number) {
+  return Math.abs(param.value - value) <= Math.max(stepForParam(param), 0.0001) * 0.5;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId = 0;
+  const timeout = new Promise<T>((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  });
+}
+
+export function createSchemaRequestGate() {
+  let latestRequestId = 0;
+  return {
+    begin() {
+      latestRequestId += 1;
+      return latestRequestId;
+    },
+    isLatest(requestId: number) {
+      return requestId === latestRequestId;
+    },
+    invalidate() {
+      latestRequestId += 1;
+    },
+  };
 }
 
 type BuiltInPluginKind =
@@ -51,8 +151,10 @@ type BuiltInPluginKind =
   | "modulation"
   | "saturation"
   | "pitch"
+  | "nam"
   | "synth"
   | "piano"
+  | "guitar"
   | "drums"
   | "generic";
 
@@ -65,6 +167,8 @@ export function getPluginKind(schema: BuiltInPluginSchema | null): BuiltInPlugin
   if (label.includes("chorus") || label.includes("flanger") || label.includes("phaser") || label.includes("modulation")) return "modulation";
   if (label.includes("saturat")) return "saturation";
   if (label.includes("pitch")) return "pitch";
+  if (label.includes("nam")) return "nam";
+  if (label.includes("guitar")) return "guitar";
   if (label.includes("piano")) return "piano";
   if (label.includes("drum")) return "drums";
   if (label.includes("synth") || label.includes("sampler")) return "synth";
@@ -79,7 +183,9 @@ export function primaryParamIdsForKind(kind: BuiltInPluginKind, schema: BuiltInP
   if (kind === "modulation") return ["mode", "rate", "depth", "mix", "characterMode"];
   if (kind === "saturation") return ["satType", "drive", "mix", "outputGain", "oversampleMode"];
   if (kind === "pitch") return ["key", "scale", "retuneSpeed", "correctionStrength", "mix"];
+  if (kind === "nam") return ["inputTrimDb", "gateThresholdDb", "cabEnabled", "chorusMix", "delayMix", "reverbMix", "outputTrimDb"];
   if (kind === "piano") return ["model", "tone", "body", "resonance", "outputGain"];
+  if (kind === "guitar") return ["model", "tone", "body", "bendRangeSemitones", "outputGain"];
   if (kind === "drums") return ["kit", "mapPreset", "punch", "ambience", "outputGain"];
   if (kind === "synth") return ["brightness", "detuneCents", "subLevel", "noiseLevel", "outputGain"];
   if (kind === "dynamics" && name.includes("limiter")) return ["threshold", "ceiling", "lookaheadMs", "releaseMs"];
@@ -105,6 +211,7 @@ export function groupLabel(group: string) {
     instrument: "Instrument",
     midi: "MIDI",
     mix: "Mix",
+    model: "Models",
     modulation: "Modulation",
     oscillator: "Oscillators",
     output: "Output",
@@ -130,22 +237,16 @@ export function groupSortWeight(kind: BuiltInPluginKind, group: string) {
     modulation: ["modulation", "feedback", "character", "tone", "width", "mix"],
     saturation: ["drive", "character", "tone", "quality", "mix", "output"],
     pitch: ["scale", "correction", "detection", "formant", "midi", "mix"],
+    nam: ["model", "gain", "dynamics", "cab", "tone", "modulation", "time", "space"],
     synth: ["oscillator", "tone", "envelope", "output"],
     piano: ["character", "tone", "body", "width", "envelope", "output"],
+    guitar: ["character", "tone", "body", "midi", "space", "envelope", "output"],
     drums: ["drums", "character", "space", "width", "output"],
     generic: ["controls", "output"],
   };
   const order = orderByKind[kind] ?? orderByKind.generic;
   const index = order.indexOf(group);
   return index === -1 ? 100 : index;
-}
-
-export function stepForParam(param: BuiltInParamDescriptor) {
-  const span = Math.abs(param.max - param.min);
-  if (param.type === "toggle" || param.type === "enum") return 1;
-  if (param.unit === "Hz" && param.max > 1000) return 1;
-  if (param.unit === "ms" || param.unit === "s" || param.unit === "dB" || param.unit === "st" || param.unit === "ct") return Math.max(span / 500, 0.01);
-  return Math.max(span / 500, 0.001);
 }
 
 export function BuiltInParamControl({
@@ -610,46 +711,129 @@ export function BuiltInPluginPanel({
   onClose,
   initialSchema,
 }: BuiltInPluginPanelProps) {
-  const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? null);
+  const bootSchema = useMemo(
+    () => (isNAMPluginName(fallbackName) ? createNAMBootSchema(address, fallbackName) : null),
+    [address, fallbackName],
+  );
+  const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? bootSchema);
   const [loading, setLoading] = useState(false);
+  const namParamRefreshTimerRef = useRef<number | null>(null);
+  const optimisticParamValuesRef = useRef<Record<string, number>>({});
+  const schemaRequestGateRef = useRef(createSchemaRequestGate());
+  const schemaRef = useRef(schema);
+  schemaRef.current = schema;
+
+  const applyOptimisticParamValues = useCallback((nextSchema: BuiltInPluginSchema | null | undefined) => {
+    if (!nextSchema || !isUsableSchema(nextSchema)) return nextSchema ?? null;
+    const optimisticValues = optimisticParamValuesRef.current;
+    if (Object.keys(optimisticValues).length === 0) return nextSchema;
+
+    const remainingOptimistic = { ...optimisticValues };
+    let schemaChanged = false;
+    const parameters = nextSchema.parameters.map((entry) => {
+      const optimisticValue = optimisticValues[entry.id];
+      if (typeof optimisticValue !== "number" || !Number.isFinite(optimisticValue)) return entry;
+      const value = entry.type === "toggle"
+        ? (optimisticValue >= 0.5 ? 1 : 0)
+        : clamp(optimisticValue, entry.min, entry.max);
+
+      if (valuesClose(entry, value)) {
+        delete remainingOptimistic[entry.id];
+        return entry;
+      }
+
+      schemaChanged = true;
+      return { ...entry, value };
+    });
+
+    if (Object.keys(remainingOptimistic).length !== Object.keys(optimisticValues).length) {
+      optimisticParamValuesRef.current = remainingOptimistic;
+    }
+
+    return schemaChanged ? { ...nextSchema, parameters } : nextSchema;
+  }, []);
 
   const loadSchema = useCallback(async (showLoading = true) => {
+    const requestId = schemaRequestGateRef.current.begin();
     if (showLoading) setLoading(true);
     try {
-      const nextSchema = await nativeBridge.getBuiltInPluginSchema(address);
-      setSchema(nextSchema);
+      const nextSchema = await withTimeout(nativeBridge.getBuiltInPluginSchema(address), 2500, "Built-in plugin schema");
+      if (!schemaRequestGateRef.current.isLatest(requestId)) return null;
+
+      const acceptedSchema = isUsableSchema(nextSchema)
+        ? applyOptimisticParamValues(nextSchema)
+        : bootSchema
+          ? (isUsableSchema(schemaRef.current)
+              ? applyOptimisticParamValues(schemaRef.current)
+              : applyOptimisticParamValues(bootSchema))
+          : applyOptimisticParamValues(nextSchema);
+      schemaRef.current = acceptedSchema;
+      setSchema(acceptedSchema);
+      return acceptedSchema;
     } catch (error) {
+      if (!schemaRequestGateRef.current.isLatest(requestId)) return null;
       console.error("[BuiltInPluginPanel] Failed to load schema:", error);
-      setSchema({
-        schemaVersion: 1,
-        name: fallbackName,
-        category: "Built-in",
-        chain: address.chain,
-        fxIndex: address.fxIndex ?? -1,
-        parameters: [],
-      });
+      const current = schemaRef.current;
+      const acceptedSchema = isUsableSchema(current)
+        ? applyOptimisticParamValues(current)
+        : applyOptimisticParamValues(bootSchema ?? current ?? {
+          schemaVersion: 1,
+          name: fallbackName,
+          category: "Built-in",
+          chain: address.chain,
+          fxIndex: address.fxIndex ?? -1,
+          parameters: [],
+        });
+      schemaRef.current = acceptedSchema;
+      setSchema(acceptedSchema);
+      return acceptedSchema;
     } finally {
-      if (showLoading) setLoading(false);
+      if (showLoading && schemaRequestGateRef.current.isLatest(requestId)) setLoading(false);
     }
-  }, [address, fallbackName]);
+  }, [address, applyOptimisticParamValues, bootSchema, fallbackName]);
 
   useEffect(() => {
     if (initialSchema) {
+      schemaRequestGateRef.current.invalidate();
+      schemaRef.current = initialSchema;
       setSchema(initialSchema);
+      setLoading(false);
       return;
     }
+    if (bootSchema) setSchema((current) => (isUsableSchema(current) ? current : bootSchema));
     void loadSchema();
-  }, [initialSchema, loadSchema]);
+  }, [bootSchema, initialSchema, loadSchema]);
 
   useEffect(() => {
     const pluginKind = `${schema?.category ?? ""} ${schema?.name ?? ""}`.toLowerCase();
-    const needsLiveSchema = pluginKind.includes("eq") || pluginKind.includes("pitch") || pluginKind.includes("dynamics") || pluginKind.includes("compressor") || pluginKind.includes("gate") || pluginKind.includes("limiter");
+    // NAM has a dedicated lock-free diagnostics endpoint. Polling its complete
+    // schema takes the processor callback lock and can make the audio thread
+    // skip an entire rack block, which is audible as a click.
+    const needsLiveSchema = pluginKind.includes("eq")
+      || pluginKind.includes("pitch")
+      || pluginKind.includes("dynamics")
+      || pluginKind.includes("compressor")
+      || pluginKind.includes("gate")
+      || pluginKind.includes("limiter");
     if (!needsLiveSchema) return;
+    let refreshInFlight = false;
     const intervalId = window.setInterval(() => {
-      void loadSchema(false);
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      void loadSchema(false).finally(() => {
+        refreshInFlight = false;
+      });
     }, 500);
     return () => window.clearInterval(intervalId);
   }, [loadSchema, schema?.category, schema?.name]);
+
+  useEffect(() => () => {
+    schemaRequestGateRef.current.invalidate();
+    if (namParamRefreshTimerRef.current !== null) {
+      window.clearTimeout(namParamRefreshTimerRef.current);
+      namParamRefreshTimerRef.current = null;
+    }
+  }, []);
 
   const pluginKind = useMemo(() => getPluginKind(schema), [schema]);
 
@@ -679,6 +863,10 @@ export function BuiltInPluginPanel({
 
   const handleParamChange = async (param: BuiltInParamDescriptor, rawValue: number) => {
     const value = param.type === "toggle" ? (rawValue >= 0.5 ? 1 : 0) : clamp(rawValue, param.min, param.max);
+    optimisticParamValuesRef.current = {
+      ...optimisticParamValuesRef.current,
+      [param.id]: value,
+    };
     setSchema((current) =>
       current
         ? {
@@ -689,74 +877,115 @@ export function BuiltInPluginPanel({
           }
         : current,
     );
-    await nativeBridge.setBuiltInPluginParam(address, param.id, value);
+    let ok = false;
+    try {
+      ok = await nativeBridge.setBuiltInPluginParam(address, param.id, value);
+    } catch (error) {
+      console.error("[BuiltInPluginPanel] Failed to set built-in parameter:", error);
+    }
+    if (!ok) {
+      const { [param.id]: _discarded, ...remaining } = optimisticParamValuesRef.current;
+      optimisticParamValuesRef.current = remaining;
+      void loadSchema(false);
+      return;
+    }
+    if (ok && pluginKind === "nam") {
+      if (namParamRefreshTimerRef.current !== null) window.clearTimeout(namParamRefreshTimerRef.current);
+      namParamRefreshTimerRef.current = window.setTimeout(() => {
+        namParamRefreshTimerRef.current = null;
+        void loadSchema(false);
+      }, 120);
+    }
   };
 
   const title = schema?.name || fallbackName;
+  const displayTitle = pluginKind === "nam" ? "NAM Rack" : title;
 
   return (
     <section className="builtin-plugin-panel" data-kind={pluginKind} onClick={(event) => event.stopPropagation()}>
       <div className="builtin-panel-header">
         <div className="builtin-panel-title">
           <Activity size={14} />
-          <span>{title}</span>
+          <span data-qa={pluginKind === "nam" ? "nam-window-title" : undefined}>{displayTitle}</span>
         </div>
-        {onClose && (
-          <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close editor" aria-label={`Close ${title}`}>
-            <X size={14} />
-          </Button>
+        {pluginKind === "nam" ? (
+          <div className="builtin-window-controls" aria-label="Window controls">
+            {onClose && (
+              <button type="button" onClick={onClose} title="Close editor" aria-label={`Close ${displayTitle}`}>
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        ) : (
+          onClose && (
+            <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close editor" aria-label={`Close ${title}`}>
+              <X size={14} />
+            </Button>
+          )
         )}
       </div>
 
-      {schema && schema.parameters.length > 0 && (
-        <BuiltInVisualization
-          schema={schema}
+      {loading && !schema ? (
+        <div className="builtin-empty">Loading</div>
+      ) : pluginKind === "nam" ? (
+        <NAMRackPanel
+          address={address}
+          schema={schema ?? bootSchema ?? createNAMBootSchema(address, fallbackName)}
+          primaryParams={primaryParams}
+          groupedParams={groupedParams}
           onParamChange={(param, value) => {
             void handleParamChange(param, value);
           }}
+          onRefreshRack={() => loadSchema(false)}
         />
-      )}
-
-      {loading ? (
-        <div className="builtin-empty">Loading</div>
       ) : !schema || schema.parameters.length === 0 ? (
         <div className="builtin-empty">No editable parameters</div>
       ) : (
-        <div className="builtin-param-groups">
-          {primaryParams.length > 0 && (
-            <div className="builtin-macro-strip" aria-label={`${title} primary controls`}>
-              {primaryParams.map((param) => (
-                <BuiltInParamControl
-                  key={param.id}
-                  param={param}
-                  compact
-                  onChange={(nextParam, value) => {
-                    void handleParamChange(nextParam, value);
-                  }}
-                />
-              ))}
-            </div>
+        <>
+          {schema.parameters.length > 0 && (
+            <BuiltInVisualization
+              schema={schema}
+              onParamChange={(param, value) => {
+                void handleParamChange(param, value);
+              }}
+            />
           )}
-          {groupedParams.map(([group, params]) => (
-            <div className="builtin-param-group" key={group}>
-              <div className="builtin-group-title">
-                <SlidersHorizontal size={11} />
-                <span>{groupLabel(group)}</span>
-              </div>
-              <div className="builtin-param-grid">
-                {params.map((param) => (
+          <div className="builtin-param-groups">
+            {primaryParams.length > 0 && (
+              <div className="builtin-macro-strip" aria-label={`${title} primary controls`}>
+                {primaryParams.map((param) => (
                   <BuiltInParamControl
                     key={param.id}
                     param={param}
+                    compact
                     onChange={(nextParam, value) => {
                       void handleParamChange(nextParam, value);
                     }}
                   />
                 ))}
               </div>
-            </div>
-          ))}
-        </div>
+            )}
+            {groupedParams.map(([group, params]) => (
+              <div className="builtin-param-group" key={group}>
+                <div className="builtin-group-title">
+                  <SlidersHorizontal size={11} />
+                  <span>{groupLabel(group)}</span>
+                </div>
+                <div className="builtin-param-grid">
+                  {params.map((param) => (
+                    <BuiltInParamControl
+                      key={param.id}
+                      param={param}
+                      onChange={(nextParam, value) => {
+                        void handleParamChange(nextParam, value);
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
       )}
     </section>
   );

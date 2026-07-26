@@ -1,0 +1,23 @@
+{
+  "id": "amp-head-design-a",
+  "skinId": "amp-head-design-a",
+  "artboard": { "width": 1535, "height": 557 },
+  "device": { "kind": "amp", "title": "Meridian 100", "subtitle": "OpenStudio Capture Head", "color": "#171a1b", "accent": "#8fd3ff", "originality": "studio13-meridian-no-triangle-wedge" },
+  "composition": { "targetDeviceCount": 1, "layout": "amp-head-grille-faceplate", "requiredModules": ["grille", "badge", "input", "lower faceplate", "power"] },
+  "controls": [
+    { "id": "amp-boost", "paramId": "ampBoost", "kind": "switch", "x": 268, "y": 410, "width": 52, "height": 72, "label": "Boost", "zIndex": 8 },
+    { "id": "amp-voice", "paramId": "ampVoice", "kind": "switch", "x": 340, "y": 410, "width": 52, "height": 72, "label": "Voice", "zIndex": 8 },
+    { "id": "amp-gain", "paramId": "ampGainDb", "kind": "knob", "x": 475, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Gain", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-bass", "paramId": "bassDb", "kind": "knob", "x": 590, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Bass", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-middle", "paramId": "midDb", "kind": "knob", "x": 705, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Mid", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-treble", "paramId": "trebleDb", "kind": "knob", "x": 820, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Treble", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-presence", "paramId": "presenceDb", "kind": "knob", "x": 935, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Presence", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-master", "paramId": "ampMix", "kind": "knob", "x": 1050, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Master", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-output", "paramId": "ampOutputDb", "kind": "knob", "x": 1165, "y": 420, "width": 78, "height": 78, "diameter": 64, "label": "Output", "labelPlacement": "above", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "amp-display", "kind": "display", "x": 768, "y": 288, "width": 430, "height": 58, "label": "NAM A2 model", "zIndex": 6 },
+    { "id": "amp-power-leds", "kind": "meter", "x": 1298, "y": 422, "width": 42, "height": 34, "label": "", "zIndex": 7 },
+    { "id": "amp-led", "kind": "led", "x": 1332, "y": 404, "width": 30, "height": 30, "diameter": 22, "zIndex": 8 },
+    { "id": "amp-power", "paramId": "ampEnabled", "kind": "switch", "x": 1390, "y": 410, "width": 50, "height": 64, "label": "Power", "labelPlacement": "hidden", "zIndex": 9 }
+  ],
+  "hitboxes": []
+}

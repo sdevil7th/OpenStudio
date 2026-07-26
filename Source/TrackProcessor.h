@@ -90,6 +90,7 @@ public:
         bool isInputFX = false;
         int fxIndex = -1;
         int paramIndex = -1;
+        juce::String builtInParamId;
         int midiCC = -1;
     };
 
@@ -111,6 +112,7 @@ public:
     bool producesMidi() const override;
     bool isMidiEffect() const override;
     double getTailLengthSeconds() const override;
+    double getOfflineRenderTailLengthSeconds() const;
 
     int getNumPrograms() override;
     int getCurrentProgram() override;
@@ -293,6 +295,9 @@ public:
     int getChainLatency() const;
     void setPDCDelay(int delaySamples);
     int getPDCDelay() const { return pdcDelaySamples; }
+    void resetPDCDelayState();
+    void resetOfflineRenderState();
+    void invalidatePluginAutomationCache() noexcept;
 
     // DC Offset Removal
     void setDCOffsetRemoval(bool enabled) { dcOffsetRemoval = enabled; }
@@ -406,6 +411,10 @@ private:
         bool isInputFX = false;
         int fxIndex = -1;
         int paramIndex = -1;
+        juce::String builtInParamId;
+        float builtInMinimum = 0.0f;
+        float builtInMaximum = 1.0f;
+        bool builtInDiscrete = false;
         std::shared_ptr<AutomationList> automation = std::make_shared<AutomationList>();
         std::atomic<float> lastAppliedValue { std::numeric_limits<float>::quiet_NaN() };
     };
@@ -426,6 +435,7 @@ private:
         bool isInputFX = false;
         int fxIndex = -1;
         int paramIndex = -1;
+        juce::String builtInParamId;
     };
 
     void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&);

@@ -96,6 +96,80 @@ function normalizeMIDIImportTrack(rawTrack, index, fallbackName) {
   };
 }
 
+function makeMIDIEventKey(event) {
+  const channel = event.channel ?? "";
+  if (event.type === "noteOn" || event.type === "noteOff") {
+    return [
+      event.type,
+      event.timestamp,
+      event.note,
+      event.velocity ?? 0,
+      channel,
+    ].join("|");
+  }
+  if (event.type === "pitchBend") {
+    return [
+      event.type,
+      event.timestamp,
+      event.value ?? 8192,
+      channel,
+    ].join("|");
+  }
+  return JSON.stringify(event);
+}
+
+function makeMIDICCEventKey(event) {
+  return [
+    event.time,
+    event.cc,
+    event.value,
+    event.channel ?? "",
+  ].join("|");
+}
+
+function dedupeByKey(items, getKey) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = getKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sortMIDIEvents(a, b) {
+  return a.timestamp - b.timestamp
+    || (a.note ?? 0) - (b.note ?? 0)
+    || String(a.type).localeCompare(String(b.type))
+    || (a.channel ?? 0) - (b.channel ?? 0);
+}
+
+function sortMIDICCEvents(a, b) {
+  return a.time - b.time
+    || a.cc - b.cc
+    || (a.channel ?? 0) - (b.channel ?? 0)
+    || a.value - b.value;
+}
+
+function mergeMIDIImportTracks(normalizedTracks, baseName) {
+  const events = [];
+  const ccEvents = [];
+  let duration = 0;
+
+  for (const track of normalizedTracks) {
+    duration = Math.max(duration, Number(track.duration) || 0);
+    events.push(...(track.events || []).map((event) => ({ ...event })));
+    ccEvents.push(...(track.ccEvents || []).map((event) => ({ ...event })));
+  }
+
+  return {
+    name: baseName,
+    events: dedupeByKey(events, makeMIDIEventKey).sort(sortMIDIEvents),
+    ccEvents: dedupeByKey(ccEvents, makeMIDICCEventKey).sort(sortMIDICCEvents),
+    duration: Math.max(0.25, duration || 4),
+  };
+}
+
 function syncMIDITrackIds(get, trackIds) {
   const state = get();
   for (const trackId of trackIds) {
@@ -295,12 +369,12 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         throw new Error(importResult.error || "No supported MIDI events found in file: " + sourcePath);
       }
 
+      const mergedSource = mergeMIDIImportTracks(normalizedTracks, baseName);
       const existingTrack = request.targetTrackId
         ? get().tracks.find((track) => track.id === request.targetTrackId)
         : null;
       const canUseExistingTrack =
         existingTrack &&
-        normalizedTracks.length === 1 &&
         (existingTrack.type === "midi" || existingTrack.type === "instrument");
       const initialTracks = get().tracks;
       const targetTrackIndex = existingTrack
@@ -315,59 +389,35 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       const importedClipIds = [];
       const createdTracks = [];
       const importedEntries = [];
+      const targetTrackId = canUseExistingTrack ? existingTrack.id : crypto.randomUUID();
+      const clipId = crypto.randomUUID();
+      const color = canUseExistingTrack
+        ? existingTrack.color || "#4361ee"
+        : `hsl(${(insertIndex * 60) % 360}, 60%, 50%)`;
 
-      if (canUseExistingTrack) {
-        const source = normalizedTracks[0];
-        const clipId = crypto.randomUUID();
-        importedClipIds.push(clipId);
-        touchedTrackIds.push(existingTrack.id);
-        importedEntries.push({
-          trackId: existingTrack.id,
-          clip: {
-            id: clipId,
-            name: baseName,
-            startTime,
-            duration: source.duration,
-            offset: 0,
-            sourceStart: 0,
-            sourceLength: source.duration,
-            loopEnabled: true,
-            loopOffset: 0,
-            loopLength: source.duration,
-            events: source.events,
-            ccEvents: source.ccEvents,
-            color: existingTrack.color || "#4361ee",
-          },
-        });
-      } else {
-        normalizedTracks.forEach((source, index) => {
-          const trackId = crypto.randomUUID();
-          const clipId = crypto.randomUUID();
-          const color = `hsl(${((insertIndex + index) * 60) % 360}, 60%, 50%)`;
-          const track = createDefaultTrack(trackId, source.name || `${baseName} ${index + 1}`, color, "midi", initialTracks);
-          createdTracks.push(track);
-          touchedTrackIds.push(trackId);
-          importedClipIds.push(clipId);
-          importedEntries.push({
-            trackId,
-            clip: {
-              id: clipId,
-              name: source.name || baseName,
-              startTime,
-              duration: source.duration,
-              offset: 0,
-              sourceStart: 0,
-              sourceLength: source.duration,
-              loopEnabled: true,
-              loopOffset: 0,
-              loopLength: source.duration,
-              events: source.events,
-              ccEvents: source.ccEvents,
-              color,
-            },
-          });
-        });
+      if (!canUseExistingTrack) {
+        createdTracks.push(createDefaultTrack(targetTrackId, baseName, color, "midi", initialTracks));
       }
+      touchedTrackIds.push(targetTrackId);
+      importedClipIds.push(clipId);
+      importedEntries.push({
+        trackId: targetTrackId,
+        clip: {
+          id: clipId,
+          name: baseName,
+          startTime,
+          duration: mergedSource.duration,
+          offset: 0,
+          sourceStart: 0,
+          sourceLength: mergedSource.duration,
+          loopEnabled: true,
+          loopOffset: 0,
+          loopLength: mergedSource.duration,
+          events: mergedSource.events,
+          ccEvents: mergedSource.ccEvents,
+          color,
+        },
+      });
 
       const syncAfterCreate = () => {
         const createdTrackIds = createdTracks.map((track) => track.id);

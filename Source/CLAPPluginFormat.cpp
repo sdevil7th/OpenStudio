@@ -375,9 +375,9 @@ public:
                                 | CLAP_TRANSPORT_HAS_TEMPO
                                 | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
 
-        if (auto* playHead = getPlayHead())
+        if (auto* currentPlayHead = getPlayHead())
         {
-            auto position = playHead->getPosition();
+            auto position = currentPlayHead->getPosition();
             if (position.hasValue())
             {
                 auto info = *position;

@@ -22,6 +22,7 @@ jobs:
       BUILD_DIR: build-release-windows
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
+      ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.10.20' }}
@@ -45,6 +46,10 @@ jobs:
         run: |
           $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
           foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([string] $entry.Value)) {
+              Write-Output "::add-mask::$($entry.Value)"
+            }
+
             if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
               continue
             }
@@ -88,17 +93,29 @@ jobs:
       - name: Install optional ONNX Runtime
         if: vars.OPENSTUDIO_SETUP_ONNXRUNTIME == 'true'
         shell: pwsh
-        run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION
+        run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
 
       - name: Configure CMake
         shell: pwsh
         run: |
+          $tone3000ClientId = $env:TONE3000_PUBLISHABLE_KEY
+          if ([string]::IsNullOrWhiteSpace($tone3000ClientId)) {
+            $tone3000ClientId = $env:OPENSTUDIO_TONE3000_CLIENT_ID_VALUE
+          }
+          if ([string]::IsNullOrWhiteSpace($tone3000ClientId)) {
+            $tone3000ClientId = $env:OPENSTUDIO_TONE3000_CLIENT_ID
+          }
+          if ([string]::IsNullOrWhiteSpace($tone3000ClientId)) {
+            throw "TONE3000_PUBLISHABLE_KEY is required for release builds."
+          }
+
           cmake -S . -B $env:BUILD_DIR -A x64 `
             "-DOPENSTUDIO_APP_VERSION=$env:VERSION" `
             "-DOPENSTUDIO_UPDATE_MANIFEST_URL_VALUE=$env:RELEASE_SITE_URL/releases/stable/latest.json" `
             "-DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE=$env:RELEASE_SITE_URL/appcast/windows-stable.xml" `
             "-DOPENSTUDIO_RELEASES_PAGE_URL_VALUE=$env:RELEASE_SITE_URL/download" `
             "-DOPENSTUDIO_UPDATE_CHANNEL_VALUE=stable" `
+            "-DOPENSTUDIO_TONE3000_CLIENT_ID_VALUE=$tone3000ClientId" `
             "-DJUCE_ASIOSDK_PATH=$env:GITHUB_WORKSPACE/$env:ASIO_SDK_DIR" `
             "-DOPENSTUDIO_REQUIRE_ASIO=ON" `
             "-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF" `
@@ -201,6 +218,10 @@ jobs:
         run: |
           $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
           foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([string] $entry.Value)) {
+              Write-Output "::add-mask::$($entry.Value)"
+            }
+
             if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
               continue
             }
@@ -247,12 +268,19 @@ jobs:
       - name: Configure CMake
         shell: bash
         run: |
+          TONE3000_CLIENT_ID="${TONE3000_PUBLISHABLE_KEY:-${OPENSTUDIO_TONE3000_CLIENT_ID_VALUE:-${OPENSTUDIO_TONE3000_CLIENT_ID:-}}}"
+          if [ -z "$TONE3000_CLIENT_ID" ]; then
+            echo "TONE3000_PUBLISHABLE_KEY is required for release builds." >&2
+            exit 1
+          fi
+
           cmake -S . -B "$BUILD_DIR" \
             -DOPENSTUDIO_APP_VERSION="$VERSION" \
             -DOPENSTUDIO_UPDATE_MANIFEST_URL_VALUE="$RELEASE_SITE_URL/releases/stable/latest.json" \
             -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="$RELEASE_SITE_URL/appcast/macos-stable.xml" \
             -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="$RELEASE_SITE_URL/download" \
             -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
+            -DOPENSTUDIO_TONE3000_CLIENT_ID_VALUE="$TONE3000_CLIENT_ID" \
             -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
@@ -303,9 +331,32 @@ jobs:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       BUILD_DIR: build-release-linux
       ONNXRUNTIME_VERSION: 1.24.4
+      ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
       RELEASE_SITE_URL: https://openstudio.org.in
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install Doppler CLI
+        if: env.DOPPLER_TOKEN != ''
+        uses: dopplerhq/cli-action@v3
+
+      - name: Load release secrets from Doppler
+        if: env.DOPPLER_TOKEN != ''
+        shell: pwsh
+        run: |
+          $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
+          foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([string] $entry.Value)) {
+              Write-Output "::add-mask::$($entry.Value)"
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
+              continue
+            }
+
+            "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
 
       - name: Normalize version
         shell: bash
@@ -336,11 +387,18 @@ jobs:
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
           wget -q "$URL" -O onnxruntime.tgz
+          echo "${ONNXRUNTIME_LINUX_X64_SHA256}  onnxruntime.tgz" | sha256sum --check --strict
           mkdir -p thirdparty/onnxruntime
           tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime
 
       - name: Configure CMake
         run: |
+          TONE3000_CLIENT_ID="${TONE3000_PUBLISHABLE_KEY:-${OPENSTUDIO_TONE3000_CLIENT_ID_VALUE:-${OPENSTUDIO_TONE3000_CLIENT_ID:-}}}"
+          if [ -z "$TONE3000_CLIENT_ID" ]; then
+            echo "TONE3000_PUBLISHABLE_KEY is required for release builds." >&2
+            exit 1
+          fi
+
           cmake -S . -B "$BUILD_DIR" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DOPENSTUDIO_APP_VERSION="$VERSION" \
@@ -348,6 +406,7 @@ jobs:
             -DOPENSTUDIO_UPDATE_APPCAST_URL_VALUE="$RELEASE_SITE_URL/appcast/linux-stable.xml" \
             -DOPENSTUDIO_RELEASES_PAGE_URL_VALUE="$RELEASE_SITE_URL/download" \
             -DOPENSTUDIO_UPDATE_CHANNEL_VALUE="stable" \
+            -DOPENSTUDIO_TONE3000_CLIENT_ID_VALUE="$TONE3000_CLIENT_ID" \
             -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 
@@ -397,6 +456,10 @@ jobs:
         run: |
           $secrets = doppler secrets download --no-file --format json | ConvertFrom-Json -AsHashtable
           foreach ($entry in $secrets.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace([string] $entry.Value)) {
+              Write-Output "::add-mask::$($entry.Value)"
+            }
+
             if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key))) {
               continue
             }

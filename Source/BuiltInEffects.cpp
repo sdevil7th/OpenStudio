@@ -49,6 +49,93 @@ static void sanitizeBuiltInBuffer(juce::AudioBuffer<float>& buffer, float limit)
     }
 }
 
+namespace
+{
+constexpr size_t kRealtimeFilterLutSize = 513;
+
+float safeFilterMaximum(double sampleRate, float nominalMinimum, float nominalMaximum)
+{
+    return juce::jmax(nominalMinimum,
+                      juce::jmin(nominalMaximum,
+                                 static_cast<float>(sampleRate * 0.475)));
+}
+
+void prepareRealtimeFilterLut(std::vector<S13IIRCoefficientSet>& lut,
+                              double sampleRate,
+                              float nominalMinimum,
+                              float nominalMaximum,
+                              bool highPass)
+{
+    const float safeMinimum = juce::jmax(1.0f, nominalMinimum);
+    const float safeMaximum = safeFilterMaximum(sampleRate, safeMinimum, nominalMaximum);
+    const double logMinimum = std::log(static_cast<double>(safeMinimum));
+    const double logRange = std::log(static_cast<double>(safeMaximum)) - logMinimum;
+    lut.resize(kRealtimeFilterLutSize);
+
+    for (size_t index = 0; index < lut.size(); ++index)
+    {
+        const double proportion = static_cast<double>(index)
+            / static_cast<double>(lut.size() - 1);
+        const float frequency = static_cast<float>(std::exp(logMinimum + proportion * logRange));
+        const auto coefficients = highPass
+            ? juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequency)
+            : juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, frequency);
+        const auto& source = coefficients->coefficients;
+        jassert(source.size() == lut[index].size());
+        for (size_t coefficient = 0; coefficient < lut[index].size(); ++coefficient)
+            lut[index][coefficient] = source[static_cast<int>(coefficient)];
+    }
+}
+
+const S13IIRCoefficientSet& lookupRealtimeFilterLut(
+    const std::vector<S13IIRCoefficientSet>& lut,
+    double sampleRate,
+    float frequency,
+    float nominalMinimum,
+    float nominalMaximum) noexcept
+{
+    jassert(! lut.empty());
+    const float safeMinimum = juce::jmax(1.0f, nominalMinimum);
+    const float safeMaximum = safeFilterMaximum(sampleRate, safeMinimum, nominalMaximum);
+    const double logMinimum = std::log(static_cast<double>(safeMinimum));
+    const double logRange = std::log(static_cast<double>(safeMaximum)) - logMinimum;
+    const double position = logRange > 0.0
+        ? (std::log(static_cast<double>(juce::jlimit(safeMinimum, safeMaximum, frequency))) - logMinimum)
+            / logRange
+        : 0.0;
+    const auto index = static_cast<size_t>(juce::jlimit(
+        0,
+        static_cast<int>(lut.size() - 1),
+        static_cast<int>(std::lround(position * static_cast<double>(lut.size() - 1)))));
+    return lut[index];
+}
+
+void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& filter,
+                                     const S13IIRCoefficientSet& coefficients) noexcept
+{
+    jassert(filter.coefficients != nullptr);
+    if (filter.coefficients == nullptr)
+        return;
+
+    auto& destination = filter.coefficients->coefficients;
+    jassert(destination.size() == coefficients.size());
+    if (destination.size() != coefficients.size())
+        return;
+
+    for (size_t coefficient = 0; coefficient < coefficients.size(); ++coefficient)
+        destination.set(static_cast<int>(coefficient), coefficients[coefficient]);
+}
+
+void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& left,
+                                     juce::dsp::IIR::Filter<float>& right,
+                                     const S13IIRCoefficientSet& coefficients) noexcept
+{
+    writeRealtimeFilterCoefficients(left, coefficients);
+    if (right.coefficients != left.coefficients)
+        writeRealtimeFilterCoefficients(right, coefficients);
+}
+}
+
 //==============================================================================
 //  S13EQ -- 8-band parametric EQ
 //==============================================================================
@@ -121,6 +208,28 @@ void S13EQ::prepareToPlay(double sampleRate, int samplesPerBlock)
     fftWritePos = 0;
     fftBlockCounter = 0;
     updateFilters();
+}
+
+void S13EQ::reset()
+{
+    for (int band = 0; band < numBands; ++band)
+    {
+        for (int stage = 0; stage < maxStagesPerBand; ++stage)
+            bandFilters[band][stage].reset();
+        for (int channel = 0; channel < 2; ++channel)
+            dynamicDetectorFilters[band][channel].reset();
+        dynamicEnvelope[static_cast<size_t>(band)] = 0.0f;
+        dynamicGainDB[static_cast<size_t>(band)].store(0.0f, std::memory_order_relaxed);
+    }
+    if (oversampler)
+        oversampler->reset();
+    msScratch.clear();
+    preEQBuffer.fill(0.0f);
+    postEQBuffer.fill(0.0f);
+    fftWritePos = 0;
+    fftBlockCounter = 0;
+    smoothedAutoGainDB = 0.0f;
+    gainReductionDB.store(0.0f, std::memory_order_relaxed);
 }
 
 void S13EQ::releaseResources()
@@ -658,6 +767,11 @@ void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
     auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastSCHPFFreq);
     scHPF_L.coefficients = hpfCoeffs;
     scHPF_R.coefficients = hpfCoeffs;
+    prepareRealtimeFilterLut(scHPFCoefficientLut, sampleRate, 20.0f, 500.0f, true);
+    writeRealtimeFilterCoefficients(
+        scHPF_L,
+        scHPF_R,
+        lookupRealtimeFilterLut(scHPFCoefficientLut, sampleRate, lastSCHPFFreq, 20.0f, 500.0f));
     scHPF_L.reset();
     scHPF_R.reset();
 
@@ -677,6 +791,16 @@ void S13Compressor::releaseResources()
     envelopeLevel = 0.0f;
     rmsEnvelopeLevel = 0.0f;
     currentGainLin = 1.0f;
+    smoothedMakeup.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(makeupGain.load(std::memory_order_relaxed)));
+    scHPF_L.reset();
+    scHPF_R.reset();
+    lookaheadDelayL.reset();
+    lookaheadDelayR.reset();
+    if (oversampler)
+        oversampler->reset();
+    inputLevelDB.store(-100.0f, std::memory_order_relaxed);
+    outputLevelDB.store(-100.0f, std::memory_order_relaxed);
 }
 
 void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -693,9 +817,15 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     if (std::abs(scFreq - lastSCHPFFreq) > 1.0f)
     {
         lastSCHPFFreq = scFreq;
-        auto coeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(cachedSampleRate, scFreq);
-        scHPF_L.coefficients = coeffs;
-        scHPF_R.coefficients = coeffs;
+        if (! scHPFCoefficientLut.empty())
+            writeRealtimeFilterCoefficients(
+                scHPF_L,
+                scHPF_R,
+                lookupRealtimeFilterLut(scHPFCoefficientLut,
+                                        cachedSampleRate,
+                                        scFreq,
+                                        20.0f,
+                                        500.0f));
     }
 
     float atkMs, relMs;
@@ -754,10 +884,14 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         float gainLin = juce::Decibels::decibelsToGain(gr);
         peakGR = juce::jmin(peakGR, gr);
 
-        float delayedL = lookaheadDelayL.popSample(0);
-        float delayedR = dataR ? lookaheadDelayR.popSample(0) : delayedL;
+        // JUCE's DelayLine expects the current input to be pushed before it is
+        // popped. Popping first makes a zero-sample delay wrap around the whole
+        // ring buffer, which turned the NAM rack's parallel compressor into an
+        // unintended ~46 ms echo at 44.1 kHz.
         lookaheadDelayL.pushSample(0, dryL);
         if (dataR) lookaheadDelayR.pushSample(0, dryR);
+        const float delayedL = lookaheadDelayL.popSample(0);
+        const float delayedR = dataR ? lookaheadDelayR.popSample(0) : delayedL;
 
         float mkLin = smoothedMakeup.getNextValue();
         float wetL = delayedL * gainLin * mkLin;

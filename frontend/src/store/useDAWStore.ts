@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import {
   FACTORY_QUANTIZE_PRESETS,
@@ -1327,7 +1327,7 @@ interface DAWState {
 
   // Missing Media Resolver
   showMissingMedia: boolean;
-  missingMediaFiles: Array<{ path: string; clipIds: string[] }>;
+  missingMediaFiles: MissingMediaEntry[];
 
   // Sprint 17: Visual Improvements
   recentColors: string[];
@@ -1387,7 +1387,7 @@ interface DAWActions {
   showToast: (message: string, type?: "success" | "error" | "info") => void;
 
   // Project Management (F2)
-  newProject: () => Promise<void>;
+  newProject: () => Promise<boolean>;
   saveProject: (saveAs?: boolean) => Promise<boolean>;
   saveNewVersion: () => Promise<boolean>;
   loadProject: (path?: string, options?: { bypassFX?: boolean }) => Promise<boolean>;
@@ -2071,6 +2071,7 @@ interface DAWActions {
 
   // Missing Media Resolver
   resolveMissingMedia: (originalPath: string, newPath: string) => void;
+  resolveMissingNAMAsset: (target: NAMProjectAssetTarget, newPath: string) => Promise<boolean>;
   closeMissingMedia: () => void;
 
   // Sprint 17: Visual Improvements

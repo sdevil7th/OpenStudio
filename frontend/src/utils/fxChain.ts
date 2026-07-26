@@ -11,8 +11,8 @@ export interface InstrumentChangeDetail {
   instrumentPlugin?: string | null;
 }
 
-const FX_CHAIN_CHANGED_EVENT = "studio13:fx-chain-changed";
-const INSTRUMENT_CHANGED_EVENT = "studio13:instrument-changed";
+const FX_CHAIN_CHANGED_EVENT = "openstudio:fx-chain-changed";
+const INSTRUMENT_CHANGED_EVENT = "openstudio:instrument-changed";
 
 export async function getFXChainSlots(trackId: string, chainType: FXChainType): Promise<any[]> {
   if (chainType === "master") {

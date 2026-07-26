@@ -177,6 +177,7 @@ jobs:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
+      ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
     steps:
       - uses: actions/checkout@v5
 
@@ -204,6 +205,7 @@ jobs:
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
           wget -q "$URL" -O onnxruntime.tgz
+          echo "${ONNXRUNTIME_LINUX_X64_SHA256}  onnxruntime.tgz" | sha256sum --check --strict
           mkdir -p thirdparty/onnxruntime
           tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime
 

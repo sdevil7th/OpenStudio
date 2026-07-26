@@ -124,6 +124,18 @@ For a complete list of frontend dependencies and their licenses, see
 
 ---
 
+## NeuralAmpModelerCore
+
+- **Website:** https://github.com/sdatkinson/NeuralAmpModelerCore
+- **License:** MIT License
+- **Copyright:** NeuralAmpModelerCore contributors
+- **Usage:** NAM/A1/A2 neural amp model loading and DSP processing
+
+OpenStudio preserves TONE3000 per-tone license metadata in saved NAM tones.
+TONE3000 models and thumbnails are not redistributed by OpenStudio.
+
+---
+
 ## Signalsmith Stretch
 
 - **Website:** https://signalsmith-audio.co.uk/code/stretch/

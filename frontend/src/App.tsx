@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } fr
 import { useShallow } from "zustand/shallow";
 import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
+import { bootstrapTONE3000Session } from "./services/tone3000Session";
 import { getGlobalShortcutConflicts } from "./store/actionRegistry";
 import {
   useDAWStore,
@@ -34,7 +35,8 @@ import { TransportBar as BottomTransportBar } from "./components/TransportBar";
 import { MenuBar } from "./components/MenuBar";
 import { MasterTrackHeader } from "./components/MasterTrackHeader";
 import { ProjectTabBar } from "./components/ProjectTabBar";
-import { CustomToolbarStrip } from "./components/ToolbarEditor";
+import { CustomToolbarStrip, ToolbarEditor } from "./components/ToolbarEditor";
+import { PluginBrowser } from "./components/PluginBrowser";
 import { SortableTrackHeader } from "./components/SortableTrackHeader";
 import { AddMultipleTracksModal } from "./components/AddMultipleTracksModal";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
@@ -70,10 +72,8 @@ const ThemeEditor = React.lazy(() => import("./components/ThemeEditor").then(m =
 const VideoWindow = React.lazy(() => import("./components/VideoWindow").then(m => ({ default: m.VideoWindow })));
 const ScriptEditor = React.lazy(() => import("./components/ScriptEditor").then(m => ({ default: m.ScriptEditor })));
 const PitchEditorLowerZone = React.lazy(() => import("./components/PitchEditorLowerZone").then(m => ({ default: m.PitchEditorLowerZone })));
-const ToolbarEditor = React.lazy(() => import("./components/ToolbarEditor").then(m => ({ default: m.ToolbarEditor })));
 const DDPExportModal = React.lazy(() => import("./components/DDPExportModal").then(m => ({ default: m.DDPExportModal })));
 const ProjectCompareModal = React.lazy(() => import("./components/ProjectCompareModal").then(m => ({ default: m.ProjectCompareModal })));
-const PluginBrowser = React.lazy(() => import("./components/PluginBrowser").then(m => ({ default: m.PluginBrowser })));
 const EnvelopeManagerModal = React.lazy(() => import("./components/EnvelopeManagerModal").then(m => ({ default: m.EnvelopeManagerModal })));
 const ChannelStripEQModal = React.lazy(() => import("./components/ChannelStripEQModal").then(m => ({ default: m.ChannelStripEQModal })));
 const TrackRoutingModal = React.lazy(() => import("./components/TrackRoutingModal").then(m => ({ default: m.TrackRoutingModal })));
@@ -100,6 +100,17 @@ import {
 
 function App() {
   const startupReadyReportedRef = useRef(false);
+  const [isStartupLoading, setIsStartupLoading] = useState(true);
+  const [startupLoadingMessage, setStartupLoadingMessage] = useState("Preparing OpenStudio...");
+
+  const reportStartupReady = useCallback((detail: string) => {
+    if (startupReadyReportedRef.current) {
+      return;
+    }
+
+    startupReadyReportedRef.current = true;
+    window.dispatchEvent(new CustomEvent("openstudio:app-ready", { detail }));
+  }, []);
 
   // Use useShallow to prevent re-renders when unrelated state changes (like currentTime)
   const {
@@ -170,6 +181,7 @@ function App() {
     showGettingStarted,
     showMissingMedia,
     missingMediaFiles,
+    resolveMissingNAMAsset,
     masterAutomationLanes,
     showMasterAutomation,
     showStemSeparation,
@@ -246,6 +258,7 @@ function App() {
       showGettingStarted: state.showGettingStarted,
       showMissingMedia: state.showMissingMedia,
       missingMediaFiles: state.missingMediaFiles,
+      resolveMissingNAMAsset: state.resolveMissingNAMAsset,
       masterAutomationLanes: state.masterAutomationLanes,
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
@@ -256,32 +269,6 @@ function App() {
     }))
   );
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const markAppReady = (detail: string) => {
-      if (cancelled || startupReadyReportedRef.current) {
-        return;
-      }
-
-      startupReadyReportedRef.current = true;
-      window.dispatchEvent(new CustomEvent("openstudio:app-ready", { detail }));
-    };
-
-    void (async () => {
-      try {
-        await hydrateRecentProjects();
-        markAppReady("main-app-hydrated");
-      } catch (error) {
-        console.error("[startup] Failed to hydrate recent projects:", error);
-        markAppReady("main-app-hydration-failed");
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [hydrateRecentProjects]);
 
   // Compute visible tracks — hides children of collapsed folder tracks
   const visibleTracks = useMemo(() => {
@@ -414,8 +401,91 @@ function App() {
   useEffect(() => startMidiEditorUISync(), []);
 
   useEffect(() => {
-    void refreshAiToolsStatus(true);
-  }, [refreshAiToolsStatus]);
+    let cancelled = false;
+    let finishTimer: number | undefined;
+    let readyDetail = "main-app-startup-ready";
+    const startupGateStartedAt = performance.now();
+
+    const setStartupStep = (message: string) => {
+      if (!cancelled) {
+        setStartupLoadingMessage(message);
+      }
+    };
+
+    const finishStartupGate = () => {
+      if (cancelled) {
+        return;
+      }
+
+      setStartupLoadingMessage("Opening workspace...");
+      const remainingMs = Math.max(0, 650 - (performance.now() - startupGateStartedAt));
+      finishTimer = window.setTimeout(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setIsStartupLoading(false);
+        reportStartupReady(readyDetail);
+      }, remainingMs);
+    };
+
+    const openLaunchProjectIfPresent = async () => {
+      const pendingProjectPath = await nativeBridge.consumePendingLaunchProjectPath();
+      if (!pendingProjectPath || cancelled) {
+        return;
+      }
+
+      const lowerPath = pendingProjectPath.toLowerCase();
+      if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) {
+        return;
+      }
+
+      const launchProjectName = pendingProjectPath.split(/[\\/]/).pop() || "project";
+      setStartupStep(`Opening ${launchProjectName}...`);
+      const success = await useDAWStore.getState().requestOpenProject(pendingProjectPath);
+      if (!success) {
+        readyDetail = "main-app-launch-project-failed";
+        console.error("[App] Failed to open launch project:", pendingProjectPath);
+      }
+    };
+
+    void (async () => {
+      try {
+        setStartupStep("Loading recent projects...");
+        await hydrateRecentProjects();
+      } catch (error) {
+        readyDetail = "main-app-startup-recovered";
+        console.error("[startup] Failed to hydrate recent projects:", error);
+      }
+
+      // Network-backed session refresh and optional AI runtime inspection must
+      // never hold the workspace behind the startup overlay. Both services
+      // publish their own busy/status state when their background checks finish.
+      void bootstrapTONE3000Session().catch((error) => {
+        console.warn("[startup] TONE3000 silent auth bootstrap failed:", error);
+      });
+      void refreshAiToolsStatus(true).catch((error) => {
+        console.warn("[startup] AI tools status check failed:", error);
+      });
+
+      try {
+        setStartupStep("Checking startup project...");
+        await openLaunchProjectIfPresent();
+      } catch (error) {
+        readyDetail = "main-app-startup-recovered";
+        console.error("[App] Failed to consume launch project path:", error);
+      }
+
+      finishStartupGate();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (finishTimer !== undefined) {
+        window.clearTimeout(finishTimer);
+      }
+    };
+  }, [hydrateRecentProjects, refreshAiToolsStatus, reportStartupReady]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.onAiToolsStatusUpdate((status) => {
@@ -1030,33 +1100,6 @@ function App() {
     if (conflicts.length > 0) {
       console.warn("[shortcuts] conflicting global shortcuts detected", conflicts);
     }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const openLaunchProject = async () => {
-      const pendingProjectPath = await nativeBridge.consumePendingLaunchProjectPath();
-      if (!pendingProjectPath || cancelled) return;
-
-      const lowerPath = pendingProjectPath.toLowerCase();
-      if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) return;
-
-      try {
-        const success = await useDAWStore.getState().requestOpenProject(pendingProjectPath);
-        if (!success) {
-          console.error("[App] Failed to open launch project:", pendingProjectPath);
-        }
-      } catch (error) {
-        console.error("[App] Failed to consume launch project path:", error);
-      }
-    };
-
-    void openLaunchProject();
-
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   // Global keyboard shortcuts
@@ -2017,6 +2060,7 @@ function App() {
             onResolve={(originalPath, newPath) =>
               useDAWStore.getState().resolveMissingMedia(originalPath, newPath)
             }
+            onResolveNAMAsset={(target, newPath) => resolveMissingNAMAsset(target, newPath)}
             onResolveAll={() => useDAWStore.getState().closeMissingMedia()}
           />
         </Suspense>
@@ -2034,6 +2078,19 @@ function App() {
         <Suspense fallback={null}>
           <GettingStartedGuide />
         </Suspense>
+      )}
+
+      {/* Startup Loading Overlay */}
+      {isStartupLoading && (
+        <div className="openstudio-startup-overlay" role="status" aria-live="polite" data-qa="app-startup-loading">
+          <div className="openstudio-startup-card">
+            <div className="openstudio-startup-spinner" aria-hidden="true" />
+            <div className="openstudio-startup-copy">
+              <strong>Starting OpenStudio</strong>
+              <span>{startupLoadingMessage}</span>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Project Loading Overlay */}

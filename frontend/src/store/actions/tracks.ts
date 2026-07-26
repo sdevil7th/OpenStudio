@@ -25,9 +25,11 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Piano",
   "OpenStudio Drums",
   "OpenStudio Basic Synth",
+  "OpenStudio Clean Guitar",
   "Studio13 Piano",
   "Studio13 Drums",
   "Studio13 Basic Synth",
+  "Studio13 Clean Guitar",
   "OpenStudio EQ",
   "OpenStudio Compressor",
   "OpenStudio Gate",
@@ -36,6 +38,7 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Reverb",
   "OpenStudio Chorus",
   "OpenStudio Saturator",
+  "OpenStudio NAM Rack",
   "OpenStudio Pitch Correct",
   "S13 EQ",
   "S13 Compressor",
@@ -45,6 +48,7 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "S13 Reverb",
   "S13 Chorus",
   "S13 Saturator",
+  "S13 NAM Rack",
   "S13 Pitch Correct",
 ]);
 

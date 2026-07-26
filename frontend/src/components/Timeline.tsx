@@ -172,6 +172,24 @@ const getExternalMediaFileExtension = (file: { extension?: string; name: string 
   return raw.startsWith(".") ? raw : `.${raw}`;
 };
 
+const getExternalMediaFileKey = (file: { path?: string; name: string }) =>
+  (file.path || file.name).replace(/\\/g, "/").toLowerCase();
+
+const dedupeExternalMediaFiles = <T extends { path?: string; name: string }>(files: T[]): T[] => {
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    const key = getExternalMediaFileKey(file);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const getExternalMediaDropKey = (
+  dragId: string | undefined,
+  files: Array<{ path?: string; name: string }>,
+) => `${dragId || "drop"}:${files.map(getExternalMediaFileKey).join("|")}`;
+
 const getExternalMediaKind = (file: { extension?: string; name: string }): ExternalMediaKind =>
   EXTERNAL_MIDI_EXTENSIONS.has(getExternalMediaFileExtension(file)) ? "midi" : "audio";
 
@@ -1530,13 +1548,14 @@ export function Timeline({
   externalMediaPreviewRef.current = externalMediaPreview;
   const externalMediaDragContextRef = useRef<ExternalMediaDragContext | null>(null);
   const requestedExternalPreviewIdsRef = useRef<Set<string>>(new Set());
+  const processedExternalDropKeysRef = useRef<Set<string>>(new Set());
 
   const getSupportedExternalMediaFiles = useCallback((files: ExternalMediaDragEvent["files"] | undefined) => {
     const inputFiles = files ?? [];
-    return inputFiles.filter((file) => {
+    return dedupeExternalMediaFiles(inputFiles.filter((file) => {
       const ext = getExternalMediaFileExtension(file);
       return EXTERNAL_MEDIA_EXTENSIONS.has(ext);
-    });
+    }));
   }, []);
 
   const getFirstSupportedExternalMediaFile = useCallback((event: ExternalMediaDragEvent) => {
@@ -1569,7 +1588,6 @@ export function Timeline({
   const resolveExternalMediaDropTarget = useCallback((
     absoluteY: number,
     mediaKind: ExternalMediaKind,
-    midiTrackCount = 1,
   ): ExternalMediaDropTarget => {
     const currentTracks = tracksRef.current;
     const currentTrackYs = trackYsRef.current;
@@ -1595,8 +1613,7 @@ export function Timeline({
 
     const hitTrack = currentTracks[hit.trackIndex];
     const needsTrackInsertion =
-      !isExternalTrackCompatible(hitTrack, mediaKind) ||
-      (mediaKind === "midi" && midiTrackCount > 1);
+      !isExternalTrackCompatible(hitTrack, mediaKind);
 
     return needsTrackInsertion
       ? { kind: "insertTrack", insertIndex: hit.trackIndex }
@@ -1658,7 +1675,7 @@ export function Timeline({
     const mediaKind = context?.filePath === file.path ? context.mediaKind : getExternalMediaKind(file);
     const midiTracks = context?.filePath === file.path ? getNonEmptyExternalMIDITracks(context.midiTracks) : [];
     const midiTrackCount = mediaKind === "midi" ? Math.max(1, context?.midiTrackCount || midiTracks.length || 1) : undefined;
-    const target = resolveExternalMediaDropTarget(absoluteY, mediaKind, midiTrackCount);
+    const target = resolveExternalMediaDropTarget(absoluteY, mediaKind);
     const firstMidiTrack = midiTracks[0];
 
     if (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost") {
@@ -1832,6 +1849,16 @@ export function Timeline({
         clearDragContext(event?.dragId);
         return;
       }
+      const dropKey = getExternalMediaDropKey(event?.dragId, mediaFiles);
+      if (processedExternalDropKeysRef.current.has(dropKey)) {
+        clearDragContext(event?.dragId);
+        return;
+      }
+      processedExternalDropKeysRef.current.add(dropKey);
+      if (processedExternalDropKeysRef.current.size > 64) {
+        const oldestKey = processedExternalDropKeysRef.current.values().next().value;
+        if (oldestKey) processedExternalDropKeysRef.current.delete(oldestKey);
+      }
 
       console.log("[audio.import] external drop committed", {
         count: mediaFiles.length,
@@ -1851,8 +1878,7 @@ export function Timeline({
           const useExisting =
             index === 0 &&
             targetTrack &&
-            isExternalTrackCompatible(targetTrack, "midi") &&
-            (preview.midiTrackCount ?? 1) <= 1;
+            isExternalTrackCompatible(targetTrack, "midi");
           const insertIndex = preview.target.kind === "insertTrack"
             ? preview.target.insertIndex + index
             : preview.target.kind === "existingTrack"

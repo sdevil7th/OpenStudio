@@ -956,7 +956,7 @@ export function MenuBar() {
           "A hybrid DAW with JUCE C++ backend and React/TypeScript frontend.\n\n" +
           "Built with:\n  JUCE 8.0 — Audio engine, VST3 hosting\n" +
           "  React — User interface\n  Konva — Timeline canvas\n  Zustand — State management\n\n" +
-          "github.com/studio13"
+          "github.com/sdevil7th/OpenStudio"
         */
       },
     },

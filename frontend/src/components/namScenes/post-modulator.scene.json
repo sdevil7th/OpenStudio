@@ -1,0 +1,19 @@
+{
+  "id": "post-modulator-design-a",
+  "skinId": "post-modulator-design-a",
+  "artboard": { "width": 920, "height": 620 },
+  "device": { "kind": "pedal", "title": "Modulator", "subtitle": "OpenStudio Movement", "color": "#aa8979", "accent": "#a8d8ff" },
+  "composition": { "targetDeviceCount": 1, "layout": "postfx-copper-horizontal-modulator", "requiredModules": ["waveform display", "selector", "Rate", "Depth", "Shape", "Mix", "Engage"] },
+  "controls": [
+    { "id": "mod-display", "kind": "display", "x": 460, "y": 124, "width": 252, "height": 70, "label": "Chorus", "valuePlacement": "hidden", "zIndex": 7 },
+    { "id": "mod-mode", "paramId": "modulatorMode", "kind": "button", "x": 460, "y": 214, "width": 200, "height": 42, "label": "Chorus", "labelPlacement": "hidden", "zIndex": 9 },
+    { "id": "mod-character", "paramId": "chorusCharacter", "kind": "button", "x": 670, "y": 214, "width": 110, "height": 42, "label": "Ensemble", "zIndex": 9 },
+    { "id": "mod-rate", "paramId": "chorusRateHz", "kind": "knob", "x": 364, "y": 354, "width": 88, "height": 88, "diameter": 72, "label": "Rate", "labelPlacement": "below", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "mod-depth", "paramId": "chorusDepth", "kind": "knob", "x": 492, "y": 354, "width": 88, "height": 88, "diameter": 72, "label": "Depth", "labelPlacement": "below", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "mod-feedback", "paramId": "modulatorFeedback", "kind": "knob", "x": 620, "y": 354, "width": 88, "height": 88, "diameter": 72, "label": "Shape", "labelPlacement": "below", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "mod-mix", "paramId": "chorusMix", "kind": "knob", "x": 748, "y": 354, "width": 88, "height": 88, "diameter": 72, "label": "Mix", "labelPlacement": "below", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "mod-pedal-mode", "paramId": "modulatorPedalMode", "kind": "button", "x": 790, "y": 214, "width": 74, "height": 44, "label": "Sync", "zIndex": 9 },
+    { "id": "mod-engage", "paramId": "modulatorEnabled", "kind": "footswitch", "x": 790, "y": 500, "width": 104, "height": 104, "diameter": 82, "label": "Engage", "labelPlacement": "hidden", "zIndex": 9 }
+  ],
+  "hitboxes": []
+}

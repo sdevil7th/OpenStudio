@@ -1,0 +1,19 @@
+{
+  "id": "pre-tape-echo-design-a",
+  "skinId": "pre-tape-echo-design-a",
+  "artboard": { "width": 720, "height": 1040 },
+  "device": { "kind": "pedal", "title": "Booster", "subtitle": "OpenStudio Pre Level", "color": "#76806d", "accent": "#80dfff" },
+  "composition": { "targetDeviceCount": 5, "layout": "pre-fx-stompbox-row", "requiredModules": ["Gate Drive", "Booster", "Tone Shaper", "Compressor", "Overdrive"] },
+  "controls": [
+    { "id": "tape-display", "kind": "display", "x": 360, "y": 132, "width": 270, "height": 76, "label": "Boost", "zIndex": 5 },
+    { "id": "tape-mix", "paramId": "tapeEchoMix", "kind": "knob", "x": 160, "y": 218, "width": 154, "height": 154, "diameter": 136, "label": "Level", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "tape-feed", "paramId": "tapeEchoFeedback", "kind": "knob", "x": 560, "y": 218, "width": 154, "height": 154, "diameter": 136, "label": "Boost", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "tape-mode", "paramId": "delayTempoSync", "kind": "switch", "x": 360, "y": 255, "width": 78, "height": 106, "label": "Tight", "zIndex": 8 },
+    { "id": "tape-time", "paramId": "tapeEchoTimeMs", "kind": "knob", "x": 160, "y": 456, "width": 154, "height": 154, "diameter": 136, "label": "Range", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "tape-mod", "paramId": "tapeEchoMod", "kind": "knob", "x": 360, "y": 456, "width": 154, "height": 154, "diameter": 136, "label": "Feel", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "tape-tone", "paramId": "tapeEchoTone", "kind": "knob", "x": 560, "y": 456, "width": 154, "height": 154, "diameter": 136, "label": "Tone", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "tape-led", "kind": "led", "x": 360, "y": 765, "width": 60, "height": 60, "diameter": 48, "zIndex": 7 },
+    { "id": "tape-engage", "paramId": "tapeEchoEnabled", "kind": "footswitch", "x": 360, "y": 875, "width": 140, "height": 140, "diameter": 112, "label": "Engage", "labelPlacement": "above", "zIndex": 9 }
+  ],
+  "hitboxes": []
+}

@@ -8,8 +8,10 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -43,6 +45,52 @@ MIN_SOURCE_PEAK = 1.0e-5
 MIN_SOURCE_RMS = 1.0e-6
 MIN_OUTPUT_PEAK = 1.0e-4
 MIN_OUTPUT_RMS = 1.0e-5
+
+
+def ffmpeg_binary_name() -> str:
+    return "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+
+def _candidate_ffmpeg_path(path: Path, binary_name: str) -> Path:
+    return path / binary_name if path.is_dir() else path
+
+
+def resolve_ffmpeg_executable() -> tuple[str | None, list[str]]:
+    binary_name = ffmpeg_binary_name()
+    searched: list[str] = []
+
+    env_path = os.environ.get("OPENSTUDIO_FFMPEG_PATH", "").strip()
+    if env_path:
+        candidate = _candidate_ffmpeg_path(Path(env_path).expanduser(), binary_name)
+        searched.append(str(candidate))
+        if candidate.is_file():
+            return str(candidate), searched
+
+    path_match = shutil.which("ffmpeg")
+    searched.append("PATH:ffmpeg")
+    if path_match:
+        return path_match, searched
+
+    candidate_dirs = [
+        SCRIPT_PATH.parent,
+        SCRIPT_PATH.parent.parent,
+        Path.cwd(),
+        Path.cwd() / "tools",
+        SCRIPT_PATH.parent / "tools",
+        SCRIPT_PATH.parent.parent / "tools",
+    ]
+    seen: set[str] = set()
+    for directory in candidate_dirs:
+        candidate = directory / binary_name
+        key = str(candidate.resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        searched.append(str(candidate))
+        if candidate.is_file():
+            return str(candidate), searched
+
+    return None, searched
 
 
 def emit_payload(payload: dict[str, Any]) -> None:
@@ -95,13 +143,102 @@ def source_payload(params: dict[str, Any]) -> dict[str, Any]:
     return source if isinstance(source, dict) else {}
 
 
-def prepare_source_segment(params: dict[str, Any], output_path: Path, request_id: str) -> tuple[Path, dict[str, Any]]:
+def normalize_audio_channels(data: np.ndarray, target_channels: int) -> np.ndarray:
+    target_channels = max(1, int(target_channels))
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    if data.ndim != 2:
+        raise RuntimeError("Source audio must be mono or multichannel PCM.")
+
+    current_channels = data.shape[1]
+    if current_channels == target_channels:
+        return data.astype(np.float32, copy=False)
+    if target_channels == 1:
+        return np.mean(data, axis=1, keepdims=True).astype(np.float32, copy=False)
+    if current_channels == 1:
+        return np.repeat(data, target_channels, axis=1).astype(np.float32, copy=False)
+    if current_channels > target_channels:
+        return data[:, :target_channels].astype(np.float32, copy=False)
+
+    repeats = int(np.ceil(target_channels / current_channels))
+    return np.tile(data, (1, repeats))[:, :target_channels].astype(np.float32, copy=False)
+
+
+def write_float_wav(path: Path, data: np.ndarray, sample_rate: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), data.astype(np.float32, copy=False), sample_rate, subtype="FLOAT")
+
+
+def resample_wav_with_ffmpeg(
+    input_path: Path,
+    output_path: Path,
+    *,
+    sample_rate: int,
+    channels: int,
+) -> None:
+    ffmpeg, searched_locations = resolve_ffmpeg_executable()
+    if not ffmpeg:
+        searched = "\n".join(f"  - {location}" for location in searched_locations)
+        raise RuntimeError(
+            "FFmpeg is required to resample source audio for Stable Audio 3. "
+            f"Searched locations:\n{searched}"
+        )
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(input_path),
+        "-ac",
+        str(max(1, int(channels))),
+        "-ar",
+        str(max(1, int(sample_rate))),
+        "-c:a",
+        "pcm_f32le",
+        "-f",
+        "wav",
+        str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "FFmpeg failed to resample the source audio."
+        raise RuntimeError(f"Stable Audio 3 source resample failed: {detail}")
+
+
+def get_model_audio_format(model: Any) -> tuple[int, int]:
+    model_config = getattr(model, "model_config", {}) if model is not None else {}
+    inner_model = getattr(model, "model", None)
+
+    sample_rate = getattr(inner_model, "sample_rate", None)
+    if not sample_rate and isinstance(model_config, dict):
+        sample_rate = model_config.get("sample_rate")
+
+    channels = getattr(inner_model, "io_channels", None)
+    if not channels and isinstance(model_config, dict):
+        channels = model_config.get("audio_channels")
+
+    return max(1, normalize_int(sample_rate, 44100)), max(1, normalize_int(channels, 2))
+
+
+def prepare_source_segment(
+    params: dict[str, Any],
+    output_path: Path,
+    request_id: str,
+    *,
+    target_sample_rate: int,
+    target_channels: int,
+) -> tuple[Path, dict[str, Any]]:
     source = source_payload(params)
     source_file = Path(normalize_text(source.get("filePath"))).expanduser()
     if not source_file.exists():
         raise RuntimeError(f"Source audio file does not exist: {source_file}")
 
     info = sf.info(str(source_file))
+    target_sample_rate = max(1, int(target_sample_rate))
+    target_channels = max(1, int(target_channels))
     clip_offset = max(0.0, normalize_float(source.get("clipOffset"), 0.0))
     clip_duration = max(0.01, normalize_float(source.get("clipDuration"), 0.0))
     start_frame = int(round(clip_offset * info.samplerate))
@@ -110,15 +247,31 @@ def prepare_source_segment(params: dict[str, Any], output_path: Path, request_id
     if data.size == 0:
         raise RuntimeError("Source clip segment is empty after applying clip offset and duration.")
     actual_duration = float(data.shape[0]) / float(samplerate)
-    source_peak = float(np.max(np.abs(data))) if data.size else 0.0
-    source_rms = float(np.sqrt(np.mean(np.square(data)))) if data.size else 0.0
     if actual_duration < 0.05:
         raise RuntimeError("Source clip segment is too short for Stable Audio source generation.")
+
+    prepared_data = normalize_audio_channels(data, target_channels)
+    segment_path = output_path.parent / f"{request_id}_stable_source.wav"
+    resampled_from = None
+    if samplerate != target_sample_rate:
+        resampled_from = output_path.parent / f"{request_id}_stable_source_original.wav"
+        write_float_wav(resampled_from, prepared_data, samplerate)
+        resample_wav_with_ffmpeg(
+            resampled_from,
+            segment_path,
+            sample_rate=target_sample_rate,
+            channels=target_channels,
+        )
+        prepared_data, prepared_samplerate = sf.read(str(segment_path), always_2d=True, dtype="float32")
+    else:
+        prepared_samplerate = target_sample_rate
+        write_float_wav(segment_path, prepared_data, prepared_samplerate)
+
+    source_peak = float(np.max(np.abs(prepared_data))) if prepared_data.size else 0.0
+    source_rms = float(np.sqrt(np.mean(np.square(prepared_data)))) if prepared_data.size else 0.0
     if source_peak < MIN_SOURCE_PEAK or source_rms < MIN_SOURCE_RMS:
         raise RuntimeError("Source clip is near-silent. Stable Audio source workflows need an audible source clip.")
-    segment_path = output_path.parent / f"{request_id}_stable_source.wav"
-    sf.write(str(segment_path), data, samplerate)
-    source_stats = analyze_audio_array(data.astype(np.float32), samplerate)
+    source_stats = analyze_audio_array(prepared_data.astype(np.float32), prepared_samplerate)
     return segment_path, {
         "clipDuration": actual_duration,
         "requestedClipDuration": clip_duration,
@@ -130,7 +283,13 @@ def prepare_source_segment(params: dict[str, Any], output_path: Path, request_id
         "sourceClipId": normalize_text(source.get("sourceClipId")),
         "sourcePeak": source_peak,
         "sourceRms": source_rms,
-        "sourceSampleRate": samplerate,
+        "sourceSampleRate": prepared_samplerate,
+        "sourceChannels": int(prepared_data.shape[1]) if prepared_data.ndim == 2 else 1,
+        "originalSampleRate": samplerate,
+        "originalChannels": int(info.channels),
+        "preparedSampleRate": prepared_samplerate,
+        "preparedChannels": int(prepared_data.shape[1]) if prepared_data.ndim == 2 else 1,
+        "resampledSourcePath": str(resampled_from) if resampled_from else "",
         "sourceStats": source_stats,
     }
 
@@ -342,6 +501,10 @@ def build_generation_request(
         "targetRms": 0.0,
         "expectedOutputDuration": duration,
         "sourceStats": None,
+        "sourceOriginalSampleRate": None,
+        "sourceOriginalChannels": None,
+        "sourcePreparedSampleRate": None,
+        "sourcePreparedChannels": None,
         "effectiveNoiseAmount": None,
     }
 
@@ -385,6 +548,10 @@ def build_generation_request(
         details["sourceStats"] = source_meta.get("sourceStats")
         details["targetPeak"] = normalize_float(source_meta.get("sourcePeak"), 0.0)
         details["targetRms"] = normalize_float(source_meta.get("sourceRms"), 0.0)
+        details["sourceOriginalSampleRate"] = source_meta.get("originalSampleRate")
+        details["sourceOriginalChannels"] = source_meta.get("originalChannels")
+        details["sourcePreparedSampleRate"] = source_meta.get("preparedSampleRate")
+        details["sourcePreparedChannels"] = source_meta.get("preparedChannels")
 
         if workflow == "continue-clip":
             extension_duration = max(
@@ -610,12 +777,19 @@ class StableAudioWorker:
                 "scriptVersion": SCRIPT_VERSION,
             })
             model = self._load_model(workflow, request_id)
+            target_sample_rate, target_channels = get_model_audio_format(model)
 
             segment_path = None
             source_meta = None
             source_audio = None
             if workflow in SOURCE_WORKFLOWS:
-                segment_path, meta = prepare_source_segment(params, output_path, request_id)
+                segment_path, meta = prepare_source_segment(
+                    params,
+                    output_path,
+                    request_id,
+                    target_sample_rate=target_sample_rate,
+                    target_channels=target_channels,
+                )
                 source_meta = meta
                 source_audio = load_audio_tuple(segment_path)
             kwargs, request_details = build_generation_request(
@@ -656,6 +830,10 @@ class StableAudioWorker:
                 "generationDetails": {
                     "workflow": workflow,
                     "sourceSegment": str(segment_path) if segment_path else "",
+                    "sourceOriginalSampleRate": request_details.get("sourceOriginalSampleRate"),
+                    "sourceOriginalChannels": request_details.get("sourceOriginalChannels"),
+                    "sourcePreparedSampleRate": request_details.get("sourcePreparedSampleRate"),
+                    "sourcePreparedChannels": request_details.get("sourcePreparedChannels"),
                     "duration": kwargs.get("duration"),
                     "initNoiseLevel": kwargs.get("init_noise_level"),
                     "inpaintMaskStartSeconds": kwargs.get("inpaint_mask_start_seconds"),
@@ -698,7 +876,7 @@ class StableAudioWorker:
                 generation_stop_event.set()
                 generation_heartbeat.join(timeout=1.0)
 
-            sample_rate = int(getattr(model, "sample_rate", 44100) or 44100)
+            sample_rate = target_sample_rate
             if isinstance(audio, tuple) and len(audio) == 2:
                 first, second = audio
                 if isinstance(first, (int, float)):
