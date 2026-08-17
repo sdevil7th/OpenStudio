@@ -15,14 +15,7 @@ const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
 
 let recordStartInFlight = false;
 let recordStartToken = 0;
-
-const stringifyForDebug = (value: unknown) => {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch (error) {
-    return `[unserializable: ${String(error)}]`;
-  }
-};
+let playRequestToken = 0;
 
 function quantizeRecordedMIDIEvents(events: any[], gridSeconds: number, strength: number) {
   const grid = Math.max(0.001, gridSeconds || 0.125);
@@ -200,6 +193,8 @@ type GetFn = () => any;
 
 export const transportActions = (set: SetFn, get: GetFn) => ({
     play: async () => {
+      const requestToken = ++playRequestToken;
+      const isCurrentPlayRequest = () => requestToken === playRequestToken;
       const { transport, syncClipsWithBackend, pixelsPerSecond, timeSelection } = get();
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:start`, {
         transportBefore: transport,
@@ -249,11 +244,14 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       // PlaybackEngine clips (fillTrackBuffer is skipped), and the full sync
       // disrupts the ARA renderer causing ~300ms/block.
       const araActive = await nativeBridge.hasAnyActiveARA();
+      if (!isCurrentPlayRequest()) return;
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:ara`, { araActive, startTime });
 
       if (araActive) {
         await clearPitchRoutesForCorrectedSourcesBeforePlayback("play:ara");
+        if (!isCurrentPlayRequest()) return;
         const positionResult = await nativeBridge.setTransportPosition(startTime);
+        if (!isCurrentPlayRequest()) return;
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPosition`, { startTime, positionResult });
         set((state) => ({
           transport: {
@@ -267,11 +265,18 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           recordingMIDIPreviews: {},
         }));
         const playingResult = await nativeBridge.setTransportPlaying(true);
+        if (!isCurrentPlayRequest()) {
+          await nativeBridge.setTransportPlaying(false).catch(logBridgeError("play:cancelled"));
+          return;
+        }
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPlaying`, { playingResult, mode: "ara" });
       } else {
         await syncClipsWithBackend();
+        if (!isCurrentPlayRequest()) return;
         await clearPitchRoutesForCorrectedSourcesBeforePlayback("play:standard");
+        if (!isCurrentPlayRequest()) return;
         const positionResult = await nativeBridge.setTransportPosition(startTime);
+        if (!isCurrentPlayRequest()) return;
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPosition`, { startTime, positionResult });
         set((state) => ({
           transport: {
@@ -285,23 +290,13 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           recordingMIDIPreviews: {},
         }));
         const playingResult = await nativeBridge.setTransportPlaying(true);
+        if (!isCurrentPlayRequest()) {
+          await nativeBridge.setTransportPlaying(false).catch(logBridgeError("play:cancelled"));
+          return;
+        }
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:setTransportPlaying`, { playingResult, mode: "standard" });
       }
 
-      const debugSnapshot = await nativeBridge.getAudioDebugSnapshot();
-      console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:debugSnapshot`, debugSnapshot, stringifyForDebug(debugSnapshot));
-      window.setTimeout(async () => {
-        try {
-          const delayedSnapshot = await nativeBridge.getAudioDebugSnapshot();
-          console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:debugSnapshotDelayed`, delayedSnapshot, stringifyForDebug(delayedSnapshot));
-        } catch (error) {
-          console.warn(`${AUDIO_TRANSPORT_LOG_PREFIX} play:debugSnapshotDelayed failed`, error);
-        }
-      }, 500);
-      const hasMidiClips = get().tracks.some((t) => (t.midiClips?.length ?? 0) > 0);
-      if (debugSnapshot.playbackClipCount <= 0 && !hasMidiClips) {
-        console.info(`${AUDIO_TRANSPORT_LOG_PREFIX} play:noRegisteredClips; auto-stop will handle silent playback`);
-      }
     },
 
     toggleRecord: async () => {
@@ -462,8 +457,6 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
           console.warn(`${AUDIO_RECORD_LOG_PREFIX} record:punchInMIDIInputReadiness failed`, error);
         });
       }
-      const recordSnapshot = await nativeBridge.getAudioDebugSnapshot();
-      console.log(`${AUDIO_RECORD_LOG_PREFIX} record:debugSnapshot`, recordSnapshot, stringifyForDebug(recordSnapshot));
       } catch (error) {
         console.error(`${AUDIO_RECORD_LOG_PREFIX} record failed`, error);
         get().showToast?.("Failed to start recording", "error");
@@ -486,6 +479,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
     pause: () => {
+      playRequestToken += 1;
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} pause`, {
         transportBefore: get().transport,
       });
@@ -499,6 +493,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
     stop: async () => {
+      playRequestToken += 1;
       const { playStartPosition, transport, addClip, playheadStopBehavior } = get();
       const activeRecordSession = get().recordSession;
       if (recordStartInFlight) {
@@ -552,8 +547,9 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         wasRecording,
       });
 
-      // Clear sync cache so next play does a fresh diff
-      resetSyncCache();
+      // Invalidate queued sync work immediately. Await the barrier below before
+      // directly registering completed recording clips with the backend.
+      const clipSyncResetBarrier = resetSyncCache();
 
       // Stop playback and recording
       const playingResult = await nativeBridge.setTransportPlaying(false);
@@ -562,6 +558,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       await nativeBridge.setTransportPosition(intendedStopTime).catch(logBridgeError("stop:setTransportPositionEarly"));
       console.log("[useDAWStore] STOP Native transport stopped.");
       get().endAutomationWriteSession?.();
+      await clipSyncResetBarrier;
 
       // If we were recording, fetch the new clips and add them to the tracks
       if (wasRecording) {
@@ -874,7 +871,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
                 isModified: true,
               });
               for (const { trackId, clip } of recordedPlaybackClips) {
-                void nativeBridge.removePlaybackClip(trackId, clip.filePath).catch(logBridgeError("sync"));
+                void nativeBridge.removePlaybackClipById(trackId, clip.id).catch(logBridgeError("sync"));
               }
               for (const trackId of midiTrackIdsToSync) {
                 void get().syncMIDITrackToBackend?.(trackId, { debounce: false });
@@ -899,8 +896,6 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       }));
       const positionResult = await nativeBridge.setTransportPosition(finalStopTime);
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} stop:setTransportPosition`, { finalStopTime, positionResult });
-      const stopSnapshot = await nativeBridge.getAudioDebugSnapshot();
-      console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} stop:debugSnapshot`, stopSnapshot, stringifyForDebug(stopSnapshot));
     },
 
     togglePlayPause: async () => {

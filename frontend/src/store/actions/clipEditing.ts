@@ -66,285 +66,504 @@ function syncMIDITracksForTimelineClips(get: GetFn, tracks: any[]) {
   }
 }
 
-export const clipEditingActions = (set: SetFn, get: GetFn) => ({
-    splitClipAtPlayhead: () => {
-      const state = get();
-      const playhead = state.transport.currentTime;
+const SPLIT_TIME_EPSILON = 0.000001;
 
-      // Collect clips to split: selected clips, or all clips under playhead if none selected
-      const clipsToSplit: Array<{ clip: AudioClip; trackId: string }> = [];
+function cloneSelectionSnapshot(state: any) {
+  return {
+    selectedClipIds: [...state.selectedClipIds],
+    selectedClipId: state.selectedClipId,
+    selectedTrackIds: [...state.selectedTrackIds],
+    selectedTrackId: state.selectedTrackId,
+    lastSelectedTrackId: state.lastSelectedTrackId,
+  };
+}
 
-      if (state.selectedClipIds.length > 0) {
-        // Split selected clips
-        for (const track of state.tracks) {
-          for (const clip of track.clips) {
-            if (state.selectedClipIds.includes(clip.id)) {
-              const clipEnd = clip.startTime + clip.duration;
-              if (playhead > clip.startTime && playhead < clipEnd) {
-                clipsToSplit.push({ clip, trackId: track.id });
-              }
-            }
-          }
+function cloneMIDIEditorSnapshot(state: any) {
+  return {
+    midiEditorSessions: (state.midiEditorSessions || []).map((session: any) => ({
+      ...session,
+      selectedNoteIds: [...(session.selectedNoteIds || [])],
+      visibleLanes: (session.visibleLanes || []).map((lane: any) => ({ ...lane })),
+    })),
+    activeMidiEditorSessionId: state.activeMidiEditorSessionId,
+    dockedMidiEditorSessionId: state.dockedMidiEditorSessionId,
+    detachedPanels: [...(state.detachedPanels || [])],
+    showPianoRoll: state.showPianoRoll,
+    pianoRollTrackId: state.pianoRollTrackId,
+    pianoRollClipId: state.pianoRollClipId,
+    selectedNoteIds: [...(state.selectedNoteIds || [])],
+    midiEditRange: state.midiEditRange ? { ...state.midiEditRange } : null,
+    pianoRollEditCursorTime: state.pianoRollEditCursorTime,
+    activeMidiTool: state.activeMidiTool,
+    pianoRollVisibleLanes: (state.pianoRollVisibleLanes || []).map((lane: any) => ({ ...lane })),
+    pianoRollActiveLaneId: state.pianoRollActiveLaneId,
+  };
+}
+
+function buildPostSplitMIDIEditorState(before: any, splitData: any[]) {
+  const splitClipIds = new Set<string>(
+    splitData
+      .filter((split: any) => split.kind === "midi")
+      .map((split: any) => split.originalClip.id),
+  );
+  if (splitClipIds.size === 0) return null;
+
+  const midiEditorSessions = before.midiEditorSessions
+    .filter((session: any) => !splitClipIds.has(session.clipId));
+  const sessionIds = new Set<string>(midiEditorSessions.map((session: any) => session.sessionId));
+  const dockedMidiEditorSessionId = sessionIds.has(before.dockedMidiEditorSessionId)
+    ? before.dockedMidiEditorSessionId
+    : null;
+  const activeMidiEditorSessionId = sessionIds.has(before.activeMidiEditorSessionId)
+    ? before.activeMidiEditorSessionId
+    : (dockedMidiEditorSessionId || midiEditorSessions[0]?.sessionId || null);
+  const activeSession = midiEditorSessions.find(
+    (session: any) => session.sessionId === activeMidiEditorSessionId,
+  );
+  const hasWindowedSession = midiEditorSessions.some((session: any) => session.mode === "windowed");
+
+  return {
+    midiEditorSessions,
+    activeMidiEditorSessionId,
+    dockedMidiEditorSessionId,
+    detachedPanels: hasWindowedSession
+      ? before.detachedPanels
+      : before.detachedPanels.filter((panelId: string) => panelId !== "midiEditor"),
+    showPianoRoll: Boolean(dockedMidiEditorSessionId),
+    pianoRollTrackId: activeSession?.trackId || null,
+    pianoRollClipId: activeSession?.clipId || null,
+    selectedNoteIds: [...(activeSession?.selectedNoteIds || [])],
+    midiEditRange: activeSession?.midiEditRange || null,
+    pianoRollEditCursorTime: activeSession?.editCursorTime ?? null,
+    activeMidiTool: activeSession?.activeTool || before.activeMidiTool,
+    pianoRollVisibleLanes: (activeSession?.visibleLanes || before.pianoRollVisibleLanes)
+      .map((lane: any) => ({ ...lane })),
+    pianoRollActiveLaneId: activeSession?.activeLaneId || before.pianoRollActiveLaneId,
+  };
+}
+
+function clipContainsSplitTime(clip: any, splitTime: number) {
+  const clipStart = Number(clip?.startTime);
+  const clipEnd = clipStart + Number(clip?.duration);
+  return Number.isFinite(clipStart)
+    && Number.isFinite(clipEnd)
+    && splitTime > clipStart + SPLIT_TIME_EPSILON
+    && splitTime < clipEnd - SPLIT_TIME_EPSILON;
+}
+
+function getTimelineClipEntries(state: any) {
+  return state.tracks.flatMap((track: any) => [
+    ...track.clips.map((clip: any, index: number) => ({
+      clip,
+      track,
+      trackId: track.id,
+      index,
+      kind: "audio",
+    })),
+    ...track.midiClips.map((clip: any, index: number) => ({
+      clip,
+      track,
+      trackId: track.id,
+      index,
+      kind: "midi",
+    })),
+  ]);
+}
+
+function resolveTimelineSplitTargets(state: any, splitTime: number, anchorClipId?: string) {
+  if (!Number.isFinite(splitTime)) return [];
+
+  const entries = getTimelineClipEntries(state);
+  const selectedClipIds = new Set<string>(state.selectedClipIds);
+  const selectedTrackIds = new Set<string>(state.selectedTrackIds);
+  const crossingEntries = entries.filter((entry: any) =>
+    clipContainsSplitTime(entry.clip, splitTime));
+  const selectedClipCrossings = crossingEntries.filter((entry: any) =>
+    selectedClipIds.has(entry.clip.id));
+  const selectedTrackCrossings = crossingEntries.filter((entry: any) =>
+    selectedTrackIds.has(entry.trackId));
+  const editable = (candidates: any[]) => candidates.filter((entry: any) => !entry.clip.locked);
+  const anchor = anchorClipId
+    ? entries.find((entry: any) => entry.clip.id === anchorClipId)
+    : null;
+
+  if (anchorClipId) {
+    if (!anchor) return [];
+    if (selectedClipIds.has(anchorClipId)) {
+      if (selectedClipCrossings.length > 0) return editable(selectedClipCrossings);
+      if (selectedTrackCrossings.length > 0) return editable(selectedTrackCrossings);
+    } else if (selectedClipIds.size === 0 && selectedTrackIds.has(anchor.trackId)) {
+      if (selectedTrackCrossings.length > 0) return editable(selectedTrackCrossings);
+    }
+    return editable(crossingEntries.filter((entry: any) => entry.clip.id === anchorClipId));
+  }
+
+  if (selectedClipCrossings.length > 0) return editable(selectedClipCrossings);
+  if (selectedTrackCrossings.length > 0) return editable(selectedTrackCrossings);
+  return editable(crossingEntries);
+}
+
+function interpolateGainEnvelope(points: any[], time: number) {
+  if (points.length === 0) return 1;
+  if (time <= points[0].time) return points[0].gain;
+  if (time >= points[points.length - 1].time) return points[points.length - 1].gain;
+
+  for (let index = 0; index + 1 < points.length; index += 1) {
+    const left = points[index];
+    const right = points[index + 1];
+    if (time < left.time || time > right.time) continue;
+    const span = right.time - left.time;
+    if (Math.abs(span) <= SPLIT_TIME_EPSILON) return right.gain;
+    const amount = (time - left.time) / span;
+    return left.gain + amount * (right.gain - left.gain);
+  }
+
+  return 1;
+}
+
+function splitGainEnvelope(envelope: any, splitOffset: number) {
+  if (!Array.isArray(envelope)) {
+    return { left: undefined, right: undefined };
+  }
+  if (envelope.length === 0) {
+    return { left: [], right: [] };
+  }
+
+  const points = envelope
+    .filter((point: any) => Number.isFinite(point?.time) && Number.isFinite(point?.gain))
+    .map((point: any) => ({ time: Number(point.time), gain: Number(point.gain) }))
+    .sort((a: any, b: any) => a.time - b.time);
+  if (points.length === 0) {
+    return { left: [], right: [] };
+  }
+
+  const boundaryGain = interpolateGainEnvelope(points, splitOffset);
+  const left = points
+    .filter((point: any) => point.time < splitOffset - SPLIT_TIME_EPSILON)
+    .map((point: any) => ({ ...point }));
+  left.push({ time: splitOffset, gain: boundaryGain });
+
+  const right = [{ time: 0, gain: boundaryGain }];
+  for (const point of points) {
+    if (point.time > splitOffset + SPLIT_TIME_EPSILON) {
+      right.push({ time: point.time - splitOffset, gain: point.gain });
+    }
+  }
+
+  return { left, right };
+}
+
+function cloneMIDIClipContent(clip: any) {
+  return {
+    events: clip.events.map((event: any) => ({ ...event })),
+    ccEvents: clip.ccEvents?.map((event: any) => ({ ...event })) || [],
+    quantizeBackup: clip.quantizeBackup
+      ? {
+          events: clip.quantizeBackup.events.map((event: any) => ({ ...event })),
+          ccEvents: clip.quantizeBackup.ccEvents?.map((event: any) => ({ ...event })),
         }
-      } else {
-        // No clips selected — split all clips under playhead
-        for (const track of state.tracks) {
-          for (const clip of track.clips) {
-            const clipEnd = clip.startTime + clip.duration;
-            if (playhead > clip.startTime && playhead < clipEnd) {
-              clipsToSplit.push({ clip, trackId: track.id });
-            }
-          }
-        }
-      }
+      : undefined,
+  };
+}
 
-      if (clipsToSplit.length === 0) return;
-
-      // Build left/right clips for each split
-      const splitData = clipsToSplit.map(({ clip, trackId }) => {
-        const leftId = crypto.randomUUID();
-        const rightId = crypto.randomUUID();
-        const leftDuration = playhead - clip.startTime;
-        const rightDuration = clip.duration - leftDuration;
-
-        const leftClip: AudioClip = {
-          ...clip,
-          id: leftId,
-          duration: leftDuration,
-          fadeOut: 0, // Remove fade out from left clip (split point)
-        };
-
-        const rightClip: AudioClip = {
-          ...clip,
-          id: rightId,
-          startTime: playhead,
-          duration: rightDuration,
-          offset: clip.offset + leftDuration,
-          fadeIn: 0, // Remove fade in from right clip (split point)
-        };
-
-        return { originalClip: clip, trackId, leftClip, rightClip };
-      });
-
-      const command: Command = {
-        type: "SPLIT_CLIP",
-        description: `Split ${splitData.length} clip${splitData.length > 1 ? "s" : ""} at cursor`,
-        timestamp: Date.now(),
-        execute: () => {
-          set((s) => ({
-            tracks: s.tracks.map((track) => {
-              const splitsForTrack = splitData.filter((sd) => sd.trackId === track.id);
-              if (splitsForTrack.length === 0) return track;
-
-              const originalIds = new Set(splitsForTrack.map((sd) => sd.originalClip.id));
-              const newClips = track.clips.filter((c) => !originalIds.has(c.id));
-              for (const sd of splitsForTrack) {
-                newClips.push(sd.leftClip, sd.rightClip);
-              }
-              return { ...track, clips: newClips };
-            }),
-            // Select the right-side clips after split
-            selectedClipIds: splitData.map((sd) => sd.rightClip.id),
-            selectedClipId: splitData.length > 0 ? splitData[0].rightClip.id : null,
-          }));
-        },
-        undo: () => {
-          set((s) => ({
-            tracks: s.tracks.map((track) => {
-              const splitsForTrack = splitData.filter((sd) => sd.trackId === track.id);
-              if (splitsForTrack.length === 0) return track;
-
-              const splitIds = new Set(
-                splitsForTrack.flatMap((sd) => [sd.leftClip.id, sd.rightClip.id])
-              );
-              const newClips = track.clips.filter((c) => !splitIds.has(c.id));
-              for (const sd of splitsForTrack) {
-                newClips.push(sd.originalClip);
-              }
-              return { ...track, clips: newClips };
-            }),
-            selectedClipIds: clipsToSplit.map((c) => c.clip.id),
-            selectedClipId: clipsToSplit.length > 0 ? clipsToSplit[0].clip.id : null,
-          }));
-        },
-      };
-
-      commandManager.execute(command);
-      set({
-        canUndo: commandManager.canUndo(),
-        canRedo: commandManager.canRedo(),
-        isModified: true,
-      });
-    },
-
-    splitClipAtPosition: (clipId, splitTime) => {
-      const state = get();
-
-      // Find the clip and its track
-      let foundClip: AudioClip | null = null;
-      let foundTrackId: string | null = null;
-      for (const track of state.tracks) {
-        const clip = track.clips.find((c) => c.id === clipId);
-        if (clip) {
-          foundClip = clip;
-          foundTrackId = track.id;
-          break;
-        }
-      }
-      if (!foundClip || !foundTrackId) return;
-
-      const clip = foundClip;
-      const trackId = foundTrackId;
-      const clipEnd = clip.startTime + clip.duration;
-
-      // Split must be strictly inside the clip
-      if (splitTime <= clip.startTime || splitTime >= clipEnd) return;
-
-      const leftId = crypto.randomUUID();
-      const rightId = crypto.randomUUID();
-      const leftDuration = splitTime - clip.startTime;
-      const rightDuration = clip.duration - leftDuration;
-
-      const leftClip: AudioClip = {
-        ...clip,
-        id: leftId,
+function splitAudioTakes(
+  takes: any,
+  originalStartTime: number,
+  splitTime: number,
+  splitOffset: number,
+  rightDuration: number,
+) {
+  if (!Array.isArray(takes)) return takes;
+  const parentDuration = splitOffset + rightDuration;
+  return takes.map((take: any) => {
+    if (!take || typeof take !== "object") return take;
+    const takeOffset = Number.isFinite(Number(take.offset)) ? Number(take.offset) : 0;
+    const declaredDuration = Number.isFinite(Number(take.duration))
+      ? Math.max(0, Number(take.duration))
+      : parentDuration;
+    const sourceLength = Number(take.sourceLength);
+    const sourceAvailableDuration = Number.isFinite(sourceLength) && sourceLength > 0
+      ? Math.max(0, sourceLength - takeOffset)
+      : parentDuration;
+    // Imploded/imported takes are not guaranteed to span the parent item. Keep
+    // each take slot, but intersect its content with the two child windows so a
+    // right-hand take never advances beyond its own source.
+    const availableDuration = Math.min(parentDuration, declaredDuration, sourceAvailableDuration);
+    const takeSplitOffset = Math.min(splitOffset, availableDuration);
+    const leftDuration = takeSplitOffset;
+    const boundedRightDuration = Math.min(
+      rightDuration,
+      Math.max(0, availableDuration - splitOffset),
+    );
+    const fadeIn = Math.max(0, Number(take.fadeIn) || 0);
+    const fadeOut = Math.max(0, Number(take.fadeOut) || 0);
+    const envelopes = splitGainEnvelope(take.gainEnvelope, takeSplitOffset);
+    const hasRightContent = boundedRightDuration > SPLIT_TIME_EPSILON;
+    return {
+      left: {
+        ...take,
+        id: crypto.randomUUID(),
+        startTime: originalStartTime,
         duration: leftDuration,
-        fadeOut: 0,
-      };
-
-      const rightClip: AudioClip = {
-        ...clip,
-        id: rightId,
+        offset: takeOffset,
+        fadeIn: Math.min(fadeIn, leftDuration),
+        fadeOut: hasRightContent ? 0 : Math.min(fadeOut, leftDuration),
+        gainEnvelope: envelopes.left,
+      },
+      right: {
+        ...take,
+        id: crypto.randomUUID(),
         startTime: splitTime,
-        duration: rightDuration,
-        offset: clip.offset + leftDuration,
+        duration: boundedRightDuration,
+        offset: takeOffset + takeSplitOffset,
+        pitchCorrectionSourceOffset: Number.isFinite(take.pitchCorrectionSourceOffset)
+          ? take.pitchCorrectionSourceOffset + takeSplitOffset
+          : take.pitchCorrectionSourceOffset,
         fadeIn: 0,
-      };
+        fadeOut: Math.min(fadeOut, boundedRightDuration),
+        gainEnvelope: envelopes.right,
+      },
+    };
+  });
+}
 
-      const command: Command = {
-        type: "SPLIT_CLIP",
-        description: "Split clip at position",
-        timestamp: Date.now(),
-        execute: () => {
-          set((s) => ({
-            tracks: s.tracks.map((track) => {
-              if (track.id !== trackId) return track;
-              return {
-                ...track,
-                clips: [
-                  ...track.clips.filter((c) => c.id !== clip.id),
-                  leftClip,
-                  rightClip,
-                ],
-              };
-            }),
-            selectedClipIds: [rightClip.id],
-            selectedClipId: rightClip.id,
-            isModified: true,
-          }));
-        },
-        undo: () => {
-          set((s) => ({
-            tracks: s.tracks.map((track) => {
-              if (track.id !== trackId) return track;
-              return {
-                ...track,
-                clips: [
-                  ...track.clips.filter((c) => c.id !== leftId && c.id !== rightId),
-                  clip,
-                ],
-              };
-            }),
-            selectedClipIds: [clip.id],
-            selectedClipId: clip.id,
-          }));
-        },
-      };
+function createTimelineSplit(entry: any, splitTime: number) {
+  const { clip, trackId, kind } = entry;
+  const splitOffset = splitTime - clip.startTime;
+  const rightDuration = clip.duration - splitOffset;
+  const leftId = crypto.randomUUID();
+  const rightId = crypto.randomUUID();
 
-      commandManager.execute(command);
-      set({
-        canUndo: commandManager.canUndo(),
-        canRedo: commandManager.canRedo(),
-        isModified: true,
-      });
-    },
-
-    splitMIDIClipAtPosition: (clipId, splitTime) => {
-      const state = get();
-      let foundClip: MIDIClip | null = null;
-      let foundTrackId: string | null = null;
-      for (const track of state.tracks) {
-        const clip = track.midiClips.find((c) => c.id === clipId);
-        if (clip) { foundClip = clip; foundTrackId = track.id; break; }
-      }
-      if (!foundClip || !foundTrackId) return;
-      const clip = foundClip;
-      const trackId = foundTrackId;
-      const clipEnd = clip.startTime + clip.duration;
-      if (splitTime <= clip.startTime || splitTime >= clipEnd) return;
-
-      const splitOffset = splitTime - clip.startTime; // seconds into visible clip
-      const sourceSplitOffset = (clip.offset || 0) + splitOffset;
-      const leftId = crypto.randomUUID();
-      const rightId = crypto.randomUUID();
-
-      const leftClip: MIDIClip = {
+  if (kind === "midi") {
+    const leftContent = cloneMIDIClipContent(clip);
+    const rightContent = cloneMIDIClipContent(clip);
+    return {
+      originalClip: clip,
+      trackId,
+      kind,
+      leftClip: {
         ...clip,
+        ...leftContent,
         id: leftId,
         duration: splitOffset,
         offset: clip.offset || 0,
-        events: [...clip.events],
-        ccEvents: clip.ccEvents ? [...clip.ccEvents] : [],
-      };
-      const rightClip: MIDIClip = {
+      },
+      rightClip: {
         ...clip,
+        ...rightContent,
         id: rightId,
         startTime: splitTime,
-        duration: clip.duration - splitOffset,
-        offset: sourceSplitOffset,
-        events: [...clip.events],
-        ccEvents: clip.ccEvents ? [...clip.ccEvents] : [],
-      };
+        duration: rightDuration,
+        offset: (clip.offset || 0) + splitOffset,
+      },
+    };
+  }
 
-      const newTracks = state.tracks.map((track) => {
-        if (track.id !== trackId) return track;
-        return {
-          ...track,
-          midiClips: [
-            ...track.midiClips.filter((c) => c.id !== clip.id),
-            leftClip,
-            rightClip,
-          ],
-        };
-      });
+  const envelopes = splitGainEnvelope(clip.gainEnvelope, splitOffset);
+  const fadeIn = Math.max(0, Number(clip.fadeIn) || 0);
+  const fadeOut = Math.max(0, Number(clip.fadeOut) || 0);
+  const splitTakes = splitAudioTakes(
+    clip.takes,
+    clip.startTime,
+    splitTime,
+    splitOffset,
+    rightDuration,
+  );
+  return {
+    originalClip: clip,
+    trackId,
+    kind,
+    leftClip: {
+      ...clip,
+      id: leftId,
+      duration: splitOffset,
+      fadeIn: Math.min(fadeIn, splitOffset),
+      fadeOut: 0,
+      gainEnvelope: envelopes.left,
+      takes: splitTakes?.map((take: any) => take.left),
+    },
+    rightClip: {
+      ...clip,
+      id: rightId,
+      startTime: splitTime,
+      duration: rightDuration,
+      offset: (clip.offset || 0) + splitOffset,
+      pitchCorrectionSourceOffset: Number.isFinite(clip.pitchCorrectionSourceOffset)
+        ? clip.pitchCorrectionSourceOffset + splitOffset
+        : clip.pitchCorrectionSourceOffset,
+      fadeIn: 0,
+      fadeOut: Math.min(fadeOut, rightDuration),
+      gainEnvelope: envelopes.right,
+      takes: splitTakes?.map((take: any) => take.right),
+    },
+  };
+}
 
-      commandManager.push({
-        type: "SPLIT_MIDI_CLIP",
-        description: "Split MIDI clip",
-        timestamp: Date.now(),
-        execute: () => {
-          set({ tracks: newTracks, selectedClipIds: [rightId], selectedClipId: rightId, isModified: true });
-          syncMIDITracksForTimelineClips(get, get().tracks);
-        },
-        undo: () => {
-          set((s) => ({
-            tracks: s.tracks.map((t) => {
-              if (t.id !== trackId) return t;
-              return {
-                ...t,
-                midiClips: [...t.midiClips.filter((c) => c.id !== leftId && c.id !== rightId), clip],
-              };
-            }),
-            selectedClipIds: [clip.id],
-            selectedClipId: clip.id,
-            isModified: true,
-          }));
-          syncMIDITracksForTimelineClips(get, get().tracks);
-        },
+function buildSplitTrackSnapshots(tracks: any[], splitData: any[]) {
+  const replacements = new Map(splitData.map((split: any) => [
+    split.originalClip.id,
+    split,
+  ]));
+  const snapshots = new Map<string, any>();
+
+  for (const track of tracks) {
+    const hasAudioSplit = track.clips.some((clip: any) => replacements.has(clip.id));
+    const hasMIDISplit = track.midiClips.some((clip: any) => replacements.has(clip.id));
+    if (!hasAudioSplit && !hasMIDISplit) continue;
+
+    snapshots.set(track.id, {
+      beforeClips: [...track.clips],
+      beforeMIDIClips: [...track.midiClips],
+      afterClips: track.clips.flatMap((clip: any) => {
+        const split = replacements.get(clip.id);
+        return split?.kind === "audio" ? [split.leftClip, split.rightClip] : [clip];
+      }),
+      afterMIDIClips: track.midiClips.flatMap((clip: any) => {
+        const split = replacements.get(clip.id);
+        return split?.kind === "midi" ? [split.leftClip, split.rightClip] : [clip];
+      }),
+    });
+  }
+
+  return snapshots;
+}
+
+function applySplitTrackSnapshots(tracks: any[], snapshots: Map<string, any>, phase: "before" | "after") {
+  return tracks.map((track: any) => {
+    const snapshot = snapshots.get(track.id);
+    if (!snapshot) return track;
+    return {
+      ...track,
+      clips: [...snapshot[`${phase}Clips`]],
+      midiClips: [...snapshot[`${phase}MIDIClips`]],
+    };
+  });
+}
+
+function buildPostSplitSelection(before: any, splitData: any[]) {
+  const replacements = new Map(splitData.map((split: any) => [
+    split.originalClip.id,
+    [split.leftClip.id, split.rightClip.id],
+  ]));
+  const selectedClipIds: string[] = [];
+
+  for (const clipId of before.selectedClipIds) {
+    selectedClipIds.push(...(replacements.get(clipId) || [clipId]));
+  }
+
+  const uniqueSelectedClipIds = [...new Set(selectedClipIds)];
+  const primaryReplacement = before.selectedClipId
+    ? replacements.get(before.selectedClipId)
+    : null;
+  return {
+    ...before,
+    selectedClipIds: uniqueSelectedClipIds,
+    selectedClipId: primaryReplacement?.[1]
+      || (before.selectedClipId && uniqueSelectedClipIds.includes(before.selectedClipId)
+        ? before.selectedClipId
+        : null),
+  };
+}
+
+function syncTimelineSplit(get: GetFn, splitData: any[]) {
+  const state = get();
+  const hasAudio = splitData.some((split: any) => split.kind === "audio");
+  const midiTrackIds = new Set<string>(
+    splitData
+      .filter((split: any) => split.kind === "midi")
+      .map((split: any) => split.trackId),
+  );
+
+  if (hasAudio && state.syncClipsWithBackend) {
+    const result = state.syncClipsWithBackend();
+    if (result?.catch) {
+      result.catch((error: unknown) => {
+        console.error("[timeline.split] Backend clip sync failed after recovery attempt", error);
       });
-      set({ tracks: newTracks, selectedClipIds: [rightId], selectedClipId: rightId,
-        canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo(), isModified: true });
-      syncMIDITracksForTimelineClips(get, get().tracks);
+    }
+  }
+
+  for (const trackId of midiTrackIds) {
+    const result = state.syncMIDITrackToBackend?.(trackId, { debounce: false });
+    if (result?.catch) result.catch(() => {});
+  }
+}
+
+function splitTimelineAtPosition(set: SetFn, get: GetFn, splitTime: number, anchorClipId?: string) {
+  const state = get();
+  const targets = resolveTimelineSplitTargets(state, splitTime, anchorClipId);
+  if (targets.length === 0) return;
+
+  const splitData = targets.map((entry: any) => createTimelineSplit(entry, splitTime));
+  const trackSnapshots = buildSplitTrackSnapshots(state.tracks, splitData);
+  const beforeSelection = cloneSelectionSnapshot(state);
+  const afterSelection = buildPostSplitSelection(beforeSelection, splitData);
+  const splitMIDIClipIds = new Set<string>(
+    splitData
+      .filter((split: any) => split.kind === "midi")
+      .map((split: any) => split.originalClip.id),
+  );
+  const splitAudioClipIds = new Set<string>(
+    splitData
+      .filter((split: any) => split.kind === "audio")
+      .map((split: any) => split.originalClip.id),
+  );
+
+  const apply = (phase: "before" | "after", selection: any) => {
+    let midiEditorPatch = null;
+    if (phase === "after"
+        && get().showPitchEditor
+        && splitAudioClipIds.has(get().pitchEditorClipId)) {
+      get().closePitchEditor?.();
+    }
+    if (phase === "after" && splitMIDIClipIds.size > 0) {
+      const currentMIDIEditor = cloneMIDIEditorSnapshot(get());
+      const detachedMIDISessionIds = currentMIDIEditor.midiEditorSessions
+        .filter((session: any) => session.mode === "windowed" && splitMIDIClipIds.has(session.clipId))
+        .map((session: any) => session.sessionId);
+      for (const sessionId of detachedMIDISessionIds) {
+        const result = nativeBridge.closeMidiEditorWindow(sessionId, "sourceSplit");
+        if (result?.catch) result.catch(() => {});
+      }
+      midiEditorPatch = buildPostSplitMIDIEditorState(currentMIDIEditor, splitData);
+    }
+    set((current: any) => ({
+      tracks: applySplitTrackSnapshots(current.tracks, trackSnapshots, phase),
+      ...selection,
+      ...(midiEditorPatch || {}),
+      isModified: true,
+    }));
+    syncTimelineSplit(get, splitData);
+  };
+
+  commandManager.execute({
+    type: splitData.some((split: any) => split.kind === "midi")
+      ? "SPLIT_TIMELINE_CLIPS"
+      : "SPLIT_CLIP",
+    description: `Split ${splitData.length} clip${splitData.length === 1 ? "" : "s"}`,
+    timestamp: Date.now(),
+    execute: () => apply("after", afterSelection),
+    undo: () => apply("before", beforeSelection),
+  });
+
+  set({
+    canUndo: commandManager.canUndo(),
+    canRedo: commandManager.canRedo(),
+    isModified: true,
+  });
+}
+
+export const clipEditingActions = (set: SetFn, get: GetFn) => ({
+    splitClipAtPlayhead: () => {
+      splitTimelineAtPosition(set, get, get().transport.currentTime);
+    },
+
+    splitClipAtPosition: (clipId, splitTime) => {
+      splitTimelineAtPosition(set, get, splitTime, clipId);
+    },
+
+    splitMIDIClipAtPosition: (clipId, splitTime) => {
+      splitTimelineAtPosition(set, get, splitTime, clipId);
     },
 
     selectClip: (clipId, modifiers) => {
@@ -1277,7 +1496,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
           // Sync with backend - remove from playback engine
           if (clipFilePath) {
             try {
-              await nativeBridge.removePlaybackClip(trackIdForBackend, clipFilePath);
+              await nativeBridge.removePlaybackClipById(trackIdForBackend, clipId);
               console.log(`[DAW] Clip deleted and removed from backend: ${clipFilePath}`);
             } catch (error) {
               console.error("[DAW] Failed to remove clip from backend:", error);

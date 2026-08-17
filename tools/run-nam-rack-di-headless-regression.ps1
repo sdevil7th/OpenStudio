@@ -11,10 +11,10 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $fixtureRoot = Join-Path $repoRoot "resources\test_fixtures\guitar_di"
-$fixtureArchive = Join-Path $fixtureRoot "EGuitarFSBS-bridge-direct-SFZ+FLAC-20220911.7z"
-$fixtureExtractDir = Join-Path $fixtureRoot "EGuitarFSBS-bridge-direct-SFZ+FLAC-20220911"
-$fixtureUrl = "https://freepats.zenvoid.org/ElectricGuitar/FSBS-EGuitar/EGuitarFSBS-bridge-direct-SFZ+FLAC-20220911.7z"
-$fixtureSha256 = "E7E7B5ABFEDA8A1EA8A7186A8DCA34ED5C6C4502A4E9B3E9E670753E4F0EB990"
+$fixtureArchive = Join-Path $fixtureRoot "EGuitarFSBS-direct-SFZ+FLAC-20220911.7z"
+$fixtureExtractDir = Join-Path $fixtureRoot "EGuitarFSBS-direct SFZ+FLAC-20220911"
+$fixtureUrl = "https://github.com/freepats/electric-guitar-FSBS-direct/releases/download/2022-09-11/EGuitarFSBS-direct-SFZ%2BFLAC-20220911.7z"
+$fixtureSha256 = "7AB2A4551BB8847342D6FD10CC56E0642FCAF43F3BE8D665269C4DC9BFBBD599"
 
 function Resolve-AppPath {
     if ($AppPath -and (Test-Path $AppPath)) {

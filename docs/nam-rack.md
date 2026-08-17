@@ -27,22 +27,57 @@ Input trim
   -> Gate
   -> Compressor
   -> Tape Echo
-  -> Mono Octaver
+  -> Stereo Poly Octaver
   -> Precision Drive
   -> Distortion
-  -> Laser
+  -> optional A1/A2 Pedal NAM capture
   -> A1/A2 Amp or Full-Rig NAM capture
   -> Cabinet IR and cabinet shaping
+  -> Cabinet Space (early Room / optional Doubler)
   -> reorderable EQ / modulation / delay / reverb
   -> Output trim and meters
 ```
 
 The tuner observes the input without becoming part of the audible chain.
-Historical Pedal NAM state is read only for project migration; the current
-product uses the dedicated native pedalboard before one Amp/Full-Rig NAM slot.
-The former live Transpose, Chaos mode, Glitch, and Doubler product controls are
-retired. Legacy internal parameter names may remain where needed to restore old
-projects.
+Pedal NAM is an optional serial pre-amp slot. When loaded, its calibrated wet
+path and the native pedalboard feed the Amp/Full-Rig NAM slot; a partial Pedal
+mix preserves the single-input dry/wet balance before a following mono Amp NAM.
+The current auto-fold still infers a one-live-side route
+from each audio block. That preserves established sessions but is not explicit
+host-route metadata: a callback that straddles the first stereo Tape repeat is
+a documented compatibility limitation until route provenance is carried into
+the rack.
+The former global live Transpose, Chaos mode, Glitch, and Laser product
+controls are retired. The new Cabinet Space Doubler is a separate post-cab
+presentation effect, not a revival of the retired global control. Legacy Laser
+fields are ignored and pruned when old projects are restored; they are not
+exposed or processed by the active rack.
+
+### Tuner behavior
+
+Opening the tuner explicitly subscribes that NAM Rack to its dry hardware-input
+route; record arm and input monitoring are not required. Multiple rack windows
+use independent subscriber IDs, so closing one window cannot disable another.
+The most recently opened tuner owns the analysis route until it closes, then
+the prior subscriber resumes. A master-rack tuner explicitly observes global
+hardware Input 1.
+
+The audio callback only selects the strongest routed channel and copies it into
+a preallocated lock-free FIFO. A low-priority worker applies anti-aliased
+downsampling, full-range MPM/NSDF pitch detection, parabolic period refinement,
+and a temporal tracker. This keeps analysis out of the audible path and adds no
+audio latency.
+
+The supported range is 27.5-1320 Hz, covering B0/E1 bass fundamentals through
+upper guitar. Estimates are converted to absolute musical cents, median
+filtered, and confidence-weighted before display. Three consistent frames
+acquire a note, with the first pick-heavy window deliberately deweighted.
+Large note or octave changes require repeated agreement, and note-name
+hysteresis prevents boundary flicker. A missing estimate enters `Holding`: the
+last average remains unchanged for about 450 ms, then fades and clears around
+1.2 seconds after genuinely missing pitch. Closing the final subscribed tuner
+disables the worker-side analysis. The worker discards stale queued audio
+rather than letting CPU pressure turn into seconds of display lag.
 
 ## Why A2 matters
 
@@ -66,6 +101,13 @@ The main implementation lives in:
 - `Source/BuiltInEffects2.h/.cpp` — rack DSP, A1/A2 model preparation and
   processing, cabinet convolution, effects, transitions, calibration, state,
   latency, and diagnostics.
+- `Source/NAMCabPresentation.h/.cpp` — bounded post-cab early-room and
+  doubler presentation, transient protection, mono compatibility, and spatial
+  diagnostics.
+- `Source/NAMPolyOctaver.h/.cpp` — independent-channel ERB phase-scaling
+  octave voices used by the current stereo/polyphonic Octaver.
+- `Source/TunerPitchTracker.h/.cpp` — real-time-safe input tap, background
+  MPM/NSDF detector, sustained-note averaging, and hold/release state.
 - `Source/MainComponent.cpp` — native bridge, TONE3000 OAuth/search/download,
   local library, and secure token persistence.
 - `frontend/src/components/NAMRackPanel.tsx` — rack application state and user
@@ -89,6 +131,279 @@ The main implementation lives in:
   and crossfade transitions.
 - Precision Drive and Distortion share one fixed 2x nonlinear rate island.
 - No timing result from one machine is marketed as a universal CPU claim.
+
+### Input routing and stereo NAM contract
+
+The DAW track route is the sole input-topology authority. A one-channel route
+uses the mono NAM path. A route with two or more channels uses the stereo path
+automatically when every loaded NAM slot has either two prepared 1x1 lanes or
+a native 2x2 graph; if a loaded slot cannot support stereo, the Rack safely
+falls back to mono. Empty slots do not prevent the remaining stereo effects
+from processing a stereo track.
+
+The standard NAM capture used by the public ecosystem is normally a stateful
+1-input/1-output processor. For stereo processing, its atomically published
+owner contains two independently constructed and prepared `nam::DSP` graphs.
+Left and right have separate model,
+resampler, FIFO, dry-delay, calibration, fault, output-history, and NAM Slim
+activation state. The callback evaluates the lanes sequentially with shared
+preallocated scratch memory, but stages both results until the pair completes;
+a runtime fault in either graph therefore publishes latency-matched dry for both
+channels in that same callback, never one wet lane beside one dry lane. The Rack
+never clocks one DSP object twice. A native 2x2 NAM model, if one is loaded, runs
+once and does not receive a duplicate wrapper graph. Cabinet convolution
+continues to process the resulting stereo lanes.
+
+Changing among routing modes uses an 8 ms fade-out, a muted 24 ms plus reported
+latency state-prime interval, and a 12 ms fade-in. The graph mode changes only at
+zero gain, and the envelope is before post effects so existing delay/reverb
+tails remain continuous. This avoids exposing a cold or stale inactive lane and
+does not allocate, lock, reset a graph, or perform I/O on the audio callback.
+
+Both 1x1 lanes are constructed off the callback. A failed replacement cannot
+disturb an already active pair. On a first load, if only the optional right graph
+cannot be constructed or prepared, the ready primary graph remains available
+for mono routing. Parallel lanes add no second latency contribution, but stereo
+processing is expected to approach twice the NAM inference cost. Mono routing
+processes only the primary graph.
+
+There is no Rack-level Mono/Stereo preference. The retired `inputMode` key is
+absent from the public schema and is ignored and pruned from legacy project,
+preset, A/B, baseline, portable-state, and direct-setter paths. Physical input
+selection and track channel width remain DAW responsibilities. Diagnostics
+publish the automatic and effective mode so the UI can explain transitions and
+pause the mono-only Doubler without introducing another user setting. Loading a
+compatible model or changing the DAW track width activates the corresponding
+route through the same muted handoff described above.
+
+The complete Release rack diagnostic at 48 kHz / 8 samples included Compressor,
+Tape Echo, Stereo Poly Octaver, both native drives, A1 Pedal NAM, A2 Amp NAM,
+Cab IR, Room/Doubler, EQ, modulation, Delay, and Reverb. Three current-source
+runs on the test machine measured Single-NAM average/p99/p99.9 of
+`56.51/75.5/91.3 us`, `59.69/98.3/340.2 us`, and `58.50/92.4/353.0 us`, with
+`0/29/18` of 4096 userspace calls over the `166.67 us` deadline. Dual NAM
+measured `100.12/120.2/142.5 us`, `104.24/300.9/404.3 us`, and
+`103.79/160.0/436.9 us`, with `0/62/37` misses. The averages remain below the
+callback budget, but the scheduler-sensitive tail does not demonstrate reliable
+8-sample operation. These are machine/build-specific `diagnostic_only` results,
+not proof of ASIO stability. Driver safety and subjective stereo presentation
+still require testing on the target system.
+
+### Cabinet Space presentation contract
+
+Cabinet Space is a fixed post-cab presentation stage, before the reorderable EQ,
+modulation, Delay, and Reverb. It also runs for captures with an embedded cab;
+placing it inside the external IR function would incorrectly skip those rigs.
+Room Amount/Width feed a deterministic asymmetric 2x2 early-reflection field.
+Doubler Mix/Spread add two independently drifting short-delay voices. The close
+cab signal remains an unattenuated centre anchor and the generated side is
+mixed as `+S/-S`, so summing the output to mono cancels the added side rather
+than comb-filtering the direct tone.
+
+The design follows the practical contracts exposed by current guitar products:
+mono can become stereo at a component boundary, while true stereo input remains
+stereo; a doubler uses millisecond-scale spread; and cabinet presentation is
+separate from the late Delay/Reverb. It also follows the DAFx open-source
+widener findings that low frequencies should remain more centred and that a
+decorrelated path needs transient handling. Accordingly, two cascaded side
+high-passes keep bass anchored, and a shared onset envelope ducks only the wet
+Room/Doubler fields (up to about 3/6 dB respectively) while leaving the direct
+pick attack untouched.
+
+The processor has no feedback network, runtime allocation, locks, logging, or
+I/O. Its deterministic gates cover exact bypass, reset/partition equivalence,
+mono-fold cancellation, mono-to-stereo generation, the 3.1 ms first reflection,
+44.1/48/96 kHz operation, wet-only low-frequency side/mid balance, prefilled
+automation, transient recovery, NaN/Inf recovery, bounded tail, and 8-sample
+component timing. Wall-clock scheduler outliers remain diagnostic-only.
+Perceived externalisation, naturalness, and similarity to a named product are
+still `not_asserted` until a level-matched musician audition.
+
+Cabinet Space is controlled independently from the external Cab/IR switch. In
+the compact chain, its own power control restores the last Room Amount and
+Doubler Mix (or starts at 22% Room / 12% Doubler); switching it off writes both
+amounts to zero. In Cab > Device Controls, Room Amount and Doubler Mix are the
+individual enables: either may be zero while the other remains audible, and
+Width/Spread shape only their corresponding active field.
+
+### Native pre-amp pedal level contract
+
+Precision Drive and Distortion use one current pre-release implementation. They
+share a `+12 dBu` native-pedal operating reference before the Amp NAM stage. If
+the interface/rack calibration reference is `R dBu`, the shared nonlinear island
+receives `R - 12 dB` before fixed 2x processing and applies the exact reciprocal
+gain afterward. This keeps the represented analog pedal level stable when the
+interface reference changes and avoids applying the conversion twice when both
+pedals are stacked.
+
+Precision Drive is a full-wet overdrive circuit, not an EQ-only boost. Attack
+sets a frequency-selective feedback split: low frequencies retain the unity path
+while upper lows and mids receive Drive-dependent gain into an asymmetric
+nonlinear cell. Bright shapes the post-cell bandwidth, a DC blocker removes the
+intentional asymmetry's offset, and Volume is an exact post-circuit gain. The
+current default Volume is `+9 dB`, giving the pedal enough output to push a clean
+Amp NAM; a saved explicit nonzero Volume remains the user's value.
+
+Distortion is a clean-room modern-heavy design informed by Empress's published
+Heavy/Heavy Menace behavior, not a circuit clone. It distributes gain across
+three zero-centred nonlinear cells with filtering between cells, then feeds a
+stateful diode stage. `Weight` is a pre-distortion high-pass macro (`Tight` to
+`Thick`), Tone controls interstage/presence voicing, and Heavy, Extreme, and
+Crunch select distinct gain-density ranges. Mix crossfades the latency-aligned
+clean stage input against the complete distorted branch. A fixed `-2.5 dB`
+internal calibration keeps ordinary high-gain transients below the rack's
+emergency knee; Level is applied exactly once after the complete topology.
+`Dist Gate` is a dedicated stereo-linked idle-noise gate. Its detector reads
+the untouched calibrated drive-island input before Precision Drive, while its
+gain is applied after the complete Distortion circuit, Mix, and Level. This
+input-keyed/post-distortion placement leaves the approved open tone unchanged
+while preventing the circuit's roughly 75 dB near-zero gain from turning
+pickup/interface noise into broadband fizz. The current `0.22` default uses
+6 dB hysteresis, a 35 ms hold, a fast reopen, and a smooth close; `0` is the
+exact-unity bypass. The nonlinear state remains warm during closure, and the
+linked envelope applies the same gain to both channels without mixing audio
+between them.
+The public design references are Empress's
+[Heavy Menace overview](https://empresseffects.com/products/heavy-menace) and
+[Heavy/Heavy Menace design history](https://empresseffects.com/blogs/empress-blog/the-heavy-menace-celebrating-10-years-of-heavy).
+
+The shared island uses one latency-aligned power transition instead of
+multiplying nested pedal fades. Mid-transition reversals remain continuous, and
+reaching exact bypass performs bounded fixed-state cleanup. The shared IIR
+oversampler is drained incrementally with zero input across ordinary bypass
+callbacks rather than performing a capacity-sized reset in one low-buffer
+callback. The path has independent left/right state and performs no runtime
+allocation, lock, I/O, nested resampling, or lookahead.
+
+The serialized `namEffectsDspVersion` field is an internal migration schema,
+not a user preference or a supported legacy-engine selector. Because NAM Rack
+has not shipped, every recognized old or missing marker is translated to the
+one current implementation during binary, project, tone, and portable-state
+restore. Persistent user `.ospreset` files are rewritten atomically after a
+successful migration; runtime factory originals are left untouched and receive
+a migrated AppData shadow. Corrupt presets are not rewritten. For pre-current
+presets only, the former default Precision Volume of `0 dB` maps to the current
+`+9 dB` default; explicit nonzero controls and model/IR resources are preserved.
+No old pedal DSP remains selectable or runnable after restore.
+
+### Other pre-NAM pedal contracts
+
+The current Compressor exposes `Comp`, explicit `Attack` (0.1-50 ms), explicit
+`Release` (50-1000 ms), a neutral-at-centre 500 Hz `Tone` tilt, true parallel
+`Mix`, signed `Level` (-18 to +18 dB), and detector HPF choices Off/120/240 Hz.
+`Comp` spans a 2:1 to 20:1 ratio with a progressively lower threshold and
+firmer knee. Its calibrated gain-reduction meter is shown on the pedal. The
+range and interaction model deliberately cover the useful overlap documented
+by Dyna Comp, Cali76, Empress Compressor MKII, and Keeley Compressor Plus,
+without claiming to copy their proprietary OTA/FET circuits or synthesising
+their noise.
+
+The Compressor first builds its complete parallel signal and then applies the
+signed Level control to that complete stage:
+
+```text
+stage = (1 - Mix) * dry + Mix * compressed
+output = dBToGain(Output) * stage
+```
+
+The child compressor therefore has no hidden positive makeup contribution.
+After Compressor bypass has drained its 25 ms transition, its detector,
+RMS envelope, filters, and lookahead state are reset before the next engage.
+The stable Level automation/state ID remains `compressorVolumeDb`. The retired
+pre-release `Detail` macro is accepted only by migration: it is translated once
+to its exact former effective attack/release times, removed, and never selects
+another compressor implementation.
+
+The Rack Graphic EQ is nine bands at 65/125/250/500 Hz and 1/2/4/8/16 kHz,
+with +/-12 dB per band. The upper 16 kHz control is a high shelf rather than a
+near-Nyquist bell, and the complete EQ has a separate smoothed +/-12 dB Level
+control for gain matching and headroom. Flat/unity and bypass are transparent;
+the minimum-phase path adds no latency or modelled hiss. State migration fills
+the new Level at 0 dB and preserves the established band IDs.
+
+Tape Echo uses an additive send law:
+
+```text
+output = dry + EchoLevel * echo
+```
+
+The direct guitar therefore stays at unity while Echo Level raises the repeats.
+Bypass stops recording new input but lets the already-recorded stereo repeats
+spill over the unity direct path. The runtime dry/send smoothers are initialized
+to this law both at prepare time and after rack reset. The stable state ID remains
+`tapeEchoMix`; the schema calls it `Echo Level`.
+
+Moving Tape Mod publishes the raw control target to the child delay and uses a
+40 ms sample-domain morph for its Mod-derived width,
+feedback colour/cross-feed, and right-head time. This passed fixed-versus-uneven
+callback rendering with a maximum error of `3.7439e-7`; the control also differed
+materially from static Mod, so the invariant cannot pass by ignoring automation.
+The shared right-head morph means Tape Time/Mod-derived head movement uses that
+same 40 ms response. Standalone Delay and the post-NAM rack Delay retain their
+existing timings.
+
+Gate topology is unchanged. The rack uses `Stereo Poly Octaver`: independent L/R
+instances of the MIT Terrarium-derived ERB-PS2 topology, with fixed 6:1
+multirate processing, 80 complex bands at `Fs/6`, fast phase scaling, and
+polyphase reconstruction. Six-sample scheduling state is retained across host
+callbacks, so arbitrary partitions are sample-exact. The production callback
+performs no allocation, locking, I/O, coefficient design, or dynamic growth.
+
+Deterministic fixtures cover exact silence/bypass, L-only isolation, identical
+stereo parity, reset and fixed-versus-uneven callback partitions, NaN/Inf
+recovery, 110/220/440/880 Hz target generation, at least 70 dB stop-band
+rejection, and 44.1/48/96 kHz operation. All reset/partition/leak/parity errors
+were exactly zero in the final Release run. The optimized isolated 48 kHz /
+8-sample both-voice path measured p50 `2.9 us`, p99 `8.0 us`, and zero deadline
+misses on the test machine. These are correctness and machine-specific timing
+checks only: perceived chord tracking, pick transients, voicing, and
+product-reference quality remain `not_asserted` until musician audition.
+
+### Reverb
+
+The active rack pedal is one true-stereo guitar reverb, using an eight-line
+feedback delay network with fixed input diffusion and decorrelated stereo
+output decoding.
+The current reverb starts with a hall-sized primary tank and follows a
+zero-slope curve from 0.2 to 6 seconds of Decay. Its feedback coefficients are
+recalculated from the per-line times, preserving the requested RT60. A gently tapered
+square-root late-output compensation counters the lower impulse density of
+longer lines without making the longest setting louder.
+
+It adds a stereo architectural early-reflection pattern, spreads that pattern
+into the tank, decodes a second set of fixed tank taps, and applies two short
+output-only allpasses per channel. These layers create a later, more distributed
+spatial field rather than relying on a louder wet signal. The recursive reads
+remain fixed: moving
+fractional feedback taps can inject a small positive loop-energy error that
+compounds during a long armed session. The eight incommensurate tank lengths,
+secondary taps, and output diffusers provide decorrelation without moving the
+recursive poles.
+
+Changing Decay crossfades the old and requested tank read heads over 80 ms and
+queues the newest request when a morph is already active. The second read exists
+only during that transition; steady state uses one read per tank line. The
+design adds no dry latency, runtime allocation, second tank, lock, or
+convolution. It uses a perceptual wet-gain curve while leaving the dry path
+at unity, so a half-position Mix produces a clearly established space without
+wrapping or attenuating the direct guitar tone.
+
+Finite reverb samples have no separate tank or wet-output safety knee.
+The rack's final stereo-linked guard remains the only normal finite-value
+shaper. A separate integrity fallback clears only the reverb history and mutes
+the current wet block if recursive state is non-finite or exceeds catastrophic
+internal headroom; normal wet audio and the sample-exact dry branch are not
+shaped by that fallback.
+
+Its six sound controls are Pre-delay, Decay, Mix, Low cut, Tone, and Shimmer;
+Engage is the only switch. Pre-delay applies before every wet path, and Shimmer
+adds a filtered, decorrelated octave-up signal primarily inside the feedback
+loop. With Shimmer at zero, the pitch shifters leave the audio callback.
+
+Room/Plate/Hall selection, Freeze, ducking, and the former advanced reverb
+controls are not part of the active rack UI or parameter schema. Recognized
+pre-release reverb markers are migration input only and normalize to the one
+current rack reverb during restore.
 
 ### State and recovery contract
 

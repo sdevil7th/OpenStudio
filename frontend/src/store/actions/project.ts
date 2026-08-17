@@ -33,6 +33,10 @@ import {
   summarizeNAMProjectStateIssues,
   type NAMProjectStateIssue,
 } from "../../utils/namProjectState";
+import { isRetiredNAMRackAutomationParamId } from "../../utils/namPortableState";
+import { migrateLegacyChorusRateAutomationValue } from "../../utils/builtInParamValue";
+
+const AUTOMATION_CURVE_VERSION = 2;
 
 const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Piano",
@@ -320,20 +324,34 @@ function isLegacyPlaceholderAutomationLane(lane: any): boolean {
   );
 }
 
+function isRetiredNAMRackAutomationLane(lane: any): boolean {
+  return isRetiredNAMRackAutomationParamId(lane?.param);
+}
+
 function hasMeaningfulAutomationLane(lane: any, ownerData: any = {}): boolean {
+  if (isRetiredNAMRackAutomationLane(lane)) return false;
   const hasPoints = Array.isArray(lane?.points) && lane.points.length > 0;
   if (hasPoints) return true;
   if (Boolean(ownerData?.showAutomation) && Boolean(lane?.visible)) return true;
   return !isLegacyPlaceholderAutomationLane(lane);
 }
 
-function normalizeAutomationLane(lane: any) {
+function isNAMRackChorusRateAutomationLane(lane: any) {
+  return /^builtin_(?:input|track)_\d+_chorusRateHz$/.test(String(lane?.param || ""));
+}
+
+function normalizeAutomationLane(lane: any, automationCurveVersion = 1) {
   const readEnabled = automationLaneReadFromLegacy(lane);
+  const migrateChorusRate =
+    automationCurveVersion < AUTOMATION_CURVE_VERSION
+    && isNAMRackChorusRateAutomationLane(lane);
   const points = Array.isArray(lane?.points)
     ? lane.points
         .map((point: any) => ({
           time: Math.max(0, Number(point?.time) || 0),
-          value: Math.max(0, Math.min(1, Number(point?.value) || 0)),
+          value: migrateChorusRate
+            ? migrateLegacyChorusRateAutomationValue(Number(point?.value) || 0)
+            : Math.max(0, Math.min(1, Number(point?.value) || 0)),
         }))
         .sort((a: any, b: any) => a.time - b.time)
     : [];
@@ -349,10 +367,14 @@ function normalizeAutomationLane(lane: any) {
   };
 }
 
-function normalizeAutomationLanes(lanes: any[], ownerData: any = {}) {
+function normalizeAutomationLanes(
+  lanes: any[],
+  ownerData: any = {},
+  automationCurveVersion = 1,
+) {
   return (Array.isArray(lanes) ? lanes : [])
     .filter((lane) => hasMeaningfulAutomationLane(lane, ownerData))
-    .map(normalizeAutomationLane);
+    .map((lane) => normalizeAutomationLane(lane, automationCurveVersion));
 }
 
 function resolveLoadedAutomationLaneModes(lanes: any[], readEnabled: boolean) {
@@ -440,6 +462,7 @@ function buildSerializedProjectData(
 ) {
   return {
     version: "1.2.0",
+    automationCurveVersion: AUTOMATION_CURVE_VERSION,
     savedAt: Date.now(),
     projectName: state.projectName,
     projectNotes: state.projectNotes,
@@ -568,7 +591,7 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
   if (typeof get().closeCrossfadeEditor === "function")
     get().closeCrossfadeEditor();
 
-  resetSyncCache();
+  await resetSyncCache();
 
   const tracks = [...get().tracks];
   for (let i = tracks.length - 1; i >= 0; i--) {
@@ -790,7 +813,6 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
       try {
       const state = get();
-      console.log(`[DEBUG SAVE] Starting save. ${state.tracks.length} tracks.`);
       const namLibraryPayload = await nativeBridge.getNAMLibrary().catch(() => ({ installed: [] }));
       const namInstalledByPath = buildNAMInstalledPathIndex(namLibraryPayload.installed || []);
 
@@ -801,14 +823,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           const trackNAMAssets: any[] = [];
 
           const inputFXList = await nativeBridge.getTrackInputFX(track.id);
-          console.log(`[DEBUG SAVE] Track "${track.name}" (${track.id}): getTrackInputFX returned`, JSON.stringify(inputFXList));
           const inputFXPaths: string[] = [];
           for (let i = 0; i < inputFXList.length; i++) {
             const item = inputFXList[i];
-            console.log(`[DEBUG SAVE]   inputFX[${i}] raw object keys:`, Object.keys(item), `pluginPath="${item.pluginPath}"`);
             if (item.pluginPath) inputFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, true);
-            console.log(`[DEBUG SAVE]   inputFX[${i}] state length: ${fxState ? fxState.length : 0}`);
             inputFXStates.push(fxState || "");
             if (isNAMRackPluginPath(item.pluginPath)) {
               const builtInState = await nativeBridge.getBuiltInPluginState({ trackId: track.id, chain: "input", fxIndex: i }).catch(() => null);
@@ -825,13 +844,10 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           const trackFXStates: string[] = [];
           const trackFXPaths: string[] = [];
           const trackFXList = await nativeBridge.getTrackFX(track.id);
-          console.log(`[DEBUG SAVE] Track "${track.name}" (${track.id}): getTrackFX returned`, JSON.stringify(trackFXList));
           for (let i = 0; i < trackFXList.length; i++) {
             const item = trackFXList[i];
-            console.log(`[DEBUG SAVE]   trackFX[${i}] raw object keys:`, Object.keys(item), `pluginPath="${item.pluginPath}"`);
             if (item.pluginPath) trackFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, false);
-            console.log(`[DEBUG SAVE]   trackFX[${i}] state length: ${fxState ? fxState.length : 0}`);
             trackFXStates.push(fxState || "");
             if (isNAMRackPluginPath(item.pluginPath)) {
               const builtInState = await nativeBridge.getBuiltInPluginState({ trackId: track.id, chain: "track", fxIndex: i }).catch(() => null);
@@ -844,8 +860,6 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               }, namInstalledByPath));
             }
           }
-
-          console.log(`[DEBUG SAVE] Track "${track.name}" RESULT: ${inputFXPaths.length} input FX paths, ${trackFXPaths.length} track FX paths`);
 
           const instrumentState = track.instrumentPlugin
             ? await nativeBridge.getInstrumentState(track.id).catch(() => "")
@@ -967,7 +981,6 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       );
 
       if (success) {
-        console.log(`[DEBUG SAVE] Saved successfully to: ${path}`);
         get().showToast("Project saved", "success");
         set((ctx) => {
           const newRecent = [
@@ -982,13 +995,13 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         });
         persistRecentProjects(get().recentProjects);
       } else {
-        console.error(`[DEBUG SAVE] Save FAILED for path: ${path}`);
+        console.error(`[saveProject] Save failed for path: ${path}`);
         get().showToast("Failed to save project", "error");
       }
 
       return success;
       } catch (e) {
-        console.error("[DEBUG SAVE] Exception during save:", e);
+        console.error("[saveProject] Exception during save:", e);
         get().showToast("Save failed: " + String(e), "error");
         return false;
       }
@@ -1020,7 +1033,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
     },
 
     loadProject: async (path, options) => {
-      resetSyncCache();
+      await resetSyncCache();
 
       const bypassFX = options?.bypassFX ?? false;
       if (!path) {
@@ -1092,6 +1105,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         const loadedMasterAutomationLanesNormalized = normalizeAutomationLanes(
           loadedMasterAutomationLanesRaw,
           { showAutomation: Boolean(data.showMasterAutomation) },
+          Number(data.automationCurveVersion) || 1,
         );
         const loadedMasterAutomationRead = deriveAutomationReadEnabled(
           {
@@ -1394,6 +1408,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             const normalizedAutomationLanes = normalizeAutomationLanes(
               trackData.automationLanes || [],
               trackData,
+              Number(data.automationCurveVersion) || 1,
             );
             const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
             const restoredAutomationLanes = resolveLoadedAutomationLaneModes(
@@ -1734,6 +1749,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
       const template: ProjectTemplate = {
         name,
+        automationCurveVersion: AUTOMATION_CURVE_VERSION,
         tracks: templateTracks,
         masterVolume: state.masterVolume,
         masterPan: state.masterPan,
@@ -1783,6 +1799,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             const normalizedAutomationLanes = normalizeAutomationLanes(
               trackData.automationLanes || [],
               trackData,
+              Number(template.automationCurveVersion) || 1,
             );
             const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
             const newTrack = {

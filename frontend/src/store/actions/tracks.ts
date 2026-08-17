@@ -4,6 +4,7 @@ import { commandManager } from "../commands";
 import { logBridgeError, toastBridgeError } from "../../utils/bridgeErrorHandler";
 import { createDefaultTrack } from "../useDAWStore";
 import { syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
+import { buildTrackRenameChanges } from "../../utils/trackRename";
 import {
   getLinkedTrackIds,
   _linkingInProgress,
@@ -449,7 +450,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
           // Clear clips from backend playback engine
           for (const clip of trackSnapshot.clips) {
             if (clip.filePath) {
-              await nativeBridge.removePlaybackClip(id, clip.filePath).catch(() => {});
+              await nativeBridge.removePlaybackClipById(id, clip.id).catch(() => {});
             }
           }
           await nativeBridge.removeTrack(id).catch(() => {});
@@ -508,6 +509,37 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
           return t;
         }),
       }));
+    },
+
+    renameTracks: (trackIds, baseName) => {
+      const changes = buildTrackRenameChanges(get().tracks, trackIds, baseName);
+      if (changes.length === 0) return;
+
+      const oldNames = new Map(changes.map((change) => [change.id, change.oldName]));
+      const newNames = new Map(changes.map((change) => [change.id, change.newName]));
+      const applyNames = (names: Map<string, string>) => {
+        set((state) => ({
+          tracks: state.tracks.map((track) => {
+            const name = names.get(track.id);
+            return name === undefined ? track : { ...track, name };
+          }),
+          isModified: true,
+        }));
+      };
+
+      commandManager.execute({
+        type: "RENAME_TRACKS",
+        description: changes.length === 1
+          ? `Rename track to "${changes[0].newName}"`
+          : `Rename ${changes.length} tracks`,
+        timestamp: Date.now(),
+        execute: () => applyNames(newNames),
+        undo: () => applyNames(oldNames),
+      });
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+      });
     },
 
     setTrackMIDIEffects: (trackId, midiEffects) => {

@@ -2,8 +2,8 @@
   "id": "pre-dual-octaver-design-a",
   "skinId": "pre-dual-octaver-design-a",
   "artboard": { "width": 720, "height": 1040 },
-  "device": { "kind": "pedal", "title": "Tone Shaper", "subtitle": "OpenStudio Pre EQ", "color": "#343537", "accent": "#ffffff" },
-  "composition": { "targetDeviceCount": 5, "layout": "pre-fx-stompbox-row", "requiredModules": ["Gate Drive", "Booster", "Tone Shaper", "Compressor", "Overdrive"] },
+  "device": { "kind": "pedal", "title": "Poly Octaver", "subtitle": "OpenStudio Stereo Pitch", "color": "#343537", "accent": "#ffffff" },
+  "composition": { "targetDeviceCount": 5, "layout": "pre-fx-stompbox-row", "requiredModules": ["Gate Drive", "Booster", "Poly Octaver", "Compressor", "Overdrive"] },
   "controls": [
     { "id": "oct-down", "paramId": "octaverDownMix", "kind": "knob", "x": 180, "y": 218, "width": 168, "height": 168, "diameter": 146, "label": "Low", "zIndex": 8, "rotationRange": [-135, 135] },
     { "id": "oct-up", "paramId": "octaverUpMix", "kind": "knob", "x": 540, "y": 218, "width": 168, "height": 168, "diameter": 146, "label": "High", "zIndex": 8, "rotationRange": [-135, 135] },

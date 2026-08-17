@@ -868,6 +868,10 @@ export interface AudioDeviceSetup {
   numActiveOutputChannels?: number;
   inputChannelNames?: string[];
   outputChannelNames?: string[];
+  activeInputChannelIndices?: number[];
+  activeOutputChannelIndices?: number[];
+  channelActivationPolicy?: string;
+  forcesAllDeviceChannels?: boolean;
 }
 
 // Render Queue Job
@@ -936,6 +940,7 @@ export interface MixerSnapshot {
 
 export interface ProjectTemplate {
   name: string;
+  automationCurveVersion?: number;
   tracks: Track[];
   masterVolume: number;
   masterPan: number;
@@ -1438,6 +1443,7 @@ interface DAWActions {
   duplicateTrack: (trackId: string) => Promise<void>;
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
+  renameTracks: (trackIds: string[], baseName: string) => void;
   setTrackMIDIEffects: (trackId: string, midiEffects: MIDITrackEffect[]) => void;
   reorderTrack: (activeId: string, overId: string) => void;
   reorderMultipleTracks: (trackIds: string[], overId: string) => void;
@@ -4484,6 +4490,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           numActiveOutputChannels: (raw as Record<string, unknown>).numActiveOutputChannels as number ?? undefined,
           inputChannelNames: (raw as Record<string, unknown>).inputChannelNames as string[] | undefined,
           outputChannelNames: (raw as Record<string, unknown>).outputChannelNames as string[] | undefined,
+          activeInputChannelIndices: (raw as Record<string, unknown>).activeInputChannelIndices as number[] | undefined,
+          activeOutputChannelIndices: (raw as Record<string, unknown>).activeOutputChannelIndices as number[] | undefined,
+          channelActivationPolicy: (raw as Record<string, unknown>).channelActivationPolicy as string | undefined,
+          forcesAllDeviceChannels: (raw as Record<string, unknown>).forcesAllDeviceChannels as boolean | undefined,
         } });
       } catch (error) {
         console.error("Failed to refresh audio device setup:", error);
@@ -4856,7 +4866,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             ),
             isModified: true,
           }));
-          void nativeBridge.removePlaybackClip(trackId, newClip.filePath);
+          void nativeBridge.removePlaybackClipById(trackId, newClip.id);
         },
       });
     },
@@ -4993,7 +5003,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               isModified: true,
             };
           });
-          void nativeBridge.removePlaybackClip(targetTrackId, generatedClip.filePath).catch(logBridgeError("sync"));
+          void nativeBridge.removePlaybackClipById(targetTrackId, generatedClip.id).catch(logBridgeError("sync"));
           if (newTrackId) {
             void nativeBridge.removeTrack(newTrackId).catch(logBridgeError("sync"));
           }

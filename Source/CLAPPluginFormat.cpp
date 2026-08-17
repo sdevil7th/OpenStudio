@@ -1,20 +1,157 @@
 #include "CLAPPluginFormat.h"
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #ifdef _WIN32
   #include <windows.h>
   using LibHandle = HMODULE;
-  static LibHandle loadLib(const char* path) { return LoadLibraryA(path); }
+  static LibHandle loadLib(const juce::String& path, juce::String& errorMessage)
+  {
+      auto handle = LoadLibraryW(path.toWideCharPointer());
+      if (handle == nullptr)
+      {
+          const auto errorCode = GetLastError();
+          wchar_t systemMessage[512] {};
+          const auto messageLength = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                                     nullptr,
+                                                     errorCode,
+                                                     0,
+                                                     systemMessage,
+                                                     static_cast<DWORD>(std::size(systemMessage)),
+                                                     nullptr);
+          errorMessage = messageLength > 0
+              ? juce::String(systemMessage).trim()
+              : "Windows error " + juce::String(static_cast<juce::int64>(errorCode));
+      }
+      return handle;
+  }
   static void* getSymbol(LibHandle h, const char* name) { return (void*)GetProcAddress(h, name); }
   static void freeLib(LibHandle h) { FreeLibrary(h); }
 #else
   #include <dlfcn.h>
   using LibHandle = void*;
-  static LibHandle loadLib(const char* path) { return dlopen(path, RTLD_LOCAL | RTLD_LAZY); }
+  static LibHandle loadLib(const juce::String& path, juce::String& errorMessage)
+  {
+      dlerror();
+      auto handle = dlopen(path.toRawUTF8(), RTLD_LOCAL | RTLD_LAZY);
+      if (handle == nullptr)
+      {
+          if (const auto* error = dlerror())
+              errorMessage = juce::String::fromUTF8(error);
+      }
+      return handle;
+  }
   static void* getSymbol(LibHandle h, const char* name) { return dlsym(h, name); }
   static void freeLib(LibHandle h) { dlclose(h); }
 #endif
+
+static void logClapDiagnostic(const juce::String& message)
+{
+    juce::Logger::writeToLog("[CLAP] " + message);
+}
+
+static juce::String getMissingClapPluginCallbacks(const clap_plugin_t* plugin)
+{
+    if (plugin == nullptr)
+        return "plugin";
+
+    juce::StringArray missing;
+    if (plugin->desc == nullptr)             missing.add("desc");
+    if (plugin->init == nullptr)             missing.add("init");
+    if (plugin->destroy == nullptr)          missing.add("destroy");
+    if (plugin->activate == nullptr)         missing.add("activate");
+    if (plugin->deactivate == nullptr)       missing.add("deactivate");
+    if (plugin->start_processing == nullptr) missing.add("start_processing");
+    if (plugin->stop_processing == nullptr)  missing.add("stop_processing");
+    if (plugin->reset == nullptr)            missing.add("reset");
+    if (plugin->process == nullptr)          missing.add("process");
+    if (plugin->get_extension == nullptr)    missing.add("get_extension");
+    if (plugin->on_main_thread == nullptr)   missing.add("on_main_thread");
+    return missing.joinIntoString(", ");
+}
+
+static juce::String getMissingClapGuiCallbacks(const clap_plugin_gui_t* gui)
+{
+    if (gui == nullptr)
+        return {};
+
+    juce::StringArray missing;
+    if (gui->is_api_supported == nullptr) missing.add("is_api_supported");
+    if (gui->create == nullptr)           missing.add("create");
+    if (gui->destroy == nullptr)          missing.add("destroy");
+    if (gui->get_size == nullptr)         missing.add("get_size");
+    if (gui->set_size == nullptr)         missing.add("set_size");
+    if (gui->set_parent == nullptr)       missing.add("set_parent");
+    if (gui->show == nullptr)             missing.add("show");
+    return missing.joinIntoString(", ");
+}
+
+static void populateClapDescription(juce::PluginDescription& result,
+                                    const clap_plugin_descriptor_t& clapDescriptor,
+                                    const juce::File& moduleFile,
+                                    bool hasSharedContainer)
+{
+    result.name = clapDescriptor.name ? clapDescriptor.name : "Unknown";
+    result.manufacturerName = clapDescriptor.vendor ? clapDescriptor.vendor : "Unknown";
+    result.descriptiveName = clapDescriptor.description ? clapDescriptor.description : "";
+    result.version = clapDescriptor.version ? clapDescriptor.version : "";
+    result.pluginFormatName = "CLAP";
+    result.fileOrIdentifier = moduleFile.getFullPathName();
+    result.uniqueId = juce::String(clapDescriptor.id ? clapDescriptor.id : "").hashCode();
+    result.category = "";
+    result.isInstrument = false;
+    result.hasSharedContainer = hasSharedContainer;
+    result.lastFileModTime = moduleFile.getLastModificationTime();
+    result.lastInfoUpdateTime = juce::Time::getCurrentTime();
+
+    if (clapDescriptor.features == nullptr)
+        return;
+
+    juce::StringArray features;
+    for (int i = 0; clapDescriptor.features[i] != nullptr; ++i)
+        features.add(clapDescriptor.features[i]);
+
+    result.isInstrument = features.contains(CLAP_PLUGIN_FEATURE_INSTRUMENT);
+
+    if (result.isInstrument)
+        result.category = "Instrument";
+    else if (features.contains(CLAP_PLUGIN_FEATURE_AUDIO_EFFECT))
+        result.category = "Effect";
+    else if (features.contains(CLAP_PLUGIN_FEATURE_ANALYZER))
+        result.category = "Analyzer";
+}
+
+static bool updateClapChannelMetadata(const clap_plugin_t& plugin,
+                                      juce::PluginDescription& description)
+{
+    const auto* audioPorts = static_cast<const clap_plugin_audio_ports_t*>(
+        plugin.get_extension(&plugin, CLAP_EXT_AUDIO_PORTS));
+
+    if (audioPorts == nullptr || audioPorts->count == nullptr || audioPorts->get == nullptr)
+        return false;
+
+    const auto countChannels = [&plugin, audioPorts](bool isInput)
+    {
+        uint64_t totalChannels = 0;
+        const auto numPorts = audioPorts->count(&plugin, isInput);
+
+        for (uint32_t i = 0; i < numPorts; ++i)
+        {
+            clap_audio_port_info_t portInfo {};
+            if (audioPorts->get(&plugin, i, isInput, &portInfo))
+                totalChannels += portInfo.channel_count;
+        }
+
+        return static_cast<int>(juce::jmin(
+            totalChannels,
+            static_cast<uint64_t>((std::numeric_limits<int>::max)())));
+    };
+
+    description.numInputChannels = countChannels(true);
+    description.numOutputChannels = countChannels(false);
+    return true;
+}
 
 //==============================================================================
 // Minimal CLAP host implementation required by the CLAP API
@@ -77,10 +214,7 @@ public:
             const char* apiStr = CLAP_WINDOW_API_X11;
 #endif
             if (guiExt->is_api_supported(clapPlugin, apiStr, false))
-            {
-                guiExt->create(clapPlugin, apiStr, false);
-                guiCreated = true;
-            }
+                guiCreated = guiExt->create(clapPlugin, apiStr, false);
         }
     }
 
@@ -117,14 +251,16 @@ public:
         window.api = CLAP_WINDOW_API_X11;
         window.x11 = (unsigned long)(uintptr_t)nativeHandle;
 #endif
-        guiExt->set_parent(clapPlugin, &window);
+        if (!guiExt->set_parent(clapPlugin, &window))
+            return;
 
         // Query preferred size
         uint32_t w = 0, h = 0;
         if (guiExt->get_size(clapPlugin, &w, &h) && w > 0 && h > 0)
             setSize(static_cast<int>(w), static_cast<int>(h));
 
-        guiExt->show(clapPlugin);
+        if (!guiExt->show(clapPlugin))
+            logClapDiagnostic("Plugin GUI could not be shown: " + getAudioProcessor()->getName());
         parentSet = true;
     }
 
@@ -226,25 +362,23 @@ class CLAPPluginInstance : public juce::AudioPluginInstance
 {
 public:
     CLAPPluginInstance(LibHandle lib, const clap_plugin_t* plugin,
-                       const juce::String& pluginName, const juce::String& vendorName,
-                       const juce::String& fileOrId)
+                       juce::PluginDescription description)
         : juce::AudioPluginInstance(BusesProperties()
               .withInput("Input", juce::AudioChannelSet::stereo(), true)
               .withOutput("Output", juce::AudioChannelSet::stereo(), true))
-        , pluginFileOrId(fileOrId)
         , libHandle(lib)
         , clapPlugin(plugin)
-        , name(pluginName)
-        , vendor(vendorName)
+        , pluginDescription(std::move(description))
     {
         if (clapPlugin)
         {
-            clapPlugin->init(clapPlugin);
-
             // Discover parameters
-            paramsExt = (const clap_plugin_params_t*)clapPlugin->get_extension(clapPlugin, CLAP_EXT_PARAMS);
-            if (paramsExt)
+            const auto* candidateParams = static_cast<const clap_plugin_params_t*>(
+                clapPlugin->get_extension(clapPlugin, CLAP_EXT_PARAMS));
+            if (candidateParams != nullptr && candidateParams->count != nullptr
+                                           && candidateParams->get_info != nullptr)
             {
+                paramsExt = candidateParams;
                 uint32_t paramCount = paramsExt->count(clapPlugin);
                 for (uint32_t i = 0; i < paramCount; ++i)
                 {
@@ -262,7 +396,19 @@ public:
             }
 
             // Check for GUI support
-            guiExt = (const clap_plugin_gui_t*)clapPlugin->get_extension(clapPlugin, CLAP_EXT_GUI);
+            const auto* candidateGui = static_cast<const clap_plugin_gui_t*>(
+                clapPlugin->get_extension(clapPlugin, CLAP_EXT_GUI));
+            const auto missingGuiCallbacks = getMissingClapGuiCallbacks(candidateGui);
+            if (candidateGui != nullptr && missingGuiCallbacks.isEmpty())
+            {
+                guiExt = candidateGui;
+            }
+            else if (candidateGui != nullptr)
+            {
+                logClapDiagnostic("Ignoring incomplete GUI extension for '"
+                                  + pluginDescription.name + "'; missing: "
+                                  + missingGuiCallbacks);
+            }
         }
     }
 
@@ -282,7 +428,7 @@ public:
         {
             // Find entry and deinit
             auto* entryFn = (const clap_plugin_entry_t*)getSymbol(libHandle, "clap_entry");
-            if (entryFn)
+            if (entryFn != nullptr && entryFn->deinit != nullptr)
                 entryFn->deinit();
             freeLib(libHandle);
             libHandle = nullptr;
@@ -293,22 +439,31 @@ public:
 
     void fillInPluginDescription(juce::PluginDescription& desc) const override
     {
-        desc.name = name;
-        desc.manufacturerName = vendor;
-        desc.pluginFormatName = "CLAP";
-        desc.fileOrIdentifier = pluginFileOrId;
-        desc.category = "";
+        desc = pluginDescription;
     }
 
-    const juce::String getName() const override { return name; }
+    const juce::String getName() const override { return pluginDescription.name; }
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override
     {
         if (!clapPlugin) return;
 
-        // Activate the plugin
-        clapPlugin->activate(clapPlugin, sampleRate, (uint32_t)samplesPerBlock, (uint32_t)samplesPerBlock);
-        clapPlugin->start_processing(clapPlugin);
+        if (!clapPlugin->activate(clapPlugin,
+                                  sampleRate,
+                                  static_cast<uint32_t>(samplesPerBlock),
+                                  static_cast<uint32_t>(samplesPerBlock)))
+        {
+            logClapDiagnostic("Activation failed for: " + pluginDescription.name);
+            return;
+        }
+
+        if (!clapPlugin->start_processing(clapPlugin))
+        {
+            clapPlugin->deactivate(clapPlugin);
+            logClapDiagnostic("Processing startup failed for: " + pluginDescription.name);
+            return;
+        }
+
         currentSampleRate = sampleRate;
         currentBlockSize = samplesPerBlock;
         activated = true;
@@ -592,9 +747,7 @@ private:
     const clap_plugin_params_t* paramsExt = nullptr;
     const clap_plugin_gui_t* guiExt = nullptr;
     juce::Array<CLAPParameter*> clapParams; // Non-owning — AudioProcessor owns them via addParameter
-    juce::String name;
-    juce::String vendor;
-    juce::String pluginFileOrId;
+    juce::PluginDescription pluginDescription;
     bool activated = false;
     double currentSampleRate = 44100.0;
     int currentBlockSize = 512;
@@ -621,8 +774,7 @@ juce::String CLAPPluginFormat::getNameOfPluginFromIdentifier(const juce::String&
 
 bool CLAPPluginFormat::pluginNeedsRescanning(const juce::PluginDescription& desc)
 {
-    juce::ignoreUnused(desc);
-    return false;
+    return juce::File(desc.fileOrIdentifier).getLastModificationTime() != desc.lastFileModTime;
 }
 
 bool CLAPPluginFormat::doesPluginStillExist(const juce::PluginDescription& desc)
@@ -676,56 +828,70 @@ void CLAPPluginFormat::findAllTypesForFile(juce::OwnedArray<juce::PluginDescript
                                             const juce::String& fileOrIdentifier)
 {
     juce::File file(fileOrIdentifier);
-    if (!file.existsAsFile()) return;
+    if (!file.existsAsFile())
+    {
+        logClapDiagnostic("Scan skipped because the file does not exist: " + fileOrIdentifier);
+        return;
+    }
 
     // Load the shared library
-    LibHandle lib = loadLib(fileOrIdentifier.toRawUTF8());
-    if (!lib) return;
+    juce::String loadError;
+    LibHandle lib = loadLib(fileOrIdentifier, loadError);
+    if (!lib)
+    {
+        logClapDiagnostic("Failed to load '" + fileOrIdentifier + "': "
+                          + (loadError.isNotEmpty() ? loadError : "unknown loader error"));
+        return;
+    }
 
     auto* entry = (const clap_plugin_entry_t*)getSymbol(lib, "clap_entry");
-    if (!entry || !clap_version_is_compatible(entry->clap_version))
+    if (!entry)
     {
+        logClapDiagnostic("Missing clap_entry symbol in: " + fileOrIdentifier);
         freeLib(lib);
         return;
     }
 
-    entry->init(fileOrIdentifier.toRawUTF8());
+    if (!clap_version_is_compatible(entry->clap_version))
+    {
+        logClapDiagnostic("Incompatible CLAP version in: " + fileOrIdentifier);
+        freeLib(lib);
+        return;
+    }
+
+    if (entry->init == nullptr || entry->deinit == nullptr || entry->get_factory == nullptr)
+    {
+        logClapDiagnostic("Incomplete CLAP entry callbacks in: " + fileOrIdentifier);
+        freeLib(lib);
+        return;
+    }
+
+    if (!entry->init(fileOrIdentifier.toRawUTF8()))
+    {
+        logClapDiagnostic("CLAP entry initialization failed for: " + fileOrIdentifier);
+        freeLib(lib);
+        return;
+    }
 
     auto* factory = (const clap_plugin_factory_t*)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
-    if (factory)
+    if (factory == nullptr)
     {
-        uint32_t count = factory->get_plugin_count(factory);
+        logClapDiagnostic("No plugin factory was exposed by: " + fileOrIdentifier);
+    }
+    else if (factory->get_plugin_count == nullptr || factory->get_plugin_descriptor == nullptr)
+    {
+        logClapDiagnostic("Incomplete plugin factory callbacks in: " + fileOrIdentifier);
+    }
+    else
+    {
+        const uint32_t count = factory->get_plugin_count(factory);
         for (uint32_t i = 0; i < count; ++i)
         {
             auto* desc = factory->get_plugin_descriptor(factory, i);
             if (!desc) continue;
 
             auto* pd = new juce::PluginDescription();
-            pd->name = desc->name ? desc->name : "Unknown";
-            pd->manufacturerName = desc->vendor ? desc->vendor : "Unknown";
-            pd->descriptiveName = desc->description ? desc->description : "";
-            pd->version = desc->version ? desc->version : "";
-            pd->pluginFormatName = "CLAP";
-            pd->fileOrIdentifier = fileOrIdentifier;
-            pd->uniqueId = juce::String(desc->id ? desc->id : "").hashCode();
-            pd->category = "";
-
-            // Parse features for category
-            if (desc->features)
-            {
-                juce::StringArray features;
-                for (int f = 0; desc->features[f] != nullptr; ++f)
-                    features.add(desc->features[f]);
-
-                if (features.contains(CLAP_PLUGIN_FEATURE_INSTRUMENT))
-                    pd->category = "Instrument";
-                else if (features.contains(CLAP_PLUGIN_FEATURE_AUDIO_EFFECT))
-                    pd->category = "Effect";
-                else if (features.contains(CLAP_PLUGIN_FEATURE_ANALYZER))
-                    pd->category = "Analyzer";
-
-                pd->isInstrument = features.contains(CLAP_PLUGIN_FEATURE_INSTRUMENT);
-            }
+            populateClapDescription(*pd, *desc, file, count > 1);
 
             results.add(pd);
         }
@@ -743,76 +909,184 @@ void CLAPPluginFormat::createPluginInstance(const juce::PluginDescription& desc,
 
     juce::String fileOrId = desc.fileOrIdentifier;
 
-    LibHandle lib = loadLib(fileOrId.toRawUTF8());
+    juce::String loadError;
+    LibHandle lib = loadLib(fileOrId, loadError);
     if (!lib)
     {
-        callback(nullptr, "Failed to load CLAP library: " + fileOrId);
+        const auto message = "Failed to load CLAP library '" + fileOrId + "': "
+                           + (loadError.isNotEmpty() ? loadError : "unknown loader error");
+        logClapDiagnostic(message);
+        callback(nullptr, message);
         return;
     }
 
     auto* entry = (const clap_plugin_entry_t*)getSymbol(lib, "clap_entry");
-    if (!entry || !clap_version_is_compatible(entry->clap_version))
+    if (!entry)
     {
         freeLib(lib);
-        callback(nullptr, "Invalid CLAP entry point in: " + fileOrId);
+        const auto message = "Missing clap_entry symbol in: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
         return;
     }
 
-    entry->init(fileOrId.toRawUTF8());
+    if (!clap_version_is_compatible(entry->clap_version))
+    {
+        freeLib(lib);
+        const auto message = "Incompatible CLAP version in: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
+
+    if (entry->init == nullptr || entry->deinit == nullptr || entry->get_factory == nullptr)
+    {
+        freeLib(lib);
+        const auto message = "Incomplete CLAP entry callbacks in: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
+
+    if (!entry->init(fileOrId.toRawUTF8()))
+    {
+        freeLib(lib);
+        const auto message = "CLAP entry initialization failed for: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
 
     auto* factory = (const clap_plugin_factory_t*)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
-    if (!factory)
+    if (!factory || factory->get_plugin_count == nullptr
+                 || factory->get_plugin_descriptor == nullptr
+                 || factory->create_plugin == nullptr)
     {
         entry->deinit();
         freeLib(lib);
-        callback(nullptr, "No CLAP factory in: " + fileOrId);
+        const auto message = "No valid CLAP plugin factory in: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
         return;
     }
 
-    // Find the matching plugin by uniqueId
-    const clap_plugin_t* clapPlugin = nullptr;
-    juce::String pluginName = desc.name;
-    juce::String vendorName = desc.manufacturerName;
+    // A CLAP module may expose multiple plugin classes. Never substitute another
+    // class just because it lives in the same module.
+    const uint32_t count = factory->get_plugin_count(factory);
+    const int requestedId = desc.uniqueId != 0 ? desc.uniqueId : desc.deprecatedUid;
+    std::vector<const clap_plugin_descriptor_t*> matchingDescriptors;
 
-    uint32_t count = factory->get_plugin_count(factory);
     for (uint32_t i = 0; i < count; ++i)
     {
         auto* pluginDesc = factory->get_plugin_descriptor(factory, i);
-        if (!pluginDesc) continue;
+        if (pluginDesc == nullptr || pluginDesc->id == nullptr)
+            continue;
 
-        int id = juce::String(pluginDesc->id ? pluginDesc->id : "").hashCode();
-        if (id == desc.uniqueId)
-        {
-            static clap_host_t host = makeHost();
-            clapPlugin = factory->create_plugin(factory, &host, pluginDesc->id);
-            break;
-        }
+        if (juce::String(pluginDesc->id).hashCode() == requestedId)
+            matchingDescriptors.push_back(pluginDesc);
     }
 
-    if (!clapPlugin)
+    if (matchingDescriptors.size() > 1)
     {
-        // Try first plugin as fallback
-        if (count > 0)
+        std::vector<const clap_plugin_descriptor_t*> metadataMatches;
+        for (const auto* candidate : matchingDescriptors)
         {
-            auto* pluginDesc = factory->get_plugin_descriptor(factory, 0);
-            if (pluginDesc)
-            {
-                static clap_host_t host = makeHost();
-                clapPlugin = factory->create_plugin(factory, &host, pluginDesc->id);
-            }
+            const bool nameMatches = desc.name.isEmpty()
+                || juce::String(candidate->name ? candidate->name : "") == desc.name;
+            const bool vendorMatches = desc.manufacturerName.isEmpty()
+                || juce::String(candidate->vendor ? candidate->vendor : "") == desc.manufacturerName;
+
+            if (nameMatches && vendorMatches)
+                metadataMatches.push_back(candidate);
         }
+
+        matchingDescriptors = std::move(metadataMatches);
     }
+
+    if (matchingDescriptors.size() != 1)
+    {
+        entry->deinit();
+        freeLib(lib);
+        const auto reason = matchingDescriptors.empty()
+            ? "was not found"
+            : "is ambiguous because multiple classes have the same stored ID";
+        const auto message = "Requested CLAP class '" + desc.name + "' (ID 0x"
+                           + juce::String::toHexString(requestedId) + ") " + reason
+                           + " in module: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
+
+    const auto* matchedDescriptor = matchingDescriptors.front();
+    static clap_host_t host = makeHost();
+    const clap_plugin_t* clapPlugin = factory->create_plugin(factory, &host, matchedDescriptor->id);
 
     if (!clapPlugin)
     {
         entry->deinit();
         freeLib(lib);
-        callback(nullptr, "Failed to create CLAP plugin from: " + fileOrId);
+        const auto message = "CLAP factory failed to create class '"
+                           + juce::String(matchedDescriptor->id) + "' from: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
         return;
     }
 
+    const auto missingCallbacks = getMissingClapPluginCallbacks(clapPlugin);
+    if (missingCallbacks.isNotEmpty())
+    {
+        if (clapPlugin->destroy != nullptr)
+            clapPlugin->destroy(clapPlugin);
+        entry->deinit();
+        freeLib(lib);
+        const auto message = "CLAP class '" + juce::String(matchedDescriptor->id)
+                           + "' is missing required fields/callbacks (" + missingCallbacks
+                           + ") in: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
+
+    const auto returnedClassId = clapPlugin->desc->id != nullptr
+        ? juce::String(clapPlugin->desc->id)
+        : juce::String();
+    if (returnedClassId != juce::String(matchedDescriptor->id))
+    {
+        clapPlugin->destroy(clapPlugin);
+        entry->deinit();
+        freeLib(lib);
+        const auto message = "CLAP factory returned class '" + returnedClassId
+                           + "' when '" + juce::String(matchedDescriptor->id)
+                           + "' was requested from: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
+
+    if (!clapPlugin->init(clapPlugin))
+    {
+        clapPlugin->destroy(clapPlugin);
+        entry->deinit();
+        freeLib(lib);
+        const auto message = "CLAP plugin initialization failed: " + fileOrId;
+        logClapDiagnostic(message);
+        callback(nullptr, message);
+        return;
+    }
+
+    auto instanceDescription = desc;
+    populateClapDescription(instanceDescription,
+                            *matchedDescriptor,
+                            juce::File(fileOrId),
+                            count > 1);
+    instanceDescription.deprecatedUid = desc.deprecatedUid;
+    updateClapChannelMetadata(*clapPlugin, instanceDescription);
+
     // Note: we do NOT call entry->deinit() here because the plugin is still alive.
     // The CLAPPluginInstance destructor handles cleanup.
-    auto instance = std::make_unique<CLAPPluginInstance>(lib, clapPlugin, pluginName, vendorName, fileOrId);
+    auto instance = std::make_unique<CLAPPluginInstance>(lib,
+                                                         clapPlugin,
+                                                         std::move(instanceDescription));
     callback(std::move(instance), {});
 }

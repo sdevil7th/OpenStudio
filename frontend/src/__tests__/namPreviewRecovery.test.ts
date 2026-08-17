@@ -13,7 +13,6 @@ const baseline = {
   pedalMix: 0,
   ampEnabled: 1,
   ampMix: 1,
-  auditionSource: 0,
   pedalCalibrationMode: 1,
   pedalOverrideInputLevelDbu: 12,
   pedalOverrideOutputLevelDbu: 12,
@@ -47,7 +46,6 @@ function audition(overrides: Record<string, unknown> = {}) {
     provisionalPublication: candidate.provisionalPublication ?? {
       slot: candidate.slot,
       localPath: candidate.localPath,
-      auditionSource: 0,
       cabRequestedEnabled: candidate.slot === "cab" ? true : baseline.cabRequestedEnabled,
       effectiveCabEnabled: candidate.slot === "cab" ? 1 : undefined,
       pedalMix: candidate.slot === "pedal" ? 1 : undefined,
@@ -74,7 +72,7 @@ describe("NAM provisional preview recovery guard", () => {
     }, audition())).toBe(false);
   });
 
-  it("rejects an amp preview after its source, power, mix, or requested Cab preference changed", () => {
+  it("ignores retired diagnostic-source state but rejects power, mix, or Cab changes", () => {
     const state = {
       modelState: {
         ampModelPath: "C:/NAM/Preview.nam",
@@ -83,7 +81,7 @@ describe("NAM provisional preview recovery guard", () => {
       },
       values: { auditionSource: 1, cabEnabled: 1, ampEnabled: 1, ampMix: 1 },
     };
-    expect(provisionalNAMPreviewMatchesState(state, audition())).toBe(false);
+    expect(provisionalNAMPreviewMatchesState(state, audition())).toBe(true);
     expect(provisionalNAMPreviewMatchesState({
       ...state,
       values: { auditionSource: 0, cabEnabled: 1, ampEnabled: 0, ampMix: 1 },
@@ -126,7 +124,6 @@ describe("NAM provisional preview recovery guard", () => {
       provisionalPublication: {
         slot: "amp",
         localPath: "C:/NAM/Preview.nam",
-        auditionSource: 0,
         cabRequestedEnabled: false,
         effectiveCabEnabled: 0,
         ampEnabled: 1,

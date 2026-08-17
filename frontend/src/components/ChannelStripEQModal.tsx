@@ -75,24 +75,41 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
   useEffect(() => {
     if (!isOpen || !trackId || trackId === prevTrackIdRef.current) return;
     prevTrackIdRef.current = trackId;
+    let cancelled = false;
 
     (async () => {
-      const bands: EQBandState[] = [];
-      for (let i = 0; i < 6; i++) {
+      const parameterReads = Array.from({ length: EQ_BANDS.length * 4 }, (_, index) =>
+        nativeBridge.getChannelStripEQParam(trackId, index),
+      );
+      const [enabledState, phaseState, dcState, parameterValues] = await Promise.all([
+        nativeBridge.getChannelStripEQEnabled(trackId),
+        nativeBridge.getTrackPhaseInvert(trackId),
+        nativeBridge.getTrackDCOffset(trackId),
+        Promise.all(parameterReads),
+      ]);
+      if (cancelled) return;
+      setEqEnabled(enabledState);
+      setPhaseInverted(phaseState);
+      setDcOffsetEnabled(dcState);
+      const bands = EQ_BANDS.map((definition, i): EQBandState => {
         const base = i * 4;
-        const freq = await nativeBridge.getChannelStripEQParam(trackId, base);
-        const gain = await nativeBridge.getChannelStripEQParam(trackId, base + 1);
-        const q = await nativeBridge.getChannelStripEQParam(trackId, base + 2);
-        const enabled = await nativeBridge.getChannelStripEQParam(trackId, base + 3);
-        bands.push({
-          freq: freq > 0 ? freq : EQ_BANDS[i].defaultFreq,
+        const freq = parameterValues[base];
+        const gain = parameterValues[base + 1];
+        const q = parameterValues[base + 2];
+        const enabled = parameterValues[base + 3];
+        return {
+          freq: freq > 0 ? freq : definition.defaultFreq,
           gain,
-          q: q > 0 ? q : EQ_BANDS[i].defaultQ,
+          q: q > 0 ? q : definition.defaultQ,
           enabled: enabled > 0.5,
-        });
-      }
+        };
+      });
       setEqBands(bands);
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, trackId]);
 
   // Reset state when modal closes
@@ -129,8 +146,11 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
   );
 
   const handlePhaseInvert = useCallback(() => {
-    setPhaseInverted((p) => !p);
-  }, []);
+    if (!trackId) return;
+    const next = !phaseInverted;
+    setPhaseInverted(next);
+    nativeBridge.setTrackPhaseInvert(trackId, next);
+  }, [phaseInverted, trackId]);
 
   const handleDcOffsetToggle = useCallback(() => {
     if (!trackId) return;

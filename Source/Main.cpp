@@ -2,8 +2,10 @@
 #include "ApplicationLaunchState.h"
 #include "AudioEngine.h"
 #include "AppUpdater.h"
+#include "CLAPPluginFormat.h"
 #include "MainComponent.h"
 #include "MixerWindowManager.h"
+#include "PluginManager.h"
 
 #include "NAM/container.h"
 #include "NAM/convnet.h"
@@ -73,6 +75,115 @@ juce::File getWritableStartupLogFile()
 
     return juce::File::getSpecialLocation(juce::File::SpecialLocationType::currentApplicationFile)
         .getSiblingFile("OpenStudio_Debug.log");
+}
+
+juce::StringArray readPluginScanSearchPathsFile(const juce::File& pathsFile)
+{
+    const auto xml = juce::parseXML(pathsFile);
+    if (xml == nullptr)
+        return {};
+
+    juce::StringArray paths;
+    for (const auto* child : xml->getChildIterator())
+        if (child != nullptr && child->hasTagName("PATH"))
+            paths.add(child->getStringAttribute("value"));
+    paths.trim();
+    paths.removeEmptyStrings();
+    return paths;
+}
+
+int runHeadlessPluginScanProbe(const juce::String& formatName,
+                               const juce::String& pluginIdentifier,
+                               const juce::StringArray& searchPaths,
+                               const juce::File& reportFile)
+{
+    juce::AudioPluginFormatManager formats;
+    formats.addDefaultFormats();
+    formats.addFormat(new CLAPPluginFormat());
+
+    auto result = std::make_unique<juce::XmlElement>("PLUGIN_SCAN_RESULT");
+    result->setAttribute("format", formatName);
+    result->setAttribute("file", pluginIdentifier);
+
+    juce::AudioPluginFormat* selectedFormat = nullptr;
+    for (int index = 0; index < formats.getNumFormats(); ++index)
+    {
+        auto* candidate = formats.getFormat(index);
+        if (candidate != nullptr && candidate->getName().equalsIgnoreCase(formatName))
+        {
+            selectedFormat = candidate;
+            break;
+        }
+    }
+
+    if (selectedFormat == nullptr)
+    {
+        result->setAttribute("status", "unsupported-format");
+        result->setAttribute("error", "The requested plug-in format is not enabled in this build.");
+    }
+    else
+    {
+        const bool requiresDiscoveryPriming =
+            formatName.containsIgnoreCase("LV2")
+            || !juce::File::isAbsolutePath(pluginIdentifier);
+        if (requiresDiscoveryPriming && !searchPaths.isEmpty())
+        {
+            juce::FileSearchPath discoveryPaths;
+            for (const auto& path : searchPaths)
+                discoveryPaths.add(juce::File(path));
+
+            // LV2 candidates are URIs backed by a bundle map populated during
+            // directory enumeration. Rebuild that map in this isolated process
+            // before asking the format to resolve the URI. Filesystem-backed
+            // VST3 and CLAP candidates must skip this work: rescanning every
+            // root once per candidate would turn discovery into O(N^2).
+            selectedFormat->searchPathsForPlugins(discoveryPaths, true, false);
+        }
+
+        if (!selectedFormat->fileMightContainThisPluginType(pluginIdentifier))
+        {
+            result->setAttribute("status", "not-a-plugin");
+            result->setAttribute("error", "The selected format rejected this candidate before loading it.");
+        }
+        else
+        {
+            juce::OwnedArray<juce::PluginDescription> descriptions;
+            selectedFormat->findAllTypesForFile(descriptions, pluginIdentifier);
+            for (const auto* description : descriptions)
+                if (description != nullptr)
+                    result->addChildElement(description->createXml().release());
+
+            result->setAttribute("status", descriptions.isEmpty() ? "no-types" : "ok");
+            result->setAttribute("pluginCount", descriptions.size());
+            if (descriptions.isEmpty())
+                result->setAttribute("error", "The module loaded no compatible plug-in types.");
+        }
+    }
+
+    reportFile.getParentDirectory().createDirectory();
+    const bool wroteReport = result->writeTo(reportFile);
+    const bool succeeded = wroteReport && result->getStringAttribute("status") == "ok";
+    juce::Logger::writeToLog("[pluginScan.probe] format=" + formatName
+        + " file=" + pluginIdentifier
+        + " status=" + result->getStringAttribute("status")
+        + " report=" + reportFile.getFullPathName());
+    return succeeded ? 0 : 2;
+}
+
+int runHeadlessPluginScanRegression(const juce::File& reportFile)
+{
+    PluginManager pluginManager;
+    const auto result = pluginManager.scanForPlugins(true);
+    reportFile.getParentDirectory().createDirectory();
+    const bool wroteReport = reportFile.replaceWithText(juce::JSON::toString(result, true));
+    const bool succeeded = result.isObject()
+        && static_cast<bool>(result.getProperty("success", false))
+        && static_cast<bool>(result.getProperty("forceRescan", false))
+        && static_cast<int>(result.getProperty("failedCount", 0)) == 0;
+    juce::Logger::writeToLog("[pluginScan.headless] report=" + reportFile.getFullPathName()
+        + " wroteReport=" + juce::String(wroteReport ? "true" : "false")
+        + " success=" + juce::String(succeeded ? "true" : "false"));
+    return wroteReport && succeeded ? 0 : 2;
 }
 
 juce::Rectangle<int> rectangleFromVar(const juce::var& value)
@@ -188,7 +299,9 @@ float namProbeInputSample(int absoluteSample, double sampleRate)
     return static_cast<float>(harmonic * envelope * 0.075);
 }
 
-int runHeadlessNAMModelProbe(const juce::File& modelFile, const juce::File& reportFile)
+int runHeadlessNAMModelProbe(const juce::File& modelFile,
+                             const juce::File& reportFile,
+                             bool audioEngineConstructed)
 {
     juce::Array<juce::var> checks;
     auto* root = new juce::DynamicObject();
@@ -211,6 +324,41 @@ int runHeadlessNAMModelProbe(const juce::File& modelFile, const juce::File& repo
             + (error.isNotEmpty() ? " error=" + error : juce::String()));
         return wrote && pass ? 0 : 2;
     };
+
+    const bool audioEngineIsolated =
+        ! audioEngineConstructed;
+    addHarnessCheck(
+        checks,
+        "audio_engine_not_constructed",
+        audioEngineIsolated ? "pass" : "fail",
+        "The NAM safety-probe child must not construct an AudioEngine or open an audio device.",
+        audioEngineConstructed);
+
+    bool backgroundPriority = true;
+   #if JUCE_WINDOWS
+    const auto priorityClass =
+        ::GetPriorityClass(::GetCurrentProcess());
+    backgroundPriority =
+        priorityClass != HIGH_PRIORITY_CLASS
+        && priorityClass != REALTIME_PRIORITY_CLASS;
+    root->setProperty(
+        "windowsPriorityClass",
+        static_cast<juce::int64>(
+            priorityClass));
+   #endif
+    addHarnessCheck(
+        checks,
+        "background_process_priority",
+        backgroundPriority ? "pass" : "fail",
+        "The NAM safety-probe child must not compete with the live audio process at high or realtime priority.");
+
+    if (! audioEngineIsolated
+        || ! backgroundPriority)
+    {
+        return finish(
+            false,
+            "NAM model safety probe was not isolated from the live audio process.");
+    }
 
     if (! modelFile.existsAsFile())
     {
@@ -727,14 +875,6 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
-        // Raise process priority so the audio thread is less likely to be preempted
-        // by competing background processes. ASIO drivers handle thread priority
-        // themselves (via MMCSS), but HIGH_PRIORITY_CLASS reduces scheduler jitter
-        // from other apps at 32-sample buffer sizes.
-       #if JUCE_WINDOWS
-        ::SetPriorityClass(::GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-       #endif
-
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
         const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
         const auto automatedRegressionHeadlessMode = commandLineHasFlag(commandLine, "--automated-regression-headless");
@@ -747,12 +887,18 @@ public:
         const auto headlessOutputDirectoryPath = getCommandLineOptionValue(commandLine, "--output-dir");
         const auto namRackDIRegressionModelPath = getCommandLineOptionValue(commandLine, "--model-path");
         const auto namModelProbePath = getCommandLineOptionValue(commandLine, "--nam-model-probe-headless");
+        const auto pluginScanProbePath = getCommandLineOptionValue(commandLine, "--plugin-scan-probe-headless");
+        const auto pluginScanProbeFormat = getCommandLineOptionValue(commandLine, "--plugin-format");
+        const auto pluginScanSearchPathsFile = getCommandLineOptionValue(commandLine, "--plugin-search-paths-file");
+        const auto pluginScanRegressionHeadlessMode = commandLineHasFlag(commandLine, "--plugin-scan-regression-headless");
         const auto windowLifecycleHarnessMode = commandLineHasFlag(commandLine, "--window-lifecycle-harness");
         startupMode = commandLineHasFlag(commandLine, "--ui-safe-mode")
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
 
-        auto logFile = getWritableStartupLogFile();
+        auto logFile = pluginScanProbePath.isNotEmpty() && startupSelfTestReportPath.isNotEmpty()
+            ? juce::File(startupSelfTestReportPath.trim().unquoted()).withFileExtension("log")
+            : getWritableStartupLogFile();
         juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "OpenStudio Startup Log"));
         juce::Logger::writeToLog("Application Initialising...");
         juce::Logger::writeToLog("Startup log path: " + logFile.getFullPathName());
@@ -791,12 +937,79 @@ public:
             if (startupSelfTestReportPath.isNotEmpty())
                 juce::Logger::writeToLog("NAM model probe report path: " + startupSelfTestReportPath);
         }
+        if (pluginScanProbePath.isNotEmpty())
+        {
+            juce::Logger::writeToLog("Plugin scan probe path: " + pluginScanProbePath);
+            juce::Logger::writeToLog("Plugin scan probe format: " + pluginScanProbeFormat);
+        }
+        if (pluginScanRegressionHeadlessMode)
+            juce::Logger::writeToLog("Plugin scan headless regression enabled.");
         if (windowLifecycleHarnessMode)
         {
             const auto reportPath = startupSelfTestReportPath.isNotEmpty()
                 ? startupSelfTestReportPath
                 : getWritableStartupLogFile().getSiblingFile("OpenStudio_WindowLifecycleHarness.json").getFullPathName();
             juce::Logger::writeToLog("Window lifecycle harness enabled. Report path: " + reportPath);
+        }
+
+        if (pluginScanRegressionHeadlessMode)
+        {
+           #if JUCE_WINDOWS
+            ::SetPriorityClass(::GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+           #endif
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_PluginScanRegression.json");
+            const auto exitCode = runHeadlessPluginScanRegression(reportFile);
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        // Plug-in discovery runs in a disposable helper process. A malformed,
+        // incompatible, or hanging third-party module must not take down the
+        // live OpenStudio process.
+        if (pluginScanProbePath.isNotEmpty())
+        {
+           #if JUCE_WINDOWS
+            ::SetPriorityClass(::GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+           #endif
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_PluginScanProbe.xml");
+            const auto exitCode = runHeadlessPluginScanProbe(
+                pluginScanProbeFormat,
+                pluginScanProbePath.trim().unquoted(),
+                pluginScanSearchPathsFile.isNotEmpty()
+                    ? readPluginScanSearchPathsFile(juce::File(pluginScanSearchPathsFile.trim().unquoted()))
+                    : juce::StringArray(),
+                reportFile);
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        // The safety probe is spawned by a live, high-priority OpenStudio
+        // process and therefore may inherit that priority class. Handle it
+        // before constructing AudioEngine so it cannot open or contend for the
+        // live ASIO device, and explicitly demote its model parse/prewarm work.
+        if (namModelProbePath.isNotEmpty())
+        {
+           #if JUCE_WINDOWS
+            ::SetPriorityClass(
+                ::GetCurrentProcess(),
+                BELOW_NORMAL_PRIORITY_CLASS);
+           #endif
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_NAMModelProbe.json");
+            const auto exitCode = runHeadlessNAMModelProbe(
+                juce::File(namModelProbePath.trim().unquoted()),
+                reportFile,
+                audioEngine != nullptr);
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
         }
 
         if (startupSelfTestMode)
@@ -812,13 +1025,24 @@ public:
             return;
         }
 
+        // Keep ordinary UI, WebView, logging, and worker threads below the
+        // callback's dedicated MMCSS "Pro Audio" priority. Raising the entire
+        // process to HIGH also raises non-audio work and can starve interface
+        // support/driver threads at very small buffers.
+       #if JUCE_WINDOWS
+        ::SetPriorityClass(
+            ::GetCurrentProcess(),
+            ABOVE_NORMAL_PRIORITY_CLASS);
+       #endif
+        audioEngine = std::make_unique<AudioEngine>();
+
         if (automatedRegressionHeadlessMode)
         {
             const auto reportFile = startupSelfTestReportPath.isNotEmpty()
                 ? juce::File(startupSelfTestReportPath)
                 : getWritableStartupLogFile().getSiblingFile("OpenStudio_AutomatedRegression.json");
 
-            const auto exitCode = runHeadlessAutomatedRegressionSuite(audioEngine, reportFile);
+            const auto exitCode = runHeadlessAutomatedRegressionSuite(*audioEngine, reportFile);
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -826,7 +1050,7 @@ public:
 
         if (pitchRegressionHeadlessJobPath.isNotEmpty())
         {
-            const auto exitCode = runHeadlessPitchRegressionJob(audioEngine, pitchRegressionHeadlessJobPath);
+            const auto exitCode = runHeadlessPitchRegressionJob(*audioEngine, pitchRegressionHeadlessJobPath);
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -834,7 +1058,7 @@ public:
 
         if (cleanGuitarRegressionReportPath.isNotEmpty())
         {
-            const auto exitCode = runHeadlessCleanGuitarRegression(audioEngine, juce::File(cleanGuitarRegressionReportPath.trim().unquoted()));
+            const auto exitCode = runHeadlessCleanGuitarRegression(*audioEngine, juce::File(cleanGuitarRegressionReportPath.trim().unquoted()));
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -842,7 +1066,7 @@ public:
 
         if (namRackRegressionReportPath.isNotEmpty())
         {
-            const auto exitCode = runHeadlessNAMRackRegression(audioEngine, juce::File(namRackRegressionReportPath.trim().unquoted()));
+            const auto exitCode = runHeadlessNAMRackRegression(*audioEngine, juce::File(namRackRegressionReportPath.trim().unquoted()));
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -860,7 +1084,7 @@ public:
                 ? juce::File(namRackDIRegressionModelPath.trim().unquoted())
                 : juce::File();
 
-            const auto exitCode = runHeadlessNAMRackDIRegression(audioEngine,
+            const auto exitCode = runHeadlessNAMRackDIRegression(*audioEngine,
                                                                  juce::File(namRackDIRegressionInputPath.trim().unquoted()),
                                                                  outputDirectory,
                                                                  reportFile,
@@ -870,21 +1094,10 @@ public:
             return;
         }
 
-        if (namModelProbePath.isNotEmpty())
-        {
-            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
-                ? juce::File(startupSelfTestReportPath.trim().unquoted())
-                : getWritableStartupLogFile().getSiblingFile("OpenStudio_NAMModelProbe.json");
-            const auto exitCode = runHeadlessNAMModelProbe(juce::File(namModelProbePath.trim().unquoted()), reportFile);
-            setApplicationReturnValue(exitCode);
-            quit();
-            return;
-        }
-
         mixerWindowManager = std::make_unique<MixerWindowManager>(
             [this]()
             {
-                return std::make_unique<MainComponent>(audioEngine,
+                return std::make_unique<MainComponent>(*audioEngine,
                                                        appUpdater,
                                                        startupMode,
                                                        MainComponent::WindowRole::mixer,
@@ -896,16 +1109,16 @@ public:
             });
 
         mainWindow = std::make_unique<MainWindow>(getApplicationName(),
-                                                  audioEngine,
+                                                  *audioEngine,
                                                   appUpdater,
                                                   startupMode,
                                                   createWindowCallbacks(),
                                                   pitchRegressionJobPath);
 
         if (auto* component = mainWindow->getMainComponent())
-            audioEngine.setPluginWindowOwnerComponent(component);
+            audioEngine->setPluginWindowOwnerComponent(component);
 
-        audioEngine.onPeaksReady = [] (const juce::String& filePath)
+        audioEngine->onPeaksReady = [] (const juce::String& filePath)
         {
             auto* data = new juce::DynamicObject();
             data->setProperty("filePath", filePath);
@@ -917,7 +1130,7 @@ public:
             MainComponent::broadcastEventToAll("updateStatusChanged", status);
         });
 
-        audioEngine.setPluginWindowShortcutForwardCallback([](const juce::var& payload)
+        audioEngine->setPluginWindowShortcutForwardCallback([](const juce::var& payload)
         {
             MainComponent::broadcastEventToAll("nativeGlobalShortcut", payload);
         });
@@ -945,6 +1158,7 @@ public:
         midiEditorWindowManagers.clear();
         mixerWindowManager = nullptr;
         mainWindow = nullptr;
+        audioEngine.reset();
 
         juce::Logger::setCurrentLogger(nullptr);
     }
@@ -1207,7 +1421,7 @@ private:
         auto manager = std::make_unique<MixerWindowManager>(
             [this, safeSessionId]()
             {
-                return std::make_unique<MainComponent>(audioEngine,
+                return std::make_unique<MainComponent>(*audioEngine,
                                                        appUpdater,
                                                        startupMode,
                                                        MainComponent::WindowRole::midiEditor,
@@ -1315,7 +1529,7 @@ private:
         auto manager = std::make_unique<MixerWindowManager>(
             [this, safeSessionId]()
             {
-                return std::make_unique<MainComponent>(audioEngine,
+                return std::make_unique<MainComponent>(*audioEngine,
                                                        appUpdater,
                                                        startupMode,
                                                        MainComponent::WindowRole::pluginEditor,
@@ -1359,7 +1573,7 @@ private:
     void handleMixerWindowClosed(const juce::Rectangle<int>& bounds)
     {
         if (auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr)
-            audioEngine.setPluginWindowOwnerComponent(component);
+            audioEngine->setPluginWindowOwnerComponent(component);
 
         auto* payload = new juce::DynamicObject();
         payload->setProperty("bounds", rectangleToVar(bounds));
@@ -1385,7 +1599,7 @@ private:
     void handlePluginEditorWindowClosed(const juce::String& sessionId, const juce::Rectangle<int>& bounds)
     {
         if (auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr)
-            audioEngine.setPluginWindowOwnerComponent(component);
+            audioEngine->setPluginWindowOwnerComponent(component);
 
         auto* payload = new juce::DynamicObject();
         payload->setProperty("sessionId", sessionId);
@@ -1534,7 +1748,7 @@ private:
         (*runner)();
     }
 
-    AudioEngine audioEngine;
+    std::unique_ptr<AudioEngine> audioEngine;
     AppUpdater appUpdater;
     MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;
     std::unique_ptr<MainWindow> mainWindow;

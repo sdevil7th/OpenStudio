@@ -1,10 +1,13 @@
 import { type CSSProperties } from "react";
 import { ArrowLeft, SlidersHorizontal } from "lucide-react";
-import {
-  NAM_RACK_LASER_MODE_OPTIONS,
-  type BuiltInParamDescriptor,
-} from "../services/NativeBridge";
+import { type BuiltInParamDescriptor } from "../services/NativeBridge";
 import { RackKnob } from "./NAMRackKnob";
+
+export type RackMixerParamGroupSpec = {
+  id: string;
+  label: string;
+  paramIds: readonly string[];
+};
 
 export type RackMixerStripSpec = {
   id: string;
@@ -13,6 +16,7 @@ export type RackMixerStripSpec = {
   active: boolean;
   meterDb?: number;
   params: BuiltInParamDescriptor[];
+  paramGroups?: readonly RackMixerParamGroupSpec[];
   warning?: boolean;
   available?: boolean;
   unavailableReason?: string;
@@ -21,54 +25,95 @@ export type RackMixerStripSpec = {
   dependencyNote?: string;
 };
 
+export const NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS = [
+  {
+    id: "reverb",
+    label: "Reverb",
+    paramIds: [
+      "reverbEnabled",
+      "reverbVoice",
+      "reverbMix",
+      "reverbDecaySec",
+      "reverbPreDelayMs",
+      "reverbLowCutHz",
+      "reverbTone",
+      "reverbShimmer",
+    ],
+  },
+] as const satisfies readonly RackMixerParamGroupSpec[];
+
+export const NAM_RACK_CABINET_SPACE_PARAM_IDS = [
+  "cabRoomEnabled",
+  "cabRoomAmount",
+  "cabRoomWidth",
+  "cabDoublerEnabled",
+  "cabDoublerMix",
+  "cabDoublerSpread",
+] as const;
+
+export function isNAMRackCabinetSpaceParamId(paramId: string) {
+  return (NAM_RACK_CABINET_SPACE_PARAM_IDS as readonly string[]).includes(paramId);
+}
+
+export const NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS = [
+  {
+    id: "cabinet-ir",
+    label: "Cabinet & IR",
+    paramIds: [
+      "cabEnabled",
+      "cabMicPosition",
+      "cabMicDistance",
+      "cabMicBlend",
+      "cabRoomSend",
+      "cabLevelDb",
+      "cabPan",
+      "cabHPFHz",
+      "cabLPFHz",
+      "cabPhaseInvert",
+    ],
+  },
+  {
+    id: "room",
+    label: "Room",
+    paramIds: ["cabRoomEnabled", "cabRoomAmount", "cabRoomWidth"],
+  },
+  {
+    id: "doubler",
+    label: "Doubler",
+    paramIds: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerSpread"],
+  },
+] as const satisfies readonly RackMixerParamGroupSpec[];
+
 export const NAM_RACK_ADVANCED_CONTROL_IDS = {
-  input: ["inputTrimDb", "inputMode"],
+  input: ["inputTrimDb"],
   gate: ["gateThresholdDb", "gateReleaseMs"],
-  compressor: ["compressorEnabled", "compressorDetail", "compressorMix", "compressorVolumeDb", "compressorComp"],
+  compressor: [
+    "compressorEnabled",
+    "compressorComp",
+    "compressorAttackMs",
+    "compressorReleaseMs",
+    "compressorToneDb",
+    "compressorSidechainHPF",
+    "compressorMix",
+    "compressorVolumeDb",
+  ],
   "tape-echo": ["tapeEchoEnabled", "tapeEchoMix", "tapeEchoTimeMs", "tapeEchoFeedback", "tapeEchoMod", "tapeEchoTone"],
   octaver: ["octaverEnabled", "octaverDownMix", "octaverUpMix", "octaverDirectMix"],
   "precision-drive": ["precisionDriveEnabled", "precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack", "precisionDriveGate", "precisionDriveDrive"],
-  chaos: ["chaosEnabled", "chaosDrive", "chaosTone", "chaosMix", "chaosLevelDb"],
-  laser: ["laserEnabled", "laserMode", "laserMix", "laserSpeedHz", "laserSensitivity", "laserEnvelopeMode", "laserTrigger"],
+  chaos: ["chaosEnabled", "chaosMode", "chaosDrive", "chaosWeight", "chaosTone", "chaosGate", "chaosMix", "chaosLevelDb"],
+  "pedal-capture": ["pedalMix"],
   amp: ["ampEnabled", "ampGainDb", "ampBoost", "ampVoice", "ampMix", "ampOutputDb", "bassDb", "midDb", "trebleDb", "presenceDb"],
-  cab: ["cabEnabled", "cabMicPosition", "cabMicDistance", "cabMicBlend", "cabRoomSend", "cabLevelDb", "cabPan", "cabHPFHz", "cabLPFHz", "cabPhaseInvert"],
-  eq: ["eqEnabled"],
+  cab: [...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0].paramIds],
+  room: ["cabRoomEnabled", "cabRoomAmount", "cabRoomWidth"],
+  doubler: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerSpread"],
+  eq: ["eqEnabled", "eqLevelDb"],
   mod: ["modulatorEnabled", "chorusMix", "chorusRateHz", "chorusDepth", "chorusCharacter", "modulatorMode", "modulatorFeedback", "modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalMode", "modulatorPedalPosition"],
   delay: ["delayEnabled", "delayMix", "delayTimeMs", "delayFeedback", "delayMod", "delayDucker", "delayMode", "delayPingPong", "delayTempoSync"],
-  reverb: ["reverbEnabled", "reverbMix", "reverbDecaySec", "reverbPreDelayMs", "reverbLowCutHz", "reverbTone", "reverbShimmer"],
+  reverb: NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS.flatMap((group) => [...group.paramIds]),
   output: ["outputTrimDb"],
 } as const;
 
 export type NAMRackAdvancedStageId = keyof typeof NAM_RACK_ADVANCED_CONTROL_IDS;
-
-export const NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS = NAM_RACK_LASER_MODE_OPTIONS;
-
-/**
- * Keep the native numeric mode identity stable while presenting names that
- * describe the current DSP behavior.
- */
-export function projectNAMRackParamForUI(param: BuiltInParamDescriptor): BuiltInParamDescriptor {
-  if (param.id !== "laserMode") return param;
-  const supportedValue = NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS.some(
-    (option) => option.value === Math.round(param.value),
-  )
-    ? Math.round(param.value)
-    : NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS[0].value;
-  const supportedDefault = NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS.some(
-    (option) => option.value === Math.round(param.defaultValue),
-  )
-    ? Math.round(param.defaultValue)
-    : NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS[0].value;
-
-  return {
-    ...param,
-    value: supportedValue,
-    min: NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS[0].value,
-    max: NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS[NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS.length - 1].value,
-    defaultValue: supportedDefault,
-    enumOptions: NAM_RACK_SUPPORTED_LASER_MODE_OPTIONS.map((option) => ({ ...option })),
-  };
-}
 
 const NAM_RACK_ADVANCED_FIXED_PRE_ORDER = [
   "input",
@@ -78,9 +123,11 @@ const NAM_RACK_ADVANCED_FIXED_PRE_ORDER = [
   "octaver",
   "precision-drive",
   "chaos",
-  "laser",
+  "pedal-capture",
   "amp",
   "cab",
+  "room",
+  "doubler",
 ] as const;
 
 const NAM_RACK_ADVANCED_POST_IDS = ["eq", "mod", "delay", "reverb"] as const;
@@ -94,6 +141,8 @@ const NAM_RACK_ADVANCED_STAGE_IDS = new Set<string>([
 export function namRackAdvancedStageForCompactModule(moduleId: string): NAMRackAdvancedStageId | null {
   if (moduleId === "amp-nam") return "amp";
   if (moduleId === "cab-ir") return "cab";
+  if (moduleId === "cabinet-space" || moduleId === "room") return "room";
+  if (moduleId === "doubler") return "doubler";
   return NAM_RACK_ADVANCED_STAGE_IDS.has(moduleId) ? moduleId as NAMRackAdvancedStageId : null;
 }
 
@@ -146,6 +195,26 @@ function RackMixerStrip({
     "--nam-meter-pct": `${meterPercent(stage.meterDb) * 100}%`,
     "--nam-inspector-width": `${stage.params.length <= 1 ? 460 : stage.params.length === 2 ? 580 : stage.params.length <= 4 ? 720 : 860}px`,
   } as CSSProperties;
+  const paramsById = new Map(stage.params.map((param) => [param.id, param]));
+  const groupedParamIds = new Set(stage.paramGroups?.flatMap((group) => [...group.paramIds]) ?? []);
+  const groupedSections = (stage.paramGroups ?? [])
+    .map((group) => ({
+      ...group,
+      params: group.paramIds
+        .map((paramId) => paramsById.get(paramId))
+        .filter((param): param is BuiltInParamDescriptor => Boolean(param)),
+    }))
+    .filter((group) => group.params.length > 0);
+  const ungroupedParams = stage.params.filter((param) => !groupedParamIds.has(param.id));
+  const renderParam = (param: BuiltInParamDescriptor) => (
+    <RackKnob
+      key={param.id}
+      param={param}
+      onChange={onParamChange}
+      disabled={stage.available === false || stage.disabledParamIds?.includes(param.id)}
+      disabledReason={stage.disabledParamReasons?.[param.id]}
+    />
+  );
 
   return (
     <article
@@ -177,15 +246,22 @@ function RackMixerStrip({
           </small>
         )}
         {stage.params.length > 0 ? (
-          stage.params.map((param) => (
-            <RackKnob
-              key={param.id}
-              param={param}
-              onChange={onParamChange}
-              disabled={stage.available === false || stage.disabledParamIds?.includes(param.id)}
-              disabledReason={stage.disabledParamReasons?.[param.id]}
-            />
-          ))
+          groupedSections.length > 0 ? (
+            <div className="nam-rack-mixer-control-groups">
+              {groupedSections.map((group) => (
+                <section key={group.id} className="nam-rack-mixer-control-group" data-control-group={group.id}>
+                  <strong>{group.label}</strong>
+                  <div>{group.params.map(renderParam)}</div>
+                </section>
+              ))}
+              {ungroupedParams.length > 0 && (
+                <section className="nam-rack-mixer-control-group" data-control-group="additional">
+                  <strong>Additional</strong>
+                  <div>{ungroupedParams.map(renderParam)}</div>
+                </section>
+              )}
+            </div>
+          ) : stage.params.map(renderParam)
         ) : (
           <small>{stage.active ? "Signal present" : "No direct mixer control"}</small>
         )}

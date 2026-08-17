@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronLeft,
-  ChevronRight,
   CheckCircle2,
   Download,
   ExternalLink,
@@ -47,6 +46,19 @@ import {
   startTONE3000InteractiveAuth,
   useTONE3000Session,
 } from "../services/tone3000Session";
+import {
+  createNAMExplorerSessionEpoch,
+  getNAMExplorerSessionView,
+  NAMSessionResourceInvalidatedError,
+  NAM_EXPLORER_SESSION_TTL_MS,
+  namCatalogSession,
+  namInstalledLibrarySession,
+  namLibraryInfoSession,
+  namLiveSearchPageSession,
+  namToneDetailSession,
+  setNAMExplorerSessionView,
+  updateNAMExplorerSessionScroll,
+} from "../services/namExplorerSession";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Input, Modal } from "./ui";
@@ -90,6 +102,18 @@ import {
 } from "../utils/namCaptureType";
 import { buildNAMModulePresetCommitValues } from "../utils/namRackPresetTransactions";
 import {
+  buildTONE3000LiveSearchSnapshot,
+  createTONE3000QueryDebouncer,
+  createTONE3000SearchEpoch,
+  type TONE3000LiveSearchSnapshot,
+} from "../utils/tone3000LiveSearch";
+import {
+  createTONE3000AppendGate,
+  observeTONE3000AppendSentinel,
+  shouldRetryTONE3000Append,
+  type TONE3000LiveSearchFailure,
+} from "../utils/tone3000InfiniteAppend";
+import {
   expectedNAMEffectiveCabEnabled,
   inspectNAMCaptureSchemaActivation,
   namCaptureUsePhaseLabel,
@@ -97,6 +121,11 @@ import {
   type NAMCaptureUsePhase,
 } from "../utils/namCaptureActivation";
 import { windowRole } from "../utils/windowEnvironment";
+import {
+  namInstrumentLabelsAreCompatible,
+  normalizeNAMInstrumentProfile,
+  type NAMInstrumentProfile,
+} from "../utils/namInstrumentProfile";
 
 type NAMTab = "latest" | "trending" | "downloads-all-time" | "installed" | "favorites";
 type NAMSlot = "amp" | "pedal";
@@ -248,7 +277,6 @@ type NAMAuditionState = {
   provisionalPublication?: {
     slot: NAMTargetSlot;
     localPath: string;
-    auditionSource: number;
     cabRequestedEnabled?: boolean;
     effectiveCabEnabled?: number;
     pedalMix?: number;
@@ -351,7 +379,6 @@ function previewBaselineFromState(state: unknown, fallback: BuiltInPluginSchema)
     pedalMix: Number(values.pedalMix ?? 0),
     ampEnabled: Number(values.ampEnabled ?? 1),
     ampMix: Number(values.ampMix ?? 1),
-    auditionSource: Number(values.auditionSource ?? 0),
     pedalCalibrationMode: Number(values.pedalCalibrationMode ?? 1),
     pedalOverrideInputLevelDbu: Number(values.pedalOverrideInputLevelDbu ?? 12),
     pedalOverrideOutputLevelDbu: Number(values.pedalOverrideOutputLevelDbu ?? 12),
@@ -414,7 +441,6 @@ export function provisionalNAMPreviewMatchesState(
       ? modelState.hasPedalModel
       : modelState.hasCabIR;
   if (!Boolean(hasLoadedModel) || !sameLocalPath(String(loadedPath ?? ""), audition.localPath)) return false;
-  const auditionSource = Number(values.auditionSource);
   const pedalMix = Number(values.pedalMix);
   const ampEnabled = Number(values.ampEnabled);
   const ampMix = Number(values.ampMix);
@@ -427,9 +453,7 @@ export function provisionalNAMPreviewMatchesState(
   const cabinetInvariantHolds = typeof requestedCabEnabled === "boolean"
     && Number.isFinite(effectiveCabEnabled)
     && (effectiveCabEnabled >= 0.5) === expectedEffectiveCabEnabled;
-  return Number.isFinite(auditionSource)
-    && Math.abs(auditionSource - publication.auditionSource) < 0.01
-    && cabinetInvariantHolds
+  return cabinetInvariantHolds
     && (publication.cabRequestedEnabled === undefined
       || (typeof requestedCabEnabled === "boolean"
         && requestedCabEnabled === publication.cabRequestedEnabled))
@@ -502,9 +526,6 @@ const NAM_PEDAL_DISTORTION_ART = new URL("../assets/nam/pedal-distortion-library
 const NAM_CAB_CARD_ART = new URL("../assets/nam/cab-card.webp", import.meta.url).href;
 const NAM_ROOM_CARD_ART = new URL("../assets/nam/room-ir-library-v1.webp", import.meta.url).href;
 const NAM_FX_CHORUS_ART = new URL("../assets/nam/fx-chorus-library-v1.webp", import.meta.url).href;
-const NAM_LIBRARY_CACHE_TTL_MS = 5 * 60 * 1000;
-const NAM_LIVE_PAGE_CACHE_LIMIT = 64;
-const NAM_TONE_DETAIL_CACHE_LIMIT = 128;
 const NAM_LIVE_PAGE_TARGETS: Record<NAMExplorerVariant, number> = {
   rail: 4,
   "source-flow": 12,
@@ -740,10 +761,13 @@ export const OPENSTUDIO_FX_COLLECTION_PRESETS: OpenStudioFXPreset[] = [
     description: "Short plate-room blend for guitar ambience after delay.",
     values: {
       reverbEnabled: 1,
+      reverbVoice: 1,
       reverbMix: 0.2,
       reverbDecaySec: 2.4,
       reverbPreDelayMs: 18,
+      reverbLowCutHz: 120,
       reverbTone: 0.62,
+      reverbShimmer: 0,
     },
   },
 ];
@@ -894,34 +918,6 @@ export function buildNAMRailInstalledActionState({
     loadIcon: missing ? "restore" : "load",
   };
 }
-type NAMExplorerSessionCache = {
-  info?: { value: Awaited<ReturnType<typeof nativeBridge.getNAMLibraryInfo>>; at: number };
-  catalog?: { value: Awaited<ReturnType<typeof nativeBridge.getNAMCatalog>>; at: number };
-  library?: { value: Awaited<ReturnType<typeof nativeBridge.getNAMLibrary>>; at: number };
-};
-const namExplorerSessionCache: NAMExplorerSessionCache = {};
-const namLiveSearchPageCache = new Map<string, { value: Awaited<ReturnType<typeof nativeBridge.searchTONE3000NAM>>; at: number }>();
-const namToneDetailCache = new Map<string, { value: Awaited<ReturnType<typeof nativeBridge.getTONE3000ToneDetail>>; at: number }>();
-
-function setBoundedNAMCacheEntry<T>(
-  cache: Map<string, { value: T; at: number }>,
-  key: string,
-  value: T,
-  limit: number,
-) {
-  const now = Date.now();
-  for (const [candidateKey, entry] of cache) {
-    if (now - entry.at >= NAM_LIBRARY_CACHE_TTL_MS) cache.delete(candidateKey);
-  }
-  // Refresh insertion order so eviction behaves as a small session LRU.
-  cache.delete(key);
-  cache.set(key, { value, at: now });
-  while (cache.size > limit) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey === undefined) break;
-    cache.delete(oldestKey);
-  }
-}
 const NAM_SHELVES: Array<[NAMShelf, string]> = [
   ["featured", "Featured"],
   ["latest-a2", "Latest A2"],
@@ -1071,6 +1067,7 @@ export function makeNAMSourceFlowRoute(
   flow: NAMLibraryFlowMode,
   previewFxModule: OpenStudioFXModuleId | null,
   storedOrder: unknown,
+  octaverLabel = "Octaver",
 ) {
   const allowedPostStages = new Set<OpenStudioFXModuleId>(["eq", "mod", "delay", "reverb"]);
   const postOrder: OpenStudioFXModuleId[] = [];
@@ -1094,7 +1091,7 @@ export function makeNAMSourceFlowRoute(
     "Gate",
     "Compressor",
     "Tape Echo",
-    "Mono Octaver",
+    octaverLabel,
     "Precision Drive",
     "High Gain Distortion",
     flow === "amp" ? "Amp NAM Preview" : "Amp NAM",
@@ -1747,9 +1744,9 @@ function dateMs(...values: unknown[]) {
   return 0;
 }
 
-function sortCatalogRows(rows: NAMCatalogRow[], sortMode: NAMSortMode, preserveServerTrendingOrder = false) {
+function sortCatalogRows(rows: NAMCatalogRow[], sortMode: NAMSortMode, preserveServerOrder = false) {
   const sorted = [...rows];
-  if (sortMode === "trending" && preserveServerTrendingOrder) return sorted;
+  if (preserveServerOrder) return sorted;
   sorted.sort((left, right) => {
     if (sortMode === "name-az") return toneTitle(left.tone, left.model).localeCompare(toneTitle(right.tone, right.model));
     if (sortMode === "downloads-all-time") return Number(right.tone.downloads_count || 0) - Number(left.tone.downloads_count || 0);
@@ -2379,7 +2376,6 @@ function initialDevMockAudition(): NAMAuditionState | null {
       pedalMix: 0,
       ampEnabled: 1,
       ampMix: 1,
-      auditionSource: 0,
     },
   };
 }
@@ -2450,6 +2446,7 @@ interface NAMExplorerProps {
   address: BuiltInPluginAddress;
   schema: BuiltInPluginSchema;
   onRefreshRack: () => BuiltInPluginSchema | null | Promise<BuiltInPluginSchema | null>;
+  onFlushPendingParamWrites?: () => Promise<boolean>;
   intent?: NAMExplorerIntent | null;
   variant?: NAMExplorerVariant;
   libraryFlow?: NAMLibraryFlowMode | null;
@@ -2471,6 +2468,8 @@ interface NAMExplorerProps {
   onEnterRackSection?: (sectionId: "pre" | "amp" | "cab" | "eq" | "post") => void;
   onPreviousPreset?: () => void;
   onNextPreset?: () => void;
+  previousPresetLabel?: string;
+  nextPresetLabel?: string;
   onSavePreset?: () => void;
   onOpenPresetManager?: () => void;
   onRecallCompare?: (slot: "A" | "B") => void;
@@ -2480,12 +2479,14 @@ interface NAMExplorerProps {
   onOpenAdvanced?: () => void;
   onCycleSize?: () => void;
   onMaxSize?: () => void;
+  instrumentProfile?: NAMInstrumentProfile;
 }
 
 export function NAMExplorer({
   address,
   schema,
   onRefreshRack,
+  onFlushPendingParamWrites,
   intent,
   variant = "full",
   libraryFlow: libraryFlowProp = null,
@@ -2507,6 +2508,8 @@ export function NAMExplorer({
   onEnterRackSection,
   onPreviousPreset,
   onNextPreset,
+  previousPresetLabel,
+  nextPresetLabel,
   onSavePreset,
   onOpenPresetManager,
   onRecallCompare,
@@ -2516,46 +2519,86 @@ export function NAMExplorer({
   onOpenAdvanced,
   onCycleSize,
   onMaxSize,
+  instrumentProfile: instrumentProfileProp = 0,
 }: NAMExplorerProps) {
+  const instrumentProfile = normalizeNAMInstrumentProfile(instrumentProfileProp);
   const railMode = variant === "rail";
   const sourceFlowMode = variant === "source-flow";
   const sourceFlow = libraryFlowProp ?? intent?.libraryFlow ?? null;
   const sourceFlowConfig = sourceFlow ? getNAMSourceFlowConfig(sourceFlow) : null;
-  const [tab, setTab] = useState<NAMTab>(() => initialNAMTab());
-  const [sortMode, setSortMode] = useState<NAMSortMode>(() => initialNAMSortMode());
+  const sessionViewKey = `${variant}:${sourceFlow ?? "catalog"}`;
+  const sessionEpochRef = useRef(createNAMExplorerSessionEpoch(sessionViewKey));
+  sessionEpochRef.current.update(sessionViewKey);
+  const initialSessionViewRef = useRef(getNAMExplorerSessionView(sessionViewKey));
+  const initialSessionView = initialSessionViewRef.current;
+  const intentSessionKeyRef = useRef(sessionViewKey);
+  const persistenceSessionKeyRef = useRef(sessionViewKey);
+  const sessionKeyTransition = intentSessionKeyRef.current !== sessionViewKey;
+  const [sessionRestoreRevision, bumpSessionRestoreRevision] = useState(0);
+  const initialCatalogEntryRef = useRef(namCatalogSession.peek());
+  const initialLibraryInfoEntryRef = useRef(namLibraryInfoSession.peek());
+  const initialInstalledEntryRef = useRef(namInstalledLibrarySession.peek());
+  const initialCatalogPayload = initialCatalogEntryRef.current?.value;
+  const initialLibraryInfoPayload = initialLibraryInfoEntryRef.current?.value;
+  const initialInstalledPayload = initialInstalledEntryRef.current?.value;
+  const initialCatalogRows = (initialCatalogPayload?.tones || initialCatalogPayload?.data || []) as NAMCatalogTone[];
+  const initialSessionCatalogIsLive = initialSessionView?.catalogMode === "live";
+  const initialRestoredCatalog = initialSessionCatalogIsLive
+    ? initialSessionView?.catalog ?? []
+    : initialCatalogEntryRef.current
+      ? initialCatalogRows
+      : initialSessionView?.catalog ?? initialCatalogRows;
+  const initialLiveViewFresh = Boolean(
+    initialSessionView?.catalogMode === "live"
+    && initialSessionView.liveSearchSignature
+    && Date.now() - initialSessionView.catalogRefreshedAtMs < NAM_EXPLORER_SESSION_TTL_MS,
+  );
+  const [tab, setTabState] = useState<NAMTab>(() => initialSessionView?.tab as NAMTab || initialNAMTab());
+  const [sortMode, setSortModeState] = useState<NAMSortMode>(() => initialSessionView?.sortMode as NAMSortMode || initialNAMSortMode());
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement | null>(null);
-  const [query, setQuery] = useState(() => initialNAMQuery());
-  const [architecture, setArchitecture] = useState(() => initialNAMArchitecture());
+  const initialQueryRef = useRef(initialSessionView?.query ?? initialNAMQuery());
+  const [query, setQueryState] = useState(initialQueryRef.current);
+  const [committedQuery, setCommittedQuery] = useState(initialSessionView?.committedQuery ?? initialQueryRef.current);
+  const [architecture, setArchitectureState] = useState(() => initialSessionView?.architecture ?? initialNAMArchitecture());
   const [slot, setSlot] = useState<NAMSlot>("amp");
-  const [viewMode, setViewMode] = useState<NAMViewMode>(() => railMode ? "list" : initialNAMViewMode());
-  const [filtersOpen, setFiltersOpen] = useState(() => initialNAMFiltersOpen());
-  const [catalogMode, setCatalogMode] = useState<NAMCatalogMode>("cache");
+  const [viewMode, setViewMode] = useState<NAMViewMode>(() => railMode ? "list" : initialSessionView?.viewMode as NAMViewMode || initialNAMViewMode());
+  const [filtersOpen, setFiltersOpen] = useState(() => initialSessionView?.filtersOpen ?? initialNAMFiltersOpen());
+  const [catalogMode, setCatalogMode] = useState<NAMCatalogMode>(initialSessionCatalogIsLive ? "live" : "cache");
   const [selectedKey, setSelectedKey] = useState(() => initialDevMockAudition() ? DEV_MOCK_AUDITION_KEY : "");
-  const [catalog, setCatalog] = useState<NAMCatalogTone[]>([]);
-  const [catalogGeneratedAt, setCatalogGeneratedAt] = useState("");
-  const [catalogSource, setCatalogSource] = useState("");
-  const [catalogRefreshedAtMs, setCatalogRefreshedAtMs] = useState(0);
-  const [installed, setInstalled] = useState<NAMInstalledModel[]>([]);
-  const [libraryPath, setLibraryPath] = useState("");
-  const [gearFilter, setGearFilter] = useState(() => initialNAMGearFilter());
-  const [livePage, setLivePage] = useState(1);
-  const [liveTotalPages, setLiveTotalPages] = useState(1);
-  const [liveTotal, setLiveTotal] = useState(0);
-  const [liveHasMore, setLiveHasMore] = useState(false);
-  const [liveSearchSignature, setLiveSearchSignature] = useState("");
+  const [catalog, setCatalog] = useState<NAMCatalogTone[]>(() => initialRestoredCatalog);
+  const [catalogGeneratedAt, setCatalogGeneratedAt] = useState(() => initialSessionCatalogIsLive
+    ? initialSessionView?.catalogGeneratedAt ?? ""
+    : initialCatalogEntryRef.current
+      ? String(initialCatalogPayload?.generatedAt || "")
+      : initialSessionView?.catalogGeneratedAt ?? "");
+  const [catalogSource, setCatalogSource] = useState(() => initialSessionCatalogIsLive
+    ? initialSessionView?.catalogSource ?? ""
+    : initialCatalogEntryRef.current
+      ? String(initialCatalogPayload?.source || "")
+      : initialSessionView?.catalogSource ?? "");
+  const [catalogRefreshedAtMs, setCatalogRefreshedAtMs] = useState(() => initialSessionCatalogIsLive
+    ? initialSessionView?.catalogRefreshedAtMs ?? 0
+    : initialCatalogEntryRef.current?.at ?? initialSessionView?.catalogRefreshedAtMs ?? 0);
+  const [installed, setInstalled] = useState<NAMInstalledModel[]>(() => (initialInstalledPayload?.installed || []) as NAMInstalledModel[]);
+  const [libraryPath, setLibraryPath] = useState(() => initialLibraryInfoPayload?.libraryPath ?? "");
+  const [gearFilter, setGearFilterState] = useState(() => initialSessionView?.gearFilter ?? initialNAMGearFilter());
+  const [livePage, setLivePage] = useState(() => initialSessionView?.livePage ?? 1);
+  const [liveTotalPages, setLiveTotalPages] = useState(() => initialSessionView?.liveTotalPages ?? 1);
+  const [liveTotal, setLiveTotal] = useState(() => initialSessionView?.liveTotal ?? 0);
+  const [liveHasMore, setLiveHasMore] = useState(() => initialSessionView?.liveHasMore ?? false);
+  const [liveSearchSignature, setLiveSearchSignature] = useState(() => initialSessionView?.liveSearchSignature ?? "");
   const [liveBusy, setLiveBusy] = useState(false);
-  const [railLiveSearchKey, setRailLiveSearchKey] = useState("");
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [clientId, setClientId] = useState(() => loadStoredValue(TONE3000_CLIENT_ID_KEY));
   const [redirectUri, setRedirectUri] = useState(() => loadStoredValue(TONE3000_REDIRECT_URI_KEY, DEFAULT_REDIRECT_URI));
   const [callbackValue, setCallbackValue] = useState("");
-  const [creatorFilter, setCreatorFilter] = useState("all");
-  const [licenseFilter, setLicenseFilter] = useState("all");
-  const [instrumentFilter, setInstrumentFilter] = useState("all");
-  const [characterFilter, setCharacterFilter] = useState("all");
-  const [availabilityFilter, setAvailabilityFilter] = useState("all");
-  const [sourceFlowCategoryFilter, setSourceFlowCategoryFilter] = useState(() => initialNAMSourceFilter());
+  const [creatorFilter, setCreatorFilter] = useState(() => initialSessionView?.creatorFilter ?? "all");
+  const [licenseFilter, setLicenseFilter] = useState(() => initialSessionView?.licenseFilter ?? "all");
+  const [instrumentFilter, setInstrumentFilter] = useState(() => initialSessionView?.instrumentFilter ?? "all");
+  const [characterFilter, setCharacterFilter] = useState(() => initialSessionView?.characterFilter ?? "all");
+  const [availabilityFilter, setAvailabilityFilter] = useState(() => initialSessionView?.availabilityFilter ?? "all");
+  const [sourceFlowCategoryFilter, setSourceFlowCategoryFilterState] = useState(() => initialSessionView?.sourceFlowCategoryFilter ?? initialNAMSourceFilter());
   const [busyModelId, setBusyModelId] = useState<number | null>(null);
   const [busyLibraryKey, setBusyLibraryKey] = useState<string | null>(null);
   const [audition, setAudition] = useState<NAMAuditionState | null>(() => (
@@ -2567,8 +2610,30 @@ export function NAMExplorer({
   const mountedRef = useRef(true);
   const pendingRackActionRef = useRef<NAMQueuedRackAction | null>(null);
   const pendingRackActionGenerationRef = useRef(0);
-  const liveSearchRequestGenerationRef = useRef(0);
+  const installedLibraryMutationOwnerRef = useRef<number | null>(null);
+  const installedLibraryMutationSequenceRef = useRef(0);
+  const liveSearchEpochRef = useRef(createTONE3000SearchEpoch());
+  const liveSearchIntentSignatureRef = useRef("");
+  const lastLiveSearchFailureRef = useRef<TONE3000LiveSearchFailure | null>(null);
+  const lastAutomaticLiveSearchSignatureRef = useRef(initialLiveViewFresh ? initialSessionView?.liveSearchSignature ?? "" : "");
+  const queryDraftRef = useRef(initialQueryRef.current);
+  const committedQueryRef = useRef(initialSessionView?.committedQuery ?? initialQueryRef.current);
+  const resultsScrollRef = useRef<HTMLDivElement | null>(null);
+  const appendSentinelRef = useRef<HTMLDivElement | null>(null);
+  const appendGateRef = useRef(createTONE3000AppendGate());
+  const commitLiveSearchQueryRef = useRef<(nextQuery: string) => void>(() => undefined);
+  commitLiveSearchQueryRef.current = (nextQuery) => {
+    committedQueryRef.current = nextQuery;
+    setCommittedQuery(nextQuery);
+  };
+  const queryDebouncerRef = useRef<ReturnType<typeof createTONE3000QueryDebouncer> | null>(null);
+  if (queryDebouncerRef.current === null) {
+    queryDebouncerRef.current = createTONE3000QueryDebouncer((nextQuery) => {
+      commitLiveSearchQueryRef.current(nextQuery);
+    });
+  }
   const [rackTransactionBusy, setRackTransactionBusy] = useState(() => isNAMRackTransactionBusy(rackTransactionKey));
+  const [installedLibraryMutationPending, setInstalledLibraryMutationPending] = useState(false);
   const [queuedRackActionLabel, setQueuedRackActionLabel] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authAdvancedOpen, setAuthAdvancedOpen] = useState(false);
@@ -2598,7 +2663,7 @@ export function NAMExplorer({
   const tone3000Session = useTONE3000Session();
   const authStatus = tone3000Session.status;
   const authUiBusy = authBusy || tone3000Session.busy;
-  const rackActionsBusy = rackTransactionBusy || saveToneBusy;
+  const rackActionsBusy = rackTransactionBusy || installedLibraryMutationPending || saveToneBusy;
   const {
     hostTrack,
     openSettings,
@@ -2615,9 +2680,62 @@ export function NAMExplorer({
     })),
   );
 
-  const cacheFresh = (entry?: { at: number }) => Boolean(entry && Date.now() - entry.at < NAM_LIBRARY_CACHE_TTL_MS);
   const sourceFlowTempo = Number.isFinite(runtimeTempo) ? Number(runtimeTempo) : tempo;
   const sourceFlowTimeSignature = runtimeTimeSignature ?? timeSignature;
+
+  const invalidateLiveSearchIntent = () => {
+    liveSearchEpochRef.current.invalidate();
+    lastLiveSearchFailureRef.current = null;
+    setLiveBusy(false);
+  };
+
+  const flushPendingQueryForIntentChange = () => {
+    if (queryDraftRef.current === committedQueryRef.current) return;
+    queryDebouncerRef.current?.flush(queryDraftRef.current);
+  };
+
+  const setQuery = (nextQuery: string) => {
+    if (nextQuery === queryDraftRef.current && nextQuery === committedQueryRef.current) return;
+    invalidateLiveSearchIntent();
+    queryDraftRef.current = nextQuery;
+    setQueryState(nextQuery);
+    queryDebouncerRef.current?.schedule(nextQuery);
+  };
+
+  const setTab = (nextTab: NAMTab) => {
+    if (nextTab === tab) return;
+    invalidateLiveSearchIntent();
+    flushPendingQueryForIntentChange();
+    setTabState(nextTab);
+  };
+
+  const setSortMode = (nextSortMode: NAMSortMode) => {
+    if (nextSortMode === sortMode) return;
+    invalidateLiveSearchIntent();
+    flushPendingQueryForIntentChange();
+    setSortModeState(nextSortMode);
+  };
+
+  const setArchitecture = (nextArchitecture: string) => {
+    if (nextArchitecture === architecture) return;
+    invalidateLiveSearchIntent();
+    flushPendingQueryForIntentChange();
+    setArchitectureState(nextArchitecture);
+  };
+
+  const setGearFilter = (nextGearFilter: string) => {
+    if (nextGearFilter === gearFilter) return;
+    invalidateLiveSearchIntent();
+    flushPendingQueryForIntentChange();
+    setGearFilterState(nextGearFilter);
+  };
+
+  const setSourceFlowCategoryFilter = (nextCategory: string) => {
+    if (nextCategory === sourceFlowCategoryFilter) return;
+    invalidateLiveSearchIntent();
+    flushPendingQueryForIntentChange();
+    setSourceFlowCategoryFilterState(nextCategory);
+  };
 
   const updateAudition = (next: NAMAuditionState | null) => {
     auditionRef.current = next;
@@ -2625,7 +2743,37 @@ export function NAMExplorer({
   };
 
   const beginRackTransaction = () => {
+    if (installedLibraryMutationOwnerRef.current !== null) return null;
     return beginNAMRackTransaction(rackTransactionKey);
+  };
+
+  const beginInstalledLibraryMutation = (actionLabel: string): number | null => {
+    if (installedLibraryMutationOwnerRef.current !== null) {
+      setStatus(`Wait for the current installed-library change before ${actionLabel}.`);
+      return null;
+    }
+    if (isNAMRackTransactionBusy(rackTransactionKey)) {
+      setStatus(`Wait for the active rack change before ${actionLabel}.`);
+      return null;
+    }
+    const owner = ++installedLibraryMutationSequenceRef.current;
+    installedLibraryMutationOwnerRef.current = owner;
+    setInstalledLibraryMutationPending(true);
+    return owner;
+  };
+
+  const finishInstalledLibraryMutation = (
+    owner: number,
+    libraryKey: string,
+    modelId?: number,
+  ) => {
+    if (installedLibraryMutationOwnerRef.current !== owner) return;
+    setBusyLibraryKey((current) => current === libraryKey ? null : current);
+    if (modelId !== undefined) {
+      setBusyModelId((current) => current === modelId ? null : current);
+    }
+    installedLibraryMutationOwnerRef.current = null;
+    if (mountedRef.current) setInstalledLibraryMutationPending(false);
   };
 
   const isRackTransactionCurrent = (generation: number) => (
@@ -2646,12 +2794,16 @@ export function NAMExplorer({
 
   useEffect(() => {
     mountedRef.current = true;
+    if (queryDraftRef.current !== committedQueryRef.current) {
+      queryDebouncerRef.current?.schedule(queryDraftRef.current);
+    }
     const unsubscribe = subscribeNAMRackTransaction(rackTransactionKey, setRackTransactionBusy);
     return () => {
       mountedRef.current = false;
       pendingRackActionRef.current = null;
       pendingRackActionGenerationRef.current += 1;
-      liveSearchRequestGenerationRef.current += 1;
+      liveSearchEpochRef.current.invalidate();
+      queryDebouncerRef.current?.cancel();
       unsubscribe();
     };
   }, [rackTransactionKey]);
@@ -2695,105 +2847,183 @@ export function NAMExplorer({
   };
 
   const refreshLibrary = async (force = false, isCurrent: () => boolean = () => true) => {
-    if (!force && cacheFresh(namExplorerSessionCache.info) && cacheFresh(namExplorerSessionCache.library)) {
-      if (!isCurrent()) return;
-      setLibraryPath(namExplorerSessionCache.info?.value.libraryPath || "");
-      setInstalled((namExplorerSessionCache.library?.value.installed || []) as NAMInstalledModel[]);
-      void refreshTONE3000SessionStatus().catch(() => authStatus);
-      return;
+    const cachedInfo = namLibraryInfoSession.peek();
+    const cachedLibrary = namInstalledLibrarySession.peek();
+    if (isCurrent()) {
+      if (cachedInfo) setLibraryPath(cachedInfo.value.libraryPath || "");
+      if (cachedLibrary) setInstalled((cachedLibrary.value.installed || []) as NAMInstalledModel[]);
     }
 
-    const [info, libraryPayload] = await Promise.all([
-      force || !cacheFresh(namExplorerSessionCache.info)
-        ? nativeBridge.getNAMLibraryInfo()
-        : Promise.resolve(namExplorerSessionCache.info!.value),
-      force || !cacheFresh(namExplorerSessionCache.library)
-        ? nativeBridge.getNAMLibrary()
-        : Promise.resolve(namExplorerSessionCache.library!.value),
-      refreshTONE3000SessionStatus().catch(() => authStatus),
-    ]);
+    let info: Awaited<ReturnType<typeof nativeBridge.getNAMLibraryInfo>>;
+    let libraryPayload: Awaited<ReturnType<typeof nativeBridge.getNAMLibrary>>;
+    try {
+      [info, libraryPayload] = await Promise.all([
+        namLibraryInfoSession.load(() => nativeBridge.getNAMLibraryInfo(), { force }),
+        namInstalledLibrarySession.load(() => nativeBridge.getNAMLibrary(), { force }),
+        refreshTONE3000SessionStatus().catch(() => authStatus),
+      ]);
+    } catch (error) {
+      // A successful install/remove may supersede a library read that began
+      // before the mutation. The newer generation owns publication.
+      if (error instanceof NAMSessionResourceInvalidatedError) return;
+      throw error;
+    }
     if (!isCurrent()) return;
-    namExplorerSessionCache.info = { value: info, at: Date.now() };
-    namExplorerSessionCache.library = { value: libraryPayload, at: Date.now() };
     setLibraryPath(info.libraryPath || "");
     setInstalled((libraryPayload.installed || []) as NAMInstalledModel[]);
   };
 
+  const refreshInstalledLibraryAfterMutation = async (
+    isCurrent: () => boolean = () => true,
+  ) => {
+    namInstalledLibrarySession.invalidate();
+    await refreshLibrary(true, isCurrent);
+  };
+
   const refresh = async (force = false) => {
-    if (!force && cacheFresh(namExplorerSessionCache.info) && cacheFresh(namExplorerSessionCache.catalog) && cacheFresh(namExplorerSessionCache.library)) {
-      const info = namExplorerSessionCache.info!.value;
-      const catalogPayload = namExplorerSessionCache.catalog!.value;
-      const libraryPayload = namExplorerSessionCache.library!.value;
-      setLibraryPath(info.libraryPath || "");
+    const sessionToken = sessionEpochRef.current.capture();
+    const isCurrentSession = () => (
+      mountedRef.current && sessionEpochRef.current.isCurrent(sessionToken)
+    );
+    const preserveLiveView = !force && catalogMode === "live" && Boolean(liveSearchSignature);
+    const cachedInfo = namLibraryInfoSession.peek();
+    const cachedCatalog = namCatalogSession.peek();
+    const cachedLibrary = namInstalledLibrarySession.peek();
+    if (cachedInfo && isCurrentSession()) setLibraryPath(cachedInfo.value.libraryPath || "");
+    if (cachedLibrary && isCurrentSession()) setInstalled((cachedLibrary.value.installed || []) as NAMInstalledModel[]);
+    if (cachedCatalog && !preserveLiveView && isCurrentSession()) {
+      const cachedPayload = cachedCatalog.value;
+      setCatalog((cachedPayload.tones || cachedPayload.data || []) as NAMCatalogTone[]);
+      setCatalogGeneratedAt(String(cachedPayload.generatedAt || ""));
+      setCatalogSource(String(cachedPayload.source || "saved"));
+      setCatalogRefreshedAtMs(cachedCatalog.at);
+    }
+
+    const [info, catalogPayload, libraryPayload] = await Promise.all([
+      namLibraryInfoSession.load(() => nativeBridge.getNAMLibraryInfo(), { force }),
+      namCatalogSession.load(() => nativeBridge.getNAMCatalog(), { force }),
+      namInstalledLibrarySession.load(() => nativeBridge.getNAMLibrary(), { force }),
+      refreshTONE3000SessionStatus().catch(() => authStatus),
+    ]);
+    if (!isCurrentSession()) return;
+    setLibraryPath(info.libraryPath || "");
+    setInstalled((libraryPayload.installed || []) as NAMInstalledModel[]);
+    if (!preserveLiveView) {
       setCatalog((catalogPayload.tones || catalogPayload.data || []) as NAMCatalogTone[]);
       setCatalogGeneratedAt(String(catalogPayload.generatedAt || ""));
       setCatalogSource(String(catalogPayload.source || "saved"));
-      setCatalogRefreshedAtMs(namExplorerSessionCache.catalog!.at);
-      setInstalled((libraryPayload.installed || []) as NAMInstalledModel[]);
+      setCatalogRefreshedAtMs(namCatalogSession.peek()?.at ?? Date.now());
       setCatalogMode("cache");
       setLivePage(1);
       setLiveTotal(0);
       setLiveTotalPages(1);
       setLiveHasMore(false);
       setLiveSearchSignature("");
-      void refreshTONE3000SessionStatus().catch(() => authStatus);
-      return;
     }
-
-    const [info, catalogPayload, libraryPayload] = await Promise.all([
-      force || !cacheFresh(namExplorerSessionCache.info)
-        ? nativeBridge.getNAMLibraryInfo()
-        : Promise.resolve(namExplorerSessionCache.info!.value),
-      force || !cacheFresh(namExplorerSessionCache.catalog)
-        ? nativeBridge.getNAMCatalog()
-        : Promise.resolve(namExplorerSessionCache.catalog!.value),
-      force || !cacheFresh(namExplorerSessionCache.library)
-        ? nativeBridge.getNAMLibrary()
-        : Promise.resolve(namExplorerSessionCache.library!.value),
-      refreshTONE3000SessionStatus().catch(() => authStatus),
-    ]);
-    const now = Date.now();
-    namExplorerSessionCache.info = { value: info, at: now };
-    namExplorerSessionCache.catalog = { value: catalogPayload, at: now };
-    namExplorerSessionCache.library = { value: libraryPayload, at: now };
-    setLibraryPath(info.libraryPath || "");
-    setCatalog((catalogPayload.tones || catalogPayload.data || []) as NAMCatalogTone[]);
-    setCatalogGeneratedAt(String(catalogPayload.generatedAt || ""));
-    setCatalogSource(String(catalogPayload.source || "saved"));
-    setCatalogRefreshedAtMs(Date.now());
-    setInstalled((libraryPayload.installed || []) as NAMInstalledModel[]);
-    setCatalogMode("cache");
-    setLivePage(1);
-    setLiveTotal(0);
-    setLiveTotalPages(1);
-    setLiveHasMore(false);
-    setLiveSearchSignature("");
   };
 
   useEffect(() => {
     void refresh().catch((error) => {
+      if (error instanceof NAMSessionResourceInvalidatedError) return;
       console.error("[NAMExplorer] Failed to load NAM catalog:", error);
-      setStatus("Catalog unavailable");
+      if (!namCatalogSession.peek() && catalog.length === 0) setStatus("Catalog unavailable");
     });
   }, []);
 
   useEffect(() => {
     if (!intent) return;
     const intentFlow = intent.libraryFlow ? getNAMSourceFlowConfig(intent.libraryFlow) : sourceFlowConfig;
-    if (intent.tab) {
-      setTab(intent.tab);
-      setSortMode(defaultSortForTab(intent.tab));
+    const savedSessionView = getNAMExplorerSessionView(sessionViewKey);
+    const cachedCatalog = namCatalogSession.peek();
+    const cachedLibrary = namInstalledLibrarySession.peek();
+    const cachedInfo = namLibraryInfoSession.peek();
+    const sessionKeyChanged = intentSessionKeyRef.current !== sessionViewKey;
+    intentSessionKeyRef.current = sessionViewKey;
+    if (sessionKeyChanged) {
+      if (savedSessionView) {
+        setTabState(savedSessionView.tab as NAMTab);
+        setSortModeState(savedSessionView.sortMode as NAMSortMode);
+        queryDraftRef.current = savedSessionView.query;
+        committedQueryRef.current = savedSessionView.committedQuery;
+        setQueryState(savedSessionView.query);
+        setCommittedQuery(savedSessionView.committedQuery);
+        setArchitectureState(savedSessionView.architecture);
+        setGearFilterState(savedSessionView.gearFilter);
+        setSourceFlowCategoryFilterState(savedSessionView.sourceFlowCategoryFilter);
+        setCreatorFilter(savedSessionView.creatorFilter);
+        setLicenseFilter(savedSessionView.licenseFilter);
+        setInstrumentFilter(savedSessionView.instrumentFilter);
+        setCharacterFilter(savedSessionView.characterFilter);
+        setAvailabilityFilter(savedSessionView.availabilityFilter);
+        setViewMode(savedSessionView.viewMode as NAMViewMode);
+        setFiltersOpen(savedSessionView.filtersOpen);
+        if (savedSessionView.catalogMode === "live") {
+          setCatalogMode("live");
+          setCatalog(savedSessionView.catalog);
+          setCatalogGeneratedAt(savedSessionView.catalogGeneratedAt);
+          setCatalogSource(savedSessionView.catalogSource);
+          setCatalogRefreshedAtMs(savedSessionView.catalogRefreshedAtMs);
+        } else {
+          setCatalogMode("cache");
+          setCatalog((cachedCatalog?.value.tones || cachedCatalog?.value.data || savedSessionView.catalog) as NAMCatalogTone[]);
+          setCatalogGeneratedAt(String(cachedCatalog?.value.generatedAt || savedSessionView.catalogGeneratedAt));
+          setCatalogSource(String(cachedCatalog?.value.source || savedSessionView.catalogSource || "saved"));
+          setCatalogRefreshedAtMs(cachedCatalog?.at ?? savedSessionView.catalogRefreshedAtMs);
+        }
+        if (cachedLibrary) setInstalled((cachedLibrary.value.installed || []) as NAMInstalledModel[]);
+        if (cachedInfo) setLibraryPath(cachedInfo.value.libraryPath || "");
+        setLivePage(savedSessionView.livePage);
+        setLiveTotalPages(savedSessionView.liveTotalPages);
+        setLiveTotal(savedSessionView.liveTotal);
+        setLiveHasMore(savedSessionView.liveHasMore);
+        setLiveSearchSignature(savedSessionView.liveSearchSignature);
+        const savedLiveViewFresh = savedSessionView.catalogMode === "live"
+          && Date.now() - savedSessionView.catalogRefreshedAtMs < NAM_EXPLORER_SESSION_TTL_MS;
+        lastAutomaticLiveSearchSignatureRef.current = savedLiveViewFresh ? savedSessionView.liveSearchSignature : "";
+      } else {
+        setCatalog((cachedCatalog?.value.tones || cachedCatalog?.value.data || []) as NAMCatalogTone[]);
+        setCatalogGeneratedAt(String(cachedCatalog?.value.generatedAt || ""));
+        setCatalogSource(String(cachedCatalog?.value.source || "saved"));
+        setCatalogRefreshedAtMs(cachedCatalog?.at ?? 0);
+        setInstalled((cachedLibrary?.value.installed || []) as NAMInstalledModel[]);
+        setLibraryPath(cachedInfo?.value.libraryPath || "");
+        setCatalogMode("cache");
+        setLivePage(1);
+        setLiveTotalPages(1);
+        setLiveTotal(0);
+        setLiveHasMore(false);
+        setLiveSearchSignature("");
+        lastAutomaticLiveSearchSignatureRef.current = "";
+      }
+      bumpSessionRestoreRevision((current) => current + 1);
     }
-    if (intent.query !== undefined) setQuery(intent.query);
-    else if (intentFlow) setQuery(intentFlow.defaultQuery);
-    if (intent.architecture !== undefined) setArchitecture(intent.architecture);
-    else if (intentFlow) setArchitecture("all");
-    if (intent.gearFilter !== undefined) setGearFilter(intent.gearFilter);
-    else if (intentFlow) setGearFilter(intentFlow.defaultGearFilter);
+    const restoreSourceFlowSession = sourceFlowMode && Boolean(savedSessionView);
+    invalidateLiveSearchIntent();
+    queryDebouncerRef.current?.cancel();
+    if (intent.tab && !restoreSourceFlowSession) {
+      setTabState(intent.tab);
+      setSortModeState(defaultSortForTab(intent.tab));
+    }
+    const nextQuery = restoreSourceFlowSession
+      ? undefined
+      : intent.query !== undefined ? intent.query : intentFlow?.defaultQuery;
+    if (nextQuery !== undefined) {
+      queryDraftRef.current = nextQuery;
+      committedQueryRef.current = nextQuery;
+      setQueryState(nextQuery);
+      setCommittedQuery(nextQuery);
+    }
+    if (!restoreSourceFlowSession && intent.architecture !== undefined) setArchitectureState(intent.architecture);
+    else if (!restoreSourceFlowSession && intentFlow) setArchitectureState("all");
+    if (intent.gearFilter !== undefined && (!restoreSourceFlowSession || intent.categoryFilter !== undefined)) setGearFilterState(intent.gearFilter);
+    else if (!restoreSourceFlowSession && intentFlow) setGearFilterState(intentFlow.defaultGearFilter);
     if (intentFlow?.targetSlot === "amp" || intentFlow?.targetSlot === "pedal") setSlot(intentFlow.targetSlot);
     if (intentFlow) {
       const requestedSourceFilter = intent.sourceFilter;
-      setSourceFlowCategoryFilter(requestedSourceFilter ?? intent.categoryFilter ?? initialNAMSourceFilter());
+      const requestedCategory = requestedSourceFilter ?? intent.categoryFilter;
+      if (requestedCategory !== undefined || !restoreSourceFlowSession) {
+        setSourceFlowCategoryFilterState(requestedCategory ?? initialNAMSourceFilter());
+      }
       if (intentFlow.mode === "fx" && requestedSourceFilter) {
         const matchingPreset = OPENSTUDIO_FX_COLLECTION_PRESETS.find((preset) => preset.moduleId === requestedSourceFilter);
         if (matchingPreset) setSelectedFXPresetId(matchingPreset.id);
@@ -2806,7 +3036,15 @@ export function NAMExplorer({
       setFiltersOpen(true);
     }
     setSelectedKey("");
-  }, [intent?.token, sourceFlowMode]);
+  }, [intent?.token, sessionViewKey, sourceFlowMode]);
+
+  useEffect(() => {
+    // A profile change intentionally changes discovery context. Do not leave a
+    // hidden record or an opposite manual filter selected after the context
+    // changes. Untagged catalog entries remain discoverable.
+    setInstrumentFilter("all");
+    setSelectedKey("");
+  }, [instrumentProfile]);
 
   useEffect(() => {
     localStorage.setItem(TONE3000_CLIENT_ID_KEY, clientId);
@@ -2905,7 +3143,9 @@ export function NAMExplorer({
       if (architecture !== "all" && arch !== architecture) return false;
       if (creatorFilter !== "all" && creatorLabel(tone) !== creatorFilter) return false;
       if (licenseFilter !== "all" && licenseLabel(tone.license) !== licenseFilter) return false;
-      if (instrumentFilter !== "all" && !rowInstrumentLabels(tone, model).includes(instrumentFilter)) return false;
+      const instrumentLabels = rowInstrumentLabels(tone, model);
+      if (!namInstrumentLabelsAreCompatible(instrumentLabels, instrumentProfile)) return false;
+      if (instrumentFilter !== "all" && !instrumentLabels.includes(instrumentFilter)) return false;
       if (characterFilter !== "all" && !rowCharacterLabels(tone, model).includes(characterFilter)) return false;
       if (availabilityFilter !== "all" && rowAvailabilityLabel(tone, model) !== availabilityFilter) return false;
       if (sourceFlow && sourceFlow !== "fx") {
@@ -2930,8 +3170,12 @@ export function NAMExplorer({
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
     });
-    return sortCatalogRows(filtered, sortMode, catalogMode === "live");
-  }, [architecture, availabilityFilter, catalog, catalogMode, characterFilter, creatorFilter, favorites, installedByModelId, instrumentFilter, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
+    return sortCatalogRows(
+      filtered,
+      sortMode,
+      catalogMode === "live" && (Boolean(needle) || sortMode === "trending"),
+    );
+  }, [architecture, availabilityFilter, catalog, catalogMode, characterFilter, creatorFilter, favorites, installedByModelId, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
   const displayRows = boundNAMCatalogRowsForDisplay(rows, variant, catalogMode, tab);
 
   const installedRows = useMemo(() => {
@@ -2942,7 +3186,9 @@ export function NAMExplorer({
       if (architecture !== "all" && architectureLabel(record.architecture).toLowerCase() !== architecture) return false;
       if (creatorFilter !== "all" && String(record.creator ?? "") !== creatorFilter) return false;
       if (licenseFilter !== "all" && String(record.license ?? "") !== licenseFilter) return false;
-      if (instrumentFilter !== "all" && !installedInstrumentLabels(record).includes(instrumentFilter)) return false;
+      const instrumentLabels = installedInstrumentLabels(record);
+      if (!namInstrumentLabelsAreCompatible(instrumentLabels, instrumentProfile)) return false;
+      if (instrumentFilter !== "all" && !instrumentLabels.includes(instrumentFilter)) return false;
       if (characterFilter !== "all" && !installedCharacterLabels(record).includes(characterFilter)) return false;
       if (availabilityFilter !== "all" && installedAvailabilityLabel(record) !== availabilityFilter) return false;
       if (sourceFlow && sourceFlow !== "fx") {
@@ -2954,7 +3200,7 @@ export function NAMExplorer({
       return `${installedTitle(record)} ${record.name ?? ""} ${record.creator ?? ""} ${record.gearType ?? ""} ${record.updateReason ?? ""} ${installedInstrumentLabels(record).join(" ")} ${installedCharacterLabels(record).join(" ")} ${installedAvailabilityLabel(record)} ${record.localPath ?? ""}`.toLowerCase().includes(needle);
     });
     return sortInstalledRows(filtered, sortMode);
-  }, [architecture, availabilityFilter, characterFilter, creatorFilter, installed, instrumentFilter, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
+  }, [architecture, availabilityFilter, characterFilter, creatorFilter, installed, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
 
   const selectedInstalled = tab === "installed" || tab === "favorites"
     ? installedRows.find((record) => installedKey(record) === selectedKey) ?? (!selectedKey ? installedRows[0] ?? null : null)
@@ -3221,11 +3467,11 @@ export function NAMExplorer({
       }
 
       const catalogPayload = result.catalog || await nativeBridge.getNAMCatalog();
-      namExplorerSessionCache.catalog = { value: catalogPayload, at: Date.now() };
+      const catalogEntry = namCatalogSession.set(catalogPayload);
       setCatalog((catalogPayload.tones || catalogPayload.data || []) as NAMCatalogTone[]);
       setCatalogGeneratedAt(String(catalogPayload.generatedAt || ""));
       setCatalogSource(String(catalogPayload.source || "saved"));
-      setCatalogRefreshedAtMs(Date.now());
+      setCatalogRefreshedAtMs(catalogEntry.at);
       setCatalogMode("cache");
       setTab(tab === "installed" || tab === "favorites" ? "latest" : tab);
       setSelectedKey("");
@@ -3234,7 +3480,7 @@ export function NAMExplorer({
       setLiveTotalPages(1);
       setLiveHasMore(false);
       setLiveSearchSignature("");
-      await refreshLibrary(true);
+      await refreshInstalledLibraryAfterMutation();
       const rowCount = Number(result.toneRows ?? (catalogPayload.tones || catalogPayload.data || []).length);
       setStatus(`Offline tone library updated (${rowCount.toLocaleString()} tone row${rowCount === 1 ? "" : "s"})`);
     } catch (error) {
@@ -3258,16 +3504,16 @@ export function NAMExplorer({
     }
 
     const detailCacheKey = `${toneId}:${requestedArchitecture || "all"}`;
-    const cachedDetail = namToneDetailCache.get(detailCacheKey);
-    const cachedPayload = cachedDetail && Date.now() - cachedDetail.at < NAM_LIBRARY_CACHE_TTL_MS ? cachedDetail.value : null;
+    const cachedPayload = namToneDetailSession.peekFresh(detailCacheKey)?.value ?? null;
     if (!cachedPayload && !(await ensureTONE3000Auth("loading tone details", isCurrent, canUpdateUI))) return [] as NAMCatalogModel[];
     if (!isCurrent()) return [] as NAMCatalogModel[];
-    const result = cachedPayload ?? await nativeBridge.getTONE3000ToneDetail(toneId, requestedArchitecture);
+    const result = cachedPayload ?? await namToneDetailSession.load(
+      detailCacheKey,
+      () => nativeBridge.getTONE3000ToneDetail(toneId, requestedArchitecture),
+    );
     if (!isCurrent()) return [] as NAMCatalogModel[];
-    if (!cachedPayload) {
-      setBoundedNAMCacheEntry(namToneDetailCache, detailCacheKey, result, NAM_TONE_DETAIL_CACHE_LIMIT);
-    }
     if (!result.success) {
+      namToneDetailSession.delete(detailCacheKey);
       if (canUpdateUI()) setStatus(result.statusCode === 429 ? "TONE3000 rate limit reached. Try again shortly." : result.error || "Could not load tone details");
       return [] as NAMCatalogModel[];
     }
@@ -3334,7 +3580,7 @@ export function NAMExplorer({
         else console.warn("[NAMExplorer] Could not remove unsaved preview download:", result.error);
         return false;
       }
-      if (canUpdateUI()) await refreshLibrary(true, canUpdateUI);
+      if (canUpdateUI()) await refreshInstalledLibraryAfterMutation(canUpdateUI);
       return true;
     } catch (error) {
       console.warn("[NAMExplorer] Preview cleanup failed:", error);
@@ -3413,11 +3659,12 @@ export function NAMExplorer({
           pedalMix: snapshot.pedalMix,
           ampEnabled: snapshot.ampEnabled,
           ampMix: snapshot.ampMix,
-          auditionSource: snapshot.auditionSource,
           ...calibrationValues,
         },
       });
       if (!applied || !isCurrent()) return false;
+      const liveInputRestored = await nativeBridge.setNAMRackInternalAuditionSource(address, false);
+      if (!liveInputRestored || !isCurrent()) return false;
       const restoredState = await nativeBridge.getBuiltInPluginState(address);
       if (!isCurrent()) return false;
       const restoredModels = restoredState?.modelState && typeof restoredState.modelState === "object" ? restoredState.modelState : {};
@@ -3435,7 +3682,6 @@ export function NAMExplorer({
         && Math.abs(Number(restoredValues.pedalMix ?? 0) - snapshot.pedalMix) < 0.01
         && Math.abs(Number(restoredValues.ampEnabled ?? 0) - snapshot.ampEnabled) < 0.01
         && Math.abs(Number(restoredValues.ampMix ?? 0) - snapshot.ampMix) < 0.01
-        && Math.abs(Number(restoredValues.auditionSource ?? 0) - snapshot.auditionSource) < 0.01
         && valueMatches("pedalCalibrationMode", snapshot.pedalCalibrationMode)
         && valueMatches("pedalOverrideInputLevelDbu", snapshot.pedalOverrideInputLevelDbu)
         && valueMatches("pedalOverrideOutputLevelDbu", snapshot.pedalOverrideOutputLevelDbu)
@@ -3509,7 +3755,6 @@ export function NAMExplorer({
       // rack reset calibration from the new capture metadata and own embedded
       // Cab/IR bypass/restore decisions without a later frontend scalar write
       // overwriting them.
-      const publicationAuditionSource = 0;
       const publicationPedalMix = targetSlot === "pedal"
         ? (baseline.pedalMix > 0.0001 ? baseline.pedalMix : 1)
         : undefined;
@@ -3545,7 +3790,6 @@ export function NAMExplorer({
         provisionalPublication: {
           slot: targetSlot,
           localPath: record.localPath,
-          auditionSource: publicationAuditionSource,
           cabRequestedEnabled: baseline.cabRequestedEnabled,
           ...(authoritativeAmpIncludesCab === undefined ? {} : {
             effectiveCabEnabled: expectedNAMEffectiveCabEnabled(
@@ -3558,6 +3802,8 @@ export function NAMExplorer({
           ampMix: publicationAmpMix,
         },
       });
+      const liveInputReady = await nativeBridge.setNAMRackInternalAuditionSource(address, false);
+      if (!liveInputReady || !isCurrent()) return false;
       const ok = await nativeBridge.setBuiltInPluginState(address, {
         applyDirectLoadPolicy: true,
         modelState: targetSlot === "amp"
@@ -3577,7 +3823,6 @@ export function NAMExplorer({
             ampEnabled: publicationAmpEnabled,
             ampMix: publicationAmpMix,
           }),
-          auditionSource: publicationAuditionSource,
         },
       });
       if (ok) {
@@ -3610,7 +3855,6 @@ export function NAMExplorer({
       const verifiedValues = verifiedState?.values && typeof verifiedState.values === "object" ? verifiedState.values : {};
       const verifiedModelState = verifiedState?.modelState && typeof verifiedState.modelState === "object" ? verifiedState.modelState : {};
       const verifiedPath = targetSlot === "amp" ? verifiedModelState.ampModelPath : verifiedModelState.pedalModelPath;
-      const verifiedAuditionSource = Number(verifiedValues.auditionSource ?? 0);
       const verifiedHasModel = targetSlot === "amp"
         ? Boolean(verifiedModelState.hasAmpModel)
         : Boolean(verifiedModelState.hasPedalModel);
@@ -3638,7 +3882,6 @@ export function NAMExplorer({
       if (verifiedDiagnostics) {
         console.info("[NAM audition diagnostics:start]", verifiedDiagnostics);
       }
-      const sourceMismatch = verifiedAuditionSource >= 0.5;
       const pedalMixMismatch = publicationPedalMix !== undefined
         && (!Number.isFinite(verifiedPedalMix) || Math.abs(verifiedPedalMix - publicationPedalMix) >= 0.01);
       const ampEnabledMismatch = publicationAmpEnabled !== undefined
@@ -3647,7 +3890,6 @@ export function NAMExplorer({
         && (!Number.isFinite(verifiedAmpMix) || Math.abs(verifiedAmpMix - publicationAmpMix) >= 0.01);
       if (!sameLocalPath(verifiedPath, record.localPath)
         || !verifiedHasModel
-        || sourceMismatch
         || verifiedCabRequestedEnabled !== baseline.cabRequestedEnabled
         || effectiveCabMismatch
         || pedalMixMismatch
@@ -3851,7 +4093,6 @@ export function NAMExplorer({
         provisionalPublication: {
           slot: "cab",
           localPath: record.localPath,
-          auditionSource: rollbackSnapshot.auditionSource,
           cabRequestedEnabled: true,
           effectiveCabEnabled: 1,
         },
@@ -4105,7 +4346,7 @@ export function NAMExplorer({
           if (canUpdateUI()) setStatus(result.error || "Could not restore tone.");
           return false;
         }
-        await refreshLibrary(true, canUpdateUI);
+        await refreshInstalledLibraryAfterMutation(canUpdateUI);
         if (!isCurrent()) return false;
         const restoredTargetSlot = forcedTarget ?? preferredTargetForInstalled(result.record);
         if (restoredTargetSlot === "cab") {
@@ -4229,7 +4470,7 @@ export function NAMExplorer({
       unownedPreviewRecord = result.record;
 
       if (canUpdateUI()) setStatus("Preparing live guitar audition...");
-      await refreshLibrary(true, canUpdateUI);
+      await refreshInstalledLibraryAfterMutation(canUpdateUI);
       if (!isCurrent()) return false;
       const installedTargetSlot = forcedTarget ?? targetSlot;
       const preparedRecord = result.record;
@@ -4314,6 +4555,12 @@ export function NAMExplorer({
     setSaveToneBusy(true);
     setStatus("Saving Preset...");
     try {
+      if (onFlushPendingParamWrites && !await onFlushPendingParamWrites()) {
+        if (canUpdateUI()) {
+          setStatus("Preset was not saved because the latest control change could not be written to the rack.");
+        }
+        return;
+      }
       const beforeState = await nativeBridge.getBuiltInPluginState(address);
       if (!isCurrent()) return;
       const localAudition = auditionRef.current;
@@ -4401,7 +4648,7 @@ export function NAMExplorer({
       const savedState = await nativeBridge.getBuiltInPluginState(address);
       if (!isCurrent()) return;
       const savedUiState = savedState?.uiState && typeof savedState.uiState === "object" ? savedState.uiState : {};
-      await nativeBridge.setBuiltInPluginState(address, {
+      const identityUpdated = await nativeBridge.setBuiltInPluginState(address, {
         uiState: {
           ...savedUiState,
           namPresetDirty: false,
@@ -4416,8 +4663,10 @@ export function NAMExplorer({
         },
       });
       if (!isCurrent()) return;
+      await onRefreshRack();
+      if (!isCurrent()) return;
 
-      await refreshLibrary(true, canUpdateUI);
+      await refreshInstalledLibraryAfterMutation(canUpdateUI);
       if (!isCurrent()) return;
       if (activeAudition && canUpdateUI()) {
         updateAudition({
@@ -4430,8 +4679,11 @@ export function NAMExplorer({
       }
       if (canUpdateUI()) {
         setSaveToneOpen(false);
-        setStatus("Preset saved with the complete rack settings.");
-        onRefreshRack();
+        setStatus(
+          identityUpdated
+            ? "Preset saved with the complete rack settings."
+            : "Preset saved, but the current rack could not be verified as its clean baseline.",
+        );
       }
     } catch (error) {
       console.error("[NAMExplorer] Save Preset failed:", error);
@@ -4515,93 +4767,125 @@ export function NAMExplorer({
   };
 
   const reinstallInstalled = async (record: NAMInstalledModel) => {
-    const payload = makeReinstallPayload(record);
-    if (!payload) {
-      setStatus("Missing model download metadata. Refresh the catalog or open the TONE3000 source page.");
-      return;
-    }
-
     const key = installedKey(record);
     const modelId = modelIdOf(record);
+    const owner = beginInstalledLibraryMutation("re-downloading this model");
+    if (owner === null) return;
     setBusyLibraryKey(key);
     setBusyModelId(modelId || null);
     setStatus("");
+    let mutationCompleted = false;
     try {
+      const payload = makeReinstallPayload(record);
+      if (!payload) {
+        setStatus("Missing model download metadata. Refresh the catalog or open the TONE3000 source page.");
+        return;
+      }
       if (!(await ensureTONE3000Auth("re-downloading NAM models"))) return;
       const result = await nativeBridge.installNAMModel(payload);
       if (!result.success) {
         setStatus(result.error || "Re-download failed");
         return;
       }
-      await refreshLibrary(true);
+      mutationCompleted = true;
+      await refreshInstalledLibraryAfterMutation();
       setStatus("Re-downloaded");
+    } catch (error) {
+      console.warn("[NAMExplorer] Re-download failed", error);
+      setStatus(mutationCompleted
+        ? "Re-downloaded, but the installed library could not be refreshed. Retry Refresh."
+        : "Re-download failed");
     } finally {
-      setBusyLibraryKey(null);
-      setBusyModelId(null);
+      finishInstalledLibraryMutation(owner, key, modelId || undefined);
     }
   };
 
   const updateInstalled = async (record: NAMInstalledModel) => {
-    const payload = makeUpdatePayload(record);
-    if (!payload) {
-      setStatus("No update metadata available. Refresh the catalog first.");
-      return;
-    }
-
     const key = installedKey(record);
     const modelId = modelIdOf(record);
+    const owner = beginInstalledLibraryMutation("updating this model");
+    if (owner === null) return;
     setBusyLibraryKey(key);
     setBusyModelId(modelId || null);
     setStatus("");
+    let mutationCompleted = false;
     try {
+      const payload = makeUpdatePayload(record);
+      if (!payload) {
+        setStatus("No update metadata available. Refresh the catalog first.");
+        return;
+      }
       if (!(await ensureTONE3000Auth("updating NAM models"))) return;
       const result = await nativeBridge.installNAMModel(payload);
       if (!result.success) {
         setStatus(result.error || "Update failed");
         return;
       }
-      await refreshLibrary(true);
+      mutationCompleted = true;
+      await refreshInstalledLibraryAfterMutation();
       setStatus("Updated");
+    } catch (error) {
+      console.warn("[NAMExplorer] Installed-model update failed", error);
+      setStatus(mutationCompleted
+        ? "Updated, but the installed library could not be refreshed. Retry Refresh."
+        : "Update failed");
     } finally {
-      setBusyLibraryKey(null);
-      setBusyModelId(null);
+      finishInstalledLibraryMutation(owner, key, modelId || undefined);
     }
   };
 
   const toggleInstalledFavorite = async (record: NAMInstalledModel) => {
     const key = installedKey(record);
+    const owner = beginInstalledLibraryMutation("changing this favorite");
+    if (owner === null) return;
     setBusyLibraryKey(key);
     setStatus("");
+    let mutationCompleted = false;
     try {
       const result = await nativeBridge.setNAMModelFavorite(modelIdOf(record), record.localPath, !record.favorite);
       if (!result.success) {
         setStatus(result.error || "Could not update favorite");
         return;
       }
-      await refreshLibrary(true);
+      mutationCompleted = true;
+      await refreshInstalledLibraryAfterMutation();
       setStatus(!record.favorite ? "Added to favorites" : "Removed from favorites");
+    } catch (error) {
+      console.warn("[NAMExplorer] Favorite update failed", error);
+      setStatus(mutationCompleted
+        ? "Favorite changed, but the installed library could not be refreshed. Retry Refresh."
+        : "Could not update favorite");
     } finally {
-      setBusyLibraryKey(null);
+      finishInstalledLibraryMutation(owner, key);
     }
   };
 
   const removeInstalled = async (record: NAMInstalledModel) => {
     const key = installedKey(record);
+    const owner = beginInstalledLibraryMutation("removing this model");
+    if (owner === null) return;
     setRemoveCandidate(null);
     setBusyLibraryKey(key);
     setStatus("");
+    let mutationCompleted = false;
     try {
       const result = await nativeBridge.removeNAMModel(modelIdOf(record), record.localPath, false);
       if (!result.success) {
         setStatus(result.error || "Could not remove model");
         return;
       }
+      mutationCompleted = true;
       setSelectedKey("");
-      await refreshLibrary(true);
+      await refreshInstalledLibraryAfterMutation();
       const warning = typeof result.warning === "string" ? result.warning.trim() : "";
       setStatus(warning ? `Removed from library. ${warning}` : "Removed from library; file retained on disk");
+    } catch (error) {
+      console.warn("[NAMExplorer] Installed-model removal failed", error);
+      setStatus(mutationCompleted
+        ? "Removed from the library, but the installed list could not be refreshed. Retry Refresh."
+        : "Could not remove model");
     } finally {
-      setBusyLibraryKey(null);
+      finishInstalledLibraryMutation(owner, key);
     }
   };
 
@@ -4739,75 +5023,86 @@ export function NAMExplorer({
   );
   const liveSearchFormat = resolveNAMSearchFormat(sourceFlow);
   const liveSearchArchitecture = resolveNAMSearchArchitecture(sourceFlow, architecture);
-  const currentLiveSearchSignature = JSON.stringify({
-    query: query.trim(),
-    sort: liveSearchSort,
+  const buildLiveSearchSnapshot = (
+    page = 1,
+    queryOverride = committedQuery,
+  ) => buildTONE3000LiveSearchSnapshot({
+    query: queryOverride,
+    page,
+    pageSize: livePageSizing.apiPageSize,
+    targetPageSize: livePageSizing.targetPageSize,
+    requestedSort: liveSearchSort,
     sortMode,
     tab: liveSearchTab,
     gearFilter: liveSearchGearFilter,
     format: liveSearchFormat,
     architecture: liveSearchArchitecture,
-    sourceFlow,
+    sourceFlow: sourceFlow ?? "",
     sourceFlowCategoryFilter,
-    targetPageSize: livePageSizing.targetPageSize,
-    apiPageSize: livePageSizing.apiPageSize,
+    includeModels: false,
   });
+  const currentLiveSearchSnapshot = buildLiveSearchSnapshot();
+  const currentLiveSearchSignature = currentLiveSearchSnapshot.signature;
+  liveSearchIntentSignatureRef.current = currentLiveSearchSignature;
 
-  const runLiveSearch = async (page = 1, mode: "replace" | "append" = "replace") => {
-    const requestGeneration = ++liveSearchRequestGenerationRef.current;
-    const isCurrent = () => liveSearchRequestGenerationRef.current === requestGeneration;
-    const searchTab = liveSearchTab;
-    const sort = liveSearchSort;
-    const requestSignature = currentLiveSearchSignature;
-    const cacheKey = JSON.stringify({
-      query: query.trim(),
-      page,
-      pageSize: livePageSizing.apiPageSize,
-      targetPageSize: livePageSizing.targetPageSize,
-      sort,
-      sortMode,
-      gearFilter: liveSearchGearFilter,
-      format: liveSearchFormat,
-      architecture: liveSearchArchitecture,
-      sourceFlow,
-      sourceFlowCategoryFilter,
-      includeModels: false,
-    });
+  const runLiveSearch = async (
+    page = 1,
+    mode: "replace" | "append" = "replace",
+    requestOverride?: TONE3000LiveSearchSnapshot,
+  ): Promise<"success" | "error" | "stale"> => {
+    const request = requestOverride ?? buildLiveSearchSnapshot(page);
+    if (liveSearchIntentSignatureRef.current !== request.signature) return "stale";
+    const requestToken = liveSearchEpochRef.current.begin(request.signature);
+    const isCurrent = () => (
+      mountedRef.current
+      && liveSearchEpochRef.current.isCurrent(requestToken)
+      && liveSearchIntentSignatureRef.current === request.signature
+    );
+    const cachedPayload = namLiveSearchPageSession.peekFresh(request.cacheKey)?.value ?? null;
 
-    setLiveBusy(true);
-    setStatus("");
+    if (!cachedPayload) {
+      setLiveBusy(true);
+      setStatus("");
+    }
     if (mode !== "append") clearAllRowActionErrors();
     try {
-      if (!(await ensureTONE3000Auth("live search", isCurrent))) return;
-      if (!isCurrent()) return;
-      const cached = namLiveSearchPageCache.get(cacheKey);
-      const cachedPayload = cached && Date.now() - cached.at < NAM_LIBRARY_CACHE_TTL_MS ? cached.value : null;
+      if (!cachedPayload && !(await ensureTONE3000Auth("live search", isCurrent))) {
+        return isCurrent() ? "error" : "stale";
+      }
+      if (!isCurrent()) return "stale";
       const payload = cachedPayload
         ? cachedPayload
-        : await nativeBridge.searchTONE3000NAM({
-          query,
-          page,
-          page_size: livePageSizing.apiPageSize,
-          sort,
-          gears: liveSearchGearFilter,
-          format: liveSearchFormat,
-          architecture: liveSearchArchitecture,
-          // Search returns only the paged tone summaries. Download/model metadata is
-          // hydrated for the one tone the user previews instead of issuing an N+1
-          // burst for every card on every page.
-          includeModels: false,
-        });
-      if (!isCurrent()) return;
-      if (!cachedPayload) {
-        setBoundedNAMCacheEntry(namLiveSearchPageCache, cacheKey, payload, NAM_LIVE_PAGE_CACHE_LIMIT);
-      }
+        : await namLiveSearchPageSession.load(request.cacheKey, () => nativeBridge.searchTONE3000NAM({
+            query: request.query,
+            page: request.page,
+            page_size: request.pageSize,
+            sort: request.sort,
+            gears: request.gearFilter,
+            format: request.format,
+            architecture: request.architecture,
+            // Search returns only the paged tone summaries. Download/model metadata is
+            // hydrated for the one tone the user previews instead of issuing an N+1
+            // burst for every card on every page.
+            includeModels: request.includeModels,
+          }));
+      if (!isCurrent()) return "stale";
 
       if (payload.success === false) {
-        setStatus(payload.statusCode === 429 ? "TONE3000 rate limit reached. Wait before searching again." : payload.error || "Live TONE3000 search failed");
-        return;
+        namLiveSearchPageSession.delete(request.cacheKey);
+        const failureStatus = payload.statusCode === 429
+          ? "TONE3000 rate limit reached. Wait before searching again."
+          : payload.error || "Live TONE3000 search failed";
+        lastLiveSearchFailureRef.current = {
+          mode,
+          page: request.page,
+          signature: request.signature,
+          status: failureStatus,
+        };
+        setStatus(failureStatus);
+        return "error";
       }
 
-      const bucket = tabBucketForSort(searchTab, sortMode);
+      const bucket = tabBucketForSort(request.tab as NAMTab, request.sortMode as NAMSortMode);
       const liveTones = ((payload.tones || payload.data || []) as NAMCatalogTone[]).map((tone) => ({
         ...tone,
         source: "tone3000-live",
@@ -4817,19 +5112,19 @@ export function NAMExplorer({
         return mergeTONE3000TonePages(
           current,
           liveTones,
-          mode === "append" && catalogMode === "live" && liveSearchSignature === requestSignature,
+          mode === "append" && catalogMode === "live" && liveSearchSignature === request.signature,
         );
       });
       setCatalogGeneratedAt(String(payload.generatedAt || new Date().toISOString()));
       setCatalogSource(String(payload.source || "tone3000-live"));
       setCatalogRefreshedAtMs(Date.now());
       setCatalogMode("live");
-      setTab(searchTab);
+      setTabState(request.tab as NAMTab);
       if (mode !== "append") setSelectedKey("");
-      const responsePage = Math.max(1, Number(payload.page || page) || page);
+      const responsePage = Math.max(1, Number(payload.page || request.page) || request.page);
       const responsePageSize = Math.max(
         1,
-        Number(payload.page_size || payload.pageSize || livePageSizing.apiPageSize) || livePageSizing.apiPageSize,
+        Number(payload.page_size || payload.pageSize || request.pageSize) || request.pageSize,
       );
       const reportedTotalPages = Number(payload.total_pages || payload.totalPages || 0);
       const explicitHasMore = payload.has_more ?? payload.hasMore;
@@ -4850,17 +5145,39 @@ export function NAMExplorer({
       setLiveTotal(Number(payload.total || liveTones.length));
       setLiveTotalPages(Math.max(1, effectiveTotalPages));
       setLiveHasMore(hasMore);
-      setLiveSearchSignature(requestSignature);
+      setLiveSearchSignature(request.signature);
+      lastLiveSearchFailureRef.current = null;
       const modelErrorCount = Array.isArray(payload.errors) ? payload.errors.length : 0;
       setStatus(modelErrorCount > 0
         ? `Online tones loaded with ${modelErrorCount} detail warning${modelErrorCount === 1 ? "" : "s"}`
         : `${cachedPayload ? "Cached" : "Online"} tones ${mode === "append" ? "appended" : "loaded"} (${liveTones.length.toLocaleString()} shown)`);
+      return "success";
     } catch (error) {
       console.error("[NAMExplorer] Live TONE3000 search failed:", error);
-      if (isCurrent()) setStatus("Live TONE3000 search failed");
+      if (isCurrent()) {
+        const failureStatus = "Live TONE3000 search failed";
+        lastLiveSearchFailureRef.current = {
+          mode,
+          page: request.page,
+          signature: request.signature,
+          status: failureStatus,
+        };
+        setStatus(failureStatus);
+      }
+      return isCurrent() ? "error" : "stale";
     } finally {
       if (isCurrent()) setLiveBusy(false);
     }
+  };
+
+  const submitLiveSearch = (page = 1, mode: "replace" | "append" = "replace") => {
+    const nextQuery = queryDraftRef.current;
+    invalidateLiveSearchIntent();
+    queryDebouncerRef.current?.flush(nextQuery);
+    const request = buildLiveSearchSnapshot(page, nextQuery);
+    liveSearchIntentSignatureRef.current = request.signature;
+    lastAutomaticLiveSearchSignatureRef.current = request.signature;
+    return runLiveSearch(page, mode, request);
   };
 
   const catalogAuditionIsActive = (row: NAMCatalogRow) => Boolean(
@@ -5090,7 +5407,7 @@ export function NAMExplorer({
           variant="ghost"
           size="icon-sm"
           onClick={() => void toggleInstalledFavorite(record)}
-          disabled={busyLibraryKey === installedKey(record)}
+          disabled={rackActionsBusy || busyLibraryKey === installedKey(record)}
           title={favoriteActive ? "Remove favorite" : "Favorite"}
           aria-label={favoriteActive ? "Remove favorite" : "Favorite"}
           aria-pressed={favoriteActive}
@@ -5381,7 +5698,7 @@ export function NAMExplorer({
             event.stopPropagation();
             void toggleInstalledFavorite(record);
           }}
-          disabled={busyLibraryKey === key}
+          disabled={rackActionsBusy || busyLibraryKey === key}
           title={record.favorite ? "Remove favorite" : "Favorite"}
           aria-label={record.favorite ? "Remove favorite" : "Favorite"}
           aria-pressed={Boolean(record.favorite)}
@@ -5679,8 +5996,32 @@ export function NAMExplorer({
   const detailHydrating = Boolean(busyLibraryKey?.startsWith("tone-models:"));
   const showResultsSkeleton = (liveBusy || catalogBusy) && resultCount === 0;
   const showResultsRefreshOverlay = (liveBusy || catalogBusy || detailHydrating) && resultCount > 0;
-  const livePaginationCurrent = catalogMode === "live" && liveSearchSignature === currentLiveSearchSignature;
+  const livePaginationCurrent = query === committedQuery
+    && catalogMode === "live"
+    && liveSearchSignature === currentLiveSearchSignature;
   const liveCanLoadMore = livePaginationCurrent && liveHasMore;
+  const requestNextLivePage = async (trigger: "observer" | "manual") => {
+    if (catalogMode !== "live" || !liveCanLoadMore || liveBusy) return;
+    const nextPage = livePage + 1;
+    const appendKey = `${currentLiveSearchSignature}:page:${nextPage}`;
+    const token = appendGateRef.current.begin(appendKey, trigger === "manual");
+    if (!token) return;
+    const outcome = await runLiveSearch(nextPage, "append");
+    appendGateRef.current.settle(token, outcome);
+  };
+  const retryLiveSearch = () => {
+    const failedRequest = lastLiveSearchFailureRef.current;
+    if (shouldRetryTONE3000Append(
+      failedRequest,
+      currentLiveSearchSignature,
+      status,
+      liveCanLoadMore,
+    )) {
+      void requestNextLivePage("manual");
+      return;
+    }
+    void submitLiveSearch(1);
+  };
   const feedbackTone = feedbackToneForStatus(status);
   const authConnected = Boolean(authStatus?.authenticated && !authStatus.expired);
   const authClientConfigured = Boolean(authStatus?.configuredClientId || clientId.trim());
@@ -5695,16 +6036,99 @@ export function NAMExplorer({
     status.toLowerCase().includes("refresh failed");
 
   useEffect(() => {
-    if ((!railMode && !sourceFlowMode) || !authConnected || authChecking || liveBusy || catalogBusy) return;
+    if (sessionKeyTransition) return;
+    if (!authConnected || authChecking || catalogBusy) return;
     if (sourceFlow === "fx" || sourceFlowCategoryFilter === "local") return;
     if (tab === "installed" || tab === "favorites") return;
-    const key = JSON.stringify({ variant, sourceFlow, tab, sortMode, gearFilter, architecture, sourceFlowCategoryFilter });
-    if (railLiveSearchKey === key) return;
-    setRailLiveSearchKey(key);
-    void runLiveSearch(1).catch((error) => {
+    if (lastAutomaticLiveSearchSignatureRef.current === currentLiveSearchSignature) return;
+    lastAutomaticLiveSearchSignatureRef.current = currentLiveSearchSignature;
+    void runLiveSearch(1, "replace", currentLiveSearchSnapshot).catch((error) => {
       console.error("[NAMExplorer] Automatic live search failed:", error);
     });
-  }, [architecture, authChecking, authConnected, catalogBusy, gearFilter, liveBusy, railLiveSearchKey, railMode, sortMode, sourceFlow, sourceFlowCategoryFilter, sourceFlowMode, tab, variant]);
+  }, [authChecking, authConnected, catalogBusy, currentLiveSearchSignature, sessionKeyTransition, sourceFlow, sourceFlowCategoryFilter, tab]);
+
+  useEffect(() => {
+    if (persistenceSessionKeyRef.current !== sessionViewKey) {
+      persistenceSessionKeyRef.current = sessionViewKey;
+      return;
+    }
+    const previousScrollTop = getNAMExplorerSessionView(sessionViewKey)?.scrollTop
+      ?? initialSessionView?.scrollTop
+      ?? 0;
+    setNAMExplorerSessionView(sessionViewKey, {
+      tab,
+      sortMode,
+      query,
+      committedQuery,
+      architecture,
+      gearFilter,
+      sourceFlowCategoryFilter,
+      creatorFilter,
+      licenseFilter,
+      instrumentFilter,
+      characterFilter,
+      availabilityFilter,
+      viewMode,
+      filtersOpen,
+      catalogMode,
+      catalog,
+      catalogGeneratedAt,
+      catalogSource,
+      catalogRefreshedAtMs,
+      livePage,
+      liveTotalPages,
+      liveTotal,
+      liveHasMore,
+      liveSearchSignature,
+      scrollTop: previousScrollTop,
+    });
+  }, [
+    architecture,
+    availabilityFilter,
+    catalog,
+    catalogGeneratedAt,
+    catalogMode,
+    catalogRefreshedAtMs,
+    catalogSource,
+    characterFilter,
+    committedQuery,
+    creatorFilter,
+    filtersOpen,
+    gearFilter,
+    instrumentFilter,
+    licenseFilter,
+    liveHasMore,
+    livePage,
+    liveSearchSignature,
+    liveTotal,
+    liveTotalPages,
+    query,
+    sessionRestoreRevision,
+    sessionViewKey,
+    sortMode,
+    sourceFlowCategoryFilter,
+    tab,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (sourceFlowMode) return;
+    const scrollTop = getNAMExplorerSessionView(sessionViewKey)?.scrollTop ?? 0;
+    if (resultsScrollRef.current) resultsScrollRef.current.scrollTop = scrollTop;
+  }, [sessionViewKey, sourceFlowMode]);
+
+  useEffect(() => {
+    appendGateRef.current.reset();
+  }, [currentLiveSearchSignature]);
+
+  useEffect(() => {
+    if (sessionKeyTransition || sourceFlowMode || catalogMode !== "live" || !liveCanLoadMore || liveBusy) return;
+    return observeTONE3000AppendSentinel(
+      appendSentinelRef.current,
+      resultsScrollRef.current,
+      () => void requestNextLivePage("observer"),
+    );
+  }, [catalogMode, currentLiveSearchSignature, liveBusy, liveCanLoadMore, livePage, sessionKeyTransition, sourceFlowMode]);
 
   const clearExplorerFilters = () => {
     setQuery(sourceFlowConfig?.defaultQuery ?? "");
@@ -5739,7 +6163,7 @@ export function NAMExplorer({
     if (sourceFlow === "fx") return;
     if (tab === "installed" || tab === "favorites") return;
     event.preventDefault();
-    void runLiveSearch(1);
+    void submitLiveSearch(1);
   };
 
   const applySortMode = (nextSortMode: NAMSortMode) => {
@@ -5973,6 +6397,7 @@ export function NAMExplorer({
     && tab !== "favorites"
     && catalogMode === "live"
     ? {
+      requestKey: `${currentLiveSearchSignature}:page:${livePage + 1}`,
       page: livePage,
       totalPages: liveTotalPages,
       totalResults: liveTotal,
@@ -6050,8 +6475,16 @@ export function NAMExplorer({
   const sourceFlowRackSlots = schema.uiState?.namRackSlots && typeof schema.uiState.namRackSlots === "object"
     ? schema.uiState.namRackSlots as Record<string, unknown>
     : {};
+  const sourceFlowOctaverLabel = schema.parameters.find(
+    (parameter) => parameter.id === "octaverEnabled",
+  )?.label ?? "Octaver";
   const sourceFlowRoute = sourceFlow
-    ? makeNAMSourceFlowRoute(sourceFlow, selectedFXPreset?.moduleId ?? null, sourceFlowRackSlots.order)
+    ? makeNAMSourceFlowRoute(
+        sourceFlow,
+        selectedFXPreset?.moduleId ?? null,
+        sourceFlowRackSlots.order,
+        sourceFlowOctaverLabel,
+      )
     : "";
   const sourceFlowRateLimited = status.toLowerCase().includes("rate limit");
   const sourceFlowDesignConfig: NAMSourceFlowDesignConfig | null = sourceFlow && sourceFlowConfig ? {
@@ -6119,6 +6552,8 @@ export function NAMExplorer({
     viewLabel: sourceFlow === "fx" ? `Target: ${sourceCategoryLabel(selectedFXPreset?.moduleId || "delay")}` : `View: ${viewMode === "cards" ? "Compact" : "List"}`,
     results: sourceFlowResults,
     pagination: sourceFlowPagination,
+    sessionKey: sessionViewKey,
+    initialScrollTop: getNAMExplorerSessionView(sessionViewKey)?.scrollTop ?? initialSessionView?.scrollTop ?? 0,
     detailEyebrow: selectedSourceOnly
       ? sourceFlowConfig.sourceOnlyDetailTitle || "Selected source - Space/Reverb IR"
       : sourceFlowConfig.detailTitle,
@@ -6168,7 +6603,7 @@ export function NAMExplorer({
           : catalogMode === "live"
             ? liveTotal
             : rows.length,
-    busy: rackActionsBusy || showResultsSkeleton || showResultsRefreshOverlay,
+    busy: sessionKeyTransition || rackActionsBusy || showResultsSkeleton || showResultsRefreshOverlay,
     emptyTitle: sourceFlowCategoryFilter === "local"
       ? sourceFlow === "ir" ? "Choose a local cabinet IR" : "Choose a local NAM capture"
       : sourceFlowConfig.emptyTitle,
@@ -6530,10 +6965,15 @@ export function NAMExplorer({
               cabRequestedEnabled: requestedCabEnabled,
             };
       await publishUseProgress("activating", `Activating ${displayName} in the ${targetLabelForSlot(targetSlot)} slot...`);
+      const liveInputReady = await nativeBridge.setNAMRackInternalAuditionSource(address, false);
+      if (!isCurrent()) return;
+      if (!liveInputReady) {
+        await failUse("Live guitar input could not be restored before activating the selected component.");
+        return;
+      }
       const used = await nativeBridge.setBuiltInPluginState(address, {
         applyDirectLoadPolicy: true,
         values: {
-          auditionSource: 0,
           ...(targetSlot === "pedal"
             ? { pedalMix: Number(beforeValues.pedalMix ?? 0) > 0.0001 ? Number(beforeValues.pedalMix) : 1 }
             : {}),
@@ -6584,7 +7024,6 @@ export function NAMExplorer({
         targetSlot === "amp"
         && !rollbackSnapshot.ampModelPath;
       const finalized = await nativeBridge.setBuiltInPluginState(address, {
-        values: { auditionSource: 0 },
         uiState: {
           ...activatedUiState,
           namActivePreview: null,
@@ -6636,7 +7075,7 @@ export function NAMExplorer({
       await cleanupPreviewAudition(previewToCleanup, false, isCurrent, canUpdateUI);
       if (!isCurrent()) return;
       updateAudition(null);
-      await refreshLibrary(true, canUpdateUI);
+      await refreshInstalledLibraryAfterMutation(canUpdateUI);
       if (!isCurrent()) return;
       let refreshedSchema: BuiltInPluginSchema | null = null;
       let refreshedSchemaInspection = inspectNAMCaptureSchemaActivation(
@@ -6760,7 +7199,7 @@ export function NAMExplorer({
         }
         return false;
       }
-      const liveInputRestored = await nativeBridge.setBuiltInPluginParam(address, "auditionSource", 0);
+      const liveInputRestored = await nativeBridge.setNAMRackInternalAuditionSource(address, false);
       if (!isCurrent()) return false;
       if (!liveInputRestored) {
         if (canUpdateUI()) setStatus("The browser stayed open because live guitar input could not be restored.");
@@ -6784,32 +7223,23 @@ export function NAMExplorer({
       return;
     }
     if (action === "search") {
-      if (sourceFlow !== "fx" && tab !== "installed" && tab !== "favorites") void runLiveSearch(1);
+      if (sourceFlow !== "fx" && tab !== "installed" && tab !== "favorites") void submitLiveSearch(1);
       else setSelectedKey("");
       return;
     }
     if (action === "retry") {
-      if (sourceFlow !== "fx") void runLiveSearch(Math.max(1, livePage));
+      if (sourceFlow !== "fx") retryLiveSearch();
       return;
     }
-    if (action === "previous-page") {
-      setSelectedKey("");
-      if (catalogMode === "live" && livePaginationCurrent && livePage > 1) {
-        void runLiveSearch(livePage - 1);
-      }
-      return;
-    }
-    if (action === "next-page") {
-      setSelectedKey("");
-      if (catalogMode === "live" && livePaginationCurrent && liveHasMore) {
-        void runLiveSearch(livePage + 1);
-      }
-      return;
-    }
-    if (action === "load-more") {
+    if (action === "load-more" || action === "auto-load-more") {
       if (catalogMode === "live" && liveCanLoadMore) {
-        void runLiveSearch(livePage + 1, "append");
+        void requestNextLivePage(action === "load-more" ? "manual" : "observer");
       }
+      return;
+    }
+    if (action === "scroll") {
+      const scrollTop = Number(message.value);
+      if (Number.isFinite(scrollTop)) updateNAMExplorerSessionScroll(sessionViewKey, scrollTop);
       return;
     }
     if (action === "query") {
@@ -6926,6 +7356,8 @@ export function NAMExplorer({
           onCloseLibrary={rackActionsBusy ? undefined : () => void handleSourceFlowReturn()}
           onPreviousPreset={sourceFlowNavigationLocked ? undefined : onPreviousPreset}
           onNextPreset={sourceFlowNavigationLocked ? undefined : onNextPreset}
+          previousPresetLabel={previousPresetLabel}
+          nextPresetLabel={nextPresetLabel}
           onSavePreset={sourceFlowNavigationLocked ? undefined : onSavePreset}
           onOpenPresetManager={sourceFlowNavigationLocked ? undefined : onOpenPresetManager}
           onRecallCompare={sourceFlowNavigationLocked ? undefined : onRecallCompare}
@@ -7541,7 +7973,7 @@ export function NAMExplorer({
             )}
             {!railMode && sourceFlow !== "fx" && (
               <>
-                <Button variant="ghost" size="sm" onClick={() => void runLiveSearch(1)} disabled={liveBusy || tab === "installed" || tab === "favorites"} title="Search TONE3000 with current filters" aria-label="Search TONE3000 online">
+                <Button variant="ghost" size="sm" onClick={() => void submitLiveSearch(1)} disabled={tab === "installed" || tab === "favorites"} title="Search TONE3000 with current filters" aria-label="Search TONE3000 online">
                   <Radio size={14} />
                   Online
                 </Button>
@@ -7575,7 +8007,7 @@ export function NAMExplorer({
             />
           </label>
           {railMode && (
-            <Button className="nam-rail-search-action" variant="ghost" size="icon-sm" onClick={() => void runLiveSearch(1)} disabled={liveBusy || tab === "installed" || tab === "favorites"} title="Search TONE3000 with current filters" aria-label="Search TONE3000 online">
+            <Button className="nam-rail-search-action" variant="ghost" size="icon-sm" onClick={() => void submitLiveSearch(1)} disabled={tab === "installed" || tab === "favorites"} title="Search TONE3000 with current filters" aria-label="Search TONE3000 online">
               <Radio size={14} />
             </Button>
           )}
@@ -7744,7 +8176,7 @@ export function NAMExplorer({
           <NAMFeedbackBanner
             status={status}
             tone={feedbackTone}
-            onRetry={canRetryStatus ? () => void runLiveSearch(livePaginationCurrent ? Math.max(1, livePage) : 1) : undefined}
+            onRetry={canRetryStatus ? retryLiveSearch : undefined}
           />
         )}
         <div className="nam-library-summary">
@@ -7781,7 +8213,12 @@ export function NAMExplorer({
           </div>
         )}
         <div className="nam-results-wrap" data-refreshing={showResultsRefreshOverlay}>
-          <div className="nam-results" data-view={viewMode}>
+          <div
+            className="nam-results"
+            data-view={viewMode}
+            ref={resultsScrollRef}
+            onScroll={(event) => updateNAMExplorerSessionScroll(sessionViewKey, event.currentTarget.scrollTop)}
+          >
             {sourceFlow === "fx" ? (
               renderFXCollectionResults()
             ) : showResultsSkeleton ? (
@@ -7798,6 +8235,14 @@ export function NAMExplorer({
             ) : displayRows.length === 0 ? (
               renderEmptyResults()
             ) : displayRows.map(renderCatalogResult)}
+            {catalogMode === "live" && (
+              <div
+                ref={appendSentinelRef}
+                data-qa="tone3000-append-sentinel"
+                aria-hidden="true"
+                style={{ gridColumn: "1 / -1", height: 1 }}
+              />
+            )}
           </div>
           {showResultsRefreshOverlay && (
             <div className="nam-results-refresh" role="status" aria-live="polite">
@@ -7808,42 +8253,21 @@ export function NAMExplorer({
         </div>
         {catalogMode === "live" && (
           <div className="nam-live-pager nam-live-pager-footer" data-variant={railMode ? "rail" : "full"}>
-            {railMode ? (
-              <>
-                <Button size="sm" onClick={() => void runLiveSearch(livePage + 1, "append")} disabled={liveBusy || !liveCanLoadMore} title="Append the next page of online tones">
-                  {liveBusy ? <RefreshCw size={14} /> : null}
-                  Load more
-                </Button>
-                <span className="nam-live-page-label">
-                  {livePaginationCurrent ? `Page ${livePage} of ${liveTotalPages}` : "Search to apply filters"}
-                </span>
-                <Button variant="ghost" size="icon-sm" onClick={() => void runLiveSearch(livePage + 1)} disabled={liveBusy || !livePaginationCurrent || !liveHasMore} title="Next live page" aria-label="Next live page">
-                  <ChevronRight size={14} />
-                </Button>
-              </>
-            ) : (
-              <>
-                <span>
-                  {livePaginationCurrent
-                    ? `${liveTotal.toLocaleString()} result${liveTotal === 1 ? "" : "s"} - Page ${livePage} of ${liveTotalPages} - Sorted by ${activeSortLabel}`
-                    : "Filters changed - search to load page 1"}
-                </span>
-                <div>
-                  <Button variant="ghost" size="sm" onClick={() => void runLiveSearch(Math.max(1, livePage - 1))} disabled={liveBusy || !livePaginationCurrent || livePage <= 1} title="Previous live page">
-                    <ChevronLeft size={14} />
-                    Prev
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => void runLiveSearch(livePage + 1)} disabled={liveBusy || !livePaginationCurrent || !liveHasMore} title="Next live page">
-                    Next
-                    <ChevronRight size={14} />
-                  </Button>
-                  <Button size="sm" onClick={() => void runLiveSearch(livePage + 1, "append")} disabled={liveBusy || !liveCanLoadMore} title="Append the next page of online tones">
-                    {liveBusy ? <RefreshCw size={14} /> : <Download size={14} />}
-                    Load more
-                  </Button>
-                </div>
-              </>
-            )}
+            <span className="nam-live-page-label">
+              {livePaginationCurrent
+                ? `${displayRows.length.toLocaleString()} shown of ${liveTotal.toLocaleString()} result${liveTotal === 1 ? "" : "s"}${railMode ? "" : ` - Sorted by ${activeSortLabel}`}`
+                : "Filters changed - search to load results"}
+            </span>
+            <Button
+              size="sm"
+              onClick={() => void requestNextLivePage("manual")}
+              disabled={liveBusy || !liveCanLoadMore}
+              title={liveCanLoadMore ? "Append the next page of online tones" : "All available tones are loaded"}
+              aria-label="Load more online tones"
+            >
+              {liveBusy ? <RefreshCw size={14} /> : <Download size={14} />}
+              {liveBusy ? "Loading" : liveCanLoadMore ? "Load more" : "All loaded"}
+            </Button>
           </div>
         )}
       </div>
@@ -8019,7 +8443,7 @@ export function NAMExplorer({
                   )}
                 </>
               )}
-              <Button variant="ghost" aria-pressed={Boolean(selectedInstalled.favorite)} onClick={() => void toggleInstalledFavorite(selectedInstalled)} disabled={busyLibraryKey === installedKey(selectedInstalled)}>
+              <Button variant="ghost" aria-pressed={Boolean(selectedInstalled.favorite)} onClick={() => void toggleInstalledFavorite(selectedInstalled)} disabled={rackActionsBusy || busyLibraryKey === installedKey(selectedInstalled)}>
                 <Star size={13} />
                 {selectedInstalled.favorite ? "Unfavorite" : "Favorite"}
               </Button>
@@ -8136,7 +8560,7 @@ export function NAMExplorer({
         footer={removeCandidate ? (
           <>
             <button type="button" className="nam-rack-prompt-cancel" onClick={() => setRemoveCandidate(null)}>Cancel</button>
-            <button type="button" className="nam-rack-prompt-confirm" data-destructive="true" onClick={() => void removeInstalled(removeCandidate)}>Remove</button>
+            <button type="button" className="nam-rack-prompt-confirm" data-destructive="true" onClick={() => void removeInstalled(removeCandidate)} disabled={rackActionsBusy || busyLibraryKey === installedKey(removeCandidate)}>Remove</button>
           </>
         ) : undefined}
       >

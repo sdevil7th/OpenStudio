@@ -108,7 +108,11 @@ export function MixerPanel({
   }
   const [monitorFXList, setMonitorFXList] = useState<MonitorFXSlot[]>([]);
   const [showMonitorPluginPicker, setShowMonitorPluginPicker] = useState(false);
-  const [availablePlugins, setAvailablePlugins] = useState<{ name: string; fileOrIdentifier: string }[]>([]);
+  const [availablePlugins, setAvailablePlugins] = useState<{
+    name: string;
+    fileOrIdentifier: string;
+    identifier?: string;
+  }[]>([]);
   const [monitorPluginSearch, setMonitorPluginSearch] = useState("");
   const [addingMonitorPlugin, setAddingMonitorPlugin] = useState(false);
   const [updatingMonitorPrecision, setUpdatingMonitorPrecision] = useState<number | null>(null);
@@ -186,19 +190,46 @@ export function MixerPanel({
     }
   }, []);
 
-  const handleOpenMonitorPluginPicker = useCallback(async () => {
+  const refreshAvailableMonitorPlugins = useCallback(async () => {
     try {
       const plugins = await nativeBridge.getAvailablePlugins();
       setAvailablePlugins(
         plugins
           .filter((p: any) => !p.isInstrument)
-          .map((p: any) => ({ name: p.name, fileOrIdentifier: p.fileOrIdentifier }))
+          .map((p: any) => ({
+            name: p.name,
+            fileOrIdentifier: p.fileOrIdentifier,
+            identifier: p.identifier,
+          }))
       );
     } catch (e) {
       console.error("[MixerPanel] Failed to load plugins for monitor FX:", e);
     }
-    setShowMonitorPluginPicker(true);
   }, []);
+
+  const handleOpenMonitorPluginPicker = useCallback(async () => {
+    await refreshAvailableMonitorPlugins();
+    setShowMonitorPluginPicker(true);
+  }, [refreshAvailableMonitorPlugins]);
+
+  useEffect(() => {
+    const handleCatalogChanged = () => {
+      if (showMonitorPluginPicker) {
+        void refreshAvailableMonitorPlugins();
+      }
+    };
+
+    window.addEventListener(
+      "openstudio:plugin-catalog-changed",
+      handleCatalogChanged,
+    );
+    return () => {
+      window.removeEventListener(
+        "openstudio:plugin-catalog-changed",
+        handleCatalogChanged,
+      );
+    };
+  }, [refreshAvailableMonitorPlugins, showMonitorPluginPicker]);
 
   const filteredMonitorPlugins = availablePlugins.filter((p) =>
     p.name.toLowerCase().includes(monitorPluginSearch.toLowerCase())
@@ -495,11 +526,11 @@ export function MixerPanel({
                     No plugins found
                   </div>
                 ) : (
-                  filteredMonitorPlugins.slice(0, 50).map((plugin) => (
+                  filteredMonitorPlugins.map((plugin) => (
                     <button
-                      key={plugin.fileOrIdentifier}
+                      key={plugin.identifier || plugin.fileOrIdentifier}
                       className="w-full text-left px-1.5 py-0.5 text-[10px] text-neutral-300 hover:bg-amber-900/30 hover:text-amber-200 rounded truncate transition-colors cursor-pointer disabled:opacity-50"
-                      onClick={() => handleAddMonitorFX(plugin.fileOrIdentifier)}
+                      onClick={() => handleAddMonitorFX(plugin.identifier || plugin.fileOrIdentifier)}
                       disabled={addingMonitorPlugin}
                       title={plugin.name}
                     >

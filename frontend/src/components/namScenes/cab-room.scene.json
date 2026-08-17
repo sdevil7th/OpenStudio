@@ -16,7 +16,7 @@
     { "id": "cab-lpf", "paramId": "cabLPFHz", "kind": "knob", "x": 1258, "y": 394, "width": 50, "height": 50, "diameter": 36, "label": "LPF", "labelPlacement": "hidden", "zIndex": 8, "rotationRange": [-135, 135] },
     { "id": "cab-level", "paramId": "cabLevelDb", "kind": "fader", "x": 1382, "y": 308, "width": 38, "height": 170, "label": "A", "labelPlacement": "hidden", "valuePlacement": "hidden", "zIndex": 8 },
     { "id": "cab-blend", "paramId": "cabMicBlend", "kind": "fader", "x": 1424, "y": 308, "width": 38, "height": 170, "label": "B", "labelPlacement": "hidden", "valuePlacement": "hidden", "zIndex": 8 },
-    { "id": "cab-room", "paramId": "cabRoomSend", "kind": "knob", "x": 1382, "y": 432, "width": 44, "height": 44, "diameter": 32, "label": "Room", "labelPlacement": "hidden", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "cab-room", "paramId": "cabRoomSend", "kind": "knob", "x": 1382, "y": 432, "width": 44, "height": 44, "diameter": 32, "label": "Bloom", "labelPlacement": "hidden", "zIndex": 8, "rotationRange": [-135, 135] },
     { "id": "cab-power", "paramId": "cabEnabled", "kind": "footswitch", "x": 1424, "y": 432, "width": 44, "height": 46, "diameter": 32, "label": "Power", "labelPlacement": "hidden", "zIndex": 9 },
     { "id": "cab-led", "kind": "led", "x": 1446, "y": 418, "width": 28, "height": 28, "diameter": 20, "zIndex": 9 }
   ],

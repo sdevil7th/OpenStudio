@@ -26,15 +26,6 @@ const schema: BuiltInPluginSchema = {
       defaultValue: 0,
       unit: "dB",
     },
-    {
-      id: "auditionSource",
-      label: "Demo Source",
-      type: "toggle",
-      value: 1,
-      min: 0,
-      max: 1,
-      defaultValue: 0,
-    },
   ],
   modelState: {
     ampModelPath: "OpenStudio/NAM/previews/classic-crunch-a2.nam",
@@ -119,7 +110,6 @@ describe("NAM tone save metadata", () => {
         pedalMix: 0,
         ampEnabled: 0,
         ampMix: 0,
-        auditionSource: 0,
       },
     });
 
@@ -173,21 +163,37 @@ describe("NAM tone save metadata", () => {
       values: {
         inputTrimDb: 1.5,
         auditionSource: 1,
+        reverbEnabled: 1,
+        reverbDecaySec: 9.25,
+        reverbShimmer: 0.42,
       },
       modelState: {
         ampModelPath: previewRecord.localPath,
-        pedalModelPath: "",
-        cabIRPath: "",
+        ampModelSize: 0.75,
+        pedalModelPath: "OpenStudio/NAM/library/drive.nam",
+        pedalModelSize: 0.5,
+        cabIRPath: "OpenStudio/IR/library/studio.wav",
+        cabRequestedEnabled: true,
+      },
+      dspState: {
+        reverbEngineVersion: 5,
+        namEffectsDspVersion: 11,
       },
       uiState: {
         namActivePreview: activePreview,
+        namPresetDirty: true,
+        namActivePresetName: "Earlier Preset",
+        namPresetBaseline: { values: { reverbDecaySec: 2.2 } },
+        namRackSlots: {
+          order: ["gate", "pedal", "amp", "cab", "delay", "reverb", "mod", "eq"],
+        },
       },
     });
     const commit = vi.spyOn(nativeBridge, "commitNAMPreviewTone").mockResolvedValue({
       success: true,
       record: committedRecord,
     });
-    vi.spyOn(nativeBridge, "saveBuiltInFXPreset").mockResolvedValue(true);
+    const savePreset = vi.spyOn(nativeBridge, "saveBuiltInFXPreset").mockResolvedValue(true);
 
     const result = await saveNAMTone({
       address,
@@ -212,7 +218,12 @@ describe("NAM tone save metadata", () => {
     expect(commit).toHaveBeenCalledWith(previewRecord, expect.objectContaining({
       toneName: "My Saved Crunch",
       creator: "Session User",
-    }), expect.any(Object));
+    }), expect.objectContaining({
+      dspState: {
+        reverbEngineVersion: 5,
+        namEffectsDspVersion: 11,
+      },
+    }));
     expect(result.savedTone?.title).toBe("My Saved Crunch");
     expect(result.savedTone?.captureTitle).toBe("Classic Crunch");
     expect(result.savedTone?.modelName).toBe("Classic Crunch A2");
@@ -220,6 +231,27 @@ describe("NAM tone save metadata", () => {
     expect(result.savedTone?.localPath).toBe(committedRecord.localPath);
     expect(result.savedTone?.toneId).toBe(53203);
     expect(result.savedTone?.modelId).toBe(5320302);
+    expect(result.savedTone?.rackState).toMatchObject({
+      values: {
+        reverbEnabled: 1,
+        reverbDecaySec: 9.25,
+        reverbShimmer: 0.42,
+      },
+      modelState: {
+        pedalModelPath: "OpenStudio/NAM/library/drive.nam",
+        pedalModelSize: 0.5,
+        ampModelPath: committedRecord.localPath,
+        ampModelSize: 0.75,
+        cabIRPath: "OpenStudio/IR/library/studio.wav",
+        cabRequestedEnabled: true,
+      },
+      dspState: {
+        reverbEngineVersion: 5,
+        namEffectsDspVersion: 11,
+      },
+      slotOrder: ["gate", "pedal", "amp", "cab", "delay", "reverb", "mod", "eq"],
+    });
+    expect(result.savedTone?.values).not.toHaveProperty("auditionSource");
     expect(setState).toHaveBeenCalledWith(address, expect.objectContaining({
       modelState: expect.objectContaining({
         ampModelPath: committedRecord.localPath,
@@ -227,12 +259,17 @@ describe("NAM tone save metadata", () => {
       }),
       uiState: expect.objectContaining({
         namActivePreview: null,
+        namPresetDirty: false,
+        namActivePresetName: null,
+        namPresetBaseline: null,
         namSavedTone: expect.objectContaining({
           title: "My Saved Crunch",
           localPath: committedRecord.localPath,
         }),
       }),
     }));
+    const finalStateWriteOrder = setState.mock.invocationCallOrder[setState.mock.invocationCallOrder.length - 1];
+    expect(finalStateWriteOrder).toBeLessThan(savePreset.mock.invocationCallOrder[0]);
   });
 
   it("persists committed Cab/IR previews into the cab slot", async () => {
@@ -418,12 +455,12 @@ describe("NAM tone save metadata", () => {
     expect(setState).toHaveBeenLastCalledWith(address, {
       values: {
         inputTrimDb: 0,
-        auditionSource: 1,
         pedalMix: 0.35,
       },
       modelState: {
         clearPedalModel: true,
         ampModelPath: "OpenStudio/NAM/previews/classic-crunch-a2.nam",
+        ampModelSize: 1,
         clearCabIR: true,
       },
       uiState: {

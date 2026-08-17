@@ -13,7 +13,15 @@ import { Button } from "./ui";
 import {
   clampNumber as clamp,
   formatParamValue,
+  isChorusRateParam,
   normalizeParam as normalize,
+  normalizeParamValue,
+  paramValueFromRangeInput,
+  rangeInputMax,
+  rangeInputMin,
+  rangeInputStep,
+  rangeInputValue,
+  quantizeParamValue,
   stepForParam,
 } from "../utils/builtInParamValue";
 
@@ -40,6 +48,7 @@ function makeFallbackParam(
   unit = "",
   graphRole = "controls",
   type: BuiltInParamDescriptor["type"] = "continuous",
+  enumOptions?: BuiltInParamDescriptor["enumOptions"],
 ): BuiltInParamDescriptor {
   return {
     id,
@@ -52,6 +61,7 @@ function makeFallbackParam(
     unit,
     automatable: type !== "meter",
     graphRole,
+    enumOptions,
   };
 }
 
@@ -59,7 +69,7 @@ function isNAMPluginName(name: string) {
   return name.toLowerCase().includes("nam");
 }
 
-function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string): BuiltInPluginSchema {
+export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string): BuiltInPluginSchema {
   return {
     schemaVersion: 1,
     name: fallbackName || "OpenStudio NAM Rack",
@@ -68,8 +78,27 @@ function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string
     fxIndex: address.fxIndex ?? -1,
     parameters: [
       makeFallbackParam("inputTrimDb", "Input", 0, -24, 24, 0, "dB", "gain"),
+      {
+        ...makeFallbackParam("instrumentProfile", "Instrument", 0, 0, 1, 0, "", "global", "enum", [
+          { value: 0, label: "Guitar" },
+          { value: 1, label: "Bass" },
+        ]),
+        automatable: false,
+      },
       makeFallbackParam("gateThresholdDb", "Gate", -80, -100, 0, -80, "dB", "dynamics"),
       makeFallbackParam("gateReleaseMs", "Gate Rel", 80, 5, 1000, 80, "ms", "dynamics"),
+      makeFallbackParam("compressorEnabled", "Compressor", 0, 0, 1, 0, "", "dynamics", "toggle"),
+      makeFallbackParam("compressorAttackMs", "Attack", 21.9, 0.1, 50, 21.9, "ms", "dynamics"),
+      makeFallbackParam("compressorReleaseMs", "Release", 149.1, 50, 1000, 149.1, "ms", "dynamics"),
+      makeFallbackParam("compressorToneDb", "Tone", 0, -6, 6, 0, "dB", "dynamics"),
+      makeFallbackParam("compressorSidechainHPF", "HPF", 1, 0, 2, 1, "", "dynamics", "enum", [
+        { value: 0, label: "Off" },
+        { value: 1, label: "120 Hz" },
+        { value: 2, label: "240 Hz" },
+      ]),
+      makeFallbackParam("compressorMix", "Mix", 0.65, 0, 1, 0.65, "", "dynamics"),
+      makeFallbackParam("compressorVolumeDb", "Level", 0, -18, 18, 0, "dB", "dynamics"),
+      makeFallbackParam("compressorComp", "Comp", 0.35, 0, 1, 0.35, "", "dynamics"),
       makeFallbackParam("pedalMix", "Pedal Mix", 1, 0, 1, 1, "", "model"),
       makeFallbackParam("ampMix", "Amp Mix", 1, 0, 1, 1, "", "model"),
       makeFallbackParam("bassDb", "Bass", 0, -12, 12, 0, "dB", "tone"),
@@ -82,16 +111,37 @@ function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string
       makeFallbackParam("cabLPFHz", "Cab LPF", 8500, 1000, 20000, 8500, "Hz", "cab"),
       makeFallbackParam("cabPhaseInvert", "Phase", 0, 0, 1, 0, "", "cab", "toggle"),
       makeFallbackParam("chorusMix", "Chorus", 0, 0, 1, 0, "", "modulation"),
-      makeFallbackParam("chorusRateHz", "Chorus Rate", 0.75, 0.05, 8, 0.75, "Hz", "modulation"),
+      makeFallbackParam("chorusRateHz", "Chorus Rate", 0.75, 0.01, 8, 0.75, "Hz", "modulation"),
       makeFallbackParam("chorusDepth", "Chorus Depth", 0.32, 0, 1, 0.32, "", "modulation"),
-      makeFallbackParam("delayMix", "Delay", 0, 0, 1, 0, "", "time"),
+      makeFallbackParam("delayMix", "Delay", 0.22, 0, 1, 0.22, "", "time"),
       makeFallbackParam("delayTimeMs", "Delay Time", 360, 1, 2000, 360, "ms", "time"),
       makeFallbackParam("delayFeedback", "Delay Fdbk", 0.22, 0, 0.85, 0.22, "", "time"),
-      makeFallbackParam("reverbMix", "Reverb", 0, 0, 1, 0, "", "space"),
+      makeFallbackParam("delayMod", "Delay Mod", 0.18, 0, 1, 0.18, "", "time"),
+      makeFallbackParam("delayDucker", "Ducker", 0.12, 0, 1, 0.12, "", "time"),
+      makeFallbackParam("delayMode", "Delay Mode", 1, 0, 4, 1, "", "time", "enum", [
+        { value: 0, label: "Digital" },
+        { value: 1, label: "Tape" },
+        { value: 2, label: "Analog" },
+        { value: 3, label: "Multi" },
+        { value: 4, label: "Dual" },
+      ]),
+      makeFallbackParam("delayPingPong", "Ping Pong", 1, 0, 1, 1, "", "time", "toggle"),
+      makeFallbackParam("delayTempoSync", "Delay Sync", 0, 0, 1, 0, "", "time", "toggle"),
+      makeFallbackParam("delayEnabled", "Delay Engage", 0, 0, 1, 0, "", "time", "toggle"),
+      makeFallbackParam("reverbVoice", "Reverb Voice", 0, 0, 3, 0, "", "space", "enum", [
+        { value: 0, label: "Studio" },
+        { value: 1, label: "Plate" },
+        { value: 2, label: "Hall" },
+        { value: 3, label: "Room" },
+      ]),
+      makeFallbackParam("reverbEnabled", "Reverb Engage", 0, 0, 1, 0, "", "space", "toggle"),
+      makeFallbackParam("reverbMix", "Reverb", 0.28, 0, 1, 0.28, "", "space"),
       makeFallbackParam("reverbDecaySec", "Decay", 2.2, 0.2, 12, 2.2, "s", "space"),
+      makeFallbackParam("reverbPreDelayMs", "Pre Delay", 18, 0, 500, 18, "ms", "space"),
+      makeFallbackParam("reverbLowCutHz", "Low Cut", 120, 20, 500, 120, "Hz", "space"),
       makeFallbackParam("reverbTone", "Verb Tone", 0.62, 0, 1, 0.62, "", "space"),
+      makeFallbackParam("reverbShimmer", "Shimmer", 0, 0, 1, 0, "", "space"),
       makeFallbackParam("outputTrimDb", "Output", 0, -24, 24, 0, "dB", "gain"),
-      makeFallbackParam("auditionSource", "Demo Source", 0, 0, 1, 0, "", "utility", "toggle"),
     ],
     modelState: {
       pedalModelPath: "",
@@ -99,10 +149,13 @@ function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string
       cabIRPath: "",
       hasPedalModel: false,
       hasAmpModel: false,
+      hasSlimmableNAMModel: false,
       hasCabIR: false,
+      namEffectsDspVersion: 11,
       lastLoadError: "",
     },
     visualization: {
+      gainReductionDb: 0,
       inputLevelDb: -90,
       outputLevelDb: -90,
     },
@@ -114,6 +167,9 @@ function isUsableSchema(schema: BuiltInPluginSchema | null | undefined) {
 }
 
 function valuesClose(param: BuiltInParamDescriptor, value: number) {
+  if (isChorusRateParam(param)) {
+    return Math.abs(normalize(param) - normalizeParamValue(param, value)) <= 1 / 1000;
+  }
   return Math.abs(param.value - value) <= Math.max(stepForParam(param), 0.0001) * 0.5;
 }
 
@@ -139,6 +195,177 @@ export function createSchemaRequestGate() {
     },
     invalidate() {
       latestRequestId += 1;
+    },
+  };
+}
+
+type FrameCoalescedParamWriterOptions = {
+  write: (paramId: string, value: number) => Promise<boolean>;
+  onSuccess?: (paramId: string, value: number) => void;
+  onFailure?: (paramId: string, value: number, error?: unknown) => void;
+  requestFrame?: (callback: FrameRequestCallback) => number;
+  cancelFrame?: (frameId: number) => void;
+};
+
+type PendingParamWrite = {
+  pendingValue?: number;
+  inFlightValue?: number;
+  lastSuccessfulValue?: number;
+  frameId: number | null;
+};
+
+export function createFrameCoalescedParamWriter({
+  write,
+  onSuccess,
+  onFailure,
+  requestFrame = (callback) => window.requestAnimationFrame(callback),
+  cancelFrame = (frameId) => window.cancelAnimationFrame(frameId),
+}: FrameCoalescedParamWriterOptions) {
+  const writes = new Map<string, PendingParamWrite>();
+  const flushWaiters = new Set<{
+    failureCount: number;
+    resolve: (ok: boolean) => void;
+  }>();
+  let acceptingWrites = true;
+  let terminalFailureCount = 0;
+
+  const entryFor = (paramId: string) => {
+    const existing = writes.get(paramId);
+    if (existing) return existing;
+    const entry: PendingParamWrite = { frameId: null };
+    writes.set(paramId, entry);
+    return entry;
+  };
+
+  const hasOutstandingWrites = () => Array.from(writes.values()).some(
+    (entry) => entry.frameId !== null
+      || entry.pendingValue !== undefined
+      || entry.inFlightValue !== undefined,
+  );
+
+  const resolveFlushWaitersIfIdle = () => {
+    if (hasOutstandingWrites()) return;
+    for (const waiter of flushWaiters) {
+      waiter.resolve(terminalFailureCount === waiter.failureCount);
+    }
+    flushWaiters.clear();
+  };
+
+  const dispatch = async (paramId: string, entry: PendingParamWrite) => {
+    if (entry.inFlightValue !== undefined || entry.pendingValue === undefined) return;
+    const value = entry.pendingValue;
+    entry.pendingValue = undefined;
+    entry.inFlightValue = value;
+
+    let ok = false;
+    let writeError: unknown;
+    try {
+      ok = await write(paramId, value);
+    } catch (error) {
+      writeError = error;
+    }
+
+    entry.inFlightValue = undefined;
+    if (ok) {
+      entry.lastSuccessfulValue = value;
+      // Repeated pointer events may have queued the same quantized value while
+      // this write was in flight. The completed write already delivered it.
+      if (entry.pendingValue !== undefined && Object.is(entry.pendingValue, value)) {
+        entry.pendingValue = undefined;
+      }
+      onSuccess?.(paramId, value);
+    } else if (entry.pendingValue === undefined && acceptingWrites) {
+      // Recover only when the failed value is still the trailing value. A newer
+      // pending value should get its chance to reach the processor first.
+      terminalFailureCount += 1;
+      onFailure?.(paramId, value, writeError);
+    }
+
+    if (entry.pendingValue !== undefined) {
+      if (acceptingWrites) schedule(paramId, entry);
+      else void dispatch(paramId, entry);
+    }
+    resolveFlushWaitersIfIdle();
+  };
+
+  const schedule = (paramId: string, entry: PendingParamWrite) => {
+    if (
+      !acceptingWrites
+      || entry.frameId !== null
+      || entry.inFlightValue !== undefined
+      || entry.pendingValue === undefined
+    ) {
+      return;
+    }
+    if (flushWaiters.size > 0) {
+      void dispatch(paramId, entry);
+      return;
+    }
+    entry.frameId = requestFrame(() => {
+      entry.frameId = null;
+      void dispatch(paramId, entry);
+    });
+  };
+
+  const queueValue = (paramId: string, value: number, dispatchNow: boolean) => {
+    if (!acceptingWrites) return;
+    const entry = entryFor(paramId);
+    if (entry.pendingValue !== undefined && Object.is(entry.pendingValue, value)) return;
+    if (
+      entry.pendingValue === undefined
+      && entry.inFlightValue === undefined
+      && entry.lastSuccessfulValue !== undefined
+      && Object.is(entry.lastSuccessfulValue, value)
+    ) {
+      return;
+    }
+    entry.pendingValue = value;
+    if (dispatchNow && entry.frameId !== null) {
+      cancelFrame(entry.frameId);
+      entry.frameId = null;
+    }
+    if (dispatchNow) void dispatch(paramId, entry);
+    else schedule(paramId, entry);
+  };
+
+  return {
+    enqueue(paramId: string, value: number) {
+      queueValue(paramId, value, false);
+    },
+    writeImmediately(paramId: string, value: number) {
+      queueValue(paramId, value, true);
+    },
+    flush(): Promise<boolean> {
+      if (!acceptingWrites) return Promise.resolve(false);
+      const failureCount = terminalFailureCount;
+      return new Promise<boolean>((resolve) => {
+        flushWaiters.add({ failureCount, resolve });
+        for (const [paramId, entry] of writes) {
+          if (entry.frameId !== null) {
+            cancelFrame(entry.frameId);
+            entry.frameId = null;
+          }
+          if (entry.pendingValue !== undefined && entry.inFlightValue === undefined) {
+            void dispatch(paramId, entry);
+          }
+        }
+        resolveFlushWaitersIfIdle();
+      });
+    },
+    dispose(flushPending = true) {
+      acceptingWrites = false;
+      for (const [paramId, entry] of writes) {
+        if (entry.frameId !== null) {
+          cancelFrame(entry.frameId);
+          entry.frameId = null;
+        }
+        if (flushPending && entry.pendingValue !== undefined && entry.inFlightValue === undefined) {
+          void dispatch(paramId, entry);
+        } else if (!flushPending) {
+          entry.pendingValue = undefined;
+        }
+      }
+      resolveFlushWaitersIfIdle();
     },
   };
 }
@@ -306,11 +533,14 @@ export function BuiltInParamControl({
         </span>
         <input
           type="range"
-          min={param.min}
-          max={param.max}
-          step={stepForParam(param)}
-          value={param.value}
-          onChange={(event) => onChange(param, Number(event.currentTarget.value))}
+          min={rangeInputMin(param)}
+          max={rangeInputMax(param)}
+          step={rangeInputStep(param)}
+          value={rangeInputValue(param)}
+          onChange={(event) => onChange(
+            param,
+            paramValueFromRangeInput(param, Number(event.currentTarget.value)),
+          )}
         />
       </span>
     </label>
@@ -717,7 +947,6 @@ export function BuiltInPluginPanel({
   );
   const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? bootSchema);
   const [loading, setLoading] = useState(false);
-  const namParamRefreshTimerRef = useRef<number | null>(null);
   const optimisticParamValuesRef = useRef<Record<string, number>>({});
   const schemaRequestGateRef = useRef(createSchemaRequestGate());
   const schemaRef = useRef(schema);
@@ -792,6 +1021,42 @@ export function BuiltInPluginPanel({
     }
   }, [address, applyOptimisticParamValues, bootSchema, fallbackName]);
 
+  const loadSchemaRef = useRef(loadSchema);
+  loadSchemaRef.current = loadSchema;
+
+  const clearMatchingOptimisticValue = useCallback((paramId: string, value: number) => {
+    if (!Object.is(optimisticParamValuesRef.current[paramId], value)) return false;
+    const { [paramId]: _discarded, ...remaining } = optimisticParamValuesRef.current;
+    optimisticParamValuesRef.current = remaining;
+    return true;
+  }, []);
+
+  const recoverFailedParamWrite = useCallback((paramId: string, value: number, error?: unknown) => {
+    if (error !== undefined) {
+      console.error("[BuiltInPluginPanel] Failed to set built-in parameter:", error);
+    }
+    if (!clearMatchingOptimisticValue(paramId, value)) return;
+    void loadSchemaRef.current(false);
+  }, [clearMatchingOptimisticValue]);
+
+  const writeAddress = useMemo<BuiltInPluginAddress>(
+    () => ({
+      chain: address.chain,
+      trackId: address.trackId,
+      fxIndex: address.fxIndex,
+    }),
+    [address.chain, address.fxIndex, address.trackId],
+  );
+
+  const paramWriter = useMemo(
+    () => createFrameCoalescedParamWriter({
+      write: (paramId, value) => nativeBridge.setBuiltInPluginParam(writeAddress, paramId, value),
+      onSuccess: clearMatchingOptimisticValue,
+      onFailure: recoverFailedParamWrite,
+    }),
+    [clearMatchingOptimisticValue, recoverFailedParamWrite, writeAddress],
+  );
+
   useEffect(() => {
     if (initialSchema) {
       schemaRequestGateRef.current.invalidate();
@@ -806,9 +1071,8 @@ export function BuiltInPluginPanel({
 
   useEffect(() => {
     const pluginKind = `${schema?.category ?? ""} ${schema?.name ?? ""}`.toLowerCase();
-    // NAM has a dedicated lock-free diagnostics endpoint. Polling its complete
-    // schema takes the processor callback lock and can make the audio thread
-    // skip an entire rack block, which is audible as a click.
+    // NAM has a dedicated low-cost diagnostics endpoint. Keep periodic meter
+    // refreshes separate from rebuilding and transferring the complete schema.
     const needsLiveSchema = pluginKind.includes("eq")
       || pluginKind.includes("pitch")
       || pluginKind.includes("dynamics")
@@ -829,11 +1093,9 @@ export function BuiltInPluginPanel({
 
   useEffect(() => () => {
     schemaRequestGateRef.current.invalidate();
-    if (namParamRefreshTimerRef.current !== null) {
-      window.clearTimeout(namParamRefreshTimerRef.current);
-      namParamRefreshTimerRef.current = null;
-    }
   }, []);
+
+  useEffect(() => () => paramWriter.dispose(true), [paramWriter]);
 
   const pluginKind = useMemo(() => getPluginKind(schema), [schema]);
 
@@ -861,8 +1123,10 @@ export function BuiltInPluginPanel({
       .sort(([groupA], [groupB]) => groupSortWeight(pluginKind, groupA) - groupSortWeight(pluginKind, groupB));
   }, [pluginKind, primaryParams, schema]);
 
-  const handleParamChange = async (param: BuiltInParamDescriptor, rawValue: number) => {
-    const value = param.type === "toggle" ? (rawValue >= 0.5 ? 1 : 0) : clamp(rawValue, param.min, param.max);
+  const handleParamChange = (param: BuiltInParamDescriptor, rawValue: number) => {
+    const value = param.type === "toggle"
+      ? (rawValue >= 0.5 ? 1 : 0)
+      : quantizeParamValue(param, clamp(rawValue, param.min, param.max));
     optimisticParamValuesRef.current = {
       ...optimisticParamValuesRef.current,
       [param.id]: value,
@@ -877,25 +1141,13 @@ export function BuiltInPluginPanel({
           }
         : current,
     );
-    let ok = false;
-    try {
-      ok = await nativeBridge.setBuiltInPluginParam(address, param.id, value);
-    } catch (error) {
-      console.error("[BuiltInPluginPanel] Failed to set built-in parameter:", error);
-    }
-    if (!ok) {
-      const { [param.id]: _discarded, ...remaining } = optimisticParamValuesRef.current;
-      optimisticParamValuesRef.current = remaining;
-      void loadSchema(false);
+
+    if (param.type === "continuous") {
+      paramWriter.enqueue(param.id, value);
       return;
     }
-    if (ok && pluginKind === "nam") {
-      if (namParamRefreshTimerRef.current !== null) window.clearTimeout(namParamRefreshTimerRef.current);
-      namParamRefreshTimerRef.current = window.setTimeout(() => {
-        namParamRefreshTimerRef.current = null;
-        void loadSchema(false);
-      }, 120);
-    }
+
+    paramWriter.writeImmediately(param.id, value);
   };
 
   const title = schema?.name || fallbackName;
@@ -936,6 +1188,7 @@ export function BuiltInPluginPanel({
           onParamChange={(param, value) => {
             void handleParamChange(param, value);
           }}
+          onFlushPendingParamWrites={() => paramWriter.flush()}
           onRefreshRack={() => loadSchema(false)}
         />
       ) : !schema || schema.parameters.length === 0 ? (

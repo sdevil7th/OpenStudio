@@ -5,10 +5,13 @@
   "device": { "kind": "pedal", "title": "Distortion", "subtitle": "Dedicated High-Gain Pedal", "color": "#8b8981", "accent": "#ff5d4f" },
   "composition": { "targetDeviceCount": 5, "layout": "pre-fx-stompbox-row", "requiredModules": ["Gate Drive", "Booster", "Tone Shaper", "Compressor", "Overdrive"] },
   "controls": [
-    { "id": "chaos-drive", "paramId": "chaosDrive", "kind": "knob", "x": 180, "y": 220, "width": 154, "height": 154, "diameter": 136, "label": "Drive", "zIndex": 8, "rotationRange": [-135, 135] },
-    { "id": "chaos-tone", "paramId": "chaosTone", "kind": "knob", "x": 540, "y": 220, "width": 154, "height": 154, "diameter": 136, "label": "Tone", "zIndex": 8, "rotationRange": [-135, 135] },
-    { "id": "chaos-mix", "paramId": "chaosMix", "kind": "knob", "x": 180, "y": 440, "width": 142, "height": 142, "diameter": 124, "label": "Mix", "zIndex": 8, "rotationRange": [-135, 135] },
-    { "id": "chaos-level", "paramId": "chaosLevelDb", "kind": "knob", "x": 540, "y": 440, "width": 142, "height": 142, "diameter": 124, "label": "Level", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "chaos-mode", "paramId": "chaosMode", "kind": "button", "x": 360, "y": 115, "width": 180, "height": 70, "zIndex": 8 },
+    { "id": "chaos-drive", "paramId": "chaosDrive", "kind": "knob", "x": 144, "y": 270, "width": 132, "height": 132, "diameter": 116, "label": "Drive", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "chaos-gate", "paramId": "chaosGate", "kind": "knob", "x": 360, "y": 270, "width": 120, "height": 120, "diameter": 104, "label": "Gate", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "chaos-tone", "paramId": "chaosTone", "kind": "knob", "x": 576, "y": 270, "width": 132, "height": 132, "diameter": 116, "label": "Tone", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "chaos-weight", "paramId": "chaosWeight", "kind": "knob", "x": 144, "y": 500, "width": 132, "height": 132, "diameter": 116, "label": "Weight: Tight to Thick", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "chaos-mix", "paramId": "chaosMix", "kind": "knob", "x": 360, "y": 500, "width": 132, "height": 132, "diameter": 116, "label": "Mix", "zIndex": 8, "rotationRange": [-135, 135] },
+    { "id": "chaos-level", "paramId": "chaosLevelDb", "kind": "knob", "x": 576, "y": 500, "width": 132, "height": 132, "diameter": 116, "label": "Level", "zIndex": 8, "rotationRange": [-135, 135] },
     { "id": "chaos-led", "kind": "led", "x": 360, "y": 765, "width": 58, "height": 58, "diameter": 46, "zIndex": 7 },
     { "id": "chaos-engage", "paramId": "chaosEnabled", "kind": "footswitch", "x": 360, "y": 875, "width": 130, "height": 130, "diameter": 108, "label": "Engage", "labelPlacement": "above", "zIndex": 9 }
   ],

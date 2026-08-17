@@ -17,6 +17,17 @@ set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled in
 
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
+# Visual Studio's Debug CRT defaults to checked STL iterators. Their
+# construction/destruction is serialized by a process-wide lock, so unrelated
+# UI/background container work can priority-invert a 16-sample ASIO callback.
+# This must be directory-wide (including source-built dependencies) because
+# mixing iterator debug levels across linked C++ targets is ABI-incompatible.
+if(MSVC)
+    add_compile_definitions(
+        $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
+    )
+endif()
+
 option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
 option(OPENSTUDIO_REQUIRE_ASIO "Fail configuration when the ASIO SDK is unavailable for a Windows build" OFF)
@@ -70,6 +81,10 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        8.0.0
     GIT_SHALLOW    TRUE
+    PATCH_COMMAND
+        "${CMAKE_COMMAND}"
+        "-DJUCE_SOURCE_DIR=<SOURCE_DIR>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
 )
 FetchContent_MakeAvailable(juce)
 if(MSVC)
@@ -146,6 +161,15 @@ FetchContent_Declare(
     GIT_TAG        v0.5.4
     GIT_SHALLOW    TRUE
     GIT_SUBMODULES Dependencies/eigen
+    # Keep OpenStudio's verified v0.5.4 real-time fixes reproducible:
+    # active-column WaveNet clearing, a lock-free SlimmableWavenet pending
+    # fast path, allocation-free ConvNet processing after Reset(), and an A2
+    # tail mirror whose work scales with the current callback rather than the
+    # prepared maximum block size.
+    PATCH_COMMAND
+        "${CMAKE_COMMAND}"
+        "-DNAM_SOURCE_DIR=<SOURCE_DIR>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyNAMCorePatches.cmake"
 )
 FetchContent_GetProperties(neural_amp_modeler_core)
 if(NOT neural_amp_modeler_core_POPULATED)
@@ -178,6 +202,10 @@ target_compile_features(openstudio_namcore PRIVATE cxx_std_20)
 target_compile_definitions(openstudio_namcore PUBLIC
     NAM_SAMPLE_FLOAT
     NAM_ENABLE_A2_FAST
+    # Upstream's supported small-matrix kernels avoid generic Eigen dispatch
+    # overhead for the tiny channel counts used by realtime NAM WaveNets. The
+    # NeuralAmpModelerCore CI builds this path as well.
+    NAM_USE_INLINE_GEMM
     NAM_DEFAULT_MAX_BUFFER_SIZE=8192
 )
 target_compile_definitions(openstudio_namcore PRIVATE
@@ -257,10 +285,17 @@ juce_add_gui_app(OpenStudio
     MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )
 if(MSVC)
-    # Three audio hot-path translation units below are intentionally optimized
+    # Realtime audio translation units below are intentionally optimized
     # in Debug. CMP0184 controls runtime checks at target scope, so the target
     # must opt out to avoid MSVC's incompatible /O2 + /RTC1 combination.
     set_property(TARGET OpenStudio PROPERTY MSVC_RUNTIME_CHECKS "")
+    # The headless aggregate regression nests the complete NAM DSP suite
+    # inside the host suite. Both deliberately keep sizeable fixed DSP state
+    # on the calling thread, which exceeds Windows' 1 MiB executable default
+    # even though either suite is safe in isolation. Reserve virtual stack
+    # headroom for that supported diagnostic path; pages remain demand-
+    # committed, so normal UI/audio memory use is unchanged.
+    target_link_options(OpenStudio PRIVATE /STACK:8388608)
 endif()
 # Source files
 target_sources(OpenStudio PRIVATE
@@ -271,6 +306,10 @@ target_sources(OpenStudio PRIVATE
     Source/AppUpdater.cpp
     Source/CrashDiagnostics.cpp
     Source/AudioEngine.cpp
+    Source/NAMDelayRegression.h
+    Source/NAMDelayRegression.cpp
+    Source/NAMDelayRegressionLifecycle.cpp
+    Source/NAMDelayRegressionRackTail.cpp
     Source/AudioRecorder.cpp
     Source/PlaybackEngine.cpp
     Source/PeakCache.cpp
@@ -296,7 +335,12 @@ target_sources(OpenStudio PRIVATE
     Source/VBAPPanner.cpp
     Source/BuiltInEffects.cpp
     Source/BuiltInEffects2.cpp
+    Source/NAMCabPresentation.h
+    Source/NAMCabPresentation.cpp
+    Source/NAMPolyOctaver.h
+    Source/NAMPolyOctaver.cpp
     Source/S13PluginEditors.cpp
+    Source/TunerPitchTracker.cpp
     Source/PitchDetector.cpp
     Source/PitchMapper.cpp
     Source/S13PitchCorrector.cpp
@@ -312,16 +356,36 @@ target_sources(OpenStudio PRIVATE
     Source/ARAHostController.cpp
 )
 
-# Keep the production audio callback hot path optimized even in the app's
-# developer build. `build.py dev --run` uses Debug, and compiling these
-# translation units with /Od makes tiny ASIO callback sizes unrepresentative:
-# the NAM core is optimized, but its resampler, track wrapper, and host callback
-# otherwise are not.
+# Keep the complete production audio callback path optimized even in the app's
+# developer build. `build.py dev --run` uses Debug; leaving JUCE's ASIO
+# conversion/convolution modules or the surrounding host/track helpers at /Od
+# creates periodic work spikes that do not represent the shipped DSP.
+set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
+    Source/AudioEngine.cpp
+    Source/AudioRecorder.cpp
+    Source/PlaybackEngine.cpp
+    Source/TrackProcessor.cpp
+    Source/Metronome.cpp
+    Source/MIDIRecorder.cpp
+    Source/AutomationList.cpp
+    Source/TimecodeSync.cpp
+    Source/TriggerEngine.cpp
+    Source/BuiltInEffects.cpp
+    Source/BuiltInEffects2.cpp
+    Source/NAMCabPresentation.cpp
+    Source/NAMPolyOctaver.cpp
+    Source/S13PitchCorrector.cpp
+    Source/TunerPitchTracker.cpp
+    "${juce_SOURCE_DIR}/modules/juce_audio_basics/juce_audio_basics.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_devices/juce_audio_devices.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_formats/juce_audio_formats.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_utils/juce_audio_utils.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_dsp/juce_dsp.cpp"
+)
 if(MSVC)
     set_property(SOURCE
-        Source/AudioEngine.cpp
-        Source/TrackProcessor.cpp
-        Source/BuiltInEffects2.cpp
+        ${OPENSTUDIO_REALTIME_AUDIO_SOURCES}
         APPEND PROPERTY COMPILE_OPTIONS
         $<$<CONFIG:Debug>:/O2>
         $<$<CONFIG:Debug>:/Ob2>
@@ -330,9 +394,7 @@ if(MSVC)
     )
 else()
     set_property(SOURCE
-        Source/AudioEngine.cpp
-        Source/TrackProcessor.cpp
-        Source/BuiltInEffects2.cpp
+        ${OPENSTUDIO_REALTIME_AUDIO_SOURCES}
         APPEND PROPERTY COMPILE_OPTIONS
         $<$<CONFIG:Debug>:-O3>
     )
@@ -394,6 +456,11 @@ target_link_libraries(OpenStudio PRIVATE
     lua_static
     openstudio_namcore
 )
+if(WIN32)
+    # AudioEngine registers ASIO callback threads with the Windows Multimedia
+    # Class Scheduler Service's "Pro Audio" task.
+    target_link_libraries(OpenStudio PRIVATE avrt)
+endif()
 
 # ONNX Runtime link (optional)
 if(HAS_ONNXRUNTIME)

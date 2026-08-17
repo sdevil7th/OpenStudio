@@ -306,11 +306,16 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   /** Render with dither support — delegates to the appropriate bridge method */
   const doRender = async (overrides: { source?: string; startTime?: number; endTime?: number; filePath: string }) => {
     const params = buildRenderParams(overrides);
+    let success: boolean;
     if (options.dither) {
       const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
-      return nativeBridge.renderProjectWithDither({ ...params, ditherType });
+      success = await nativeBridge.renderProjectWithDither({ ...params, ditherType });
+    } else {
+      success = await nativeBridge.renderProject(params);
     }
-    return nativeBridge.renderProject(params);
+    if (!success) {
+      throw new Error(`Audio engine rejected the ${params.source} render for "${params.filePath}".`);
+    }
   };
 
   /** Run a secondary render (convert to secondary format) after primary render */
@@ -327,12 +332,18 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           : options.oggQuality
         : secondaryOutputBitDepth,
     };
+    let success: boolean;
     if (options.dither && !isLossyFormat(secondaryOutputFormat as AudioFormat)) {
       const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
-      await nativeBridge.renderProjectWithDither({ ...secondaryParams, ditherType });
-      return;
+      success = await nativeBridge.renderProjectWithDither({ ...secondaryParams, ditherType });
+    } else {
+      success = await nativeBridge.renderProject(secondaryParams);
     }
-    await nativeBridge.renderProject(secondaryParams);
+    if (!success) {
+      throw new Error(
+        `Primary render completed, but the secondary ${secondaryOutputFormat.toUpperCase()} output failed for "${secPath}".`,
+      );
+    }
   };
 
   /** Add rendered file(s) to project after render */
@@ -504,7 +515,11 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       }, 500);
     } catch (error) {
       console.error("Render failed:", error);
-      alert("Render failed: " + error);
+      const detail = error instanceof Error ? error.message : String(error);
+      const completedSummary = renderedFiles.length > 0
+        ? `\n\n${renderedFiles.length} primary file${renderedFiles.length === 1 ? " was" : "s were"} rendered successfully before this later step failed:\n${renderedFiles.join("\n")}`
+        : "";
+      alert(`Render did not fully complete: ${detail}${completedSummary}`);
       setIsRendering(false);
       setRenderProgress(0);
       setRenderStatus("");

@@ -21,8 +21,9 @@ import {
 import { ColorPicker } from "./ColorPicker";
 import { FXChainPanel } from "./FXChainPanel";
 import { AIWorkflowModal } from "./AIWorkflowModal";
-import { Button, Input, Knob } from "./ui";
+import { Button, Knob } from "./ui";
 import { automationToBackend } from "../store/automationParams";
+import { TrackNameEditor } from "./TrackNameEditor";
 import {
   TCP_HEADER_BUTTON_PAIR_CLASS,
   TCP_HEADER_PRIMARY_BUTTON_CLASS,
@@ -813,12 +814,9 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                 AI
               </span>
 
-              <Input
-                type="text"
-                variant="inline"
-                size="sm"
-                value={track.name}
-                onChange={(event) => updateTrack(track.id, { name: event.target.value })}
+              <TrackNameEditor
+                trackId={track.id}
+                name={track.name}
                 placeholder="AI Track Name"
                 className="min-w-[56px] flex-1 basis-20"
                 inputClassName="w-full min-w-0"

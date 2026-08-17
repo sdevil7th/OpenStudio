@@ -147,6 +147,21 @@ Includes signalsmith-linear (FFT/STFT), also MIT licensed.
 
 ---
 
+## terrarium-poly-octave
+
+- **Website:** https://github.com/schult/terrarium-poly-octave
+- **License:** MIT License
+- **Copyright:** (c) 2024 Steven Schulteis
+- **Usage:** Reference implementation and equations adapted for the NAM Rack's
+  stereo ERB phase-scaling octave generator
+
+OpenStudio retains the complete upstream MIT notice in
+`Source/NAMPolyOctaver.cpp`. Its desktop implementation is sample-rate aware,
+uses independent left/right state, and does not include the upstream Daisy,
+Q, or GCEM dependencies.
+
+---
+
 ## ONNX Runtime (Optional)
 
 - **Website:** https://onnxruntime.ai/

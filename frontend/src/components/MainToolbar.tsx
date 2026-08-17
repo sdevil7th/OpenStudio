@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Repeat,
   Circle,
@@ -22,6 +22,10 @@ import { getDisplayShortcut, getActionShortcutScopeLabel } from "../store/action
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, NativeSelect } from "./ui";
+import {
+  getActiveShortcutContext,
+  subscribeShortcutContext,
+} from "../utils/shortcutContext";
 import {
   calculateGridInterval,
   GRID_TYPE_MODE_OPTIONS,
@@ -91,7 +95,6 @@ export function MainToolbar({
     setToolMode,
     toggleSplitTool,
     toggleMuteTool,
-    showPitchEditor,
     aiToolsStatus,
     openAiToolsSetup,
   } = useDAWStore(
@@ -128,22 +131,27 @@ export function MainToolbar({
       setToolMode: s.setToolMode,
       toggleSplitTool: s.toggleSplitTool,
       toggleMuteTool: s.toggleMuteTool,
-      showPitchEditor: s.showPitchEditor,
       aiToolsStatus: s.aiToolsStatus,
       openAiToolsSetup: s.openAiToolsSetup,
     })),
   );
 
-  // When pitch editor is open, delegate undo/redo to its own stack
+  // Toolbar history follows the last interacted edit surface, not visibility.
+  const activeShortcutContext = useSyncExternalStore(
+    subscribeShortcutContext,
+    getActiveShortcutContext,
+    getActiveShortcutContext,
+  );
   const peUndo = usePitchEditorStore((s) => s.undo);
   const peRedo = usePitchEditorStore((s) => s.redo);
   const peUndoStack = usePitchEditorStore((s) => s.undoStack);
   const peRedoStack = usePitchEditorStore((s) => s.redoStack);
 
-  const effectiveUndo = showPitchEditor ? peUndo : undo;
-  const effectiveRedo = showPitchEditor ? peRedo : redo;
-  const effectiveCanUndo = showPitchEditor ? peUndoStack.length > 0 : canUndo;
-  const effectiveCanRedo = showPitchEditor ? peRedoStack.length > 0 : canRedo;
+  const pitchOwnsHistory = activeShortcutContext.kind === "pitch_editor";
+  const effectiveUndo = pitchOwnsHistory ? peUndo : undo;
+  const effectiveRedo = pitchOwnsHistory ? peRedo : redo;
+  const effectiveCanUndo = pitchOwnsHistory ? peUndoStack.length > 0 : canUndo;
+  const effectiveCanRedo = pitchOwnsHistory ? peRedoStack.length > 0 : canRedo;
   const hasArmedTracks = tracks.some((t) => t.armed);
   const gridOptions = useMemo(
     () => [...GRID_TYPE_MODE_OPTIONS],

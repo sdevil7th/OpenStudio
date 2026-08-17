@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const explorerSource = readFileSync(
   new URL("../components/NAMExplorer.tsx", import.meta.url),
   "utf8",
-);
+).replace(/\r\n?/g, "\n");
 const useFlowStart = explorerSource.indexOf("const useSourceFlowSelection = async");
 const useFlowEnd = explorerSource.indexOf("const applySourceFlowDesignTab", useFlowStart);
 const useFlowSource = explorerSource.slice(useFlowStart, useFlowEnd);

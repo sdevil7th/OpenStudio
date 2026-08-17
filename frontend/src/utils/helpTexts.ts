@@ -48,7 +48,7 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "navigation.hotkeys": {
       title: "Core Hotkeys",
       description:
-        "The fastest first-session keys are Play, Record, Add Track, Toggle Mixer, Split at Cursor, Split Tool, Delete, Save, Help Reference, and Command Palette. Custom rebinding applies to global shortcuts; timeline/editor-specific shortcuts remain reference-only for now.",
+        "The fastest first-session keys are Play, Record, Add Track, Toggle Mixer, Split at Playhead, Split Tool, Delete, Save, Help Reference, and Command Palette. Custom rebinding applies to global shortcuts; timeline/editor-specific shortcuts remain reference-only for now.",
       shortcut: `${playShortcut} | ${recordShortcut} | ${newAudioTrackShortcut} | ${mixerShortcut} | ${splitAtCursorShortcut} | ${splitToolShortcut} | ${deleteShortcut} | ${saveShortcut} | ${commandPaletteShortcut}`,
     },
     "timeline": {

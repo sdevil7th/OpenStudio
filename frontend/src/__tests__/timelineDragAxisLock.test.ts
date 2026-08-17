@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   getTimelineAxisLockedDeltas,
+  resolveTimelineDropTrackIndex,
   resolveTimelineDragAxisLock,
 } from "../utils/timelineDragAxisLock";
+import { canApplyTimelineHorizontalSnap } from "../utils/timelineClipEdgeSnap";
 
 describe("timeline drag axis lock", () => {
   it("does not lock or move before the drag threshold", () => {
@@ -51,5 +53,26 @@ describe("timeline drag axis lock", () => {
       deltaX: 4,
       deltaY: 12,
     });
+  });
+
+  it("blocks horizontal snapping while Shift lock is pending or locked vertically", () => {
+    expect(canApplyTimelineHorizontalSnap(true, null)).toBe(false);
+    expect(canApplyTimelineHorizontalSnap(true, "y")).toBe(false);
+    expect(canApplyTimelineHorizontalSnap(true, "x")).toBe(true);
+    expect(canApplyTimelineHorizontalSnap(false, null)).toBe(true);
+  });
+
+  it("clamps a drag above the timeline to the first track", () => {
+    expect(resolveTimelineDropTrackIndex(-12, 300, 3, null)).toBe(0);
+    expect(resolveTimelineDropTrackIndex(-0.01, 300, 3, null)).toBe(0);
+  });
+
+  it("keeps normal hits and the below-track insertion target unchanged", () => {
+    expect(resolveTimelineDropTrackIndex(120, 300, 3, {
+      trackIndex: 1,
+      isInClipArea: true,
+    })).toBe(1);
+    expect(resolveTimelineDropTrackIndex(301, 300, 3, null)).toBe(3);
+    expect(resolveTimelineDropTrackIndex(-12, 0, 0, null)).toBe(0);
   });
 });

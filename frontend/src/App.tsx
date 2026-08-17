@@ -13,6 +13,10 @@ import {
 } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import {
+  activateShortcutContext,
+  isEditableShortcutTarget,
+} from "./utils/shortcutContext";
+import {
   installModalContextMenuLeakGuard,
   shouldSuppressWorkspaceContextMenu,
 } from "./utils/modalEventGuards";
@@ -100,6 +104,7 @@ import {
 
 function App() {
   const startupReadyReportedRef = useRef(false);
+  const autoSaveInFlightRef = useRef(false);
   const [isStartupLoading, setIsStartupLoading] = useState(true);
   const [startupLoadingMessage, setStartupLoadingMessage] = useState("Preparing OpenStudio...");
 
@@ -928,11 +933,6 @@ function App() {
             if (autoStopDecision.stopTime !== null) {
               currentState.setCurrentTime(autoStopDecision.stopTime);
             }
-            console.log("[App] Auto-stopping silent playback", {
-              reason: autoStopDecision.reason,
-              stopTime: autoStopDecision.stopTime,
-              latestEndTime: autoStopDecision.bounds.latestEndTime,
-            });
             void currentState.stop().catch((error) => {
               console.warn("[App] Auto-stop silent playback failed", error);
               autoStopInFlight = false;
@@ -944,12 +944,6 @@ function App() {
         // Loop: wrap back to loopStart when reaching loopEnd
         const { loopEnabled, loopStart, loopEnd } = currentState.transport;
         if (loopEnabled && loopEnd > loopStart && newTime >= loopEnd) {
-          console.log("[App] Playback loop wrap", {
-            currentTime: currentState.transport.currentTime,
-            newTime,
-            loopStart,
-            loopEnd,
-          });
           newTime = loopStart + (newTime - loopEnd);
           // Sync backend position on loop wrap
           nativeBridge.setTransportPosition(newTime);
@@ -1020,65 +1014,36 @@ function App() {
     return unsub;
   }, []);
 
-  // Auto-save with rotating backups (Sprint 20.8)
+  // Auto-save with rotating backups (Sprint 20.8). Preferences expose the
+  // autoBackup fields, so keep one reactive scheduler driven by that setting.
+  // The historical autoSave fields remain in persisted state for compatibility
+  // but no longer create a second competing timer.
+  const { autoBackupEnabled, autoBackupInterval } = useDAWStore(useShallow((s) => ({
+    autoBackupEnabled: s.autoBackupEnabled,
+    autoBackupInterval: s.autoBackupInterval,
+  })));
+
   useEffect(() => {
-    const state = useDAWStore.getState();
-    if (!state.autoBackupEnabled) return;
+    if (!autoBackupEnabled) return;
 
     const interval = setInterval(async () => {
       const s = useDAWStore.getState();
-      if (s.isModified && s.projectPath) {
+      if (s.isModified
+          && s.projectPath
+          && !autoSaveInFlightRef.current) {
+        autoSaveInFlightRef.current = true;
         try {
-          const ok = await s.saveProject(false);
-          if (ok) console.log("[App] Auto-save completed");
+          await s.saveProject(false);
         } catch {
           // Auto-save failure is non-critical
+        } finally {
+          autoSaveInFlightRef.current = false;
         }
       }
-    }, state.autoBackupInterval);
+    }, autoBackupInterval);
 
     return () => clearInterval(interval);
-  }, []);
-
-  // Enhanced auto-save: uses autoSaveEnabled / autoSaveIntervalMinutes from store.
-  // Reactively subscribes to changes so toggling or changing interval takes effect immediately.
-  useEffect(() => {
-    const unsubscribe = useDAWStore.subscribe(
-      (state) => ({ enabled: state.autoSaveEnabled, minutes: state.autoSaveIntervalMinutes }),
-      ({ enabled, minutes }) => {
-        // Clear any previous timer first (handled below via closure)
-        // This subscription just triggers re-evaluation; the actual timer is managed
-        // by the outer effect dependencies.
-        void enabled;
-        void minutes;
-      },
-      { equalityFn: (a, b) => a.enabled === b.enabled && a.minutes === b.minutes },
-    );
-    return unsubscribe;
-  }, []);
-
-  // Separate interval effect for the improved auto-save
-  const autoSaveEnabled = useDAWStore((s) => s.autoSaveEnabled);
-  const autoSaveIntervalMinutes = useDAWStore((s) => s.autoSaveIntervalMinutes);
-
-  useEffect(() => {
-    if (!autoSaveEnabled) return;
-
-    const intervalMs = autoSaveIntervalMinutes * 60 * 1000;
-    const timerId = setInterval(async () => {
-      const s = useDAWStore.getState();
-      if (s.isModified && s.projectPath) {
-        try {
-          const ok = await s.saveProject(false);
-          if (ok) console.log("[App] Auto-save completed");
-        } catch {
-          // Auto-save failure is non-critical
-        }
-      }
-    }, intervalMs);
-
-    return () => clearInterval(timerId);
-  }, [autoSaveEnabled, autoSaveIntervalMinutes]);
+  }, [autoBackupEnabled, autoBackupInterval]);
 
   // Event-based metering — single batched store update for all tracks + master
   useEffect(() => {
@@ -1102,10 +1067,13 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    activateShortcutContext({ kind: "timeline" });
+  }, []);
+
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
       void dispatchGlobalShortcut({
         key: e.key,
         code: e.code,
@@ -1115,14 +1083,10 @@ function App() {
         metaKey: e.metaKey,
         repeat: e.repeat,
         source: "browser",
-        targetIsEditable:
-          !!target &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLSelectElement ||
-            target instanceof HTMLTextAreaElement ||
-            target.isContentEditable),
+        targetIsEditable: isEditableShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
+        stopImmediatePropagation: () => e.stopImmediatePropagation(),
       });
     };
 
@@ -1458,7 +1422,16 @@ function App() {
           />
         </Suspense>
       )}
-      <div ref={workspaceRef} className="workspace relative flex-1" role="main" aria-label="Main workspace">
+      <div
+        ref={workspaceRef}
+        className="workspace relative flex-1"
+        role="main"
+        aria-label="Main workspace"
+        onPointerDownCapture={() => activateShortcutContext({ kind: "timeline" })}
+        onContextMenuCapture={() => activateShortcutContext({ kind: "timeline" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "timeline" })}
+        data-shortcut-context="timeline"
+      >
         <EssentialControlsCard />
         <div className="workspace-sticky-header">
           <div className="workspace-sticky-tcp-header" style={{ width: tcpWidth }}>
@@ -1667,7 +1640,20 @@ function App() {
           className="shrink-0 min-h-0 bg-neutral-950 border-t border-neutral-700 flex flex-col"
           style={{ height: lowerZoneHeight }}
           aria-label="Docked Piano Roll editor"
+          data-shortcut-context={`piano_roll:${dockedMidiEditorSession.sessionId}`}
           data-qa="docked-piano-roll"
+          onPointerDownCapture={() => activateShortcutContext({
+            kind: "piano_roll",
+            sessionId: dockedMidiEditorSession.sessionId,
+          })}
+          onContextMenuCapture={() => activateShortcutContext({
+            kind: "piano_roll",
+            sessionId: dockedMidiEditorSession.sessionId,
+          })}
+          onFocusCapture={() => activateShortcutContext({
+            kind: "piano_roll",
+            sessionId: dockedMidiEditorSession.sessionId,
+          })}
         >
           <div
             role="separator"

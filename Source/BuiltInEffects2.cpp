@@ -7,10 +7,13 @@
 #include "NAM/get_dsp.h"
 #include "NAM/lstm.h"
 #include "NAM/model_config.h"
+#include "NAM/slimmable.h"
 #include "NAM/wavenet/model.h"
 
 #include <filesystem>
+#include <limits>
 #include <mutex>
+#include <thread>
 
 #if JUCE_WINDOWS
  #include <excpt.h>
@@ -29,6 +32,136 @@ namespace
     constexpr size_t kRealtimeFilterLutSize = 513;
     constexpr size_t kDiodeCurveLutSize = 2049;
     constexpr size_t kModulationSineLutSize = 4097;
+    constexpr float kReverbV4SelectionFloor = 3.5f;
+    constexpr float kReverbV5SelectionFloor = 4.5f;
+    // V4 is the rack's guitar-focused architectural reverb. Its shortest
+    // geometry is already hall-sized; Decay then grows the same tank smoothly
+    // to a cathedral-sized endpoint by six seconds. RT60 remains independent
+    // because the per-line feedback gains are derived from these real lengths.
+    constexpr float kReverbV4MinimumTankSizeScale = 1.85f;
+    constexpr float kReverbV4MaximumTankSizeScale = 2.50f;
+    constexpr float kReverbV4SizeGrowthStartSeconds = 0.2f;
+    constexpr float kReverbV4SizeGrowthFullSeconds = 6.0f;
+
+    float calculateReverbV4LongFieldAmount(
+        float sizeScale) noexcept;
+
+    float calculateReverbV4TankSizeScale(
+        float engineVersion,
+        float decaySeconds) noexcept
+    {
+        if (engineVersion < kReverbV4SelectionFloor)
+            return 1.0f;
+
+        const float proportion =
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                (decaySeconds
+                 - kReverbV4SizeGrowthStartSeconds)
+                    / (kReverbV4SizeGrowthFullSeconds
+                       - kReverbV4SizeGrowthStartSeconds));
+        const float smoothProportion =
+            proportion
+            * proportion
+            * (3.0f - 2.0f * proportion);
+        return kReverbV4MinimumTankSizeScale
+            + (kReverbV4MaximumTankSizeScale
+               - kReverbV4MinimumTankSizeScale)
+                * smoothProportion;
+    }
+
+    int sanitizeReverbV5VoiceIndex(float value) noexcept
+    {
+        if (! std::isfinite(value))
+            return S13NAMRack::studioReverbVoice;
+        return juce::jlimit<int>(
+            static_cast<int>(S13NAMRack::studioReverbVoice),
+            static_cast<int>(S13NAMRack::roomReverbVoice),
+            static_cast<int>(std::floor(value + 0.5f)));
+    }
+
+    float calculateSmoothReverbSize(
+        float decaySeconds,
+        float growthStartSeconds,
+        float growthFullSeconds,
+        float minimumScale,
+        float maximumScale) noexcept
+    {
+        const float proportion = juce::jlimit(
+            0.0f,
+            1.0f,
+            (decaySeconds - growthStartSeconds)
+                / juce::jmax(
+                    0.001f,
+                    growthFullSeconds - growthStartSeconds));
+        const float smoothProportion =
+            proportion * proportion * (3.0f - 2.0f * proportion);
+        return minimumScale
+            + (maximumScale - minimumScale) * smoothProportion;
+    }
+
+    float calculateReverbV5TankSizeScale(
+        float engineVersion,
+        int voiceIndex,
+        float decaySeconds) noexcept
+    {
+        if (engineVersion < kReverbV5SelectionFloor
+            || voiceIndex == S13NAMRack::studioReverbVoice)
+        {
+            // This call, including its arithmetic order, is the exact V4 path.
+            return calculateReverbV4TankSizeScale(
+                engineVersion, decaySeconds);
+        }
+
+        switch (voiceIndex)
+        {
+            case S13NAMRack::plateReverbVoice:
+                return calculateSmoothReverbSize(
+                    decaySeconds, 0.2f, 4.0f, 1.30f, 1.85f);
+            case S13NAMRack::hallReverbVoice:
+                return calculateSmoothReverbSize(
+                    decaySeconds, 0.2f, 8.0f, 2.05f, 2.50f);
+            case S13NAMRack::roomReverbVoice:
+                return calculateSmoothReverbSize(
+                    decaySeconds, 0.2f, 3.2f, 0.72f, 1.18f);
+            default:
+                break;
+        }
+        return calculateReverbV4TankSizeScale(
+            engineVersion, decaySeconds);
+    }
+
+    float calculateReverbV5LowDecayRatio(
+        float engineVersion,
+        int voiceIndex,
+        float tankSizeScale,
+        float voiceBassDecay) noexcept
+    {
+        if (engineVersion < kReverbV5SelectionFloor
+            || voiceIndex == S13NAMRack::studioReverbVoice)
+        {
+            // Studio keeps the exact V4 low-frequency RT60 relationship.
+            return engineVersion >= kReverbV4SelectionFloor
+                ? 0.90f
+                    + 0.06f
+                        * calculateReverbV4LongFieldAmount(
+                            tankSizeScale)
+                : 0.82f;
+        }
+        return juce::jlimit(0.55f, 1.05f, voiceBassDecay);
+    }
+
+    float calculateReverbV4LongFieldAmount(
+        float sizeScale) noexcept
+    {
+        return juce::jlimit(
+            0.0f,
+            1.0f,
+            (sizeScale - kReverbV4MinimumTankSizeScale)
+                / (kReverbV4MaximumTankSizeScale
+                   - kReverbV4MinimumTankSizeScale));
+    }
 
     struct ModulationSineLut
     {
@@ -198,6 +331,56 @@ namespace
             writeRealtimeFilterCoefficients(right, coefficients);
     }
 
+    bool smoothRealtimeFilterCoefficients(
+        juce::dsp::IIR::Filter<float>& left,
+        juce::dsp::IIR::Filter<float>& right,
+        const S13IIRCoefficientSet& target,
+        float smoothingCoefficient) noexcept
+    {
+        if (left.coefficients == nullptr
+            || right.coefficients == nullptr)
+            return false;
+
+        auto& leftCoefficients =
+            left.coefficients->coefficients;
+        auto& rightCoefficients =
+            right.coefficients->coefficients;
+        if (leftCoefficients.size() != target.size()
+            || rightCoefficients.size() != target.size())
+        {
+            return false;
+        }
+
+        auto* const leftRaw =
+            leftCoefficients.getRawDataPointer();
+        auto* const rightRaw =
+            rightCoefficients.getRawDataPointer();
+        const bool sharedCoefficients =
+            leftRaw == rightRaw;
+        bool smoothing = false;
+        for (size_t index = 0;
+             index < target.size();
+             ++index)
+        {
+            const float difference =
+                target[index] - leftRaw[index];
+            const float next =
+                std::abs(difference) <= 1.0e-7f
+                    ? target[index]
+                    : leftRaw[index]
+                        + difference
+                            * smoothingCoefficient;
+            leftRaw[index] = next;
+            if (! sharedCoefficients)
+                rightRaw[index] = next;
+            smoothing =
+                smoothing
+                || std::abs(target[index] - next)
+                    > 1.0e-6f;
+        }
+        return smoothing;
+    }
+
     constexpr int kNAMRackGraphicEqBandCount = 9;
     constexpr std::array<float, kNAMRackGraphicEqBandCount> kNAMRackGraphicEqFrequencies {
         65.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f
@@ -344,6 +527,23 @@ namespace
         }
     }
 
+    void updateAtomicMaximum(std::atomic<float>& maximum,
+                             float candidate) noexcept
+    {
+        if (! std::isfinite(candidate))
+            return;
+
+        float current = maximum.load(std::memory_order_relaxed);
+        while (candidate > current
+               && ! maximum.compare_exchange_weak(
+                   current,
+                   candidate,
+                   std::memory_order_relaxed,
+                   std::memory_order_relaxed))
+        {
+        }
+    }
+
     struct BuiltInMidiVoiceRef
     {
         size_t channel = 0;
@@ -383,14 +583,841 @@ namespace
         tree.writeToStream(stream);
     }
 
+    void removeNonFiniteNumericProperties(
+        juce::ValueTree tree)
+    {
+        juce::Array<juce::Identifier> propertiesToRemove;
+        for (int propertyIndex = 0;
+             propertyIndex < tree.getNumProperties();
+             ++propertyIndex)
+        {
+            const auto propertyName =
+                tree.getPropertyName(propertyIndex);
+            const auto value =
+                tree.getProperty(propertyName);
+            if (value.isDouble()
+                && ! std::isfinite(
+                    static_cast<double>(value)))
+            {
+                propertiesToRemove.add(propertyName);
+            }
+        }
+
+        for (const auto& propertyName :
+             propertiesToRemove)
+        {
+            tree.removeProperty(propertyName, nullptr);
+        }
+
+        for (int childIndex = 0;
+             childIndex < tree.getNumChildren();
+             ++childIndex)
+        {
+            removeNonFiniteNumericProperties(
+                tree.getChild(childIndex));
+        }
+    }
+
     juce::ValueTree loadParamsFromMemory(const void* data, int sizeInBytes,
                                          const juce::String& typeName)
     {
         juce::MemoryInputStream stream(data, static_cast<size_t>(sizeInBytes), false);
         auto tree = juce::ValueTree::readFromStream(stream);
         if (tree.isValid() && tree.getType() == juce::Identifier(typeName))
+        {
+            // Corrupt/non-finite preset values must fall back to each caller's
+            // declared default rather than entering a delay index, smoother,
+            // or recursive filter state.
+            removeNonFiniteNumericProperties(tree);
             return tree;
+        }
         return {};
+    }
+
+    // Complete NAM Rack snapshots carry a deterministic state shape for every
+    // module whose DSP changed during pre-release development. Missing values
+    // are filled only for complete presets/projects; sparse parameter patches
+    // remain sparse in the bridge layer.
+    constexpr double kDefaultNAMRackCompressorAttackMs = 21.9;
+    constexpr double kDefaultNAMRackCompressorReleaseMs = 149.1;
+
+    double sanitizeLegacyCompressorDetail(const juce::var& value) noexcept
+    {
+        const double detail = static_cast<double>(value);
+        return std::isfinite(detail)
+            ? juce::jlimit(0.0, 1.0, detail)
+            : 0.55;
+    }
+
+    int sanitizeNAMRackInstrumentProfile(const juce::var& value) noexcept
+    {
+        const double profile = static_cast<double>(value);
+        if (! std::isfinite(profile)
+            || profile < 0.0
+            || profile > 1.0)
+            return S13NAMRack::guitarInstrumentProfile;
+        return profile >= 0.5
+            ? S13NAMRack::bassInstrumentProfile
+            : S13NAMRack::guitarInstrumentProfile;
+    }
+
+    int sanitizeNAMRackReverbVoice(const juce::var& value) noexcept
+    {
+        const double voice = static_cast<double>(value);
+        if (! std::isfinite(voice))
+            return S13NAMRack::studioReverbVoice;
+        return juce::jlimit<int>(
+            static_cast<int>(S13NAMRack::studioReverbVoice),
+            static_cast<int>(S13NAMRack::roomReverbVoice),
+            static_cast<int>(std::floor(voice + 0.5)));
+    }
+
+    double sanitizeNAMRackDelayContinuous(
+        const juce::var& value,
+        double fallback,
+        double minimum,
+        double maximum) noexcept
+    {
+        const double numeric = static_cast<double>(value);
+        return std::isfinite(numeric)
+            ? juce::jlimit(minimum, maximum, numeric)
+            : fallback;
+    }
+
+    double sanitizeNAMRackDelayToggle(
+        const juce::var& value,
+        bool fallback) noexcept
+    {
+        const double numeric = static_cast<double>(value);
+        if (! std::isfinite(numeric))
+            return fallback ? 1.0 : 0.0;
+        return numeric >= 0.5 ? 1.0 : 0.0;
+    }
+
+    double sanitizeNAMRackDelayMode(
+        const juce::var& value,
+        int maximumMode = S13NAMRack::dualDelayMode) noexcept
+    {
+        const double numeric = static_cast<double>(value);
+        if (! std::isfinite(numeric))
+            return static_cast<double>(S13NAMRack::tapeDelayMode);
+        const double bounded = juce::jlimit(
+            static_cast<double>(S13NAMRack::digitalDelayMode),
+            static_cast<double>(maximumMode),
+            numeric);
+        return std::floor(bounded + 0.5);
+    }
+
+    int sanitizeNAMRackStoredEffectsVersion(
+        const juce::var& value) noexcept
+    {
+        const double numeric = static_cast<double>(value);
+        if (! std::isfinite(numeric))
+            return 0;
+        const double integral = std::floor(numeric);
+        if (numeric != integral
+            || integral < 1.0
+            || integral > static_cast<double>(
+                   S13NAMRack::currentNAMEffectsDspVersion))
+            return 0;
+        return static_cast<int>(integral);
+    }
+
+    double sanitizeNAMRackDelayModeForVersion(
+        const juce::var& value,
+        int storedVersion) noexcept
+    {
+        if (storedVersion
+                >= S13NAMRack::delayV10IntroducedNAMEffectsDspVersion
+            && storedVersion
+                <= S13NAMRack::currentNAMEffectsDspVersion)
+            return sanitizeNAMRackDelayMode(
+                value, S13NAMRack::dualDelayMode);
+        if (storedVersion >= 1
+            && storedVersion < S13NAMRack::currentNAMEffectsDspVersion)
+        {
+            return sanitizeNAMRackDelayMode(
+                value, S13NAMRack::analogDelayMode);
+        }
+        return static_cast<double>(S13NAMRack::tapeDelayMode);
+    }
+
+    double migrateLegacyCompressorAttackMs(double detail) noexcept
+    {
+        // V6 forced the embedded compressor's Punch style, which multiplied
+        // its nominal 2..30 ms attack by 1.5.
+        return 1.5 * (2.0 + (1.0 - detail) * 28.0);
+    }
+
+    double migrateLegacyCompressorReleaseMs(double detail) noexcept
+    {
+        // V6 Punch style multiplied its nominal 70..330 ms release by 0.7.
+        return 0.7 * (70.0 + detail * 260.0);
+    }
+
+    float mapNAMRackCompressorThresholdDb(float amount) noexcept
+    {
+        return -6.0f - 38.0f * amount;
+    }
+
+    float mapNAMRackCompressorRatio(float amount) noexcept
+    {
+        // A squared law keeps the lower half useful for transparent levelling
+        // while retaining a 20:1 endpoint for assertive peak control.
+        return 2.0f + 18.0f * amount * amount;
+    }
+
+    float mapNAMRackCompressorKneeDb(float amount) noexcept
+    {
+        return 12.0f - 10.0f * amount;
+    }
+
+    float mapNAMRackCompressorSidechainHPF(float mode) noexcept
+    {
+        switch (juce::jlimit(0, 2, juce::roundToInt(mode)))
+        {
+            case 1: return 120.0f;
+            case 2: return 240.0f;
+            default: break;
+        }
+        return 20.0f;
+    }
+
+    constexpr std::pair<const char*, double>
+        kCurrentNAMRackComponentDefaults[] {
+            { "instrumentProfile", 0.0 },
+            { "compressorEnabled", 0.0 },
+            { "compressorAttackMs", kDefaultNAMRackCompressorAttackMs },
+            { "compressorReleaseMs", kDefaultNAMRackCompressorReleaseMs },
+            { "compressorToneDb", 0.0 },
+            { "compressorSidechainHPF", 1.0 },
+            { "compressorMix", 0.65 },
+            { "compressorVolumeDb", 0.0 },
+            { "compressorComp", 0.35 },
+            { "tapeEchoEnabled", 0.0 },
+            { "tapeEchoMix", 0.28 },
+            { "tapeEchoTimeMs", 360.0 },
+            { "tapeEchoFeedback", 0.28 },
+            { "tapeEchoMod", 0.18 },
+            { "tapeEchoTone", 0.58 },
+            { "octaverEnabled", 0.0 },
+            { "octaverDownMix", 0.32 },
+            { "octaverUpMix", 0.18 },
+            { "octaverDirectMix", 1.0 },
+            { "precisionDriveEnabled", 0.0 },
+            { "precisionDriveVolumeDb", 9.0 },
+            { "precisionDriveBright", 0.55 },
+            { "precisionDriveAttack", 0.50 },
+            { "precisionDriveGate", 0.0 },
+            { "precisionDriveDrive", 0.35 },
+            { "chaosEnabled", 0.0 },
+            { "chaosMode", 0.0 },
+            { "chaosWeight", 0.50 },
+            { "chaosDrive", 0.62 },
+            { "chaosTone", 0.55 },
+            { "chaosGate", 0.22 },
+            { "chaosMix", 1.0 },
+            { "chaosLevelDb", 0.0 },
+            { "cabRoomEnabled", 0.0 },
+            { "cabRoomAmount", 0.22 },
+            { "cabRoomWidth", 0.65 },
+            { "cabDoublerEnabled", 0.0 },
+            { "cabDoublerMix", 0.12 },
+            { "cabDoublerSpread", 0.65 },
+            { "eqLevelDb", 0.0 },
+            { "chorusMix", 0.30 },
+            { "chorusRateHz", 0.75 },
+            { "chorusDepth", 0.32 },
+            { "chorusCharacter", 1.0 },
+            { "modulatorMode", 0.0 },
+            { "modulatorFeedback", 0.10 },
+            { "modulatorAutoRandom", 0.0 },
+            { "modulatorAutoSpeed", 0.35 },
+            { "modulatorEnabled", 0.0 },
+            { "modulatorPedalMode", 1.0 },
+            { "modulatorPedalPosition", 0.5 },
+            { "delayMix", 0.22 },
+            { "delayTimeMs", 360.0 },
+            { "delayFeedback", 0.22 },
+            { "delayMod", 0.18 },
+            { "delayDucker", 0.12 },
+            { "delayMode", 1.0 },
+            { "delayPingPong", 1.0 },
+            { "delayTempoSync", 0.0 },
+            { "delayEnabled", 0.0 },
+            { "reverbMix", 0.28 },
+            { "reverbDecaySec", 2.2 },
+            { "reverbTone", 0.62 },
+            { "reverbPreDelayMs", 18.0 },
+            { "reverbLowCutHz", 120.0 },
+            { "reverbShimmer", 0.0 },
+            { "reverbVoice", 0.0 },
+            { "reverbEnabled", 0.0 },
+        };
+
+    constexpr const char* kRetiredNAMRackValueProperties[] {
+        "inputMode",
+        "compressorDetail",
+        "precisionDriveMode",
+        "reverbCharacter",
+        "reverbWidth",
+        "reverbDucking",
+        "reverbBassDecay",
+        "reverbMovement",
+        "reverbEarlyLate",
+        "reverbDiffusion",
+        "reverbShimmerRegen",
+        "reverbFreeze",
+        "laserEnabled",
+        "laserMode",
+        "laserMix",
+        "laserSpeedHz",
+        "laserSensitivity",
+        "laserEnvelopeMode",
+        "laserTrigger",
+    };
+
+    void removeJSONPropertyRecursively(
+        juce::var& value,
+        const juce::Identifier& propertyToRemove);
+
+    bool canonicalizeNAMRackSnapshotVar(
+        juce::var& snapshot,
+        int parentStoredVersion = 0)
+    {
+        auto* snapshotObject = snapshot.getDynamicObject();
+        if (snapshotObject == nullptr)
+            return false;
+        bool changed = false;
+        auto* values = snapshotObject->getProperty("values").getDynamicObject();
+        if (values == nullptr)
+        {
+            auto* newValues = new juce::DynamicObject();
+            snapshotObject->setProperty("values", juce::var(newValues));
+            values = newValues;
+            changed = true;
+        }
+
+        auto* dspState = snapshotObject->getProperty("dspState").getDynamicObject();
+        int storedVersion = parentStoredVersion;
+        if (dspState != nullptr
+            && dspState->hasProperty("namEffectsDspVersion"))
+        {
+            const auto nestedVersion =
+                dspState->getProperty("namEffectsDspVersion");
+            const double numericNestedVersion =
+                static_cast<double>(nestedVersion);
+            // A missing/non-finite nested marker inherits the enclosing
+            // preset's source contract. A finite but fractional/future marker
+            // is explicitly unknown and must not be rescued by the parent.
+            storedVersion = std::isfinite(numericNestedVersion)
+                ? sanitizeNAMRackStoredEffectsVersion(nestedVersion)
+                : parentStoredVersion;
+        }
+        const auto setValue = [&] (const char* id, double value)
+        {
+            const juce::Identifier property(id);
+            if (! values->hasProperty(property)
+                || values->getProperty(property) != juce::var(value))
+            {
+                values->setProperty(property, value);
+                changed = true;
+            }
+        };
+        const auto setDefault = [&] (const char* id, double value)
+        {
+            if (! values->hasProperty(id))
+                setValue(id, value);
+        };
+
+        const double originalVolume = static_cast<double>(
+            values->hasProperty("precisionDriveVolumeDb")
+                ? values->getProperty("precisionDriveVolumeDb")
+                : juce::var(0.0));
+        const bool legacyDistortionMode = static_cast<double>(
+            values->hasProperty("precisionDriveMode")
+                ? values->getProperty("precisionDriveMode")
+                : juce::var(0.0)) >= 0.5;
+        const bool hasDedicatedDistortionState =
+            values->hasProperty("chaosMode")
+            || values->hasProperty("chaosDrive")
+            || values->hasProperty("chaosTone")
+            || values->hasProperty("chaosLevelDb");
+        const double originalPrecisionEnabled = static_cast<double>(
+            values->hasProperty("precisionDriveEnabled")
+                ? values->getProperty("precisionDriveEnabled")
+                : juce::var(0.0));
+        const double originalPrecisionDrive = static_cast<double>(
+            values->hasProperty("precisionDriveDrive")
+                ? values->getProperty("precisionDriveDrive")
+                : juce::var(0.35));
+        const double originalPrecisionBright = static_cast<double>(
+            values->hasProperty("precisionDriveBright")
+                ? values->getProperty("precisionDriveBright")
+                : juce::var(0.55));
+        const double legacyCompressorDetail =
+            sanitizeLegacyCompressorDetail(
+                values->hasProperty("compressorDetail")
+                    ? values->getProperty("compressorDetail")
+                    : juce::var(0.55));
+        const bool hasCompressorAttack =
+            values->hasProperty("compressorAttackMs");
+        const bool hasCompressorRelease =
+            values->hasProperty("compressorReleaseMs");
+        const bool hasCabRoomEnabled =
+            values->hasProperty("cabRoomEnabled");
+        const bool hasCabDoublerEnabled =
+            values->hasProperty("cabDoublerEnabled");
+        const double legacyCabRoomAmount = static_cast<double>(
+            values->hasProperty("cabRoomAmount")
+                ? values->getProperty("cabRoomAmount")
+                : juce::var(0.0));
+        const double legacyCabDoublerMix = static_cast<double>(
+            values->hasProperty("cabDoublerMix")
+                ? values->getProperty("cabDoublerMix")
+                : juce::var(0.0));
+        for (const auto& [propertyName, defaultValue] :
+             kCurrentNAMRackComponentDefaults)
+        {
+            setDefault(propertyName, defaultValue);
+        }
+        setValue(
+            "instrumentProfile",
+            storedVersion >= 8
+                    && storedVersion
+                        <= S13NAMRack::currentNAMEffectsDspVersion
+                ? sanitizeNAMRackInstrumentProfile(
+                    values->getProperty("instrumentProfile"))
+                : S13NAMRack::guitarInstrumentProfile);
+        if (values->hasProperty("auditionSource"))
+        {
+            values->removeProperty("auditionSource");
+            changed = true;
+        }
+        setValue(
+            "reverbVoice",
+            storedVersion
+                    >= S13NAMRack::reverbVoiceIntroducedNAMEffectsDspVersion
+                && storedVersion
+                    <= S13NAMRack::currentNAMEffectsDspVersion
+                ? sanitizeNAMRackReverbVoice(
+                    values->getProperty("reverbVoice"))
+                : S13NAMRack::studioReverbVoice);
+        setValue(
+            "delayMix",
+            sanitizeNAMRackDelayContinuous(
+                values->getProperty("delayMix"), 0.22, 0.0, 1.0));
+        setValue(
+            "delayTimeMs",
+            sanitizeNAMRackDelayContinuous(
+                values->getProperty("delayTimeMs"), 360.0, 1.0, 2000.0));
+        setValue(
+            "delayFeedback",
+            sanitizeNAMRackDelayContinuous(
+                values->getProperty("delayFeedback"), 0.22, 0.0, 0.85));
+        setValue(
+            "delayMod",
+            sanitizeNAMRackDelayContinuous(
+                values->getProperty("delayMod"), 0.18, 0.0, 1.0));
+        setValue(
+            "delayDucker",
+            sanitizeNAMRackDelayContinuous(
+                values->getProperty("delayDucker"), 0.12, 0.0, 1.0));
+        setValue(
+            "delayMode",
+            sanitizeNAMRackDelayModeForVersion(
+                values->getProperty("delayMode"), storedVersion));
+        setValue(
+            "delayPingPong",
+            sanitizeNAMRackDelayToggle(
+                values->getProperty("delayPingPong"), true));
+        setValue(
+            "delayTempoSync",
+            sanitizeNAMRackDelayToggle(
+                values->getProperty("delayTempoSync"), false));
+        setValue(
+            "delayEnabled",
+            sanitizeNAMRackDelayToggle(
+                values->getProperty("delayEnabled"), false));
+        // Before Room and Doubler gained explicit bypass controls, zero
+        // Amount/Mix meant bypass. Preserve the audible recall of those
+        // complete snapshots while retaining useful non-zero stored defaults
+        // for newly created, initially bypassed racks.
+        if (! hasCabRoomEnabled)
+        {
+            setValue(
+                "cabRoomEnabled",
+                std::isfinite(legacyCabRoomAmount)
+                    && legacyCabRoomAmount > 1.0e-4
+                    ? 1.0
+                    : 0.0);
+        }
+        if (! hasCabDoublerEnabled)
+        {
+            setValue(
+                "cabDoublerEnabled",
+                std::isfinite(legacyCabDoublerMix)
+                    && legacyCabDoublerMix > 1.0e-4
+                    ? 1.0
+                    : 0.0);
+        }
+        if (legacyDistortionMode && ! hasDedicatedDistortionState)
+        {
+            setValue("chaosEnabled", originalPrecisionEnabled);
+            setValue("chaosMode", 0.0);
+            setValue("chaosDrive", originalPrecisionDrive);
+            setValue("chaosTone", originalPrecisionBright);
+            setValue("chaosMix", 1.0);
+            setValue("chaosLevelDb", originalVolume);
+            setValue("precisionDriveEnabled", 0.0);
+        }
+        if (storedVersion < 8)
+        {
+            if (! hasCompressorAttack)
+            {
+                setValue(
+                    "compressorAttackMs",
+                    migrateLegacyCompressorAttackMs(
+                        legacyCompressorDetail));
+            }
+            if (! hasCompressorRelease)
+            {
+                setValue(
+                    "compressorReleaseMs",
+                    migrateLegacyCompressorReleaseMs(
+                        legacyCompressorDetail));
+            }
+        }
+        for (const auto* propertyName :
+             kRetiredNAMRackValueProperties)
+        {
+            if (values->hasProperty(propertyName))
+            {
+                values->removeProperty(propertyName);
+                changed = true;
+            }
+        }
+        if (storedVersion < 8
+            && std::abs(originalVolume) <= 1.0e-6)
+        {
+            setValue("precisionDriveVolumeDb", 9.0);
+        }
+
+        if (dspState == nullptr)
+        {
+            auto* newDspState = new juce::DynamicObject();
+            snapshotObject->setProperty("dspState", juce::var(newDspState));
+            dspState = newDspState;
+            changed = true;
+        }
+        if (! dspState->hasProperty("namEffectsDspVersion")
+            || dspState->getProperty("namEffectsDspVersion")
+                   != juce::var(S13NAMRack::currentNAMEffectsDspVersion))
+        {
+            dspState->setProperty(
+                "namEffectsDspVersion",
+                S13NAMRack::currentNAMEffectsDspVersion);
+            changed = true;
+        }
+        if (! dspState->hasProperty("reverbEngineVersion")
+            || dspState->getProperty("reverbEngineVersion")
+                   != juce::var(S13NAMRack::currentReverbEngineVersion))
+        {
+            dspState->setProperty(
+                "reverbEngineVersion",
+                S13NAMRack::currentReverbEngineVersion);
+            changed = true;
+        }
+        return changed;
+    }
+
+    bool canonicalizeNAMRackUiStateVar(
+        juce::var& uiState,
+        int parentStoredVersion = 0)
+    {
+        auto* uiObject = uiState.getDynamicObject();
+        if (uiObject == nullptr)
+            return false;
+
+        const auto originalUiState =
+            juce::JSON::toString(uiState, false);
+        removeJSONPropertyRecursively(
+            uiState,
+            juce::Identifier("auditionSource"));
+        removeJSONPropertyRecursively(
+            uiState,
+            juce::Identifier("inputMode"));
+        bool changed =
+            juce::JSON::toString(uiState, false)
+                != originalUiState;
+        auto presetBaseline = uiObject->getProperty(
+            "namPresetBaseline");
+        if (! presetBaseline.isVoid())
+        {
+            changed = canonicalizeNAMRackSnapshotVar(
+                presetBaseline,
+                parentStoredVersion) || changed;
+            uiObject->setProperty(
+                "namPresetBaseline", presetBaseline);
+        }
+
+        auto compareState = uiObject->getProperty(
+            "namRackCompare");
+        if (auto* compareObject =
+                compareState.getDynamicObject())
+        {
+            auto snapshots = compareObject->getProperty(
+                "snapshots");
+            if (auto* snapshotsObject =
+                    snapshots.getDynamicObject())
+            {
+                for (const char* slot : { "A", "B" })
+                {
+                    auto snapshot = snapshotsObject->getProperty(slot);
+                    if (! snapshot.isVoid())
+                    {
+                        changed = canonicalizeNAMRackSnapshotVar(
+                            snapshot,
+                            parentStoredVersion) || changed;
+                        snapshotsObject->setProperty(slot, snapshot);
+                    }
+                }
+            }
+        }
+        return changed;
+    }
+
+    bool canonicalizeNAMRackPresetTree(juce::ValueTree tree)
+    {
+        if (! tree.isValid()
+            || tree.getType() != juce::Identifier("S13NAMRack"))
+        {
+            return false;
+        }
+
+        bool changed = false;
+        const auto setCurrentProperty = [&] (
+            const juce::Identifier& property,
+            const juce::var& value)
+        {
+            if (! tree.hasProperty(property)
+                || tree.getProperty(property) != value)
+            {
+                tree.setProperty(property, value, nullptr);
+                changed = true;
+            }
+        };
+
+        const int storedEffectsVersion =
+            sanitizeNAMRackStoredEffectsVersion(
+                tree.getProperty("namEffectsDspVersion", 0));
+        const bool hasCurrentReverbVoice =
+            storedEffectsVersion
+                    >= S13NAMRack::reverbVoiceIntroducedNAMEffectsDspVersion
+                && storedEffectsVersion
+                    <= S13NAMRack::currentNAMEffectsDspVersion;
+        const bool hasNativeShimmerState =
+            tree.hasProperty("reverbShimmerDspVersion")
+            && static_cast<int>(
+                   tree.getProperty("reverbShimmerDspVersion")) >= 1;
+        const double originalPrecisionVolume = static_cast<double>(
+            tree.getProperty("precisionDriveVolumeDb", 0.0));
+        const bool hasDedicatedDistortionState =
+            tree.hasProperty("chaosMode")
+            || tree.hasProperty("chaosDrive")
+            || tree.hasProperty("chaosTone")
+            || tree.hasProperty("chaosLevelDb");
+        const bool migrateLegacyDistortionToggle =
+            ! hasDedicatedDistortionState
+            && static_cast<double>(
+                   tree.getProperty("precisionDriveMode", 0.0)) >= 0.5;
+        const double legacyCompressorDetail =
+            sanitizeLegacyCompressorDetail(
+                tree.getProperty("compressorDetail", 0.55));
+        const bool hasCompressorAttack =
+            tree.hasProperty("compressorAttackMs");
+        const bool hasCompressorRelease =
+            tree.hasProperty("compressorReleaseMs");
+        const bool hasCabRoomEnabled =
+            tree.hasProperty("cabRoomEnabled");
+        const bool hasCabDoublerEnabled =
+            tree.hasProperty("cabDoublerEnabled");
+        const double legacyCabRoomAmount = static_cast<double>(
+            tree.getProperty("cabRoomAmount", 0.0));
+        const double legacyCabDoublerMix = static_cast<double>(
+            tree.getProperty("cabDoublerMix", 0.0));
+
+        setCurrentProperty(
+            "namEffectsDspVersion",
+            S13NAMRack::currentNAMEffectsDspVersion);
+        setCurrentProperty(
+            "reverbEngineVersion",
+            S13NAMRack::currentReverbEngineVersion);
+        setCurrentProperty(
+            "reverbDspVersion",
+            S13NAMRack::currentReverbEngineVersion);
+        setCurrentProperty(
+            "reverbShimmerDspVersion",
+            S13NAMRack::currentReverbEngineVersion);
+        if (! hasNativeShimmerState)
+            setCurrentProperty("reverbShimmer", 0.0);
+
+        for (const auto& [propertyName, defaultValue] :
+             kCurrentNAMRackComponentDefaults)
+        {
+            const juce::Identifier property(propertyName);
+            if (! tree.hasProperty(property))
+                setCurrentProperty(property, defaultValue);
+        }
+        setCurrentProperty(
+            "instrumentProfile",
+            storedEffectsVersion >= 8
+                    && storedEffectsVersion
+                        <= S13NAMRack::currentNAMEffectsDspVersion
+                ? sanitizeNAMRackInstrumentProfile(
+                    tree.getProperty(
+                        "instrumentProfile",
+                        S13NAMRack::guitarInstrumentProfile))
+                : S13NAMRack::guitarInstrumentProfile);
+        if (tree.hasProperty("auditionSource"))
+        {
+            tree.removeProperty("auditionSource", nullptr);
+            changed = true;
+        }
+        setCurrentProperty(
+            "reverbVoice",
+            hasCurrentReverbVoice
+                ? sanitizeNAMRackReverbVoice(
+                    tree.getProperty(
+                        "reverbVoice",
+                        S13NAMRack::studioReverbVoice))
+                : S13NAMRack::studioReverbVoice);
+        setCurrentProperty(
+            "delayMix",
+            sanitizeNAMRackDelayContinuous(
+                tree.getProperty("delayMix"), 0.22, 0.0, 1.0));
+        setCurrentProperty(
+            "delayTimeMs",
+            sanitizeNAMRackDelayContinuous(
+                tree.getProperty("delayTimeMs"), 360.0, 1.0, 2000.0));
+        setCurrentProperty(
+            "delayFeedback",
+            sanitizeNAMRackDelayContinuous(
+                tree.getProperty("delayFeedback"), 0.22, 0.0, 0.85));
+        setCurrentProperty(
+            "delayMod",
+            sanitizeNAMRackDelayContinuous(
+                tree.getProperty("delayMod"), 0.18, 0.0, 1.0));
+        setCurrentProperty(
+            "delayDucker",
+            sanitizeNAMRackDelayContinuous(
+                tree.getProperty("delayDucker"), 0.12, 0.0, 1.0));
+        setCurrentProperty(
+            "delayMode",
+            sanitizeNAMRackDelayModeForVersion(
+                tree.getProperty("delayMode"), storedEffectsVersion));
+        setCurrentProperty(
+            "delayPingPong",
+            sanitizeNAMRackDelayToggle(
+                tree.getProperty("delayPingPong"), true));
+        setCurrentProperty(
+            "delayTempoSync",
+            sanitizeNAMRackDelayToggle(
+                tree.getProperty("delayTempoSync"), false));
+        setCurrentProperty(
+            "delayEnabled",
+            sanitizeNAMRackDelayToggle(
+                tree.getProperty("delayEnabled"), false));
+        if (! hasCabRoomEnabled)
+        {
+            setCurrentProperty(
+                "cabRoomEnabled",
+                std::isfinite(legacyCabRoomAmount)
+                    && legacyCabRoomAmount > 1.0e-4
+                    ? 1.0
+                    : 0.0);
+        }
+        if (! hasCabDoublerEnabled)
+        {
+            setCurrentProperty(
+                "cabDoublerEnabled",
+                std::isfinite(legacyCabDoublerMix)
+                    && legacyCabDoublerMix > 1.0e-4
+                    ? 1.0
+                    : 0.0);
+        }
+
+        if (migrateLegacyDistortionToggle)
+        {
+            setCurrentProperty(
+                "chaosEnabled",
+                tree.getProperty("precisionDriveEnabled", 0.0));
+            setCurrentProperty("chaosMode", 0.0);
+            setCurrentProperty(
+                "chaosDrive",
+                tree.getProperty("precisionDriveDrive", 0.35));
+            setCurrentProperty(
+                "chaosTone",
+                tree.getProperty("precisionDriveBright", 0.55));
+            setCurrentProperty("chaosMix", 1.0);
+            // Preserve the original saved value here. Precision's historical
+            // zero default migrates independently to +9 dB below.
+            setCurrentProperty(
+                "chaosLevelDb",
+                originalPrecisionVolume);
+            setCurrentProperty("precisionDriveEnabled", 0.0);
+        }
+        if (storedEffectsVersion < 8)
+        {
+            if (! hasCompressorAttack)
+            {
+                setCurrentProperty(
+                    "compressorAttackMs",
+                    migrateLegacyCompressorAttackMs(
+                        legacyCompressorDetail));
+            }
+            if (! hasCompressorRelease)
+            {
+                setCurrentProperty(
+                    "compressorReleaseMs",
+                    migrateLegacyCompressorReleaseMs(
+                        legacyCompressorDetail));
+            }
+        }
+        for (const auto* propertyName :
+             kRetiredNAMRackValueProperties)
+        {
+            if (tree.hasProperty(propertyName))
+            {
+                tree.removeProperty(propertyName, nullptr);
+                changed = true;
+            }
+        }
+
+        if (storedEffectsVersion < 8
+            && std::abs(originalPrecisionVolume) <= 1.0e-6)
+        {
+            setCurrentProperty("precisionDriveVolumeDb", 9.0);
+        }
+
+        const auto uiStateJSON =
+            tree.getProperty("uiStateJSON", {}).toString();
+        if (uiStateJSON.isNotEmpty())
+        {
+            auto uiState = juce::JSON::parse(uiStateJSON);
+            if (canonicalizeNAMRackUiStateVar(
+                    uiState,
+                    storedEffectsVersion))
+            {
+                tree.setProperty(
+                    "uiStateJSON",
+                    juce::JSON::toString(uiState, false),
+                    nullptr);
+                changed = true;
+            }
+        }
+
+        return changed;
     }
 
     void removeJSONPropertyRecursively(juce::var& value, const juce::Identifier& propertyToRemove)
@@ -425,6 +1452,69 @@ namespace
             object->setProperty(propertyName, child);
         }
     }
+
+    juce::String stripRetiredNAMRackUIState(const juce::String& json)
+    {
+        if (! json.contains("\"laser")
+            && ! json.contains("\"inputMode\""))
+            return json;
+
+        auto value = juce::JSON::parse(json);
+        if (value.isVoid())
+            return json;
+
+        static const std::array<juce::Identifier, 8> retiredProperties {
+            juce::Identifier("inputMode"),
+            juce::Identifier("laserEnabled"),
+            juce::Identifier("laserMode"),
+            juce::Identifier("laserMix"),
+            juce::Identifier("laserSpeedHz"),
+            juce::Identifier("laserSensitivity"),
+            juce::Identifier("laserEnvelopeMode"),
+            juce::Identifier("laserTrigger")
+        };
+        for (const auto& property : retiredProperties)
+            removeJSONPropertyRecursively(value, property);
+        return juce::JSON::toString(value, false);
+    }
+
+    float sanitizeDelayParameter(float value,
+                                 float minimum,
+                                 float maximum,
+                                 float fallback) noexcept
+    {
+        return juce::jlimit(
+            minimum,
+            maximum,
+            std::isfinite(value) ? value : fallback);
+    }
+
+    float loadDelayParameter(const std::atomic<float>& parameter,
+                             float minimum,
+                             float maximum,
+                             float fallback) noexcept
+    {
+        return sanitizeDelayParameter(
+            parameter.load(std::memory_order_relaxed),
+            minimum,
+            maximum,
+            fallback);
+    }
+
+    int loadDelayMode(const std::atomic<float>& parameter,
+                      int maximumMode,
+                      bool roundToNearest,
+                      float fallbackMode) noexcept
+    {
+        const float bounded = loadDelayParameter(
+            parameter,
+            0.0f,
+            static_cast<float>(maximumMode),
+            fallbackMode);
+        return roundToNearest
+            ? static_cast<int>(std::floor(bounded + 0.5f))
+            : static_cast<int>(bounded);
+    }
 }
 
 // ============================================================================
@@ -439,13 +1529,65 @@ S13Delay::S13Delay(float maximumSupportedDelaySeconds)
 {
 }
 
+void S13Delay::publishTempoBpmFromAudioCallback(double bpm) noexcept
+{
+    if (! std::isfinite(bpm) || bpm <= 0.0)
+        return;
+
+    publishedTempoBpm.store(
+        static_cast<float>(juce::jlimit(10.0, 300.0, bpm)),
+        std::memory_order_relaxed);
+}
+
+float S13Delay::resolveRequestedWowDepthMs() const noexcept
+{
+    const float requested =
+        wowDepthMs.load(std::memory_order_relaxed);
+    if (std::isfinite(requested) && requested >= 0.0f)
+        return juce::jlimit(0.0f, 4.0f, requested);
+
+    const float modeValue =
+        delayMode.load(std::memory_order_relaxed);
+    const float boundedMode = juce::jlimit(
+        0.0f,
+        2.0f,
+        std::isfinite(modeValue) ? modeValue : 0.0f);
+    // Keep the standalone processor's historical truncation semantics for
+    // malformed/fractional legacy values. NAM Rack state is canonicalized to
+    // exact enum values before it reaches this shared engine.
+    const int mode = static_cast<int>(boundedMode);
+    if (mode != 1)
+        return 0.0f;
+
+    const float requestedSaturation =
+        fbSaturation.load(std::memory_order_relaxed);
+    const float saturation = juce::jlimit(
+        0.0f,
+        1.0f,
+        std::isfinite(requestedSaturation)
+            ? requestedSaturation
+            : 0.0f);
+    return 1.8f * (0.25f + saturation * 0.75f);
+}
+
 void S13Delay::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    juce::ignoreUnused(getModulationSineLut());
+    // A previous callback's tempo is not authoritative for a new lifecycle
+    // pass (notably offline freeze after a project-tempo edit). Until the
+    // first legal callback publishes BPM, tail planning must take the 10 BPM
+    // worst case and read heads use a disposable 120 BPM provisional value.
+    publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
     cachedSampleRate = sampleRate;
     maxDelaySamples = juce::jmax(2, juce::roundToInt(
         maximumDelaySeconds * static_cast<float>(juce::jmax(1.0, sampleRate))) + 4);
     delayLineL.setMaximumDelayInSamples(maxDelaySamples);
     delayLineR.setMaximumDelayInSamples(maxDelaySamples);
+    if (extendedModesEnabled)
+    {
+        secondaryDelayLineL.setMaximumDelayInSamples(maxDelaySamples);
+        secondaryDelayLineR.setMaximumDelayInSamples(maxDelaySamples);
+    }
 
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
@@ -456,66 +1598,326 @@ void S13Delay::prepareToPlay(double sampleRate, int samplesPerBlock)
     delayLineR.prepare(spec);
     delayLineL.reset();
     delayLineR.reset();
+    if (extendedModesEnabled)
+    {
+        secondaryDelayLineL.prepare(spec);
+        secondaryDelayLineR.prepare(spec);
+        secondaryDelayLineL.reset();
+        secondaryDelayLineR.reset();
+    }
     smoothedMix.reset(sampleRate, 0.02);
-    const float initialMix =
-        juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed));
+    const float initialMix = loadDelayParameter(
+        mix, 0.0f, 1.0f, 0.5f);
     smoothedMix.setCurrentAndTargetValue(initialMix);
     smoothedDryGain.reset(sampleRate, 0.02);
     smoothedDryGain.setCurrentAndTargetValue(1.0f - initialMix);
+    const auto initialiseSmoother =
+        [sampleRate] (auto& smoother,
+                      double rampSeconds,
+                      float value)
+        {
+            smoother.reset(sampleRate, rampSeconds);
+            smoother.setCurrentAndTargetValue(value);
+        };
+    initialiseSmoother(
+        smoothedFeedback,
+        0.02,
+        loadDelayParameter(feedback, 0.0f, 0.95f, 0.4f));
+    initialiseSmoother(
+        smoothedCrossFeed,
+        embeddedModulationSmoothingSeconds > 0.0
+            ? embeddedModulationSmoothingSeconds
+            : 0.02,
+        loadDelayParameter(crossFeed, 0.0f, 0.95f, 0.0f));
+    initialiseSmoother(
+        smoothedSaturation,
+        embeddedModulationSmoothingSeconds > 0.0
+            ? embeddedModulationSmoothingSeconds
+            : 0.025,
+        loadDelayParameter(fbSaturation, 0.0f, 1.0f, 0.0f));
+    initialiseSmoother(
+        smoothedWidth,
+        embeddedModulationSmoothingSeconds > 0.0
+            ? embeddedModulationSmoothingSeconds
+            : 0.02,
+        loadDelayParameter(stereoWidth, 0.0f, 2.0f, 1.0f));
+    initialiseSmoother(
+        smoothedDucking,
+        0.025,
+        loadDelayParameter(ducking, 0.0f, 1.0f, 0.0f));
+    initialiseSmoother(
+        smoothedInputSend, 0.01, 1.0f);
+    const int maximumMode = extendedModesEnabled ? 4 : 2;
+    const int initialMode = loadDelayMode(
+        delayMode,
+        maximumMode,
+        extendedModesEnabled,
+        extendedModesEnabled ? 1.0f : 0.0f);
+    // Tape mode moves the read heads as wow is introduced, while both colour
+    // modes alter the live feedback loop. A deliberately slow character morph
+    // avoids turning a selector click into an audible pitch/feedback step.
+    initialiseSmoother(
+        smoothedTapeMode,
+        0.50,
+        initialMode == 1 || initialMode == 3 ? 1.0f : 0.0f);
+    initialiseSmoother(
+        smoothedAnalogMode,
+        0.50,
+        initialMode == 2 ? 1.0f : 0.0f);
+    initialiseSmoother(
+        smoothedMultiMode,
+        0.12,
+        initialMode == 3 ? 1.0f : 0.0f);
+    initialiseSmoother(
+        smoothedDualMode,
+        0.12,
+        initialMode == 4 ? 1.0f : 0.0f);
+    initialiseSmoother(
+        smoothedPingPong,
+        0.015,
+        loadDelayParameter(pingPong, 0.0f, 1.0f, 0.0f) >= 0.5f
+            ? 1.0f
+            : 0.0f);
+    initialiseSmoother(
+        smoothedWowDepthMs,
+        0.25,
+        resolveRequestedWowDepthMs());
+    initialiseSmoother(
+        smoothedWowRateHz,
+        0.10,
+        loadDelayParameter(wowRateHz, 0.01f, 4.0f, 0.37f));
+    initialiseSmoother(
+        smoothedFlutterDepthMs,
+        0.10,
+        loadDelayParameter(flutterDepthMs, 0.0f, 1.0f, 0.0f));
+    initialiseSmoother(
+        smoothedFlutterRateHz,
+        0.10,
+        loadDelayParameter(flutterRateHz, 1.0f, 16.0f, 6.4f));
+    const auto envelopeCoefficient = [sampleRate] (float milliseconds)
+    {
+        const float seconds = juce::jmax(0.0001f, milliseconds * 0.001f);
+        return 1.0f - std::exp(
+            -1.0f
+            / (seconds
+               * static_cast<float>(juce::jmax(1.0, sampleRate))));
+    };
+    initialiseSmoother(
+        smoothedDuckAttackCoefficient,
+        0.04,
+        envelopeCoefficient(loadDelayParameter(
+            duckAttackMs, 1.0f, 100.0f, 8.0f)));
+    initialiseSmoother(
+        smoothedDuckReleaseCoefficient,
+        0.06,
+        envelopeCoefficient(loadDelayParameter(
+            duckReleaseMs, 20.0f, 2000.0f, 180.0f)));
+    initialiseSmoother(
+        smoothedDuckMaximumReduction,
+        0.04,
+        loadDelayParameter(
+            duckMaxReduction, 0.0f, 0.95f, 0.82f));
+    const auto onePoleCoefficient =
+        [sampleRate] (float frequencyHz) noexcept
+        {
+            return 1.0f - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * frequencyHz
+                / static_cast<float>(juce::jmax(1.0, sampleRate)));
+        };
+    initialiseSmoother(
+        smoothedTopologyControl,
+        0.12,
+        loadDelayParameter(topologyControl, 0.0f, 1.0f, 0.18f));
+    initialiseSmoother(
+        smoothedMultiFeedback,
+        0.04,
+        loadDelayParameter(multiFeedback, 0.0f, 0.95f, 0.2112f));
+    initialiseSmoother(
+        smoothedDualTimeRatio,
+        0.12,
+        loadDelayParameter(dualTimeRatio, 0.5f, 1.0f, 0.59f));
+    initialiseSmoother(
+        smoothedDualFeedback,
+        0.04,
+        loadDelayParameter(dualFeedback, 0.0f, 0.95f, 0.185152f));
+    initialiseSmoother(
+        smoothedDualLowPassCoefficient,
+        0.04,
+        onePoleCoefficient(loadDelayParameter(
+            dualLowPassHz, 200.0f, 20000.0f, 8260.0f)));
+    initialiseSmoother(
+        smoothedDualHighPassCoefficient,
+        0.04,
+        onePoleCoefficient(loadDelayParameter(
+            dualHighPassHz, 20.0f, 2000.0f, 85.7f)));
+    initialiseSmoother(
+        smoothedDualSaturation,
+        0.04,
+        loadDelayParameter(dualSaturation, 0.0f, 1.0f, 0.234f));
+    initialiseSmoother(
+        smoothedDualModDepthMs,
+        0.12,
+        loadDelayParameter(dualModDepthMs, 0.0f, 4.0f, 0.255f));
+    initialiseSmoother(
+        smoothedDualModRateHz,
+        0.12,
+        loadDelayParameter(dualModRateHz, 0.01f, 4.0f, 0.235f));
+    smoothedFeedbackFilterMorph.reset(
+        sampleRate, 0.015);
+    smoothedFeedbackFilterMorph
+        .setCurrentAndTargetValue(0.0f);
+    sendReleaseStateL = 0.0f;
+    sendReleaseStateR = 0.0f;
 
     // Prepare feedback filters
     feedbackLPF_L.reset();
     feedbackLPF_R.reset();
     feedbackHPF_L.reset();
     feedbackHPF_R.reset();
+    alternateFeedbackLPF_L.reset();
+    alternateFeedbackLPF_R.reset();
+    alternateFeedbackHPF_L.reset();
+    alternateFeedbackHPF_R.reset();
 
-    lastLPFFreq = juce::jlimit(200.0f, 20000.0f, lpfFreq.load());
+    lastLPFFreq = loadDelayParameter(
+        lpfFreq, 200.0f, 20000.0f, 20000.0f);
     auto lpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, lastLPFFreq);
     feedbackLPF_L.coefficients = lpfCoeffs;
     feedbackLPF_R.coefficients = lpfCoeffs;
+    auto alternateLpfCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeLowPass(
+            sampleRate, lastLPFFreq);
+    alternateFeedbackLPF_L.coefficients =
+        alternateLpfCoeffs;
+    alternateFeedbackLPF_R.coefficients =
+        alternateLpfCoeffs;
     prepareRealtimeFilterLut(feedbackLPFCoefficientLut, sampleRate, 200.0f, 20000.0f, false);
+    pendingFeedbackLPFCoefficients =
+        lookupRealtimeFilterLut(
+            feedbackLPFCoefficientLut,
+            sampleRate,
+            lastLPFFreq,
+            200.0f,
+            20000.0f);
     writeRealtimeFilterCoefficients(
         feedbackLPF_L,
         feedbackLPF_R,
-        lookupRealtimeFilterLut(feedbackLPFCoefficientLut,
-                                sampleRate,
-                                lastLPFFreq,
-                                200.0f,
-                                20000.0f));
+        pendingFeedbackLPFCoefficients);
+    writeRealtimeFilterCoefficients(
+        alternateFeedbackLPF_L,
+        alternateFeedbackLPF_R,
+        pendingFeedbackLPFCoefficients);
 
-    lastHPFFreq = juce::jlimit(20.0f, 2000.0f, hpfFreq.load());
+    lastHPFFreq = loadDelayParameter(
+        hpfFreq, 20.0f, 2000.0f, 20.0f);
     auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastHPFFreq);
     feedbackHPF_L.coefficients = hpfCoeffs;
     feedbackHPF_R.coefficients = hpfCoeffs;
+    auto alternateHpfCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeHighPass(
+            sampleRate, lastHPFFreq);
+    alternateFeedbackHPF_L.coefficients =
+        alternateHpfCoeffs;
+    alternateFeedbackHPF_R.coefficients =
+        alternateHpfCoeffs;
     prepareRealtimeFilterLut(feedbackHPFCoefficientLut, sampleRate, 20.0f, 2000.0f, true);
+    pendingFeedbackHPFCoefficients =
+        lookupRealtimeFilterLut(
+            feedbackHPFCoefficientLut,
+            sampleRate,
+            lastHPFFreq,
+            20.0f,
+            2000.0f);
     writeRealtimeFilterCoefficients(
         feedbackHPF_L,
         feedbackHPF_R,
-        lookupRealtimeFilterLut(feedbackHPFCoefficientLut,
-                                sampleRate,
-                                lastHPFFreq,
-                                20.0f,
-                                2000.0f));
+        pendingFeedbackHPFCoefficients);
+    writeRealtimeFilterCoefficients(
+        alternateFeedbackHPF_L,
+        alternateFeedbackHPF_R,
+        pendingFeedbackHPFCoefficients);
+    feedbackFiltersUseAlternate = false;
+    feedbackFilterMorphActive = false;
+    feedbackFilterChangePending = false;
 
     feedbackSampleL = 0.0f;
     feedbackSampleR = 0.0f;
-    smoothedDelaySamplesL = static_cast<float>(0.25 * cachedSampleRate);
-    smoothedDelaySamplesR = static_cast<float>(0.25 * cachedSampleRate);
+    secondaryFeedbackSampleL = 0.0f;
+    secondaryFeedbackSampleR = 0.0f;
+    secondaryHighPassLowStateL = 0.0f;
+    secondaryHighPassLowStateR = 0.0f;
+    secondaryLowPassStateL = 0.0f;
+    secondaryLowPassStateR = 0.0f;
+    // Start each read head at the requested delay instead of sweeping from an
+    // arbitrary 250 ms position. A startup sweep can move past the first
+    // transient before the delay history becomes valid, silently dropping it.
+    const float publishedBpm = publishedTempoBpm.load(
+        std::memory_order_relaxed);
+    const double initialBpm = std::isfinite(publishedBpm)
+            && publishedBpm >= 10.0f
+        ? static_cast<double>(publishedBpm)
+        : 120.0;
+    const bool initialTempoSync = loadDelayParameter(
+        tempoSync, 0.0f, 1.0f, 0.0f) >= 0.5f;
+    const float initialDelayMsL = initialTempoSync
+        ? syncNoteToMs(
+              loadDelayParameter(syncNoteL, 0.0f, 8.0f, 0.0f),
+              initialBpm)
+        : loadDelayParameter(delayTimeL, 1.0f, 2000.0f, 250.0f);
+    const float initialDelayMsR = initialTempoSync
+        ? syncNoteToMs(
+              loadDelayParameter(syncNoteR, 0.0f, 8.0f, 0.0f),
+              initialBpm)
+        : loadDelayParameter(delayTimeR, 1.0f, 2000.0f, 250.0f);
+    smoothedDelaySamplesL = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        static_cast<float>(
+            initialDelayMsL * 0.001 * cachedSampleRate));
+    smoothedDelaySamplesR = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        static_cast<float>(
+            initialDelayMsR * 0.001 * cachedSampleRate));
+    delayMorphTargetSamplesL = smoothedDelaySamplesL;
+    delayMorphTargetSamplesR = smoothedDelaySamplesR;
+    pendingDelaySamplesL = smoothedDelaySamplesL;
+    pendingDelaySamplesR = smoothedDelaySamplesR;
+    requestedDelaySamplesL = smoothedDelaySamplesL;
+    requestedDelaySamplesR = smoothedDelaySamplesR;
+    smoothedDelayTimeMorph.reset(
+        sampleRate,
+        embeddedModulationSmoothingSeconds > 0.0
+            ? embeddedModulationSmoothingSeconds
+            : 0.03);
+    smoothedDelayTimeMorph.setCurrentAndTargetValue(0.0f);
+    delayTimeMorphActive = false;
+    delayTimeChangePending = false;
     duckEnvelope = 0.0f;
     modulationPhase = 0.0f;
+    flutterPhase = 1.173f;
+    secondaryModulationPhase = 0.417f;
     validHistorySamples = 0;
+    secondaryValidHistorySamples = 0;
     inputSend.store(1.0f, std::memory_order_relaxed);
     unityDry.store(0.0f, std::memory_order_relaxed);
+    publishedLiveTailSeconds.store(0.0f, std::memory_order_relaxed);
 }
 
 float S13Delay::syncNoteToMs(float noteIndex, double bpm)
 {
-    bpm = juce::jlimit(10.0, 300.0, bpm > 0.0 ? bpm : 120.0);
+    bpm = juce::jlimit(
+        10.0,
+        300.0,
+        std::isfinite(bpm) && bpm > 0.0 ? bpm : 120.0);
 
     const float quarterMs = static_cast<float>(60000.0 / bpm);
 
     // Matches the React schema: 1/1, 1/2, 1/4, 1/8, 1/16, 1/4T, 1/8T, 1/4D, 1/8D
-    const int idx = juce::jlimit(0, 8, static_cast<int>(noteIndex));
+    const int idx = static_cast<int>(std::floor(
+        sanitizeDelayParameter(noteIndex, 0.0f, 8.0f, 0.0f)
+        + 0.5f));
 
     static const float baseMultipliers[] = {
         4.0f,         // 1/1
@@ -542,86 +1944,352 @@ void S13Delay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& 
     if (numChannels < 1 || numSamples == 0)
         return;
 
-    // Update LPF if frequency changed
-    const float currentLPFFreq = juce::jlimit(200.0f, 20000.0f, lpfFreq.load());
-    if (std::abs(currentLPFFreq - lastLPFFreq) > 1.0f)
+    const float currentLPFFreq = loadDelayParameter(
+        lpfFreq, 200.0f, 20000.0f, 20000.0f);
+    const float currentHPFFreq = loadDelayParameter(
+        hpfFreq, 20.0f, 2000.0f, 20.0f);
+    const bool feedbackFilterTargetChanged =
+        std::abs(currentLPFFreq - lastLPFFreq)
+            > 1.0f
+        || std::abs(currentHPFFreq - lastHPFFreq)
+            > 1.0f;
+    if (feedbackFilterTargetChanged)
     {
         lastLPFFreq = currentLPFFreq;
-        if (! feedbackLPFCoefficientLut.empty())
-            writeRealtimeFilterCoefficients(
-                feedbackLPF_L,
-                feedbackLPF_R,
-                lookupRealtimeFilterLut(feedbackLPFCoefficientLut,
-                                        cachedSampleRate,
-                                        currentLPFFreq,
-                                        200.0f,
-                                        20000.0f));
-    }
-
-    // Update HPF if frequency changed
-    const float currentHPFFreq = juce::jlimit(20.0f, 2000.0f, hpfFreq.load());
-    if (std::abs(currentHPFFreq - lastHPFFreq) > 1.0f)
-    {
         lastHPFFreq = currentHPFFreq;
-        if (! feedbackHPFCoefficientLut.empty())
-            writeRealtimeFilterCoefficients(
-                feedbackHPF_L,
-                feedbackHPF_R,
-                lookupRealtimeFilterLut(feedbackHPFCoefficientLut,
-                                        cachedSampleRate,
-                                        currentHPFFreq,
-                                        20.0f,
-                                        2000.0f));
+        if (! feedbackLPFCoefficientLut.empty()
+            && ! feedbackHPFCoefficientLut.empty())
+        {
+            pendingFeedbackLPFCoefficients =
+                lookupRealtimeFilterLut(
+                    feedbackLPFCoefficientLut,
+                    cachedSampleRate,
+                    currentLPFFreq,
+                    200.0f,
+                    20000.0f);
+            pendingFeedbackHPFCoefficients =
+                lookupRealtimeFilterLut(
+                    feedbackHPFCoefficientLut,
+                    cachedSampleRate,
+                    currentHPFFreq,
+                    20.0f,
+                    2000.0f);
+            feedbackFilterChangePending = true;
+        }
+    }
+    if (feedbackFilterChangePending
+        && ! feedbackFilterMorphActive)
+    {
+        auto& targetLPF_L =
+            feedbackFiltersUseAlternate
+                ? feedbackLPF_L
+                : alternateFeedbackLPF_L;
+        auto& targetLPF_R =
+            feedbackFiltersUseAlternate
+                ? feedbackLPF_R
+                : alternateFeedbackLPF_R;
+        auto& targetHPF_L =
+            feedbackFiltersUseAlternate
+                ? feedbackHPF_L
+                : alternateFeedbackHPF_L;
+        auto& targetHPF_R =
+            feedbackFiltersUseAlternate
+                ? feedbackHPF_R
+                : alternateFeedbackHPF_R;
+        targetLPF_L.reset();
+        targetLPF_R.reset();
+        targetHPF_L.reset();
+        targetHPF_R.reset();
+        writeRealtimeFilterCoefficients(
+            targetLPF_L,
+            targetLPF_R,
+            pendingFeedbackLPFCoefficients);
+        writeRealtimeFilterCoefficients(
+            targetHPF_L,
+            targetHPF_R,
+            pendingFeedbackHPFCoefficients);
+        smoothedFeedbackFilterMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedFeedbackFilterMorph
+            .setTargetValue(1.0f);
+        feedbackFilterMorphActive = true;
+        feedbackFilterChangePending = false;
     }
 
-    // Get BPM from playhead for tempo sync
-    double bpm = 120.0;
+    // Host playhead state is legal to query only from processBlock(). Publish
+    // the sanitized callback-local BPM for lifecycle/tail readers, which may
+    // run concurrently and therefore consume atomics only.
+    const float previouslyPublishedBpm = publishedTempoBpm.load(
+        std::memory_order_relaxed);
+    double bpm = std::isfinite(previouslyPublishedBpm)
+            && previouslyPublishedBpm >= 10.0f
+        ? static_cast<double>(previouslyPublishedBpm)
+        : 120.0;
     if (auto* ph = getPlayHead())
     {
-        auto pos = ph->getPosition();
+        const auto pos = ph->getPosition();
         if (pos.hasValue())
         {
-            if (auto bpmVal = pos->getBpm())
-                bpm = *bpmVal;
+            if (const auto bpmVal = pos->getBpm())
+            {
+                if (std::isfinite(*bpmVal) && *bpmVal > 0.0)
+                {
+                    bpm = juce::jlimit(10.0, 300.0, *bpmVal);
+                    publishTempoBpmFromAudioCallback(bpm);
+                }
+            }
         }
     }
 
     // Compute delay times
-    const bool isTempSync = tempoSync.load() >= 0.5f;
+    const bool isTempSync = loadDelayParameter(
+        tempoSync, 0.0f, 1.0f, 0.0f) >= 0.5f;
     float delayMsL, delayMsR;
     if (isTempSync)
     {
-        delayMsL = syncNoteToMs(syncNoteL.load(), bpm);
-        delayMsR = syncNoteToMs(syncNoteR.load(), bpm);
+        delayMsL = syncNoteToMs(
+            loadDelayParameter(syncNoteL, 0.0f, 8.0f, 0.0f), bpm);
+        delayMsR = syncNoteToMs(
+            loadDelayParameter(syncNoteR, 0.0f, 8.0f, 0.0f), bpm);
     }
     else
     {
-        delayMsL = juce::jlimit(1.0f, 2000.0f, delayTimeL.load());
-        delayMsR = juce::jlimit(1.0f, 2000.0f, delayTimeR.load());
+        delayMsL = loadDelayParameter(
+            delayTimeL, 1.0f, 2000.0f, 250.0f);
+        delayMsR = loadDelayParameter(
+            delayTimeR, 1.0f, 2000.0f, 250.0f);
     }
 
-    const float delaySamplesL = static_cast<float>(delayMsL * 0.001 * cachedSampleRate);
-    const float delaySamplesR = static_cast<float>(delayMsR * 0.001 * cachedSampleRate);
-    const float fb = juce::jlimit(0.0f, 0.95f, feedback.load());
-    const float xfeed = juce::jlimit(0.0f, 0.95f, crossFeed.load());
-    const float requestedMix =
-        juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed));
+    const float delaySamplesL = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        static_cast<float>(
+            delayMsL * 0.001 * cachedSampleRate));
+    const float delaySamplesR = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        static_cast<float>(
+            delayMsR * 0.001 * cachedSampleRate));
+    const bool historyIsEmpty = validHistorySamples <= 0
+        && (! extendedModesEnabled
+            || secondaryValidHistorySamples <= 0);
+    if (historyIsEmpty)
+    {
+        // prepare/reset can only use the most recently published BPM. On the
+        // first legal callback, snap every empty-history read head to the
+        // actual host-synchronous time before accepting the first transient.
+        // There is no tail to pitch-shift while both histories are invalid.
+        smoothedDelaySamplesL = delaySamplesL;
+        smoothedDelaySamplesR = delaySamplesR;
+        delayMorphTargetSamplesL = delaySamplesL;
+        delayMorphTargetSamplesR = delaySamplesR;
+        pendingDelaySamplesL = delaySamplesL;
+        pendingDelaySamplesR = delaySamplesR;
+        requestedDelaySamplesL = delaySamplesL;
+        requestedDelaySamplesR = delaySamplesR;
+        smoothedDelayTimeMorph.setCurrentAndTargetValue(0.0f);
+        delayTimeMorphActive = false;
+        delayTimeChangePending = false;
+    }
+    else if (std::abs(delaySamplesL - requestedDelaySamplesL)
+            > 0.01f
+        || std::abs(delaySamplesR - requestedDelaySamplesR)
+            > 0.01f)
+    {
+        requestedDelaySamplesL = delaySamplesL;
+        requestedDelaySamplesR = delaySamplesR;
+        pendingDelaySamplesL = delaySamplesL;
+        pendingDelaySamplesR = delaySamplesR;
+        delayTimeChangePending = true;
+    }
+    if (delayTimeChangePending
+        && ! delayTimeMorphActive)
+    {
+        delayMorphTargetSamplesL =
+            pendingDelaySamplesL;
+        delayMorphTargetSamplesR =
+            pendingDelaySamplesR;
+        smoothedDelayTimeMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedDelayTimeMorph.setTargetValue(1.0f);
+        delayTimeMorphActive = true;
+        delayTimeChangePending = false;
+    }
+    smoothedFeedback.setTargetValue(loadDelayParameter(
+        feedback, 0.0f, 0.95f, 0.4f));
+    smoothedCrossFeed.setTargetValue(loadDelayParameter(
+        crossFeed, 0.0f, 0.95f, 0.0f));
+    const float requestedMix = loadDelayParameter(
+        mix, 0.0f, 1.0f, 0.5f);
     smoothedMix.setTargetValue(requestedMix);
-    const bool isPingPong = pingPong.load() >= 0.5f;
-    const float satAmount = juce::jlimit(0.0f, 1.0f, fbSaturation.load());
-    const float widthVal = juce::jlimit(0.0f, 2.0f, stereoWidth.load());
-    const int modeVal = juce::jlimit(0, 2, static_cast<int>(delayMode.load()));
-    const float duckAmount = juce::jlimit(0.0f, 1.0f, ducking.load());
-    const float sendGain = juce::jlimit(
-        0.0f, 1.0f, inputSend.load(std::memory_order_relaxed));
-    const bool preserveUnityDry =
-        unityDry.load(std::memory_order_relaxed) >= 0.5f;
+    smoothedPingPong.setTargetValue(
+        loadDelayParameter(pingPong, 0.0f, 1.0f, 0.0f) >= 0.5f
+            ? 1.0f
+            : 0.0f);
+    smoothedSaturation.setTargetValue(loadDelayParameter(
+        fbSaturation, 0.0f, 1.0f, 0.0f));
+    smoothedWidth.setTargetValue(loadDelayParameter(
+        stereoWidth, 0.0f, 2.0f, 1.0f));
+    const int maximumMode = extendedModesEnabled ? 4 : 2;
+    const int modeVal = loadDelayMode(
+        delayMode,
+        maximumMode,
+        extendedModesEnabled,
+        extendedModesEnabled ? 1.0f : 0.0f);
+    smoothedTapeMode.setTargetValue(
+        modeVal == 1 || modeVal == 3 ? 1.0f : 0.0f);
+    smoothedAnalogMode.setTargetValue(
+        modeVal == 2 ? 1.0f : 0.0f);
+    smoothedMultiMode.setTargetValue(
+        modeVal == 3 ? 1.0f : 0.0f);
+    smoothedDualMode.setTargetValue(
+        modeVal == 4 ? 1.0f : 0.0f);
+    smoothedDucking.setTargetValue(loadDelayParameter(
+        ducking, 0.0f, 1.0f, 0.0f));
+    smoothedWowDepthMs.setTargetValue(
+        resolveRequestedWowDepthMs());
+    smoothedWowRateHz.setTargetValue(loadDelayParameter(
+        wowRateHz, 0.01f, 4.0f, 0.37f));
+    smoothedFlutterDepthMs.setTargetValue(loadDelayParameter(
+        flutterDepthMs, 0.0f, 1.0f, 0.0f));
+    smoothedFlutterRateHz.setTargetValue(loadDelayParameter(
+        flutterRateHz, 1.0f, 16.0f, 6.4f));
+    const auto envelopeCoefficient = [this] (float milliseconds)
+    {
+        const float seconds = juce::jmax(0.0001f, milliseconds * 0.001f);
+        return 1.0f - std::exp(
+            -1.0f
+            / (seconds
+               * static_cast<float>(
+                   juce::jmax(1.0, cachedSampleRate))));
+    };
+    smoothedDuckAttackCoefficient.setTargetValue(
+        envelopeCoefficient(loadDelayParameter(
+            duckAttackMs, 1.0f, 100.0f, 8.0f)));
+    smoothedDuckReleaseCoefficient.setTargetValue(
+        envelopeCoefficient(loadDelayParameter(
+            duckReleaseMs, 20.0f, 2000.0f, 180.0f)));
+    smoothedDuckMaximumReduction.setTargetValue(loadDelayParameter(
+        duckMaxReduction, 0.0f, 0.95f, 0.82f));
+    const auto onePoleCoefficient =
+        [safeSampleRate = static_cast<float>(
+             juce::jmax(1.0, cachedSampleRate))]
+        (float frequencyHz) noexcept
+        {
+            return 1.0f - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * frequencyHz / safeSampleRate);
+        };
+    smoothedTopologyControl.setTargetValue(loadDelayParameter(
+        topologyControl, 0.0f, 1.0f, 0.18f));
+    smoothedMultiFeedback.setTargetValue(loadDelayParameter(
+        multiFeedback, 0.0f, 0.95f, 0.2112f));
+    smoothedDualTimeRatio.setTargetValue(loadDelayParameter(
+        dualTimeRatio, 0.5f, 1.0f, 0.59f));
+    smoothedDualFeedback.setTargetValue(loadDelayParameter(
+        dualFeedback, 0.0f, 0.95f, 0.185152f));
+    smoothedDualLowPassCoefficient.setTargetValue(
+        onePoleCoefficient(loadDelayParameter(
+            dualLowPassHz, 200.0f, 20000.0f, 8260.0f)));
+    smoothedDualHighPassCoefficient.setTargetValue(
+        onePoleCoefficient(loadDelayParameter(
+            dualHighPassHz, 20.0f, 2000.0f, 85.7f)));
+    smoothedDualSaturation.setTargetValue(loadDelayParameter(
+        dualSaturation, 0.0f, 1.0f, 0.234f));
+    smoothedDualModDepthMs.setTargetValue(loadDelayParameter(
+        dualModDepthMs, 0.0f, 4.0f, 0.255f));
+    smoothedDualModRateHz.setTargetValue(loadDelayParameter(
+        dualModRateHz, 0.01f, 4.0f, 0.235f));
+    const float sendTarget = loadDelayParameter(
+        inputSend, 0.0f, 1.0f, 1.0f);
+    if (sendTarget > 0.0f)
+        smoothedInputSend.setTargetValue(sendTarget);
+    else
+        smoothedInputSend.setCurrentAndTargetValue(0.0f);
+    const bool preserveUnityDry = loadDelayParameter(
+        unityDry, 0.0f, 1.0f, 0.0f) >= 0.5f;
     smoothedDryGain.setTargetValue(
         preserveUnityDry ? 1.0f : 1.0f - requestedMix);
-    const float delaySmoothingCoeff = 1.0f - std::exp(-1.0f / (0.025f * static_cast<float>(juce::jmax(1.0, cachedSampleRate))));
-    const float duckAttack = 1.0f - std::exp(-1.0f / (0.008f * static_cast<float>(juce::jmax(1.0, cachedSampleRate))));
-    const float duckRelease = 1.0f - std::exp(-1.0f / (0.180f * static_cast<float>(juce::jmax(1.0, cachedSampleRate))));
-    const float modulationInc = 0.37f * juce::MathConstants<float>::twoPi / static_cast<float>(juce::jmax(1.0, cachedSampleRate));
+    const float sendReleaseCoefficient =
+        std::exp(
+            -1.0f
+            / (0.002f
+               * static_cast<float>(
+                   juce::jmax(1.0, cachedSampleRate))));
+    const float safeSampleRate = static_cast<float>(
+        juce::jmax(1.0, cachedSampleRate));
+
+    auto& activeLPF_L =
+        feedbackFiltersUseAlternate
+            ? alternateFeedbackLPF_L
+            : feedbackLPF_L;
+    auto& activeLPF_R =
+        feedbackFiltersUseAlternate
+            ? alternateFeedbackLPF_R
+            : feedbackLPF_R;
+    auto& activeHPF_L =
+        feedbackFiltersUseAlternate
+            ? alternateFeedbackHPF_L
+            : feedbackHPF_L;
+    auto& activeHPF_R =
+        feedbackFiltersUseAlternate
+            ? alternateFeedbackHPF_R
+            : feedbackHPF_R;
+    auto& targetLPF_L =
+        feedbackFiltersUseAlternate
+            ? feedbackLPF_L
+            : alternateFeedbackLPF_L;
+    auto& targetLPF_R =
+        feedbackFiltersUseAlternate
+            ? feedbackLPF_R
+            : alternateFeedbackLPF_R;
+    auto& targetHPF_L =
+        feedbackFiltersUseAlternate
+            ? feedbackHPF_L
+            : alternateFeedbackHPF_L;
+    auto& targetHPF_R =
+        feedbackFiltersUseAlternate
+            ? feedbackHPF_R
+            : alternateFeedbackHPF_R;
+    const auto processFeedbackFilterBank =
+        [] (juce::dsp::IIR::Filter<float>& lowPass,
+            juce::dsp::IIR::Filter<float>& highPass,
+            float input) noexcept
+        {
+            if (! std::isfinite(input))
+            {
+                lowPass.reset();
+                highPass.reset();
+                return 0.0f;
+            }
+
+            const float lowPassed =
+                lowPass.processSample(input);
+            if (! std::isfinite(lowPassed))
+            {
+                lowPass.reset();
+                highPass.reset();
+                return 0.0f;
+            }
+
+            const float filtered =
+                highPass.processSample(lowPassed);
+            if (! std::isfinite(filtered))
+            {
+                lowPass.reset();
+                highPass.reset();
+                return 0.0f;
+            }
+
+            return filtered;
+        };
+    const auto finiteSample =
+        [] (float sample) noexcept
+        {
+            return std::isfinite(sample)
+                ? sample
+                : 0.0f;
+        };
 
     auto* dataL = buffer.getWritePointer(0);
     auto* dataR = (numChannels >= 2) ? buffer.getWritePointer(1) : nullptr;
@@ -630,100 +2298,671 @@ void S13Delay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& 
     {
         const float wet = smoothedMix.getNextValue();
         const float dryGain = smoothedDryGain.getNextValue();
-        const float inL = dataL[i];
-        const float inR = dataR ? dataR[i] : inL;
-        const float sentInL = inL * sendGain;
-        const float sentInR = inR * sendGain;
+        const float fb =
+            smoothedFeedback.getNextValue();
+        const float xfeed =
+            smoothedCrossFeed.getNextValue();
+        const float satAmount =
+            smoothedSaturation.getNextValue();
+        const float widthVal =
+            smoothedWidth.getNextValue();
+        const float duckAmount =
+            smoothedDucking.getNextValue();
+        const float wowDepthSamples =
+            smoothedWowDepthMs.getNextValue()
+            * 0.001f * safeSampleRate;
+        const float wowRate =
+            smoothedWowRateHz.getNextValue();
+        const float flutterDepthSamples =
+            smoothedFlutterDepthMs.getNextValue()
+            * 0.001f * safeSampleRate;
+        const float flutterRate =
+            smoothedFlutterRateHz.getNextValue();
+        const float duckAttack =
+            smoothedDuckAttackCoefficient.getNextValue();
+        const float duckRelease =
+            smoothedDuckReleaseCoefficient.getNextValue();
+        const float duckMaximumReduction =
+            smoothedDuckMaximumReduction.getNextValue();
+        const float tapeAmount =
+            smoothedTapeMode.getNextValue();
+        const float analogAmount =
+            smoothedAnalogMode.getNextValue();
+        float multiAmount =
+            extendedModesEnabled
+                ? smoothedMultiMode.getNextValue()
+                : 0.0f;
+        float dualAmount =
+            extendedModesEnabled
+                ? smoothedDualMode.getNextValue()
+                : 0.0f;
+        multiAmount = juce::jlimit(0.0f, 1.0f, multiAmount);
+        dualAmount = juce::jlimit(0.0f, 1.0f, dualAmount);
+        float baseAmount = juce::jmax(
+            0.0f, 1.0f - multiAmount - dualAmount);
+        const float topologyWeightSum = juce::jmax(
+            1.0e-6f,
+            baseAmount + multiAmount + dualAmount);
+        baseAmount /= topologyWeightSum;
+        multiAmount /= topologyWeightSum;
+        dualAmount /= topologyWeightSum;
+        const float topologyValue =
+            smoothedTopologyControl.getNextValue();
+        const float multiFeedbackGain =
+            smoothedMultiFeedback.getNextValue();
+        const float dualTimeRatioValue =
+            smoothedDualTimeRatio.getNextValue();
+        const float dualFeedbackGain =
+            smoothedDualFeedback.getNextValue();
+        const float dualLowPassCoefficient =
+            smoothedDualLowPassCoefficient.getNextValue();
+        const float dualHighPassCoefficient =
+            smoothedDualHighPassCoefficient.getNextValue();
+        const float dualSaturationAmount =
+            smoothedDualSaturation.getNextValue();
+        const float dualModDepthSamples =
+            smoothedDualModDepthMs.getNextValue()
+            * 0.001f * safeSampleRate;
+        const float dualModRate =
+            smoothedDualModRateHz.getNextValue();
+        const float pingPongAmount =
+            smoothedPingPong.getNextValue();
+        const float inL = finiteSample(dataL[i]);
+        const float inR =
+            dataR ? finiteSample(dataR[i]) : inL;
+        float sentInL = 0.0f;
+        float sentInR = 0.0f;
+        if (sendTarget > 0.0f)
+        {
+            const float sendGain =
+                smoothedInputSend.getNextValue();
+            sentInL = inL * sendGain;
+            sentInR = inR * sendGain;
+            sendReleaseStateL = sentInL;
+            sendReleaseStateR = sentInR;
+        }
+        else
+        {
+            sendReleaseStateL *=
+                sendReleaseCoefficient;
+            sendReleaseStateR *=
+                sendReleaseCoefficient;
+            if (std::abs(sendReleaseStateL)
+                < 1.0e-9f)
+            {
+                sendReleaseStateL = 0.0f;
+            }
+            if (std::abs(sendReleaseStateR)
+                < 1.0e-9f)
+            {
+                sendReleaseStateR = 0.0f;
+            }
+            sentInL = sendReleaseStateL;
+            sentInR = sendReleaseStateR;
+        }
         const float inputLevel =
             juce::jmax(std::abs(sentInL), std::abs(sentInR));
         const float duckCoeff = inputLevel > duckEnvelope ? duckAttack : duckRelease;
         duckEnvelope += (inputLevel - duckEnvelope) * duckCoeff;
-        const float duckGain = 1.0f - duckAmount * juce::jlimit(0.0f, 0.82f, duckEnvelope * 1.35f);
+        const float duckGain = 1.0f
+            - duckAmount
+                * juce::jmin(
+                    duckMaximumReduction,
+                    duckEnvelope * 1.35f);
 
-        smoothedDelaySamplesL += (delaySamplesL - smoothedDelaySamplesL) * delaySmoothingCoeff;
-        smoothedDelaySamplesR += (delaySamplesR - smoothedDelaySamplesR) * delaySmoothingCoeff;
-        float modulatedDelayL = smoothedDelaySamplesL;
-        float modulatedDelayR = smoothedDelaySamplesR;
-        if (modeVal == 1)
+        const float modulationOffsetL =
+            lookupModulationSine(modulationPhase) * wowDepthSamples
+            + lookupModulationSine(flutterPhase) * flutterDepthSamples;
+        const float modulationOffsetR =
+            lookupModulationSine(modulationPhase + 1.73f)
+                * wowDepthSamples
+            + lookupModulationSine(flutterPhase + 2.41f)
+                * flutterDepthSamples;
+        const float secondaryModulationOffsetL =
+            lookupModulationSine(secondaryModulationPhase)
+            * dualModDepthSamples;
+        const float secondaryModulationOffsetR =
+            lookupModulationSine(
+                secondaryModulationPhase + 2.17f)
+            * dualModDepthSamples;
+        modulationPhase +=
+            wowRate * juce::MathConstants<float>::twoPi
+            / safeSampleRate;
+        flutterPhase +=
+            flutterRate * juce::MathConstants<float>::twoPi
+            / safeSampleRate;
+        secondaryModulationPhase +=
+            dualModRate * juce::MathConstants<float>::twoPi
+            / safeSampleRate;
+        if (modulationPhase >= juce::MathConstants<float>::twoPi)
+            modulationPhase -= juce::MathConstants<float>::twoPi;
+        if (flutterPhase >= juce::MathConstants<float>::twoPi)
+            flutterPhase -= juce::MathConstants<float>::twoPi;
+        if (secondaryModulationPhase
+            >= juce::MathConstants<float>::twoPi)
         {
-            const float wowDepth = static_cast<float>(0.0018 * cachedSampleRate) * (0.25f + satAmount * 0.75f);
-            modulatedDelayL += std::sin(modulationPhase) * wowDepth;
-            modulatedDelayR += std::sin(modulationPhase + 1.73f) * wowDepth;
-            modulationPhase += modulationInc;
-            if (modulationPhase >= juce::MathConstants<float>::twoPi)
-                modulationPhase -= juce::MathConstants<float>::twoPi;
+            secondaryModulationPhase -=
+                juce::MathConstants<float>::twoPi;
         }
 
-        // Read from delay lines
-        delayLineL.setDelay(juce::jlimit(1.0f, static_cast<float>(maxDelaySamples - 1), modulatedDelayL));
-        delayLineR.setDelay(juce::jlimit(1.0f, static_cast<float>(maxDelaySamples - 1), modulatedDelayR));
+        const auto clampDelayTap =
+            [this] (float samples) noexcept
+        {
+            return juce::jlimit(
+                1.0f,
+                static_cast<float>(maxDelaySamples - 1),
+                samples);
+        };
+        const float activeDelayL = clampDelayTap(
+            smoothedDelaySamplesL + modulationOffsetL);
+        const float activeDelayR = clampDelayTap(
+            smoothedDelaySamplesR + modulationOffsetR);
+        float delayedL = 0.0f;
+        float delayedR = 0.0f;
+        float multiDelayedL = 0.0f;
+        float multiDelayedR = 0.0f;
+        const float delayMorph = delayTimeMorphActive
+            ? smoothedDelayTimeMorph.getNextValue()
+            : 0.0f;
+        if (extendedModesEnabled)
+        {
+            const std::array<float, 4> tapRatios {
+                1.0f,
+                0.79f - 0.08f * topologyValue,
+                0.61f - 0.08f * topologyValue,
+                0.43f - 0.07f * topologyValue
+            };
+            constexpr std::array<float, 4> tapWeights {
+                0.42f, 0.25f, 0.20f, 0.13f
+            };
+            std::array<float, 4> tapsL {};
+            std::array<float, 4> tapsR {};
+            for (size_t tap = 0; tap < tapRatios.size(); ++tap)
+            {
+                const float activeTapDelayL = clampDelayTap(
+                    smoothedDelaySamplesL * tapRatios[tap]
+                        + modulationOffsetL);
+                const float activeTapDelayR = clampDelayTap(
+                    smoothedDelaySamplesR * tapRatios[tap]
+                        + modulationOffsetR);
+                const bool finalTap = tap + 1 == tapRatios.size();
+                const float rawActiveTapL = delayLineL.popSample(
+                    0,
+                    activeTapDelayL,
+                    finalTap && ! delayTimeMorphActive);
+                const float rawActiveTapR = delayLineR.popSample(
+                    0,
+                    activeTapDelayR,
+                    finalTap && ! delayTimeMorphActive);
+                const float activeTapL =
+                    validHistorySamples
+                            >= static_cast<int>(
+                                std::ceil(activeTapDelayL))
+                        ? finiteSample(rawActiveTapL)
+                        : 0.0f;
+                const float activeTapR =
+                    validHistorySamples
+                            >= static_cast<int>(
+                                std::ceil(activeTapDelayR))
+                        ? finiteSample(rawActiveTapR)
+                        : 0.0f;
+                if (delayTimeMorphActive)
+                {
+                    const float targetTapDelayL = clampDelayTap(
+                        delayMorphTargetSamplesL * tapRatios[tap]
+                            + modulationOffsetL);
+                    const float targetTapDelayR = clampDelayTap(
+                        delayMorphTargetSamplesR * tapRatios[tap]
+                            + modulationOffsetR);
+                    const float rawTargetTapL = delayLineL.popSample(
+                        0, targetTapDelayL, finalTap);
+                    const float rawTargetTapR = delayLineR.popSample(
+                        0, targetTapDelayR, finalTap);
+                    const float targetTapL =
+                        validHistorySamples
+                                >= static_cast<int>(
+                                    std::ceil(targetTapDelayL))
+                            ? finiteSample(rawTargetTapL)
+                            : 0.0f;
+                    const float targetTapR =
+                        validHistorySamples
+                                >= static_cast<int>(
+                                    std::ceil(targetTapDelayR))
+                            ? finiteSample(rawTargetTapR)
+                            : 0.0f;
+                    tapsL[tap] = activeTapL
+                        + (targetTapL - activeTapL) * delayMorph;
+                    tapsR[tap] = activeTapR
+                        + (targetTapR - activeTapR) * delayMorph;
+                }
+                else
+                {
+                    tapsL[tap] = activeTapL;
+                    tapsR[tap] = activeTapR;
+                }
+            }
+            delayedL = tapsL[0];
+            delayedR = tapsR[0];
+            multiDelayedL =
+                tapsL[0] * tapWeights[0]
+                + tapsR[1] * tapWeights[1]
+                + tapsL[2] * tapWeights[2]
+                + tapsR[3] * tapWeights[3];
+            multiDelayedR =
+                tapsR[0] * tapWeights[0]
+                + tapsL[1] * tapWeights[1]
+                + tapsR[2] * tapWeights[2]
+                + tapsL[3] * tapWeights[3];
+        }
+        else if (delayTimeMorphActive)
+        {
+            const float targetDelayL = clampDelayTap(
+                delayMorphTargetSamplesL
+                    + modulationOffsetL);
+            const float targetDelayR = clampDelayTap(
+                delayMorphTargetSamplesR
+                    + modulationOffsetR);
+            const float rawActiveTapL =
+                delayLineL.popSample(
+                    0, activeDelayL, false);
+            const float rawTargetTapL =
+                delayLineL.popSample(
+                    0, targetDelayL, true);
+            const float rawActiveTapR =
+                delayLineR.popSample(
+                    0, activeDelayR, false);
+            const float rawTargetTapR =
+                delayLineR.popSample(
+                    0, targetDelayR, true);
+            const float activeTapL =
+                static_cast<float>(validHistorySamples)
+                        >= std::ceil(activeDelayL)
+                    ? finiteSample(rawActiveTapL)
+                    : 0.0f;
+            const float targetTapL =
+                static_cast<float>(validHistorySamples)
+                        >= std::ceil(targetDelayL)
+                    ? finiteSample(rawTargetTapL)
+                    : 0.0f;
+            const float activeTapR =
+                static_cast<float>(validHistorySamples)
+                        >= std::ceil(activeDelayR)
+                    ? finiteSample(rawActiveTapR)
+                    : 0.0f;
+            const float targetTapR =
+                static_cast<float>(validHistorySamples)
+                        >= std::ceil(targetDelayR)
+                    ? finiteSample(rawTargetTapR)
+                    : 0.0f;
+            delayedL = activeTapL
+                + (targetTapL - activeTapL) * delayMorph;
+            delayedR = activeTapR
+                + (targetTapR - activeTapR) * delayMorph;
+            multiDelayedL = delayedL;
+            multiDelayedR = delayedR;
+        }
+        else
+        {
+            const float rawDelayedL = delayLineL.popSample(
+                0, activeDelayL, true);
+            const float rawDelayedR = delayLineR.popSample(
+                0, activeDelayR, true);
+            delayedL = validHistorySamples
+                    >= static_cast<int>(std::ceil(activeDelayL))
+                ? finiteSample(rawDelayedL)
+                : 0.0f;
+            delayedR = validHistorySamples
+                    >= static_cast<int>(std::ceil(activeDelayR))
+                ? finiteSample(rawDelayedR)
+                : 0.0f;
+            multiDelayedL = delayedL;
+            multiDelayedR = delayedR;
+        }
 
-        const float rawDelayedL = delayLineL.popSample(0);
-        const float rawDelayedR = delayLineR.popSample(0);
-        const bool leftHistoryValid =
-            static_cast<float>(validHistorySamples)
-                >= std::ceil(modulatedDelayL) + 1.0f;
-        const bool rightHistoryValid =
-            static_cast<float>(validHistorySamples)
-                >= std::ceil(modulatedDelayR) + 1.0f;
-        const float delayedL = leftHistoryValid ? rawDelayedL : 0.0f;
-        const float delayedR = rightHistoryValid ? rawDelayedR : 0.0f;
+        float secondaryDelayedL = 0.0f;
+        float secondaryDelayedR = 0.0f;
+        if (extendedModesEnabled)
+        {
+            const float secondaryActiveDelayL = clampDelayTap(
+                smoothedDelaySamplesL * dualTimeRatioValue
+                    + secondaryModulationOffsetL);
+            const float secondaryActiveDelayR = clampDelayTap(
+                smoothedDelaySamplesR * dualTimeRatioValue
+                    + secondaryModulationOffsetR);
+            if (delayTimeMorphActive)
+            {
+                const float secondaryTargetDelayL = clampDelayTap(
+                    delayMorphTargetSamplesL * dualTimeRatioValue
+                        + secondaryModulationOffsetL);
+                const float secondaryTargetDelayR = clampDelayTap(
+                    delayMorphTargetSamplesR * dualTimeRatioValue
+                        + secondaryModulationOffsetR);
+                const float rawActiveL = secondaryDelayLineL.popSample(
+                    0, secondaryActiveDelayL, false);
+                const float rawTargetL = secondaryDelayLineL.popSample(
+                    0, secondaryTargetDelayL, true);
+                const float rawActiveR = secondaryDelayLineR.popSample(
+                    0, secondaryActiveDelayR, false);
+                const float rawTargetR = secondaryDelayLineR.popSample(
+                    0, secondaryTargetDelayR, true);
+                const float activeL = secondaryValidHistorySamples
+                        >= static_cast<int>(
+                            std::ceil(secondaryActiveDelayL))
+                    ? finiteSample(rawActiveL)
+                    : 0.0f;
+                const float targetL = secondaryValidHistorySamples
+                        >= static_cast<int>(
+                            std::ceil(secondaryTargetDelayL))
+                    ? finiteSample(rawTargetL)
+                    : 0.0f;
+                const float activeR = secondaryValidHistorySamples
+                        >= static_cast<int>(
+                            std::ceil(secondaryActiveDelayR))
+                    ? finiteSample(rawActiveR)
+                    : 0.0f;
+                const float targetR = secondaryValidHistorySamples
+                        >= static_cast<int>(
+                            std::ceil(secondaryTargetDelayR))
+                    ? finiteSample(rawTargetR)
+                    : 0.0f;
+                secondaryDelayedL = activeL
+                    + (targetL - activeL) * delayMorph;
+                secondaryDelayedR = activeR
+                    + (targetR - activeR) * delayMorph;
+            }
+            else
+            {
+                const float rawSecondaryL =
+                    secondaryDelayLineL.popSample(
+                        0, secondaryActiveDelayL, true);
+                const float rawSecondaryR =
+                    secondaryDelayLineR.popSample(
+                        0, secondaryActiveDelayR, true);
+                secondaryDelayedL = secondaryValidHistorySamples
+                        >= static_cast<int>(
+                            std::ceil(secondaryActiveDelayL))
+                    ? finiteSample(rawSecondaryL)
+                    : 0.0f;
+                secondaryDelayedR = secondaryValidHistorySamples
+                        >= static_cast<int>(
+                            std::ceil(secondaryActiveDelayR))
+                    ? finiteSample(rawSecondaryR)
+                    : 0.0f;
+            }
+        }
 
         // Process feedback through filters (LPF + HPF)
-        float fbL = feedbackLPF_L.processSample(feedbackSampleL);
-        fbL = feedbackHPF_L.processSample(fbL);
-        float fbR = feedbackLPF_R.processSample(feedbackSampleR);
-        fbR = feedbackHPF_R.processSample(fbR);
+        float fbL =
+            processFeedbackFilterBank(
+                activeLPF_L,
+                activeHPF_L,
+                feedbackSampleL);
+        float fbR =
+            processFeedbackFilterBank(
+                activeLPF_R,
+                activeHPF_R,
+                feedbackSampleR);
+        if (feedbackFilterMorphActive)
+        {
+            const float targetFilteredL =
+                processFeedbackFilterBank(
+                    targetLPF_L,
+                    targetHPF_L,
+                    feedbackSampleL);
+            const float targetFilteredR =
+                processFeedbackFilterBank(
+                    targetLPF_R,
+                    targetHPF_R,
+                    feedbackSampleR);
+            const float filterMorph =
+                smoothedFeedbackFilterMorph
+                    .getNextValue();
+            fbL +=
+                (targetFilteredL - fbL)
+                * filterMorph;
+            fbR +=
+                (targetFilteredR - fbR)
+                * filterMorph;
+        }
 
         // Apply feedback saturation
         if (satAmount > 0.001f)
         {
-            // Blend between clean and saturated feedback
-            float satL = std::tanh(fbL * (1.0f + satAmount * 3.0f));
-            float satR = std::tanh(fbR * (1.0f + satAmount * 3.0f));
+            // Normalise the driven tanh so its slope never exceeds unity.
+            // The former unnormalised curve raised the small-signal feedback
+            // gain by as much as 4x before the feedback coefficient, allowing
+            // a quiet repeat to build into a rare loud burst.
+            const float saturationDrive =
+                1.0f + satAmount * 3.0f;
+            const float inverseSaturationDrive =
+                1.0f / saturationDrive;
+            const float satL =
+                std::tanh(fbL * saturationDrive)
+                * inverseSaturationDrive;
+            const float satR =
+                std::tanh(fbR * saturationDrive)
+                * inverseSaturationDrive;
             fbL = fbL * (1.0f - satAmount) + satL * satAmount;
             fbR = fbR * (1.0f - satAmount) + satR * satAmount;
         }
 
-        // Apply delay mode character
-        // Mode 0: Digital (clean), Mode 1: Tape (slight wobble + saturation), Mode 2: Analog (warmth)
-        if (modeVal == 1) // Tape
+        // Smooth character changes so selecting Tape/Analog cannot replace the
+        // feedback waveform at a 16-sample callback edge.
+        const float cleanFbL = fbL;
+        const float cleanFbR = fbR;
+        float tapeFbL = cleanFbL;
+        float tapeFbR = cleanFbR;
+        if (tapeAmount > 0.00001f)
         {
-            fbL = std::tanh(fbL * 1.1f) * 0.95f;
-            fbR = std::tanh(fbR * 1.1f) * 0.95f;
+            constexpr float tapeDrive = 1.1f;
+            constexpr float inverseTapeDrive =
+                1.0f / tapeDrive;
+            tapeFbL =
+                std::tanh(cleanFbL * tapeDrive)
+                * inverseTapeDrive;
+            tapeFbR =
+                std::tanh(cleanFbR * tapeDrive)
+                * inverseTapeDrive;
         }
-        else if (modeVal == 2) // Analog
-        {
-            fbL *= 0.97f;
-            fbR *= 0.97f;
-        }
+        const float analogFbL = cleanFbL * 0.97f;
+        const float analogFbR = cleanFbR * 0.97f;
+        float tapeCharacterWeight = juce::jlimit(
+            0.0f, 1.0f, tapeAmount);
+        float analogCharacterWeight = juce::jlimit(
+            0.0f, 1.0f, analogAmount);
+        float cleanCharacterWeight = juce::jmax(
+            0.0f,
+            1.0f
+                - tapeCharacterWeight
+                - analogCharacterWeight);
+        const float characterWeightSum = juce::jmax(
+            1.0e-6f,
+            cleanCharacterWeight
+                + tapeCharacterWeight
+                + analogCharacterWeight);
+        cleanCharacterWeight /= characterWeightSum;
+        tapeCharacterWeight /= characterWeightSum;
+        analogCharacterWeight /= characterWeightSum;
+        fbL = cleanFbL * cleanCharacterWeight
+            + tapeFbL * tapeCharacterWeight
+            + analogFbL * analogCharacterWeight;
+        fbR = cleanFbR * cleanCharacterWeight
+            + tapeFbR * tapeCharacterWeight
+            + analogFbR * analogCharacterWeight;
 
         // Cross-feed: blend feedback between channels
         const float fbLMixed = fbL * (1.0f - xfeed) + fbR * xfeed;
         const float fbRMixed = fbR * (1.0f - xfeed) + fbL * xfeed;
 
-        // Write to delay lines
-        if (isPingPong)
-        {
-            delayLineL.pushSample(0, sentInL + fbRMixed * fb);
-            delayLineR.pushSample(0, sentInR + fbLMixed * fb);
-        }
-        else
-        {
-            delayLineL.pushSample(0, sentInL + fbLMixed * fb);
-            delayLineR.pushSample(0, sentInR + fbRMixed * fb);
-        }
+        // Write to delay lines. Ping-pong is a continuous routing crossfade,
+        // which avoids replacing the complete feedback source at a block edge.
+        const float feedbackWriteL =
+            fbLMixed
+            + (fbRMixed - fbLMixed)
+                * pingPongAmount;
+        const float feedbackWriteR =
+            fbRMixed
+            + (fbLMixed - fbRMixed)
+                * pingPongAmount;
+        const float primaryFeedbackGain = juce::jlimit(
+            0.0f,
+            0.95f,
+            fb * (baseAmount + dualAmount)
+                + multiFeedbackGain * multiAmount);
+        delayLineL.pushSample(
+            0,
+            finiteSample(
+                sentInL
+                    + feedbackWriteL
+                        * primaryFeedbackGain));
+        delayLineR.pushSample(
+            0,
+            finiteSample(
+                sentInR
+                    + feedbackWriteR
+                        * primaryFeedbackGain));
         validHistorySamples =
             juce::jmin(maxDelaySamples, validHistorySamples + 1);
 
-        // Store feedback samples
-        feedbackSampleL = delayedL;
-        feedbackSampleR = delayedR;
+        // Multi feeds its normalized tap sum back at f*0.96. Base and Dual
+        // keep Engine A's canonical tap. The same normalized topology weights
+        // used at the output keep rapid 3<->4 retargets non-expansive here.
+        feedbackSampleL = finiteSample(
+            delayedL * (baseAmount + dualAmount)
+                + multiDelayedL * multiAmount);
+        feedbackSampleR = finiteSample(
+            delayedR * (baseAmount + dualAmount)
+                + multiDelayedR * multiAmount);
 
-        // Apply stereo width to wet signal
-        float wetL = delayedL;
-        float wetR = delayedR;
-        if (dataR && std::abs(widthVal - 1.0f) > 0.01f)
+        if (extendedModesEnabled)
+        {
+            const auto processSecondaryFeedback =
+                [&] (float input,
+                     float& lowPassState,
+                     float& highPassLowState) noexcept
+                {
+                    if (! std::isfinite(input)
+                        || ! std::isfinite(lowPassState)
+                        || ! std::isfinite(highPassLowState))
+                    {
+                        lowPassState = 0.0f;
+                        highPassLowState = 0.0f;
+                        return 0.0f;
+                    }
+                    lowPassState += dualLowPassCoefficient
+                        * (input - lowPassState);
+                    highPassLowState += dualHighPassCoefficient
+                        * (lowPassState - highPassLowState);
+                    const float filtered =
+                        lowPassState - highPassLowState;
+                    if (! std::isfinite(filtered))
+                    {
+                        lowPassState = 0.0f;
+                        highPassLowState = 0.0f;
+                        return 0.0f;
+                    }
+                    return filtered;
+                };
+            float secondaryFbL = processSecondaryFeedback(
+                secondaryFeedbackSampleL,
+                secondaryLowPassStateL,
+                secondaryHighPassLowStateL);
+            float secondaryFbR = processSecondaryFeedback(
+                secondaryFeedbackSampleR,
+                secondaryLowPassStateR,
+                secondaryHighPassLowStateR);
+            if (dualSaturationAmount > 0.001f)
+            {
+                const float drive =
+                    1.0f + 3.0f * dualSaturationAmount;
+                const float inverseDrive = 1.0f / drive;
+                const float saturatedL =
+                    std::tanh(secondaryFbL * drive)
+                    * inverseDrive;
+                const float saturatedR =
+                    std::tanh(secondaryFbR * drive)
+                    * inverseDrive;
+                secondaryFbL =
+                    secondaryFbL
+                        * (1.0f - dualSaturationAmount)
+                    + saturatedL * dualSaturationAmount;
+                secondaryFbR =
+                    secondaryFbR
+                        * (1.0f - dualSaturationAmount)
+                    + saturatedR * dualSaturationAmount;
+            }
+
+            const float secondaryCrossFeed = juce::jlimit(
+                0.0f,
+                0.48f,
+                0.03f
+                    + pingPongAmount
+                        * (0.09f + 0.16f * topologyValue));
+            const float secondaryFbLMixed =
+                secondaryFbL * (1.0f - secondaryCrossFeed)
+                + secondaryFbR * secondaryCrossFeed;
+            const float secondaryFbRMixed =
+                secondaryFbR * (1.0f - secondaryCrossFeed)
+                + secondaryFbL * secondaryCrossFeed;
+            const float secondaryFeedbackWriteL =
+                secondaryFbLMixed
+                + (secondaryFbRMixed - secondaryFbLMixed)
+                    * pingPongAmount;
+            const float secondaryFeedbackWriteR =
+                secondaryFbRMixed
+                + (secondaryFbLMixed - secondaryFbRMixed)
+                    * pingPongAmount;
+            secondaryDelayLineL.pushSample(
+                0,
+                finiteSample(
+                    sentInL
+                        + secondaryFeedbackWriteL
+                            * dualFeedbackGain));
+            secondaryDelayLineR.pushSample(
+                0,
+                finiteSample(
+                    sentInR
+                        + secondaryFeedbackWriteR
+                            * dualFeedbackGain));
+            secondaryValidHistorySamples = juce::jmin(
+                maxDelaySamples,
+                secondaryValidHistorySamples + 1);
+            secondaryFeedbackSampleL = finiteSample(
+                secondaryDelayedL);
+            secondaryFeedbackSampleR = finiteSample(
+                secondaryDelayedR);
+        }
+
+        const float dualWetCrossFeed = juce::jlimit(
+            0.0f,
+            0.45f,
+            pingPongAmount
+                * (0.20f + 0.20f * topologyValue));
+        const float secondaryWetL =
+            secondaryDelayedL * (1.0f - dualWetCrossFeed)
+            + secondaryDelayedR * dualWetCrossFeed;
+        const float secondaryWetR =
+            secondaryDelayedR * (1.0f - dualWetCrossFeed)
+            + secondaryDelayedL * dualWetCrossFeed;
+        const float dualEngineBWeight =
+            0.35f + 0.15f * topologyValue;
+        const float dualWetL =
+            delayedL * (1.0f - dualEngineBWeight)
+            + secondaryWetL * dualEngineBWeight;
+        const float dualWetR =
+            delayedR * (1.0f - dualEngineBWeight)
+            + secondaryWetR * dualEngineBWeight;
+
+        // Base, Multi and Dual are continuously rendered and selected with a
+        // normalized one-hot crossfade. Even a rapid mid-ramp retarget keeps
+        // the absolute topology weights at one.
+        float wetL = delayedL * baseAmount
+            + multiDelayedL * multiAmount
+            + dualWetL * dualAmount;
+        float wetR = delayedR * baseAmount
+            + multiDelayedR * multiAmount
+            + dualWetR * dualAmount;
+        if (dataR)
         {
             const float mid = (wetL + wetR) * 0.5f;
             const float side = (wetL - wetR) * 0.5f;
@@ -736,111 +2975,652 @@ void S13Delay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& 
         if (dataR)
             dataR[i] = inR * dryGain + wetR * wet * duckGain;
     }
-    // The feedback path is bounded independently by its <= 0.95 coefficient
-    // and optional saturation. Do not hard-clip the mixed output here: at
-    // zero wet level this processor must leave an above-unity dry signal
+    if (delayTimeMorphActive
+        && ! smoothedDelayTimeMorph.isSmoothing())
+    {
+        smoothedDelaySamplesL =
+            delayMorphTargetSamplesL;
+        smoothedDelaySamplesR =
+            delayMorphTargetSamplesR;
+        delayTimeMorphActive = false;
+        smoothedDelayTimeMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    if (feedbackFilterMorphActive
+        && ! smoothedFeedbackFilterMorph.isSmoothing())
+    {
+        feedbackFiltersUseAlternate =
+            ! feedbackFiltersUseAlternate;
+        feedbackFilterMorphActive = false;
+        smoothedFeedbackFilterMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    // The feedback path is bounded by its <= 0.95 coefficient and
+    // non-expansive character curves. Do not hard-clip the mixed output here:
+    // at zero wet level this processor must leave an above-unity dry signal
     // sample-transparent for the NAM rack.
     clearNonFiniteSamples(buffer);
+    publishLiveTailBoundFromAudioState(buffer.getNumSamples());
+}
+
+void S13Delay::reset()
+{
+    publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    resetTailState();
 }
 
 void S13Delay::resetTailState() noexcept
 {
+    // Rack tail completion runs from the realtime callback. Physically clearing
+    // four long DelayLine buffers here would touch tens of megabytes in one
+    // callback. Logical history invalidation below makes every stale sample
+    // unreadable until its ring position has been overwritten; physical clears
+    // remain confined to prepare/release lifecycle methods.
     validHistorySamples = 0;
+    secondaryValidHistorySamples = 0;
     feedbackSampleL = 0.0f;
     feedbackSampleR = 0.0f;
+    secondaryFeedbackSampleL = 0.0f;
+    secondaryFeedbackSampleR = 0.0f;
+    secondaryHighPassLowStateL = 0.0f;
+    secondaryHighPassLowStateR = 0.0f;
+    secondaryLowPassStateL = 0.0f;
+    secondaryLowPassStateR = 0.0f;
     duckEnvelope = 0.0f;
+    modulationPhase = 0.0f;
+    flutterPhase = 1.173f;
+    secondaryModulationPhase = 0.613f;
+    const auto finiteOr = [] (float value, float fallback) noexcept
+    {
+        return std::isfinite(value) ? value : fallback;
+    };
+    const int currentMode = loadDelayMode(
+        delayMode,
+        extendedModesEnabled ? 4 : 2,
+        extendedModesEnabled,
+        extendedModesEnabled ? 1.0f : 0.0f);
+    smoothedTapeMode.setCurrentAndTargetValue(
+        currentMode == 1 || currentMode == 3 ? 1.0f : 0.0f);
+    smoothedAnalogMode.setCurrentAndTargetValue(
+        currentMode == 2 ? 1.0f : 0.0f);
+    smoothedMultiMode.setCurrentAndTargetValue(
+        currentMode == 3 ? 1.0f : 0.0f);
+    smoothedDualMode.setCurrentAndTargetValue(
+        currentMode == 4 ? 1.0f : 0.0f);
+    smoothedPingPong.setCurrentAndTargetValue(
+        finiteOr(
+            pingPong.load(std::memory_order_relaxed), 0.0f)
+                >= 0.5f
+            ? 1.0f
+            : 0.0f);
+    smoothedDucking.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            finiteOr(
+                ducking.load(std::memory_order_relaxed), 0.0f)));
+    smoothedWowDepthMs.setCurrentAndTargetValue(
+        resolveRequestedWowDepthMs());
+    smoothedWowRateHz.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.01f,
+            4.0f,
+            finiteOr(
+                wowRateHz.load(std::memory_order_relaxed), 0.37f)));
+    smoothedFlutterDepthMs.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            finiteOr(
+                flutterDepthMs.load(std::memory_order_relaxed), 0.0f)));
+    smoothedFlutterRateHz.setCurrentAndTargetValue(
+        juce::jlimit(
+            1.0f,
+            16.0f,
+            finiteOr(
+                flutterRateHz.load(std::memory_order_relaxed), 6.4f)));
+    const auto envelopeCoefficient = [this] (float milliseconds)
+    {
+        const float seconds = juce::jmax(
+            0.0001f, milliseconds * 0.001f);
+        return 1.0f - std::exp(
+            -1.0f
+            / (seconds
+               * static_cast<float>(
+                   juce::jmax(1.0, cachedSampleRate))));
+    };
+    smoothedDuckAttackCoefficient.setCurrentAndTargetValue(
+        envelopeCoefficient(juce::jlimit(
+            1.0f,
+            100.0f,
+            finiteOr(
+                duckAttackMs.load(std::memory_order_relaxed), 8.0f))));
+    smoothedDuckReleaseCoefficient.setCurrentAndTargetValue(
+        envelopeCoefficient(juce::jlimit(
+            20.0f,
+            2000.0f,
+            finiteOr(
+                duckReleaseMs.load(std::memory_order_relaxed), 180.0f))));
+    smoothedDuckMaximumReduction.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            0.95f,
+            finiteOr(
+                duckMaxReduction.load(std::memory_order_relaxed), 0.82f)));
+    const auto onePoleCoefficient = [this] (float frequencyHz) noexcept
+    {
+        return 1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * frequencyHz
+            / static_cast<float>(juce::jmax(1.0, cachedSampleRate)));
+    };
+    smoothedFeedback.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 0.95f,
+            finiteOr(
+                feedback.load(std::memory_order_relaxed), 0.0f)));
+    smoothedCrossFeed.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 0.95f,
+            finiteOr(
+                crossFeed.load(std::memory_order_relaxed), 0.0f)));
+    smoothedSaturation.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            finiteOr(
+                fbSaturation.load(std::memory_order_relaxed), 0.0f)));
+    smoothedWidth.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 2.0f,
+            finiteOr(
+                stereoWidth.load(std::memory_order_relaxed), 1.0f)));
+    smoothedTopologyControl.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            finiteOr(
+                topologyControl.load(std::memory_order_relaxed), 0.18f)));
+    smoothedMultiFeedback.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 0.95f,
+            finiteOr(
+                multiFeedback.load(std::memory_order_relaxed), 0.2112f)));
+    smoothedDualTimeRatio.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.5f, 1.0f,
+            finiteOr(
+                dualTimeRatio.load(std::memory_order_relaxed), 0.59f)));
+    smoothedDualFeedback.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 0.95f,
+            finiteOr(
+                dualFeedback.load(std::memory_order_relaxed), 0.185152f)));
+    smoothedDualLowPassCoefficient.setCurrentAndTargetValue(
+        onePoleCoefficient(juce::jlimit(
+            200.0f,
+            20000.0f,
+            finiteOr(
+                dualLowPassHz.load(std::memory_order_relaxed), 8260.0f))));
+    smoothedDualHighPassCoefficient.setCurrentAndTargetValue(
+        onePoleCoefficient(juce::jlimit(
+            20.0f,
+            2000.0f,
+            finiteOr(
+                dualHighPassHz.load(std::memory_order_relaxed), 85.7f))));
+    smoothedDualSaturation.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            finiteOr(
+                dualSaturation.load(std::memory_order_relaxed), 0.234f)));
+    smoothedDualModDepthMs.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 4.0f,
+            finiteOr(
+                dualModDepthMs.load(std::memory_order_relaxed), 0.255f)));
+    smoothedDualModRateHz.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.01f, 4.0f,
+            finiteOr(
+                dualModRateHz.load(std::memory_order_relaxed), 0.235f)));
+    const float publishedBpm = publishedTempoBpm.load(
+        std::memory_order_relaxed);
+    const double currentBpm = std::isfinite(publishedBpm)
+            && publishedBpm >= 10.0f
+        ? static_cast<double>(publishedBpm)
+        : 120.0;
+    const bool currentTempoSync = loadDelayParameter(
+        tempoSync, 0.0f, 1.0f, 0.0f) >= 0.5f;
+    const float currentDelayMsL = currentTempoSync
+        ? syncNoteToMs(
+              loadDelayParameter(syncNoteL, 0.0f, 8.0f, 0.0f),
+              currentBpm)
+        : loadDelayParameter(delayTimeL, 1.0f, 2000.0f, 250.0f);
+    const float currentDelayMsR = currentTempoSync
+        ? syncNoteToMs(
+              loadDelayParameter(syncNoteR, 0.0f, 8.0f, 0.0f),
+              currentBpm)
+        : loadDelayParameter(delayTimeR, 1.0f, 2000.0f, 250.0f);
+    requestedDelaySamplesL = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        currentDelayMsL * 0.001f
+            * static_cast<float>(juce::jmax(1.0, cachedSampleRate)));
+    requestedDelaySamplesR = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        currentDelayMsR * 0.001f
+            * static_cast<float>(juce::jmax(1.0, cachedSampleRate)));
+    smoothedDelaySamplesL = requestedDelaySamplesL;
+    smoothedDelaySamplesR = requestedDelaySamplesR;
+    delayMorphTargetSamplesL = requestedDelaySamplesL;
+    delayMorphTargetSamplesR = requestedDelaySamplesR;
+    pendingDelaySamplesL = requestedDelaySamplesL;
+    pendingDelaySamplesR = requestedDelaySamplesR;
+    delayTimeMorphActive = false;
+    delayTimeChangePending = false;
+    smoothedDelayTimeMorph
+        .setCurrentAndTargetValue(0.0f);
     feedbackLPF_L.reset();
     feedbackLPF_R.reset();
     feedbackHPF_L.reset();
     feedbackHPF_R.reset();
+    alternateFeedbackLPF_L.reset();
+    alternateFeedbackLPF_R.reset();
+    alternateFeedbackHPF_L.reset();
+    alternateFeedbackHPF_R.reset();
+    lastLPFFreq = loadDelayParameter(
+        lpfFreq, 200.0f, 20000.0f, 20000.0f);
+    lastHPFFreq = loadDelayParameter(
+        hpfFreq, 20.0f, 2000.0f, 20.0f);
+    if (! feedbackLPFCoefficientLut.empty()
+        && ! feedbackHPFCoefficientLut.empty())
+    {
+        pendingFeedbackLPFCoefficients = lookupRealtimeFilterLut(
+            feedbackLPFCoefficientLut,
+            cachedSampleRate,
+            lastLPFFreq,
+            200.0f,
+            20000.0f);
+        pendingFeedbackHPFCoefficients = lookupRealtimeFilterLut(
+            feedbackHPFCoefficientLut,
+            cachedSampleRate,
+            lastHPFFreq,
+            20.0f,
+            2000.0f);
+        writeRealtimeFilterCoefficients(
+            feedbackLPF_L,
+            feedbackLPF_R,
+            pendingFeedbackLPFCoefficients);
+        writeRealtimeFilterCoefficients(
+            alternateFeedbackLPF_L,
+            alternateFeedbackLPF_R,
+            pendingFeedbackLPFCoefficients);
+        writeRealtimeFilterCoefficients(
+            feedbackHPF_L,
+            feedbackHPF_R,
+            pendingFeedbackHPFCoefficients);
+        writeRealtimeFilterCoefficients(
+            alternateFeedbackHPF_L,
+            alternateFeedbackHPF_R,
+            pendingFeedbackHPFCoefficients);
+    }
+    feedbackFiltersUseAlternate = false;
+    feedbackFilterMorphActive = false;
+    feedbackFilterChangePending = false;
+    smoothedFeedbackFilterMorph
+        .setCurrentAndTargetValue(0.0f);
+    sendReleaseStateL = 0.0f;
+    sendReleaseStateR = 0.0f;
+    smoothedInputSend.setCurrentAndTargetValue(
+        loadDelayParameter(inputSend, 0.0f, 1.0f, 1.0f));
     smoothedMix.setCurrentAndTargetValue(0.0f);
     smoothedDryGain.setCurrentAndTargetValue(1.0f);
+    publishedLiveTailSeconds.store(0.0f, std::memory_order_relaxed);
+}
+
+void S13Delay::resetRackRuntimeMixState(
+    float send,
+    bool preserveUnityDry) noexcept
+{
+    const float boundedSend = sanitizeDelayParameter(
+        send, 0.0f, 1.0f, 0.0f);
+    const float requestedMix = loadDelayParameter(
+        mix, 0.0f, 1.0f, 0.5f);
+    inputSend.store(boundedSend, std::memory_order_relaxed);
+    unityDry.store(
+        preserveUnityDry ? 1.0f : 0.0f,
+        std::memory_order_relaxed);
+    smoothedInputSend.setCurrentAndTargetValue(boundedSend);
+    smoothedMix.setCurrentAndTargetValue(requestedMix);
+    smoothedDryGain.setCurrentAndTargetValue(
+        preserveUnityDry ? 1.0f : 1.0f - requestedMix);
 }
 
 void S13Delay::releaseResources()
 {
+    publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
     delayLineL.reset();
     delayLineR.reset();
+    if (extendedModesEnabled)
+    {
+        secondaryDelayLineL.reset();
+        secondaryDelayLineR.reset();
+    }
     feedbackLPF_L.reset();
     feedbackLPF_R.reset();
     feedbackHPF_L.reset();
     feedbackHPF_R.reset();
+    alternateFeedbackLPF_L.reset();
+    alternateFeedbackLPF_R.reset();
+    alternateFeedbackHPF_L.reset();
+    alternateFeedbackHPF_R.reset();
     feedbackSampleL = 0.0f;
     feedbackSampleR = 0.0f;
-    smoothedDelaySamplesL = static_cast<float>(0.25 * cachedSampleRate);
-    smoothedDelaySamplesR = static_cast<float>(0.25 * cachedSampleRate);
+    secondaryFeedbackSampleL = 0.0f;
+    secondaryFeedbackSampleR = 0.0f;
+    secondaryHighPassLowStateL = 0.0f;
+    secondaryHighPassLowStateR = 0.0f;
+    secondaryLowPassStateL = 0.0f;
+    secondaryLowPassStateR = 0.0f;
+    const float resetDelaySamplesL = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        static_cast<float>(
+            loadDelayParameter(
+                delayTimeL, 1.0f, 2000.0f, 250.0f)
+            * 0.001
+            * cachedSampleRate));
+    const float resetDelaySamplesR = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxDelaySamples - 1),
+        static_cast<float>(
+            loadDelayParameter(
+                delayTimeR, 1.0f, 2000.0f, 250.0f)
+            * 0.001
+            * cachedSampleRate));
+    smoothedDelaySamplesL = resetDelaySamplesL;
+    smoothedDelaySamplesR = resetDelaySamplesR;
+    delayMorphTargetSamplesL = resetDelaySamplesL;
+    delayMorphTargetSamplesR = resetDelaySamplesR;
+    pendingDelaySamplesL = resetDelaySamplesL;
+    pendingDelaySamplesR = resetDelaySamplesR;
+    requestedDelaySamplesL = resetDelaySamplesL;
+    requestedDelaySamplesR = resetDelaySamplesR;
+    delayTimeMorphActive = false;
+    delayTimeChangePending = false;
+    smoothedDelayTimeMorph
+        .setCurrentAndTargetValue(0.0f);
     duckEnvelope = 0.0f;
+    sendReleaseStateL = 0.0f;
+    sendReleaseStateR = 0.0f;
     modulationPhase = 0.0f;
+    flutterPhase = 1.173f;
+    secondaryModulationPhase = 0.613f;
     validHistorySamples = 0;
+    secondaryValidHistorySamples = 0;
     inputSend.store(1.0f, std::memory_order_relaxed);
     unityDry.store(0.0f, std::memory_order_relaxed);
-    const float initialMix =
-        juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed));
+    const float initialMix = loadDelayParameter(
+        mix, 0.0f, 1.0f, 0.5f);
     smoothedMix.setCurrentAndTargetValue(initialMix);
     smoothedDryGain.setCurrentAndTargetValue(1.0f - initialMix);
+    feedbackFiltersUseAlternate = false;
+    feedbackFilterMorphActive = false;
+    feedbackFilterChangePending = false;
+    smoothedFeedbackFilterMorph
+        .setCurrentAndTargetValue(0.0f);
+    publishedLiveTailSeconds.store(0.0f, std::memory_order_relaxed);
+}
+
+void S13Delay::publishLiveTailBoundFromAudioState(
+    int processedSamples) noexcept
+{
+    const double sampleRate = juce::jmax(1.0, cachedSampleRate);
+    const float previousPublishedValue = publishedLiveTailSeconds.load(
+        std::memory_order_relaxed);
+    const double previousRemainingTail = std::isfinite(previousPublishedValue)
+        ? juce::jmax(
+              0.0,
+              static_cast<double>(previousPublishedValue)
+                  - static_cast<double>(juce::jmax(0, processedSamples))
+                      / sampleRate)
+        : 0.0;
+    const auto publishConservativeTail = [this] (double seconds) noexcept
+    {
+        const double bounded = juce::jmax(0.0, seconds);
+        float published = static_cast<float>(bounded);
+        if (static_cast<double>(published) < bounded)
+        {
+            published = std::nextafter(
+                published,
+                std::numeric_limits<float>::infinity());
+        }
+        publishedLiveTailSeconds.store(
+            published, std::memory_order_relaxed);
+    };
+    const auto finiteSmootherMaximum = [] (const auto& smoother,
+                                            float minimum,
+                                            float maximum) noexcept
+    {
+        const float current = smoother.getCurrentValue();
+        const float target = smoother.getTargetValue();
+        return juce::jlimit(
+            minimum,
+            maximum,
+            juce::jmax(
+                std::isfinite(current) ? current : minimum,
+                std::isfinite(target) ? target : minimum));
+    };
+    const float liveMix = finiteSmootherMaximum(
+        smoothedMix, 0.0f, 1.0f);
+    if (liveMix <= 0.0001f)
+    {
+        publishConservativeTail(previousRemainingTail);
+        return;
+    }
+
+    const auto finiteDelaySamples = [this] (float samples) noexcept
+    {
+        return std::isfinite(samples)
+            ? juce::jlimit(
+                  1.0f,
+                  static_cast<float>(juce::jmax(2, maxDelaySamples) - 1),
+                  samples)
+            : 1.0f;
+    };
+    const float maximumHeadSamples = std::max({
+        finiteDelaySamples(smoothedDelaySamplesL),
+        finiteDelaySamples(smoothedDelaySamplesR),
+        finiteDelaySamples(delayMorphTargetSamplesL),
+        finiteDelaySamples(delayMorphTargetSamplesR),
+        finiteDelaySamples(pendingDelaySamplesL),
+        finiteDelaySamples(pendingDelaySamplesR),
+        finiteDelaySamples(requestedDelaySamplesL),
+        finiteDelaySamples(requestedDelaySamplesR) });
+    const float primaryModulationMs =
+        finiteSmootherMaximum(smoothedWowDepthMs, 0.0f, 4.0f)
+        + finiteSmootherMaximum(smoothedFlutterDepthMs, 0.0f, 1.0f);
+    const float secondaryModulationMs = extendedModesEnabled
+        ? finiteSmootherMaximum(smoothedDualModDepthMs, 0.0f, 4.0f)
+        : 0.0f;
+    const double maximumReadDelaySeconds = juce::jmin(
+        static_cast<double>(juce::jmax(1, maxDelaySamples - 1))
+            / sampleRate,
+        static_cast<double>(maximumHeadSamples) / sampleRate
+            + static_cast<double>(juce::jmax(
+                  primaryModulationMs,
+                  secondaryModulationMs))
+                * 0.001);
+    // The recursive sample pushed this frame was read on the previous frame.
+    // Count that one-sample unit delay on every feedback interval.
+    const double maximumFeedbackIntervalSeconds =
+        maximumReadDelaySeconds + 1.0 / sampleRate;
+
+    double maximumFeedback = static_cast<double>(finiteSmootherMaximum(
+        smoothedFeedback, 0.0f, 0.95f));
+    if (extendedModesEnabled)
+    {
+        maximumFeedback = juce::jmax(
+            maximumFeedback,
+            static_cast<double>(finiteSmootherMaximum(
+                smoothedMultiFeedback, 0.0f, 0.95f)));
+        maximumFeedback = juce::jmax(
+            maximumFeedback,
+            static_cast<double>(finiteSmootherMaximum(
+                smoothedDualFeedback, 0.0f, 0.95f)));
+    }
+    const double maximumOutputGain = juce::jmax(
+        1.0,
+        static_cast<double>(finiteSmootherMaximum(
+            smoothedWidth, 0.0f, 2.0f)));
+    const double internalMinus60Threshold =
+        0.001 / maximumOutputGain;
+    const double tailIntervals = maximumFeedback > 0.0001
+        ? std::log(internalMinus60Threshold)
+              / std::log(maximumFeedback)
+            + 1.0
+        : 1.0;
+    const double delayTimeTransitionSeconds =
+        std::isfinite(embeddedModulationSmoothingSeconds)
+            && embeddedModulationSmoothingSeconds > 0.0
+        ? juce::jlimit(
+              0.0, 0.5, embeddedModulationSmoothingSeconds)
+        : 0.03;
+    const double transitionSeconds =
+        (delayTimeMorphActive ? delayTimeTransitionSeconds : 0.0)
+        + (delayTimeChangePending ? delayTimeTransitionSeconds : 0.0)
+        + (smoothedMultiMode.isSmoothing()
+           || smoothedDualMode.isSmoothing()
+               ? 0.12
+               : 0.0);
+    const double bound = maximumFeedbackIntervalSeconds
+            * juce::jmax(1.0, tailIntervals)
+        + transitionSeconds;
+    const double maximumSupportedIntervals =
+        std::log(0.001 / 2.0) / std::log(0.95) + 1.0;
+    const double maximumPublishableTail =
+        (static_cast<double>(maximumDelaySeconds) + 1.0 / sampleRate)
+            * maximumSupportedIntervals
+        + delayTimeTransitionSeconds * 2.0
+        + 0.12;
+    publishConservativeTail(juce::jmax(
+        previousRemainingTail,
+        juce::jlimit(0.0, maximumPublishableTail, bound)));
 }
 
 double S13Delay::getTailLengthSeconds() const
 {
-    if (mix.load(std::memory_order_relaxed) <= 0.0001f)
+    const float publishedLiveTailValue =
+        publishedLiveTailSeconds.load(std::memory_order_relaxed);
+    const double publishedLiveTail =
+        std::isfinite(publishedLiveTailValue)
+            ? juce::jmax(
+                  0.0, static_cast<double>(publishedLiveTailValue))
+            : 0.0;
+    const float requestedMix = loadDelayParameter(
+        mix, 0.0f, 1.0f, 0.5f);
+    if (requestedMix <= 0.0001f && publishedLiveTail <= 0.0)
         return 0.0;
 
-    double bpm = 120.0;
-    if (auto* currentPlayHead = getPlayHead())
-    {
-        const auto position = currentPlayHead->getPosition();
-        if (position.hasValue())
-            if (const auto positionBpm = position->getBpm())
-                bpm = *positionBpm;
-    }
+    const float publishedBpm = publishedTempoBpm.load(
+        std::memory_order_relaxed);
+    // Before the first audio callback there is no legal host-tempo query.
+    // Ten BPM is the supported worst case, so this cannot under-report a
+    // tempo-synchronised tail. Once audio runs, use its published BPM.
+    const double bpm = std::isfinite(publishedBpm)
+            && publishedBpm >= 10.0f
+        ? static_cast<double>(publishedBpm)
+        : 10.0;
 
     float maximumDelayMs = 0.0f;
-    if (tempoSync.load(std::memory_order_relaxed) >= 0.5f)
+    if (loadDelayParameter(
+            tempoSync, 0.0f, 1.0f, 0.0f) >= 0.5f)
     {
-        maximumDelayMs = juce::jmax(syncNoteToMs(syncNoteL.load(std::memory_order_relaxed), bpm),
-                                    syncNoteToMs(syncNoteR.load(std::memory_order_relaxed), bpm));
+        maximumDelayMs = juce::jmax(
+            syncNoteToMs(
+                loadDelayParameter(syncNoteL, 0.0f, 8.0f, 0.0f), bpm),
+            syncNoteToMs(
+                loadDelayParameter(syncNoteR, 0.0f, 8.0f, 0.0f), bpm));
     }
     else
     {
         maximumDelayMs = juce::jmax(
-            juce::jlimit(1.0f, 2000.0f, delayTimeL.load(std::memory_order_relaxed)),
-            juce::jlimit(1.0f, 2000.0f, delayTimeR.load(std::memory_order_relaxed)));
+            loadDelayParameter(delayTimeL, 1.0f, 2000.0f, 250.0f),
+            loadDelayParameter(delayTimeR, 1.0f, 2000.0f, 250.0f));
     }
 
-    if (juce::jlimit(0, 2, static_cast<int>(delayMode.load(std::memory_order_relaxed))) == 1)
-    {
-        const float saturation = juce::jlimit(0.0f, 1.0f, fbSaturation.load(std::memory_order_relaxed));
-        maximumDelayMs += 1.8f * (0.25f + saturation * 0.75f);
-    }
+    const float primaryModulationMs =
+        resolveRequestedWowDepthMs()
+        + loadDelayParameter(
+            flutterDepthMs, 0.0f, 1.0f, 0.0f);
+    const float requestedMode = loadDelayParameter(
+        delayMode, 0.0f, 4.0f, 0.0f);
+    const float secondaryModulationMs = requestedMode >= 3.5f
+        ? loadDelayParameter(
+              dualModDepthMs, 0.0f, 4.0f, 0.255f)
+        : 0.0f;
+    maximumDelayMs += juce::jmax(
+        primaryModulationMs,
+        secondaryModulationMs);
+
     maximumDelayMs = juce::jmin(maximumDelaySeconds * 1000.0f, maximumDelayMs);
 
-    const double currentFeedback = juce::jlimit(
-        0.0, 0.95, static_cast<double>(feedback.load(std::memory_order_relaxed)));
-    const double repeatsToMinus60 = currentFeedback > 0.0001
-        ? std::log(0.001) / std::log(currentFeedback)
+    double currentFeedback = static_cast<double>(loadDelayParameter(
+        feedback, 0.0f, 0.95f, 0.4f));
+    if (requestedMode >= 2.5f && requestedMode < 3.5f)
+    {
+        currentFeedback = juce::jmax(
+            currentFeedback,
+            static_cast<double>(loadDelayParameter(
+                multiFeedback, 0.0f, 0.95f, 0.2112f)));
+    }
+    else if (requestedMode >= 3.5f)
+    {
+        currentFeedback = juce::jmax(
+            currentFeedback,
+            static_cast<double>(loadDelayParameter(
+                dualFeedback, 0.0f, 0.95f, 0.185152f)));
+    }
+    const double maximumOutputGain = juce::jmax(
+        1.0,
+        static_cast<double>(loadDelayParameter(
+            stereoWidth, 0.0f, 2.0f, 1.0f)));
+    const double internalMinus60Threshold =
+        0.001 / maximumOutputGain;
+    const double tailIntervals = currentFeedback > 0.0001
+        ? std::log(internalMinus60Threshold)
+              / std::log(currentFeedback)
+            + 1.0
         : 1.0;
-    return static_cast<double>(maximumDelayMs) * 0.001
-         * juce::jmax(1.0, repeatsToMinus60);
+    const double requestedTail = requestedMix > 0.0001f
+        ? (static_cast<double>(maximumDelayMs) * 0.001
+               + 1.0 / juce::jmax(1.0, cachedSampleRate))
+              * juce::jmax(1.0, tailIntervals)
+        : 0.0;
+    return juce::jmax(requestedTail, publishedLiveTail);
 }
 
 void S13Delay::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "S13Delay", {
-        { "delayTimeL",   delayTimeL.load() },
-        { "delayTimeR",   delayTimeR.load() },
-        { "feedback",     feedback.load() },
-        { "crossFeed",    crossFeed.load() },
-        { "mix",          mix.load() },
-        { "pingPong",     pingPong.load() },
-        { "tempoSync",    tempoSync.load() },
-        { "syncNoteL",    syncNoteL.load() },
-        { "syncNoteR",    syncNoteR.load() },
-        { "lpfFreq",      lpfFreq.load() },
-        { "hpfFreq",      hpfFreq.load() },
-        { "fbSaturation", fbSaturation.load() },
-        { "stereoWidth",  stereoWidth.load() },
-        { "delayMode",    delayMode.load() },
-        { "ducking",      ducking.load() }
+        { "delayTimeL",   loadDelayParameter(delayTimeL, 1.0f, 2000.0f, 250.0f) },
+        { "delayTimeR",   loadDelayParameter(delayTimeR, 1.0f, 2000.0f, 250.0f) },
+        { "feedback",     loadDelayParameter(feedback, 0.0f, 0.95f, 0.4f) },
+        { "crossFeed",    loadDelayParameter(crossFeed, 0.0f, 0.95f, 0.0f) },
+        { "mix",          loadDelayParameter(mix, 0.0f, 1.0f, 0.5f) },
+        { "pingPong",     loadDelayParameter(pingPong, 0.0f, 1.0f, 0.0f) },
+        { "tempoSync",    loadDelayParameter(tempoSync, 0.0f, 1.0f, 0.0f) },
+        { "syncNoteL",    loadDelayParameter(syncNoteL, 0.0f, 8.0f, 0.0f) },
+        { "syncNoteR",    loadDelayParameter(syncNoteR, 0.0f, 8.0f, 0.0f) },
+        { "lpfFreq",      loadDelayParameter(lpfFreq, 200.0f, 20000.0f, 20000.0f) },
+        { "hpfFreq",      loadDelayParameter(hpfFreq, 20.0f, 2000.0f, 20.0f) },
+        { "fbSaturation", loadDelayParameter(fbSaturation, 0.0f, 1.0f, 0.0f) },
+        { "stereoWidth",  loadDelayParameter(stereoWidth, 0.0f, 2.0f, 1.0f) },
+        { "delayMode",    extendedModesEnabled
+                                ? static_cast<float>(loadDelayMode(
+                                      delayMode, 4, true, 1.0f))
+                                : loadDelayParameter(
+                                      delayMode, 0.0f, 2.0f, 0.0f) },
+        { "ducking",      loadDelayParameter(ducking, 0.0f, 1.0f, 0.0f) }
     });
 }
 
@@ -850,21 +3630,41 @@ void S13Delay::setStateInformation(const void* data, int sizeInBytes)
     if (!tree.isValid())
         return;
 
-    delayTimeL   = static_cast<float>((double)tree.getProperty("delayTimeL", 250.0));
-    delayTimeR   = static_cast<float>((double)tree.getProperty("delayTimeR", 250.0));
-    feedback     = static_cast<float>((double)tree.getProperty("feedback", 0.4));
-    crossFeed    = static_cast<float>((double)tree.getProperty("crossFeed", 0.0));
-    mix          = static_cast<float>((double)tree.getProperty("mix", 0.5));
-    pingPong     = static_cast<float>((double)tree.getProperty("pingPong", 0.0));
-    tempoSync    = static_cast<float>((double)tree.getProperty("tempoSync", 0.0));
-    syncNoteL    = static_cast<float>((double)tree.getProperty("syncNoteL", 0.0));
-    syncNoteR    = static_cast<float>((double)tree.getProperty("syncNoteR", 0.0));
-    lpfFreq      = static_cast<float>((double)tree.getProperty("lpfFreq", 20000.0));
-    hpfFreq      = static_cast<float>((double)tree.getProperty("hpfFreq", 20.0));
-    fbSaturation = static_cast<float>((double)tree.getProperty("fbSaturation", 0.0));
-    stereoWidth  = static_cast<float>((double)tree.getProperty("stereoWidth", 1.0));
-    delayMode    = static_cast<float>((double)tree.getProperty("delayMode", 0.0));
-    ducking      = static_cast<float>((double)tree.getProperty("ducking", 0.0));
+    const auto restored = [&tree] (const char* property,
+                                   float minimum,
+                                   float maximum,
+                                   float fallback) noexcept
+    {
+        return sanitizeDelayParameter(
+            static_cast<float>(static_cast<double>(
+                tree.getProperty(property, fallback))),
+            minimum,
+            maximum,
+            fallback);
+    };
+    delayTimeL = restored("delayTimeL", 1.0f, 2000.0f, 250.0f);
+    delayTimeR = restored("delayTimeR", 1.0f, 2000.0f, 250.0f);
+    feedback = restored("feedback", 0.0f, 0.95f, 0.4f);
+    crossFeed = restored("crossFeed", 0.0f, 0.95f, 0.0f);
+    mix = restored("mix", 0.0f, 1.0f, 0.5f);
+    pingPong = restored("pingPong", 0.0f, 1.0f, 0.0f);
+    tempoSync = restored("tempoSync", 0.0f, 1.0f, 0.0f);
+    syncNoteL = restored("syncNoteL", 0.0f, 8.0f, 0.0f);
+    syncNoteR = restored("syncNoteR", 0.0f, 8.0f, 0.0f);
+    lpfFreq = restored("lpfFreq", 200.0f, 20000.0f, 20000.0f);
+    hpfFreq = restored("hpfFreq", 20.0f, 2000.0f, 20.0f);
+    fbSaturation = restored("fbSaturation", 0.0f, 1.0f, 0.0f);
+    stereoWidth = restored("stereoWidth", 0.0f, 2.0f, 1.0f);
+    const float restoredMode = restored(
+        "delayMode",
+        0.0f,
+        extendedModesEnabled ? 4.0f : 2.0f,
+        extendedModesEnabled ? 1.0f : 0.0f);
+    delayMode = extendedModesEnabled
+        ? static_cast<float>(
+              static_cast<int>(std::floor(restoredMode + 0.5f)))
+        : restoredMode;
+    ducking = restored("ducking", 0.0f, 1.0f, 0.0f);
 }
 
 bool S13Delay::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -882,13 +3682,22 @@ bool S13Delay::isBusesLayoutSupported(const BusesLayout& layouts) const
 //  S13OctaveShimmerShifter
 // ============================================================================
 
-void S13OctaveShimmerShifter::prepare(double sampleRate)
+void S13OctaveShimmerShifter::prepare(double sampleRate,
+                                      float grainDurationSeconds,
+                                      float initialPhase)
 {
     const float safeSampleRate =
         static_cast<float>(juce::jmax(1.0, sampleRate));
     grainWindowSamples = juce::jmax(
         64,
-        juce::roundToInt(safeSampleRate * 0.075f));
+        juce::roundToInt(
+            safeSampleRate
+            * juce::jlimit(
+                0.040f,
+                0.140f,
+                grainDurationSeconds)));
+    historyAvailabilityFadeSamples =
+        juce::jmax(1.0f, safeSampleRate * 0.005f);
     minimumDelaySamples = juce::jmax(
         8.0f, safeSampleRate * 0.0015f);
     const int requiredBufferSamples =
@@ -911,6 +3720,9 @@ void S13OctaveShimmerShifter::prepare(double sampleRate)
         - std::exp(
             -juce::MathConstants<float>::twoPi
             * 8200.0f / safeSampleRate);
+    resetGrainPhase =
+        initialPhase
+        - std::floor(initialPhase);
     juce::ignoreUnused(getModulationSineLut());
     reset();
 }
@@ -919,7 +3731,7 @@ void S13OctaveShimmerShifter::reset() noexcept
 {
     writeIndex = 0;
     validHistorySamples = 0;
-    grainPhase = 0.0f;
+    grainPhase = resetGrainPhase;
     highPassState = 0.0f;
     lowPassState = 0.0f;
 }
@@ -929,9 +3741,11 @@ float S13OctaveShimmerShifter::readFractionalDelay(
 {
     const int ringSize =
         static_cast<int>(delayBuffer.size());
+    const float requiredHistory =
+        std::ceil(delaySamples) + 2.0f;
     if (ringSize <= 4
         || static_cast<float>(validHistorySamples)
-            < std::ceil(delaySamples) + 2.0f)
+            < requiredHistory)
         return 0.0f;
 
     float readPosition =
@@ -955,16 +3769,21 @@ float S13OctaveShimmerShifter::readFractionalDelay(
         nextIndex + 1 < ringSize
             ? nextIndex + 1
             : 0;
+    const auto finiteHistorySample =
+        [&] (int index) noexcept
+        {
+            const float value =
+                delayBuffer[static_cast<size_t>(index)];
+            return std::isfinite(value) ? value : 0.0f;
+        };
     const float previous =
-        delayBuffer[static_cast<size_t>(
-            previousIndex)];
+        finiteHistorySample(previousIndex);
     const float current =
-        delayBuffer[static_cast<size_t>(index0)];
+        finiteHistorySample(index0);
     const float next =
-        delayBuffer[static_cast<size_t>(nextIndex)];
+        finiteHistorySample(nextIndex);
     const float nextNext =
-        delayBuffer[static_cast<size_t>(
-            nextNextIndex)];
+        finiteHistorySample(nextNextIndex);
 
     const float coefficient0 =
         -0.5f * previous
@@ -978,12 +3797,32 @@ float S13OctaveShimmerShifter::readFractionalDelay(
         - 0.5f * nextNext;
     const float coefficient2 =
         -0.5f * previous + 0.5f * next;
-    return ((coefficient0 * fraction
-             + coefficient1)
-                * fraction
-            + coefficient2)
-                * fraction
+    const float interpolated =
+        ((coefficient0 * fraction
+          + coefficient1)
+             * fraction
+         + coefficient2)
+             * fraction
         + current;
+
+    // A newly valid grain tap used to jump from exact zero to its full
+    // interpolated value in one sample. Shimmer can be enabled over an
+    // already-live tank, so that history boundary was audible as an isolated
+    // click. Fade availability over a five-millisecond history margin;
+    // steady-state grains retain the original interpolation and gain.
+    const float historyMargin =
+        static_cast<float>(validHistorySamples)
+        - requiredHistory;
+    const float linearAvailability =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            historyMargin
+                / historyAvailabilityFadeSamples);
+    const float availability =
+        linearAvailability * linearAvailability
+        * (3.0f - 2.0f * linearAvailability);
+    return interpolated * availability;
 }
 
 float S13OctaveShimmerShifter::processSample(
@@ -1022,12 +3861,19 @@ float S13OctaveShimmerShifter::processSample(
             * firstWeight
         + readFractionalDelay(secondDelay)
             * (1.0f - firstWeight);
+    const float safeShifted =
+        std::isfinite(shifted) ? shifted : 0.0f;
+
+    if (! std::isfinite(highPassState))
+        highPassState = 0.0f;
+    if (! std::isfinite(lowPassState))
+        lowPassState = 0.0f;
 
     highPassState +=
-        (shifted - highPassState)
+        (safeShifted - highPassState)
         * highPassCoefficient;
     const float highPassed =
-        shifted - highPassState;
+        safeShifted - highPassState;
     lowPassState +=
         (highPassed - lowPassState)
         * lowPassCoefficient;
@@ -1041,9 +3887,14 @@ float S13OctaveShimmerShifter::processSample(
     if (grainPhase >= 1.0f)
         grainPhase -= 1.0f;
 
-    return std::isfinite(lowPassState)
-        ? lowPassState
-        : 0.0f;
+    if (! std::isfinite(lowPassState))
+    {
+        highPassState = 0.0f;
+        lowPassState = 0.0f;
+        return 0.0f;
+    }
+
+    return lowPassState;
 }
 
 
@@ -1058,30 +3909,177 @@ S13Reverb::S13Reverb()
 {
 }
 
+void S13Delay::setEmbeddedModulationSmoothingSeconds(
+    double seconds) noexcept
+{
+    const double requestedSeconds =
+        juce::jlimit(0.0, 0.5, seconds);
+    if (std::abs(
+            requestedSeconds
+            - embeddedModulationSmoothingSeconds)
+        <= 1.0e-9)
+    {
+        return;
+    }
+
+    embeddedModulationSmoothingSeconds = requestedSeconds;
+
+    // A portable DSP-version switch may happen while audio is running. Retain
+    // every current/target pair and only retime the remaining transition; JUCE
+    // SmoothedValue::reset() otherwise snaps current to target.
+    const auto retime = [this] (
+        auto& smoother,
+        double embeddedSeconds,
+        double standaloneSeconds)
+    {
+        const float current = smoother.getCurrentValue();
+        const float target = smoother.getTargetValue();
+        smoother.setCurrentAndTargetValue(current);
+        smoother.reset(
+            cachedSampleRate,
+            embeddedModulationSmoothingSeconds > 0.0
+                ? embeddedSeconds
+                : standaloneSeconds);
+        smoother.setTargetValue(target);
+    };
+    retime(smoothedCrossFeed, requestedSeconds, 0.02);
+    retime(smoothedSaturation, requestedSeconds, 0.025);
+    retime(smoothedWidth, requestedSeconds, 0.02);
+    retime(smoothedDelayTimeMorph, requestedSeconds, 0.03);
+}
+
+void S13Reverb::calculateV4TankDelaySamples(
+    float sizeScale,
+    std::array<int, lateLineCount>& destination) const noexcept
+{
+    const int maximumDelay =
+        juce::jmax(
+            2,
+            lateTankBuffer.getNumSamples() - 2);
+    const float boundedScale =
+        juce::jlimit(
+            1.0f,
+            kReverbV4MaximumTankSizeScale,
+            sizeScale);
+    for (int line = 0;
+         line < lateLineCount;
+         ++line)
+    {
+        int delaySamples =
+            juce::roundToInt(
+                static_cast<float>(
+                    v3LateDelaySamples[
+                        static_cast<size_t>(line)])
+                * boundedScale);
+        if ((delaySamples & 1) == 0)
+            ++delaySamples;
+        delaySamples =
+            juce::jlimit(
+                2,
+                maximumDelay,
+                delaySamples);
+        if ((delaySamples & 1) == 0
+            && delaySamples > 2)
+        {
+            --delaySamples;
+        }
+        destination[static_cast<size_t>(line)] =
+            delaySamples;
+    }
+}
+
 void S13Reverb::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
-
-    juce::dsp::ProcessSpec spec;
-    spec.sampleRate = sampleRate;
-    spec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
-    spec.numChannels = 2;
-
-    reverb.prepare(spec);
-    reverb.reset();
     smoothedWetLevel.reset(sampleRate, 0.02);
     smoothedDryLevel.reset(sampleRate, 0.02);
     smoothedEarlyLevel.reset(sampleRate, 0.02);
+    smoothedInputSend.reset(sampleRate, 0.008);
     smoothedShimmerAmount.reset(sampleRate, 0.04);
+    smoothedV2Width.reset(sampleRate, 0.04);
+    smoothedV2Ducking.reset(sampleRate, 0.04);
+    smoothedV2Movement.reset(sampleRate, 0.08);
+    smoothedV2EarlyLate.reset(sampleRate, 0.04);
+    smoothedV2Diffusion.reset(sampleRate, 0.08);
+    smoothedV2ShimmerRegen.reset(sampleRate, 0.06);
+    smoothedV5AlternativeVoiceBlend.reset(sampleRate, 0.08);
+    smoothedV3PreDelayMorph.reset(sampleRate, 0.03);
+    smoothedV3LoopDampingCoefficient.reset(sampleRate, 0.06);
+    smoothedV4TankSizeMorph.reset(sampleRate, 0.08);
+    smoothedV3WetFilterMorph.reset(sampleRate, 0.015);
     smoothedWetLevel.setCurrentAndTargetValue(juce::jlimit(0.0f, 1.0f, wetLevel.load()));
     smoothedDryLevel.setCurrentAndTargetValue(juce::jlimit(0.0f, 1.0f, dryLevel.load()));
     smoothedEarlyLevel.setCurrentAndTargetValue(juce::jlimit(0.0f, 1.0f, earlyLevel.load()));
+    smoothedInputSend.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            inputSend.load(std::memory_order_relaxed)));
     smoothedShimmerAmount.setCurrentAndTargetValue(
         juce::jlimit(
             0.0f, 1.0f,
             shimmerAmount.load(
                 std::memory_order_relaxed)));
+    smoothedV2Width.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.25f,
+            width.load(std::memory_order_relaxed)));
+    smoothedV2Ducking.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            ducking.load(std::memory_order_relaxed)));
+    smoothedV2Movement.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            movement.load(std::memory_order_relaxed)));
+    smoothedV2EarlyLate.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            earlyLate.load(std::memory_order_relaxed)));
+    smoothedV2Diffusion.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            diffusion.load(std::memory_order_relaxed)));
+    smoothedV2ShimmerRegen.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            shimmerRegen.load(std::memory_order_relaxed)));
+    const bool initialAlternativeVoice =
+        engineVersion.load(std::memory_order_relaxed)
+                >= kReverbV5SelectionFloor
+        && sanitizeReverbV5VoiceIndex(
+               rackVoice.load(std::memory_order_relaxed))
+            != S13NAMRack::studioReverbVoice;
+    smoothedV5AlternativeVoiceBlend.setCurrentAndTargetValue(
+        initialAlternativeVoice ? 1.0f : 0.0f);
+    smoothedV4TankSizeMorph
+        .setCurrentAndTargetValue(0.0f);
+    const float initialV3PreDelaySamples =
+        juce::jlimit(
+            0.0f,
+            500.0f,
+            preDelay.load(std::memory_order_relaxed))
+        * 0.001f
+        * static_cast<float>(
+            juce::jmax(1.0, sampleRate));
+    v3ActivePreDelaySamples =
+        initialV3PreDelaySamples;
+    v3MorphTargetPreDelaySamples =
+        initialV3PreDelaySamples;
+    v3PendingPreDelaySamples =
+        initialV3PreDelaySamples;
+    v3RequestedPreDelaySamples =
+        initialV3PreDelaySamples;
+    v3PreDelayMorphActive = false;
+    v3PreDelayChangePending = false;
+    smoothedV3PreDelayMorph
+        .setCurrentAndTargetValue(0.0f);
     shimmerShifter.prepare(sampleRate);
+    v2ShimmerShifters[0].prepare(
+        sampleRate, 0.078f, 0.0f);
+    v2ShimmerShifters[1].prepare(
+        sampleRate, 0.078f, 0.25f);
+    v3ShimmerWasActive = false;
 
     // Prepare pre-delay lines
     juce::dsp::ProcessSpec monoSpec;
@@ -1103,15 +4101,33 @@ void S13Reverb::prepareToPlay(double sampleRate, int samplesPerBlock)
     wetLowCutR.reset();
     wetHighCutL.reset();
     wetHighCutR.reset();
+    v3WetLowCutAlternateL.reset();
+    v3WetLowCutAlternateR.reset();
+    v3WetHighCutAlternateL.reset();
+    v3WetHighCutAlternateR.reset();
 
     auto lcCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, 20.0f);
     wetLowCutL.coefficients = lcCoeffs;
     wetLowCutR.coefficients = lcCoeffs;
+    auto alternateLcCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeHighPass(
+            sampleRate, 20.0f);
+    v3WetLowCutAlternateL.coefficients =
+        alternateLcCoeffs;
+    v3WetLowCutAlternateR.coefficients =
+        alternateLcCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 500.0f, true);
 
     auto hcCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, 20000.0f);
     wetHighCutL.coefficients = hcCoeffs;
     wetHighCutR.coefficients = hcCoeffs;
+    auto alternateHcCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeLowPass(
+            sampleRate, 20000.0f);
+    v3WetHighCutAlternateL.coefficients =
+        alternateHcCoeffs;
+    v3WetHighCutAlternateR.coefficients =
+        alternateHcCoeffs;
     prepareRealtimeFilterLut(highCutCoefficientLut, sampleRate, 1000.0f, 20000.0f, false);
     lastLowCut = 20.0f;
     lastHighCut = 20000.0f;
@@ -1123,6 +4139,24 @@ void S13Reverb::prepareToPlay(double sampleRate, int samplesPerBlock)
         wetHighCutL,
         wetHighCutR,
         lookupRealtimeFilterLut(highCutCoefficientLut, sampleRate, lastHighCut, 1000.0f, 20000.0f));
+    writeRealtimeFilterCoefficients(
+        v3WetLowCutAlternateL,
+        v3WetLowCutAlternateR,
+        lookupRealtimeFilterLut(
+            lowCutCoefficientLut,
+            sampleRate,
+            lastLowCut,
+            20.0f,
+            500.0f));
+    writeRealtimeFilterCoefficients(
+        v3WetHighCutAlternateL,
+        v3WetHighCutAlternateR,
+        lookupRealtimeFilterLut(
+            highCutCoefficientLut,
+            sampleRate,
+            lastHighCut,
+            1000.0f,
+            20000.0f));
 
     const int scratchChannels = juce::jmax(2, getTotalNumOutputChannels());
     const int scratchSamples = juce::jmax(samplesPerBlock, 16384);
@@ -1131,19 +4165,516 @@ void S13Reverb::prepareToPlay(double sampleRate, int samplesPerBlock)
     earlyReflectionBuffer.setSize(2, juce::jmax(samplesPerBlock + 8, static_cast<int>(std::ceil(sampleRate * 0.12))), false, false, true);
     earlyReflectionBuffer.clear();
     earlyReflectionWriteIndex = 0;
-    lateTankBuffer.setSize(lateLineCount, juce::jmax(samplesPerBlock + 8, static_cast<int>(std::ceil(sampleRate * 2.5))), false, false, true);
+    // The legacy engine's largest supported line is below 300 ms. Retain its
+    // exact algorithm while avoiding the historical 2.5-second allocation for
+    // every one of its eight lines.
+    lateTankBuffer.setSize(
+        lateLineCount,
+        juce::jmax(
+            samplesPerBlock + 8,
+            static_cast<int>(
+                std::ceil(sampleRate * 0.35))),
+        false,
+        false,
+        true);
     lateTankBuffer.clear();
     lateTankWriteIndex = 0;
     lateDampingState.fill(0.0f);
     validEarlyHistorySamples = 0;
     validPreDelayHistorySamples = 0;
     validLateHistorySamples = 0;
-    inputSend.store(1.0f, std::memory_order_relaxed);
     for (size_t line = 0; line < lateModPhase.size(); ++line)
         lateModPhase[line] = static_cast<float>(line) * 0.77f;
+
+    // Reverb V2 uses one tightly-packed allocation whose segments are sized
+    // only for the selected fixed line lengths plus the maximum modulation
+    // excursion and interpolation guard samples.
+    constexpr std::array<float, v2LateLineCount>
+        v2BaseDelayMs {
+            17.31f, 19.73f, 22.27f, 25.13f,
+            28.31f, 31.67f, 35.29f, 39.11f,
+            43.37f, 47.83f, 52.97f, 58.73f,
+            65.11f, 72.17f, 79.91f, 88.27f
+        };
+    const int modulationGuardSamples =
+        juce::jmax(
+            3,
+            juce::roundToInt(
+                static_cast<float>(sampleRate)
+                * 0.00045f));
+    int v2PoolSamples = 0;
+    for (int line = 0; line < v2LateLineCount; ++line)
+    {
+        int delaySamples = juce::jmax(
+            2,
+            juce::roundToInt(
+                v2BaseDelayMs[static_cast<size_t>(line)]
+                * 0.001f
+                * static_cast<float>(sampleRate)));
+        if ((delaySamples & 1) == 0)
+            ++delaySamples;
+        v2LateDelaySamples[static_cast<size_t>(line)] =
+            delaySamples;
+        v2LateOffsets[static_cast<size_t>(line)] =
+            v2PoolSamples;
+        v2LateCapacities[static_cast<size_t>(line)] =
+            delaySamples + modulationGuardSamples + 5;
+        v2LateWriteIndices[static_cast<size_t>(line)] = 0;
+        v2PoolSamples +=
+            v2LateCapacities[static_cast<size_t>(line)];
+    }
+    v2LatePool.assign(
+        static_cast<size_t>(v2PoolSamples),
+        0.0f);
+
+    constexpr std::array<float, v2DiffusionLineCount>
+        v2DiffusionDelayMs {
+            1.63f, 1.91f,
+            2.71f, 3.17f,
+            4.43f, 5.11f,
+            6.79f, 7.63f
+        };
+    int v2DiffusionSamples = 0;
+    for (int line = 0;
+         line < v2DiffusionLineCount;
+         ++line)
+    {
+        const int lineSamples =
+            juce::jmax(
+                2,
+                juce::roundToInt(
+                    v2DiffusionDelayMs[
+                        static_cast<size_t>(line)]
+                    * 0.001f
+                    * static_cast<float>(sampleRate)));
+        v2DiffusionOffsets[static_cast<size_t>(line)] =
+            v2DiffusionSamples;
+        v2DiffusionCapacities[static_cast<size_t>(line)] =
+            lineSamples;
+        v2DiffusionWriteIndices[static_cast<size_t>(line)] =
+            0;
+        v2DiffusionSamples += lineSamples;
+    }
+    v2DiffusionPool.assign(
+        static_cast<size_t>(v2DiffusionSamples),
+        0.0f);
+    v2LowBandState.fill(0.0f);
+    v2BelowHighBandState.fill(0.0f);
+    v2LowBandGain.fill(0.85f);
+    v2MidBandGain.fill(0.85f);
+    v2HighBandGain.fill(0.75f);
+    v2TargetLowBandGain.fill(0.85f);
+    v2TargetMidBandGain.fill(0.85f);
+    v2TargetHighBandGain.fill(0.75f);
+    v2CachedDecaySeconds = -1.0f;
+    v2CachedBassRatio = -1.0f;
+    v2CachedHighRatio = -1.0f;
+    v2CachedFreeze = false;
+    v2DecayTargetsValid = false;
+    for (size_t line = 0;
+         line < v2ModPhase.size();
+         ++line)
+        v2ModPhase[line] =
+            static_cast<float>(line)
+            * 0.413f;
+    v2ShimmerPreLowPassState.fill(0.0f);
+    v2InputLowPassStateL = 0.0f;
+    v2InputLowPassStateR = 0.0f;
+    v2SideLowPassState = 0.0f;
+    v2DuckEnvelope = 0.0f;
+    v2ValidLateHistorySamples = 0;
+    const float safeSampleRate =
+        static_cast<float>(
+            juce::jmax(1.0, cachedSampleRate));
+    v2CachedInputLowCutHz =
+        juce::jlimit(
+            20.0f,
+            500.0f,
+            lowCut.load(std::memory_order_relaxed));
+    v2InputLowPassCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * v2CachedInputLowCutHz
+            / safeSampleRate);
+    v2GainSmoothingCoefficient =
+        1.0f
+        - std::exp(
+            -1.0f
+            / (0.04f * safeSampleRate));
+    v2LowBandCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 250.0f
+            / safeSampleRate);
+    v2BelowHighBandCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 5200.0f
+            / safeSampleRate);
+    v2BassSideCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 180.0f
+            / safeSampleRate);
+    v2ShimmerPreLowPassCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * juce::jmin(
+                  9000.0f,
+                  safeSampleRate * 0.20f)
+            / safeSampleRate);
+    v2DuckAttackCoefficient =
+        1.0f
+        - std::exp(
+            -1.0f
+            / (0.006f * safeSampleRate));
+    v2DuckReleaseCoefficient =
+        std::exp(
+            -1.0f
+            / (0.28f * safeSampleRate));
+
+    // Every V3 tank line follows a unique incommensurate trajectory. Paired
+    // lengths made a mono input collapse to four identical pairs, cancelling
+    // the side output and exposing a sparse metallic comb. Odd lengths avoid
+    // short common factors at the supported sample rates.
+    constexpr std::array<float, lateLineCount>
+        v3BaseDelayMs {
+            29.7f, 32.9f, 41.1f, 45.7f,
+            58.3f, 64.7f, 75.1f, 83.9f
+        };
+    for (int line = 0; line < lateLineCount; ++line)
+    {
+        int delaySamples = juce::jmax(
+            2,
+            juce::roundToInt(
+                v3BaseDelayMs[static_cast<size_t>(line)]
+                * 0.001f * safeSampleRate));
+        if ((delaySamples & 1) == 0)
+            ++delaySamples;
+        v3LateDelaySamples[static_cast<size_t>(line)] =
+            delaySamples;
+    }
+
+    constexpr std::array<float, v3DiffusionLineCount>
+        v3DiffusionDelayMs {
+            1.31f, 1.57f,
+            2.31f, 2.03f,
+            3.37f, 3.83f,
+            5.43f, 5.03f
+        };
+    int v3DiffusionSamples = 0;
+    for (int line = 0;
+         line < v3DiffusionLineCount;
+         ++line)
+    {
+        int lineSamples = juce::jmax(
+            2,
+            juce::roundToInt(
+                v3DiffusionDelayMs[
+                    static_cast<size_t>(line)]
+                * 0.001f * safeSampleRate));
+        if ((lineSamples & 1) == 0)
+            ++lineSamples;
+        v3DiffusionOffsets[static_cast<size_t>(line)] =
+            v3DiffusionSamples;
+        v3DiffusionCapacities[static_cast<size_t>(line)] =
+            lineSamples;
+        v3DiffusionWriteIndices[static_cast<size_t>(line)] =
+            0;
+        v3DiffusionSamples += lineSamples;
+    }
+    v3DiffusionPool.assign(
+        static_cast<size_t>(v3DiffusionSamples),
+        0.0f);
+    // Two output-only allpasses per side turn the deliberately long V4 tank
+    // onset into a smooth field without changing its feedback norm or the
+    // Householder/shimmer stability relationship. V3 never touches this bank.
+    constexpr std::array<float, v4OutputDiffusionLineCount>
+        v4OutputDiffusionDelayMs {
+            6.7f, 8.1f,
+            14.3f, 12.7f
+        };
+    int v4OutputDiffusionSamples = 0;
+    for (int line = 0;
+         line < v4OutputDiffusionLineCount;
+         ++line)
+    {
+        int lineSamples =
+            juce::jmax(
+                2,
+                juce::roundToInt(
+                    v4OutputDiffusionDelayMs[
+                        static_cast<size_t>(line)]
+                    * 0.001f * safeSampleRate));
+        if ((lineSamples & 1) == 0)
+            ++lineSamples;
+        v4OutputDiffusionOffsets[
+            static_cast<size_t>(line)] =
+                v4OutputDiffusionSamples;
+        v4OutputDiffusionCapacities[
+            static_cast<size_t>(line)] =
+                lineSamples;
+        v4OutputDiffusionWriteIndices[
+            static_cast<size_t>(line)] = 0;
+        v4OutputDiffusionSamples += lineSamples;
+    }
+    v4OutputDiffusionPool.assign(
+        static_cast<size_t>(
+            v4OutputDiffusionSamples),
+        0.0f);
+    v4ValidOutputDiffusionHistorySamples.fill(0);
+    v3LowBandState.fill(0.0f);
+    v3ShimmerInputHighPassState.fill(0.0f);
+    v3ShimmerInputLowPassState.fill(0.0f);
+    v3InputSideLowPassState = 0.0f;
+    v3ValidDiffusionHistorySamples.fill(0);
+    v3TailSilentSamples = 0;
+    v3TailSilent = false;
+    v3ModPhase[0] = 0.0f;
+    v3ModPhase[1] = 2.39996323f;
+    v3ModPhase[2] = 4.79992646f;
+    v3ModPhase[3] = 1.48325885f;
+    v4WasProcessing =
+        engineVersion.load(
+            std::memory_order_relaxed)
+        >= kReverbV4SelectionFloor;
+    v3FeedbackSmoothingCoefficient =
+        1.0f
+        - std::exp(
+            -1.0f
+            / (0.04f * safeSampleRate));
+    v3BassSplitCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 220.0f / safeSampleRate);
+    v3SideBassCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 90.0f / safeSampleRate);
+    v3ShimmerInputHighPassCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 220.0f / safeSampleRate);
+    v3ShimmerInputLowPassCoefficient =
+        1.0f
+        - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 7800.0f / safeSampleRate);
+
+    const float initialDecaySeconds =
+        juce::jlimit(
+            0.2f,
+            12.0f,
+            decayTime.load(std::memory_order_relaxed));
+    const float initialEngineVersion =
+        engineVersion.load(std::memory_order_relaxed);
+    const int initialVoiceIndex =
+        initialEngineVersion >= kReverbV5SelectionFloor
+            ? sanitizeReverbV5VoiceIndex(
+                  rackVoice.load(std::memory_order_relaxed))
+            : S13NAMRack::studioReverbVoice;
+    const float initialV4TankSizeScale =
+        calculateReverbV5TankSizeScale(
+            initialEngineVersion,
+            initialVoiceIndex,
+            initialDecaySeconds);
+    calculateV4TankDelaySamples(
+        initialV4TankSizeScale,
+        v4ActiveLateDelaySamples);
+    v4MorphTargetLateDelaySamples =
+        v4ActiveLateDelaySamples;
+    v4PendingLateDelaySamples =
+        v4ActiveLateDelaySamples;
+    v4ActiveTankSizeScale =
+        initialV4TankSizeScale;
+    v4MorphTargetTankSizeScale =
+        initialV4TankSizeScale;
+    v4PendingTankSizeScale =
+        initialV4TankSizeScale;
+    v4RequestedTankSizeScale =
+        initialV4TankSizeScale;
+    v4TankSizeMorphActive = false;
+    v4TankSizeChangePending = false;
+    smoothedV4TankSizeMorph
+        .setCurrentAndTargetValue(0.0f);
+    const float initialLowDecayRatio =
+        calculateReverbV5LowDecayRatio(
+            initialEngineVersion,
+            initialVoiceIndex,
+            initialV4TankSizeScale,
+            bassDecay.load(std::memory_order_relaxed));
+    for (int line = 0; line < lateLineCount; ++line)
+    {
+        const float lineSeconds =
+            static_cast<float>(
+                v4ActiveLateDelaySamples[
+                    static_cast<size_t>(line)])
+            / safeSampleRate;
+        const float midFeedback =
+            std::exp(
+                std::log(0.001f)
+                * lineSeconds
+                / initialDecaySeconds);
+        const float lowFeedback =
+            std::exp(
+                std::log(0.001f)
+                * lineSeconds
+                / (initialDecaySeconds
+                   * initialLowDecayRatio));
+        v3MidBandFeedback[static_cast<size_t>(line)] =
+            midFeedback;
+        v3LowBandFeedback[static_cast<size_t>(line)] =
+            lowFeedback;
+        v3TargetMidBandFeedback[
+            static_cast<size_t>(line)] = midFeedback;
+        v3TargetLowBandFeedback[
+            static_cast<size_t>(line)] = lowFeedback;
+    }
+
+    const float initialPreDelaySamples =
+        juce::jlimit(
+            0.0f,
+            500.0f,
+            preDelay.load(std::memory_order_relaxed))
+        * 0.001f * safeSampleRate;
+    const float initialLowCutHz =
+        juce::jlimit(
+            20.0f,
+            500.0f,
+            lowCut.load(std::memory_order_relaxed));
+    const float initialHighCutHz =
+        juce::jlimit(
+            1000.0f,
+            20000.0f,
+            highCut.load(std::memory_order_relaxed));
+    const float initialTone =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            (1.0f
+             - damping.load(std::memory_order_relaxed))
+                / 0.82f);
+    v3CachedDecaySeconds =
+        initialDecaySeconds;
+    v4CachedFeedbackSizeScale =
+        initialV4TankSizeScale;
+    v5CachedLowDecayRatio =
+        initialLowDecayRatio;
+    v3CachedLowCutHz =
+        initialLowCutHz;
+    v3CachedHighCutHz =
+        initialHighCutHz;
+    v3CachedTone =
+        initialTone;
+    v3ActivePreDelaySamples =
+        initialPreDelaySamples;
+    v3MorphTargetPreDelaySamples =
+        initialPreDelaySamples;
+    v3PendingPreDelaySamples =
+        initialPreDelaySamples;
+    v3RequestedPreDelaySamples =
+        initialPreDelaySamples;
+    v3PreDelayMorphActive = false;
+    v3PreDelayChangePending = false;
+    smoothedV3PreDelayMorph
+        .setCurrentAndTargetValue(0.0f);
+    if (! lowCutCoefficientLut.empty())
+    {
+        v3PendingLowCutCoefficients =
+            lookupRealtimeFilterLut(
+                lowCutCoefficientLut,
+                cachedSampleRate,
+                initialLowCutHz,
+                20.0f,
+                500.0f);
+        writeRealtimeFilterCoefficients(
+            wetLowCutL,
+            wetLowCutR,
+            v3PendingLowCutCoefficients);
+        writeRealtimeFilterCoefficients(
+            v3WetLowCutAlternateL,
+            v3WetLowCutAlternateR,
+            v3PendingLowCutCoefficients);
+    }
+    if (! highCutCoefficientLut.empty())
+    {
+        v3PendingHighCutCoefficients =
+            lookupRealtimeFilterLut(
+                highCutCoefficientLut,
+                cachedSampleRate,
+                initialHighCutHz,
+                1000.0f,
+                20000.0f);
+        writeRealtimeFilterCoefficients(
+            wetHighCutL,
+            wetHighCutR,
+            v3PendingHighCutCoefficients);
+        writeRealtimeFilterCoefficients(
+            v3WetHighCutAlternateL,
+            v3WetHighCutAlternateR,
+            v3PendingHighCutCoefficients);
+    }
+    lastLowCut = initialLowCutHz;
+    lastHighCut = initialHighCutHz;
+    v3WetFilterUsesAlternate = false;
+    v3WetFilterMorphActive = false;
+    v3WetFilterChangePending = false;
+    smoothedV3WetFilterMorph
+        .setCurrentAndTargetValue(0.0f);
+    v3ActivePreDelaySamples =
+        initialPreDelaySamples;
+    v3MorphTargetPreDelaySamples =
+        initialPreDelaySamples;
+    v3PendingPreDelaySamples =
+        initialPreDelaySamples;
+    v3RequestedPreDelaySamples =
+        initialPreDelaySamples;
+    v3PreDelayMorphActive = false;
+    v3PreDelayChangePending = false;
+    smoothedV3PreDelayMorph
+        .setCurrentAndTargetValue(0.0f);
+    smoothedV3LoopDampingCoefficient
+        .setCurrentAndTargetValue(
+            1.0f
+            - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * (3200.0f + initialTone * 7800.0f)
+                / safeSampleRate));
+    v2InputCoefficientUpdateCount.store(
+        1, std::memory_order_relaxed);
+    resetEmergencyBoundHitCount();
+    resetInputDiagnostics();
 }
 
 void S13Reverb::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    const float selectedEngine =
+        engineVersion.load(std::memory_order_relaxed);
+    if (selectedEngine < 1.5f)
+    {
+        processLegacyBlock(buffer, midi);
+        return;
+    }
+
+    if (selectedEngine >= 2.5f)
+    {
+        processV3Block(buffer, midi);
+        return;
+    }
+
+    processV2Block(buffer, midi);
+}
+
+void S13Reverb::processLegacyBlock(juce::AudioBuffer<float>& buffer,
+                                   juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
@@ -1164,8 +4695,28 @@ void S13Reverb::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
         0.0f,
         1.0f,
         shimmerAmount.load(std::memory_order_relaxed));
-    const float sendGain = juce::jlimit(
-        0.0f, 1.0f, inputSend.load(std::memory_order_relaxed));
+    const float sendTarget = juce::jlimit(
+        0.0f,
+        1.0f,
+        inputSend.load(std::memory_order_relaxed));
+    smoothedInputSend.setTargetValue(sendTarget);
+    const float sendStart =
+        smoothedInputSend.getCurrentValue();
+    const float sendEnd =
+        smoothedInputSend.skip(numSamples);
+    const float sendInterpolationScale =
+        1.0f
+        / static_cast<float>(juce::jmax(1, numSamples));
+    const auto inputSendForSample =
+        [sendStart,
+         sendEnd,
+         sendInterpolationScale] (int sample) noexcept
+    {
+        return sendStart
+            + (sendEnd - sendStart)
+                * static_cast<float>(sample + 1)
+                * sendInterpolationScale;
+    };
     smoothedWetLevel.setTargetValue(wetLvl);
     smoothedDryLevel.setTargetValue(dryLvl);
     smoothedEarlyLevel.setTargetValue(earlyLvl);
@@ -1281,7 +4832,11 @@ void S13Reverb::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const float inL = dryBuffer.getSample(0, i) * sendGain;
+            const float sendGain =
+                inputSendForSample(i);
+            const float inL =
+                dryBuffer.getSample(0, i)
+                * sendGain;
             const float inR = (numChannels >= 2
                 ? dryBuffer.getSample(1, i)
                 : dryBuffer.getSample(0, i)) * sendGain;
@@ -1326,7 +4881,11 @@ void S13Reverb::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
     auto* pR = numChannels >= 2 ? buffer.getWritePointer(1) : nullptr;
     for (int i = 0; i < numSamples; ++i)
     {
-        const float sentL = dryBuffer.getSample(0, i) * sendGain;
+        const float sendGain =
+            inputSendForSample(i);
+        const float sentL =
+            dryBuffer.getSample(0, i)
+            * sendGain;
         const float sentR = (pR != nullptr
             ? dryBuffer.getSample(1, i)
             : dryBuffer.getSample(0, i)) * sendGain;
@@ -1588,33 +5147,3644 @@ void S13Reverb::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
     clearNonFiniteSamples(buffer);
 }
 
+void S13Reverb::processV2Block(juce::AudioBuffer<float>& buffer,
+                               juce::MidiBuffer& midi)
+{
+    juce::ignoreUnused(midi);
+    juce::ScopedNoDenormals noDenormals;
+
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    if (numChannels < 1 || numSamples <= 0)
+        return;
+
+    if (dryBuffer.getNumChannels() < numChannels
+        || dryBuffer.getNumSamples() < numSamples
+        || earlyOutputBuffer.getNumChannels() < numChannels
+        || earlyOutputBuffer.getNumSamples() < numSamples
+        || v2LatePool.empty()
+        || v2DiffusionPool.empty())
+    {
+        buffer.clear();
+        return;
+    }
+
+    const int algorithmIndex = juce::jlimit(
+        0,
+        3,
+        static_cast<int>(
+            std::round(
+                algorithm.load(
+                    std::memory_order_relaxed))));
+    const auto selectedAlgorithm =
+        static_cast<Algorithm>(algorithmIndex);
+    const int character =
+        selectedAlgorithm == Algorithm::Room
+            ? 0
+            : (selectedAlgorithm == Algorithm::Hall
+                   ? 2
+                   : 1);
+    const float preDelayMs = juce::jlimit(
+        0.0f,
+        500.0f,
+        preDelay.load(std::memory_order_relaxed));
+    const float preDelaySamples =
+        preDelayMs * 0.001f
+        * static_cast<float>(cachedSampleRate);
+    const float lowCutHz = juce::jlimit(
+        20.0f,
+        500.0f,
+        lowCut.load(std::memory_order_relaxed));
+    if (lowCutHz != v2CachedInputLowCutHz)
+    {
+        v2CachedInputLowCutHz = lowCutHz;
+        v2InputLowPassCoefficient =
+            1.0f
+            - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * lowCutHz
+                / static_cast<float>(
+                    juce::jmax(
+                        1.0,
+                        cachedSampleRate)));
+        v2InputCoefficientUpdateCount.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    const float highCutHz = juce::jlimit(
+        1000.0f,
+        20000.0f,
+        highCut.load(std::memory_order_relaxed));
+    const float wetTarget = juce::jlimit(
+        0.0f,
+        1.0f,
+        wetLevel.load(std::memory_order_relaxed));
+    const float dryTarget = juce::jlimit(
+        0.0f,
+        1.0f,
+        dryLevel.load(std::memory_order_relaxed));
+    const float earlyTarget = juce::jlimit(
+        0.0f,
+        1.0f,
+        earlyLevel.load(std::memory_order_relaxed));
+    const float shimmerTarget = juce::jlimit(
+        0.0f,
+        1.0f,
+        shimmerAmount.load(std::memory_order_relaxed));
+    const float sendTarget = juce::jlimit(
+        0.0f,
+        1.0f,
+        inputSend.load(std::memory_order_relaxed));
+    const bool freeze =
+        freezeMode.load(std::memory_order_relaxed)
+        >= 0.5f;
+
+    smoothedWetLevel.setTargetValue(wetTarget);
+    smoothedDryLevel.setTargetValue(dryTarget);
+    smoothedEarlyLevel.setTargetValue(earlyTarget);
+    smoothedInputSend.setTargetValue(sendTarget);
+    smoothedShimmerAmount.setTargetValue(shimmerTarget);
+    smoothedV2Width.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.25f,
+            width.load(std::memory_order_relaxed)));
+    smoothedV2Ducking.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            ducking.load(std::memory_order_relaxed)));
+    smoothedV2Movement.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            movement.load(std::memory_order_relaxed)));
+    smoothedV2EarlyLate.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            earlyLate.load(std::memory_order_relaxed)));
+    smoothedV2Diffusion.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            diffusion.load(std::memory_order_relaxed)));
+    smoothedV2ShimmerRegen.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            shimmerRegen.load(
+                std::memory_order_relaxed)));
+    const float sendStart =
+        smoothedInputSend.getCurrentValue();
+    const float sendEnd =
+        smoothedInputSend.skip(numSamples);
+    const float sendInterpolationScale =
+        1.0f
+        / static_cast<float>(juce::jmax(1, numSamples));
+    const auto inputSendForSample =
+        [sendStart,
+         sendEnd,
+         sendInterpolationScale] (int sample) noexcept
+    {
+        return sendStart
+            + (sendEnd - sendStart)
+                * static_cast<float>(sample + 1)
+                * sendInterpolationScale;
+    };
+
+    const bool processShimmer =
+        shimmerTarget > 0.0001f
+        || smoothedShimmerAmount.getCurrentValue()
+            > 0.0001f
+        || smoothedShimmerAmount.isSmoothing();
+
+    if (std::abs(lowCutHz - lastLowCut) > 1.0f)
+    {
+        lastLowCut = lowCutHz;
+        if (! lowCutCoefficientLut.empty())
+            writeRealtimeFilterCoefficients(
+                wetLowCutL,
+                wetLowCutR,
+                lookupRealtimeFilterLut(
+                    lowCutCoefficientLut,
+                    cachedSampleRate,
+                    lowCutHz,
+                    20.0f,
+                    500.0f));
+    }
+    if (std::abs(highCutHz - lastHighCut) > 8.0f)
+    {
+        lastHighCut = highCutHz;
+        if (! highCutCoefficientLut.empty())
+            writeRealtimeFilterCoefficients(
+                wetHighCutL,
+                wetHighCutR,
+                lookupRealtimeFilterLut(
+                    highCutCoefficientLut,
+                    cachedSampleRate,
+                    highCutHz,
+                    1000.0f,
+                    20000.0f));
+    }
+
+    for (int channel = 0;
+         channel < numChannels;
+         ++channel)
+        dryBuffer.copyFrom(
+            channel,
+            0,
+            buffer,
+            channel,
+            0,
+            numSamples);
+    earlyOutputBuffer.clear(0, numSamples);
+
+    // Symmetric true-stereo 2x2 early field. Every input reaches both outputs
+    // through a distinct direct/cross tap time rather than polarity-only
+    // widening.
+    constexpr std::array<float, 8> roomTapMs {
+        3.1f, 5.7f, 8.9f, 12.7f,
+        17.3f, 22.9f, 28.7f, 36.1f
+    };
+    constexpr std::array<float, 8> plateTapMs {
+        6.7f, 10.9f, 15.1f, 20.3f,
+        26.9f, 34.7f, 43.1f, 53.3f
+    };
+    constexpr std::array<float, 8> hallTapMs {
+        10.7f, 16.1f, 22.9f, 30.7f,
+        39.7f, 49.9f, 61.1f, 74.3f
+    };
+    constexpr std::array<float, 8> crossDeltaMs {
+        0.7f, 1.3f, 0.9f, 1.7f,
+        1.1f, 2.1f, 1.5f, 2.7f
+    };
+    constexpr std::array<float, 8> directTapGain {
+        0.46f, -0.34f, 0.28f, -0.23f,
+        0.19f, -0.15f, 0.12f, -0.09f
+    };
+    constexpr std::array<float, 8> crossTapGain {
+        0.17f, 0.14f, -0.13f, 0.11f,
+        -0.10f, 0.085f, -0.071f, 0.058f
+    };
+    const auto& selectedTapMs =
+        character == 0
+            ? roomTapMs
+            : (character == 1
+                   ? plateTapMs
+                   : hallTapMs);
+    std::array<int, 8> directTapSamples {};
+    std::array<int, 8> crossTapSamples {};
+    const int earlyRingSize =
+        earlyReflectionBuffer.getNumSamples();
+    for (size_t tap = 0;
+         tap < selectedTapMs.size();
+         ++tap)
+    {
+        directTapSamples[tap] =
+            juce::jlimit(
+                1,
+                earlyRingSize - 1,
+                juce::roundToInt(
+                    selectedTapMs[tap]
+                    * 0.001f
+                    * static_cast<float>(
+                        cachedSampleRate)));
+        crossTapSamples[tap] =
+            juce::jlimit(
+                1,
+                earlyRingSize - 1,
+                juce::roundToInt(
+                    (selectedTapMs[tap]
+                     + crossDeltaMs[tap])
+                    * 0.001f
+                    * static_cast<float>(
+                        cachedSampleRate)));
+    }
+    const float earlyDiffusionScale =
+        0.72f
+        + juce::jlimit(
+              0.0f,
+              1.0f,
+              diffusion.load(
+                  std::memory_order_relaxed))
+            * 0.24f;
+    for (int sample = 0;
+         sample < numSamples;
+         ++sample)
+    {
+        const float sendGain =
+            inputSendForSample(sample);
+        const float wetExcitationGain =
+            sendGain
+            * (freeze ? 0.0f : 1.0f);
+        const float inputL =
+            dryBuffer.getSample(0, sample)
+            * wetExcitationGain;
+        const float inputR =
+            (numChannels >= 2
+                 ? dryBuffer.getSample(1, sample)
+                 : dryBuffer.getSample(0, sample))
+            * wetExcitationGain;
+        earlyReflectionBuffer.setSample(
+            0,
+            earlyReflectionWriteIndex,
+            inputL);
+        earlyReflectionBuffer.setSample(
+            1,
+            earlyReflectionWriteIndex,
+            inputR);
+
+        float earlyL = 0.0f;
+        float earlyR = 0.0f;
+        for (size_t tap = 0;
+             tap < directTapSamples.size();
+             ++tap)
+        {
+            const int directOffset =
+                directTapSamples[tap];
+            const int crossOffset =
+                crossTapSamples[tap];
+            int directIndex =
+                earlyReflectionWriteIndex
+                - directOffset;
+            int crossIndex =
+                earlyReflectionWriteIndex
+                - crossOffset;
+            if (directIndex < 0)
+                directIndex += earlyRingSize;
+            if (crossIndex < 0)
+                crossIndex += earlyRingSize;
+
+            if (directOffset
+                <= validEarlyHistorySamples)
+            {
+                const float directGain =
+                    directTapGain[tap]
+                    * earlyDiffusionScale;
+                earlyL +=
+                    earlyReflectionBuffer.getSample(
+                        0,
+                        directIndex)
+                    * directGain;
+                earlyR +=
+                    earlyReflectionBuffer.getSample(
+                        1,
+                        directIndex)
+                    * directGain;
+            }
+            if (crossOffset
+                <= validEarlyHistorySamples)
+            {
+                const float crossGain =
+                    crossTapGain[tap]
+                    * earlyDiffusionScale;
+                earlyL +=
+                    earlyReflectionBuffer.getSample(
+                        1,
+                        crossIndex)
+                    * crossGain;
+                earlyR +=
+                    earlyReflectionBuffer.getSample(
+                        0,
+                        crossIndex)
+                    * crossGain;
+            }
+        }
+        earlyOutputBuffer.setSample(
+            0,
+            sample,
+            earlyL);
+        if (numChannels >= 2)
+            earlyOutputBuffer.setSample(
+                1,
+                sample,
+                earlyR);
+        earlyReflectionWriteIndex =
+            (earlyReflectionWriteIndex + 1)
+            % earlyRingSize;
+        validEarlyHistorySamples =
+            juce::jmin(
+                earlyRingSize,
+                validEarlyHistorySamples + 1);
+    }
+
+    // Prevent low-frequency energy from entering the recursive field. The
+    // public Low Cut still also shapes the final wet sum.
+    const float inputLowPassCoefficient =
+        v2InputLowPassCoefficient;
+    const float effectivePreDelaySamples =
+        juce::jmax(1.0f, preDelaySamples);
+    preDelayLineL.setDelay(
+        effectivePreDelaySamples);
+    preDelayLineR.setDelay(
+        effectivePreDelaySamples);
+    auto* preDelayedL =
+        buffer.getWritePointer(0);
+    auto* preDelayedR =
+        numChannels >= 2
+            ? buffer.getWritePointer(1)
+            : nullptr;
+    for (int sample = 0;
+         sample < numSamples;
+         ++sample)
+    {
+        const float sendGain =
+            inputSendForSample(sample);
+        const float sentL =
+            dryBuffer.getSample(0, sample)
+            * sendGain
+            * (freeze ? 0.0f : 1.0f);
+        const float sentR =
+            (numChannels >= 2
+                 ? dryBuffer.getSample(1, sample)
+                 : dryBuffer.getSample(0, sample))
+            * sendGain
+            * (freeze ? 0.0f : 1.0f);
+        v2InputLowPassStateL +=
+            (sentL - v2InputLowPassStateL)
+            * inputLowPassCoefficient;
+        v2InputLowPassStateR +=
+            (sentR - v2InputLowPassStateR)
+            * inputLowPassCoefficient;
+        const float highPassedL =
+            sentL - v2InputLowPassStateL;
+        const float highPassedR =
+            sentR - v2InputLowPassStateR;
+
+        preDelayLineL.pushSample(
+            0,
+            highPassedL);
+        preDelayLineR.pushSample(
+            0,
+            highPassedR);
+        const float delayedL =
+            preDelayLineL.popSample(0);
+        const float delayedR =
+            preDelayLineR.popSample(0);
+        const bool historyValid =
+            static_cast<float>(
+                validPreDelayHistorySamples)
+            >= std::ceil(
+                effectivePreDelaySamples);
+        preDelayedL[sample] =
+            preDelaySamples > 0.5f
+                ? (historyValid
+                       ? delayedL
+                       : 0.0f)
+                : highPassedL;
+        if (preDelayedR != nullptr)
+            preDelayedR[sample] =
+                preDelaySamples > 0.5f
+                    ? (historyValid
+                           ? delayedR
+                           : 0.0f)
+                    : highPassedR;
+        validPreDelayHistorySamples =
+            juce::jmin(
+                juce::roundToInt(
+                    static_cast<float>(
+                        cachedSampleRate)
+                    * 0.5f)
+                    + 2,
+                validPreDelayHistorySamples
+                    + 1);
+    }
+
+    const float decaySeconds =
+        juce::jlimit(
+            0.1f,
+            20.0f,
+            decayTime.load(
+                std::memory_order_relaxed));
+    const float brightness =
+        1.0f
+        - juce::jlimit(
+              0.0f,
+              1.0f,
+              damping.load(
+                  std::memory_order_relaxed));
+    const float bassRatio =
+        juce::jlimit(
+            0.40f,
+            1.0f,
+            bassDecay.load(
+                std::memory_order_relaxed));
+    const float characterHighOffset =
+        character == 0
+            ? -0.06f
+            : (character == 1
+                   ? 0.10f
+                   : -0.12f);
+    const float highRatio =
+        juce::jlimit(
+            0.18f,
+            1.05f,
+            0.22f
+                + brightness * 0.76f
+                + characterHighOffset);
+    const float lowT60 =
+        juce::jmax(
+            0.12f,
+            decaySeconds * bassRatio);
+    const float highT60 =
+        juce::jmax(
+            0.10f,
+            decaySeconds * highRatio);
+    const bool updateDecayTargets =
+        ! v2DecayTargetsValid
+        || decaySeconds != v2CachedDecaySeconds
+        || bassRatio != v2CachedBassRatio
+        || highRatio != v2CachedHighRatio
+        || freeze != v2CachedFreeze;
+    if (updateDecayTargets)
+    {
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const float lineSeconds =
+                static_cast<float>(
+                    v2LateDelaySamples[lineIndex])
+                / static_cast<float>(
+                    juce::jmax(
+                        1.0,
+                        cachedSampleRate));
+            if (freeze)
+            {
+                v2TargetLowBandGain[lineIndex] =
+                    0.99995f;
+                v2TargetMidBandGain[lineIndex] =
+                    0.99995f;
+                v2TargetHighBandGain[lineIndex] =
+                    0.99995f;
+            }
+            else
+            {
+                v2TargetLowBandGain[lineIndex] =
+                    std::pow(
+                        0.001f,
+                        lineSeconds / lowT60);
+                v2TargetMidBandGain[lineIndex] =
+                    std::pow(
+                        0.001f,
+                        lineSeconds
+                            / decaySeconds);
+                v2TargetHighBandGain[lineIndex] =
+                    std::pow(
+                        0.001f,
+                        lineSeconds / highT60);
+            }
+        }
+        v2CachedDecaySeconds = decaySeconds;
+        v2CachedBassRatio = bassRatio;
+        v2CachedHighRatio = highRatio;
+        v2CachedFreeze = freeze;
+        v2DecayTargetsValid = true;
+    }
+    if (v2ValidLateHistorySamples == 0)
+    {
+        v2LowBandGain = v2TargetLowBandGain;
+        v2MidBandGain = v2TargetMidBandGain;
+        v2HighBandGain = v2TargetHighBandGain;
+    }
+
+    const float gainSmoothingCoefficient =
+        v2GainSmoothingCoefficient;
+    const float lowBandCoefficient =
+        v2LowBandCoefficient;
+    const float belowHighCoefficient =
+        v2BelowHighBandCoefficient;
+    const float bassSideCoefficient =
+        v2BassSideCoefficient;
+    const float shimmerPreLowPassCoefficient =
+        v2ShimmerPreLowPassCoefficient;
+
+    constexpr std::array<int, 4>
+        modulatedLines {
+            1, 5, 10, 14
+        };
+    constexpr std::array<float, 4>
+        modulationRatesHz {
+            0.071f, 0.103f, 0.137f, 0.181f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        preMatrixSigns {
+            1.0f, -1.0f, 1.0f, 1.0f,
+            -1.0f, 1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, -1.0f, 1.0f,
+            -1.0f, -1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<int, v2LateLineCount>
+        matrixPermutation {
+            0, 5, 10, 15,
+            7, 2, 13, 8,
+            3, 14, 1, 12,
+            11, 6, 9, 4
+        };
+    constexpr std::array<float, v2LateLineCount>
+        postMatrixSigns {
+            1.0f, 1.0f, -1.0f, 1.0f,
+            -1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, 1.0f,
+            -1.0f, 1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        inputMidSigns {
+            1.0f, 1.0f, 1.0f, 1.0f,
+            1.0f, 1.0f, 1.0f, 1.0f,
+            -1.0f, -1.0f, -1.0f, -1.0f,
+            -1.0f, -1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        inputSideSigns {
+            1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        outputLeftSigns {
+            1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f,
+            -1.0f, 1.0f, -1.0f, 1.0f,
+            -1.0f, 1.0f, -1.0f, 1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        outputRightSigns {
+            1.0f, 1.0f, -1.0f, -1.0f,
+            -1.0f, -1.0f, 1.0f, 1.0f,
+            1.0f, 1.0f, -1.0f, -1.0f,
+            -1.0f, -1.0f, 1.0f, 1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        shimmerProjection0 {
+            1.0f, 1.0f, 1.0f, 1.0f,
+            -1.0f, -1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, 1.0f, 1.0f,
+            -1.0f, -1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        shimmerProjection1 {
+            1.0f, 1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        shimmerInjection0 {
+            1.0f, -1.0f, -1.0f, 1.0f,
+            1.0f, -1.0f, -1.0f, 1.0f,
+            -1.0f, 1.0f, 1.0f, -1.0f,
+            -1.0f, 1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<float, v2LateLineCount>
+        shimmerInjection1 {
+            1.0f, -1.0f, 1.0f, -1.0f,
+            -1.0f, 1.0f, -1.0f, 1.0f,
+            -1.0f, 1.0f, -1.0f, 1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f
+        };
+
+    auto readV2Line =
+        [&] (int line,
+             float delaySamplesToRead) noexcept
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const int capacity =
+                v2LateCapacities[lineIndex];
+            delaySamplesToRead =
+                juce::jlimit(
+                    1.0f,
+                    static_cast<float>(
+                        capacity - 3),
+                    delaySamplesToRead);
+            if (static_cast<float>(
+                    v2ValidLateHistorySamples)
+                < std::ceil(
+                    delaySamplesToRead))
+                return 0.0f;
+
+            float readPosition =
+                static_cast<float>(
+                    v2LateWriteIndices[lineIndex])
+                - delaySamplesToRead;
+            while (readPosition < 0.0f)
+                readPosition +=
+                    static_cast<float>(
+                        capacity);
+            const int indexA =
+                static_cast<int>(
+                    readPosition);
+            const int indexB =
+                indexA + 1 < capacity
+                    ? indexA + 1
+                    : 0;
+            const float fraction =
+                readPosition
+                - static_cast<float>(
+                    indexA);
+            const int offset =
+                v2LateOffsets[lineIndex];
+            const float first =
+                v2LatePool[
+                    static_cast<size_t>(
+                        offset + indexA)];
+            const float second =
+                v2LatePool[
+                    static_cast<size_t>(
+                        offset + indexB)];
+            return first
+                + (second - first)
+                    * fraction;
+        };
+
+    auto processDiffusionLine =
+        [&] (int line,
+             float input,
+             float coefficient) noexcept
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const int capacity =
+                v2DiffusionCapacities[
+                    lineIndex];
+            const int writeIndex =
+                v2DiffusionWriteIndices[
+                    lineIndex];
+            const size_t poolIndex =
+                static_cast<size_t>(
+                    v2DiffusionOffsets[lineIndex]
+                    + writeIndex);
+            const float delayed =
+                v2DiffusionPool[poolIndex];
+            const float output =
+                delayed
+                - coefficient * input;
+            v2DiffusionPool[poolIndex] =
+                input
+                + coefficient * output;
+            v2DiffusionWriteIndices[
+                lineIndex] =
+                writeIndex + 1 < capacity
+                    ? writeIndex + 1
+                    : 0;
+            return output;
+        };
+
+    auto* lateOutputL =
+        buffer.getWritePointer(0);
+    auto* lateOutputR =
+        numChannels >= 2
+            ? buffer.getWritePointer(1)
+            : nullptr;
+    constexpr float inverseSqrtTwo =
+        0.7071067811865475f;
+    constexpr float inverseSqrtSixteen =
+        0.25f;
+    const float characterModDepthMs =
+        character == 0
+            ? 0.10f
+            : (character == 1
+                   ? 0.22f
+                   : 0.34f);
+    const float characterInputGain =
+        character == 0
+            ? 0.25f
+            : (character == 1
+                   ? 0.22f
+                   : 0.19f);
+
+    for (int sample = 0;
+         sample < numSamples;
+         ++sample)
+    {
+        float diffuseL =
+            lateOutputL[sample];
+        float diffuseR =
+            lateOutputR != nullptr
+                ? lateOutputR[sample]
+                : diffuseL;
+        const float currentDiffusion =
+            smoothedV2Diffusion.getNextValue();
+        const float baseDiffusionCoefficient =
+            juce::jlimit(
+                0.38f,
+                0.72f,
+                0.40f
+                    + currentDiffusion
+                        * 0.36f
+                    + (character == 0
+                           ? -0.05f
+                           : (character == 2
+                                  ? 0.025f
+                                  : 0.0f)));
+        for (int stage = 0;
+             stage < v2DiffusionStageCount;
+             ++stage)
+        {
+            const float stageScale =
+                1.0f
+                - static_cast<float>(stage)
+                    * 0.055f;
+            const float stageSign =
+                (stage & 1) == 0
+                    ? 1.0f
+                    : -1.0f;
+            const float stageCoefficient =
+                baseDiffusionCoefficient
+                * stageScale
+                * stageSign;
+            const float stageL =
+                processDiffusionLine(
+                    stage * 2,
+                    diffuseL,
+                    stageCoefficient);
+            const float stageR =
+                processDiffusionLine(
+                    stage * 2 + 1,
+                    diffuseR,
+                    -stageCoefficient);
+            if ((stage & 1) == 0)
+            {
+                diffuseL =
+                    stageL * 0.9238795f
+                    + stageR * 0.3826834f;
+                diffuseR =
+                    stageR * 0.9238795f
+                    - stageL * 0.3826834f;
+            }
+            else
+            {
+                diffuseL =
+                    (stageL + stageR)
+                    * inverseSqrtTwo;
+                diffuseR =
+                    (stageL - stageR)
+                    * inverseSqrtTwo;
+            }
+        }
+
+        const float currentMovement =
+            smoothedV2Movement.getNextValue();
+        const float modDepthSamples =
+            characterModDepthMs
+            * (0.15f
+               + currentMovement * 0.85f)
+            * 0.001f
+            * static_cast<float>(
+                cachedSampleRate);
+        std::array<float, v2LateLineCount>
+            tankRead {};
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+        {
+            float modulationSamples = 0.0f;
+            for (size_t modulator = 0;
+                 modulator
+                     < modulatedLines.size();
+                 ++modulator)
+            {
+                if (line
+                    != modulatedLines[modulator])
+                    continue;
+                modulationSamples =
+                    lookupModulationSine(
+                        v2ModPhase[
+                            static_cast<size_t>(
+                                line)])
+                    * modDepthSamples;
+                v2ModPhase[
+                    static_cast<size_t>(
+                        line)] +=
+                    juce::MathConstants<float>::twoPi
+                    * modulationRatesHz[modulator]
+                    / static_cast<float>(
+                        juce::jmax(
+                            1.0,
+                            cachedSampleRate));
+                if (v2ModPhase[
+                        static_cast<size_t>(
+                            line)]
+                    >= juce::MathConstants<
+                        float>::twoPi)
+                    v2ModPhase[
+                        static_cast<size_t>(
+                            line)] -=
+                        juce::MathConstants<
+                            float>::twoPi;
+                break;
+            }
+            tankRead[
+                static_cast<size_t>(line)] =
+                readV2Line(
+                    line,
+                    static_cast<float>(
+                        v2LateDelaySamples[
+                            static_cast<size_t>(
+                                line)])
+                        + modulationSamples);
+        }
+
+        std::array<float, v2LateLineCount>
+            decayed {};
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            v2LowBandGain[lineIndex] +=
+                (v2TargetLowBandGain[lineIndex]
+                 - v2LowBandGain[lineIndex])
+                * gainSmoothingCoefficient;
+            v2MidBandGain[lineIndex] +=
+                (v2TargetMidBandGain[lineIndex]
+                 - v2MidBandGain[lineIndex])
+                * gainSmoothingCoefficient;
+            v2HighBandGain[lineIndex] +=
+                (v2TargetHighBandGain[lineIndex]
+                 - v2HighBandGain[lineIndex])
+                * gainSmoothingCoefficient;
+            v2LowBandState[lineIndex] +=
+                (tankRead[lineIndex]
+                 - v2LowBandState[lineIndex])
+                * lowBandCoefficient;
+            v2BelowHighBandState[lineIndex] +=
+                (tankRead[lineIndex]
+                 - v2BelowHighBandState[
+                     lineIndex])
+                * belowHighCoefficient;
+            const float lowBand =
+                v2LowBandState[lineIndex];
+            const float midBand =
+                v2BelowHighBandState[
+                    lineIndex]
+                - lowBand;
+            const float highBand =
+                tankRead[lineIndex]
+                - v2BelowHighBandState[
+                    lineIndex];
+            decayed[lineIndex] =
+                lowBand
+                    * v2LowBandGain[
+                        lineIndex]
+                + midBand
+                    * v2MidBandGain[
+                        lineIndex]
+                + highBand
+                    * v2HighBandGain[
+                        lineIndex];
+        }
+
+        std::array<float, v2LateLineCount>
+            matrixState {};
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+            matrixState[
+                static_cast<size_t>(line)] =
+                decayed[
+                    static_cast<size_t>(line)]
+                * preMatrixSigns[
+                    static_cast<size_t>(line)];
+        for (int span = 1;
+             span < v2LateLineCount;
+             span *= 2)
+        {
+            for (int base = 0;
+                 base < v2LateLineCount;
+                 base += span * 2)
+            {
+                for (int element = 0;
+                     element < span;
+                     ++element)
+                {
+                    const int firstIndex =
+                        base + element;
+                    const int secondIndex =
+                        firstIndex + span;
+                    const float first =
+                        matrixState[
+                            static_cast<size_t>(
+                                firstIndex)];
+                    const float second =
+                        matrixState[
+                            static_cast<size_t>(
+                                secondIndex)];
+                    matrixState[
+                        static_cast<size_t>(
+                            firstIndex)] =
+                        first + second;
+                    matrixState[
+                        static_cast<size_t>(
+                            secondIndex)] =
+                        first - second;
+                }
+            }
+        }
+        std::array<float, v2LateLineCount>
+            feedbackVector {};
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+            feedbackVector[
+                static_cast<size_t>(line)] =
+                matrixState[
+                    static_cast<size_t>(
+                        matrixPermutation[
+                            static_cast<size_t>(
+                                line)])]
+                * postMatrixSigns[
+                    static_cast<size_t>(line)]
+                * inverseSqrtSixteen;
+
+        float decodedL = 0.0f;
+        float decodedR = 0.0f;
+        float shimmerInput0 = 0.0f;
+        float shimmerInput1 = 0.0f;
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            decodedL +=
+                decayed[lineIndex]
+                * outputLeftSigns[lineIndex];
+            decodedR +=
+                decayed[lineIndex]
+                * outputRightSigns[lineIndex];
+            if (processShimmer)
+            {
+                shimmerInput0 +=
+                    decayed[lineIndex]
+                    * shimmerProjection0[
+                        lineIndex];
+                shimmerInput1 +=
+                    decayed[lineIndex]
+                    * shimmerProjection1[
+                        lineIndex];
+            }
+        }
+        decodedL *=
+            inverseSqrtSixteen;
+        decodedR *=
+            inverseSqrtSixteen;
+        shimmerInput0 *=
+            inverseSqrtSixteen;
+        shimmerInput1 *=
+            inverseSqrtSixteen;
+
+        float shifted0 = 0.0f;
+        float shifted1 = 0.0f;
+        const float currentShimmer =
+            processShimmer
+                ? smoothedShimmerAmount
+                      .getNextValue()
+                : 0.0f;
+        const float currentShimmerRegen =
+            smoothedV2ShimmerRegen
+                .getNextValue();
+        if (processShimmer)
+        {
+            v2ShimmerPreLowPassState[0] +=
+                (shimmerInput0
+                 - v2ShimmerPreLowPassState[0])
+                * shimmerPreLowPassCoefficient;
+            v2ShimmerPreLowPassState[1] +=
+                (shimmerInput1
+                 - v2ShimmerPreLowPassState[1])
+                * shimmerPreLowPassCoefficient;
+            shifted0 =
+                v2ShimmerShifters[0]
+                    .processSample(
+                        v2ShimmerPreLowPassState[
+                            0]);
+            shifted1 =
+                v2ShimmerShifters[1]
+                    .processSample(
+                        v2ShimmerPreLowPassState[
+                            1]);
+        }
+        const float shimmerFeedbackMix =
+            freeze
+                ? 0.0f
+                : juce::jlimit(
+                      0.0f,
+                      0.36f,
+                      currentShimmer
+                          * currentShimmerRegen
+                          * 0.36f);
+        const float baseFeedbackMix =
+            1.0f
+            - shimmerFeedbackMix;
+
+        const float inputMid =
+            (diffuseL + diffuseR)
+            * inverseSqrtTwo;
+        const float inputSide =
+            (diffuseL - diffuseR)
+            * inverseSqrtTwo;
+        const float inputGain =
+            characterInputGain
+            * (0.78f
+               + currentDiffusion
+                   * 0.22f);
+        for (int line = 0;
+             line < v2LateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const float inputInjection =
+                (inputMid
+                     * inputMidSigns[
+                         lineIndex]
+                 + inputSide
+                     * inputSideSigns[
+                         lineIndex])
+                * inverseSqrtSixteen
+                * inputGain;
+            const float shimmerInjection =
+                (shifted0
+                     * shimmerInjection0[
+                         lineIndex]
+                 + shifted1
+                     * shimmerInjection1[
+                         lineIndex])
+                * inverseSqrtSixteen;
+            float writeValue =
+                feedbackVector[lineIndex]
+                    * baseFeedbackMix
+                + shimmerInjection
+                    * shimmerFeedbackMix
+                + inputInjection;
+            if (! std::isfinite(writeValue)
+                || std::abs(writeValue) > 8.0f)
+            {
+                emergencyBoundHitCount
+                    .fetch_add(
+                        1,
+                        std::memory_order_relaxed);
+                v2EmergencyBoundHitCount
+                    .fetch_add(
+                        1,
+                        std::memory_order_relaxed);
+                writeValue =
+                    std::isfinite(writeValue)
+                        ? juce::jlimit(
+                              -8.0f,
+                              8.0f,
+                              writeValue)
+                        : 0.0f;
+            }
+            v2LatePool[
+                static_cast<size_t>(
+                    v2LateOffsets[lineIndex]
+                    + v2LateWriteIndices[
+                        lineIndex])] =
+                writeValue;
+            v2LateWriteIndices[
+                lineIndex] =
+                v2LateWriteIndices[lineIndex] + 1
+                    < v2LateCapacities[lineIndex]
+                    ? v2LateWriteIndices[
+                          lineIndex]
+                          + 1
+                    : 0;
+        }
+
+        // Both shifted projections survive mono summing. A small direct octave
+        // makes low settings useful; the main shimmer character remains the
+        // bounded regenerative branch above.
+        const float directShimmerGain =
+            currentShimmer * 0.13f;
+        decodedL +=
+            (shifted0 * 0.78f
+             + shifted1 * 0.22f)
+            * directShimmerGain;
+        decodedR +=
+            (shifted0 * 0.22f
+             + shifted1 * 0.78f)
+            * directShimmerGain;
+
+        const float lateMid =
+            (decodedL + decodedR)
+            * 0.5f;
+        const float lateSide =
+            (decodedL - decodedR)
+            * 0.5f;
+        const float characterOutputGain =
+            character == 0
+                ? 0.50f
+                : (character == 1
+                       ? 0.46f
+                       : 0.43f);
+        lateOutputL[sample] =
+            (lateMid + lateSide)
+            * characterOutputGain;
+        if (lateOutputR != nullptr)
+            lateOutputR[sample] =
+                (lateMid - lateSide)
+                * characterOutputGain;
+        else
+            lateOutputL[sample] =
+                lateMid
+                * characterOutputGain;
+
+        v2ValidLateHistorySamples =
+            juce::jmin(
+                v2LateCapacities.back(),
+                v2ValidLateHistorySamples + 1);
+    }
+
+    const float duckAttack =
+        v2DuckAttackCoefficient;
+    const float duckRelease =
+        v2DuckReleaseCoefficient;
+    auto* outputL =
+        buffer.getWritePointer(0);
+    auto* outputR =
+        numChannels >= 2
+            ? buffer.getWritePointer(1)
+            : nullptr;
+    for (int sample = 0;
+         sample < numSamples;
+         ++sample)
+    {
+        const float currentWet =
+            smoothedWetLevel.getNextValue();
+        const float currentDry =
+            smoothedDryLevel.getNextValue();
+        const float currentEarly =
+            smoothedEarlyLevel.getNextValue();
+        const float currentEarlyLate =
+            smoothedV2EarlyLate.getNextValue();
+        const float earlyWeight =
+            std::sqrt(
+                juce::jmax(
+                    0.0f,
+                    1.0f
+                        - currentEarlyLate));
+        const float lateWeight =
+            std::sqrt(
+                juce::jmax(
+                    0.0f,
+                    currentEarlyLate));
+        float wetL =
+            outputL[sample]
+                * currentWet
+                * lateWeight
+            + earlyOutputBuffer.getSample(
+                  0,
+                  sample)
+                * currentEarly
+                * earlyWeight;
+        float wetR =
+            outputR != nullptr
+                ? outputR[sample]
+                      * currentWet
+                      * lateWeight
+                  + earlyOutputBuffer
+                        .getSample(
+                            1,
+                            sample)
+                      * currentEarly
+                      * earlyWeight
+                : wetL;
+        const float wetMid =
+            (wetL + wetR) * 0.5f;
+        const float rawWetSide =
+            (wetL - wetR) * 0.5f;
+        v2SideLowPassState +=
+            (rawWetSide - v2SideLowPassState)
+            * bassSideCoefficient;
+        const float bassSafeWetSide =
+            (rawWetSide - v2SideLowPassState)
+            + v2SideLowPassState * 0.18f;
+        const float currentWidth =
+            smoothedV2Width.getNextValue();
+        wetL =
+            wetMid
+            + bassSafeWetSide * currentWidth;
+        wetR =
+            wetMid
+            - bassSafeWetSide * currentWidth;
+        wetL =
+            wetHighCutL.processSample(
+                wetLowCutL.processSample(
+                    wetL));
+        if (outputR != nullptr)
+            wetR =
+                wetHighCutR.processSample(
+                    wetLowCutR.processSample(
+                        wetR));
+
+        const float detector =
+            juce::jmax(
+                std::abs(
+                    dryBuffer.getSample(
+                        0,
+                        sample)),
+                numChannels >= 2
+                    ? std::abs(
+                          dryBuffer.getSample(
+                              1,
+                              sample))
+                    : 0.0f);
+        if (detector > v2DuckEnvelope)
+            v2DuckEnvelope +=
+                (detector - v2DuckEnvelope)
+                * duckAttack;
+        else
+            v2DuckEnvelope *=
+                duckRelease;
+        const float currentDucking =
+            smoothedV2Ducking.getNextValue();
+        const float duckGain =
+            1.0f
+            / (1.0f
+               + v2DuckEnvelope
+                   * currentDucking
+                   * 7.0f);
+        outputL[sample] =
+            dryBuffer.getSample(
+                0,
+                sample)
+                * currentDry
+            + wetL * duckGain;
+        if (outputR != nullptr)
+            outputR[sample] =
+                dryBuffer.getSample(
+                    1,
+                    sample)
+                    * currentDry
+                + wetR * duckGain;
+    }
+
+    if (! processShimmer)
+    {
+        for (auto& shifter :
+             v2ShimmerShifters)
+            shifter.reset();
+        v2ShimmerPreLowPassState.fill(
+            0.0f);
+    }
+    clearNonFiniteSamples(buffer);
+}
+
+void S13Reverb::processV3Block(juce::AudioBuffer<float>& buffer,
+                               juce::MidiBuffer& midi)
+{
+    juce::ignoreUnused(midi);
+    juce::ScopedNoDenormals noDenormals;
+
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    if (numChannels < 1 || numSamples <= 0)
+        return;
+
+    if (dryBuffer.getNumChannels() < numChannels
+        || dryBuffer.getNumSamples() < numSamples
+        || lateTankBuffer.getNumSamples() <= 2
+        || v3DiffusionPool.empty())
+    {
+        buffer.clear();
+        return;
+    }
+
+    const float safeSampleRate =
+        static_cast<float>(
+            juce::jmax(1.0, cachedSampleRate));
+    const float selectedEngine =
+        engineVersion.load(std::memory_order_relaxed);
+    const bool processLargeV4 =
+        selectedEngine >= kReverbV4SelectionFloor;
+    const int selectedVoiceIndex =
+        selectedEngine >= kReverbV5SelectionFloor
+            ? sanitizeReverbV5VoiceIndex(
+                  rackVoice.load(std::memory_order_relaxed))
+            : S13NAMRack::studioReverbVoice;
+    const bool processV5AlternativeVoice =
+        selectedEngine >= kReverbV5SelectionFloor
+        && selectedVoiceIndex != S13NAMRack::studioReverbVoice;
+    smoothedV5AlternativeVoiceBlend.setTargetValue(
+        processV5AlternativeVoice ? 1.0f : 0.0f);
+    if (processLargeV4 != v4WasProcessing)
+    {
+        // A recalled V3/V4 identity can change without prepareToPlay(). New
+        // V4 histories are invalidated by counters so no stale architectural
+        // reflection or output-diffuser sample can become audible.
+        validEarlyHistorySamples = 0;
+        earlyReflectionWriteIndex = 0;
+        v4OutputDiffusionWriteIndices.fill(0);
+        v4ValidOutputDiffusionHistorySamples.fill(0);
+        v4WasProcessing = processLargeV4;
+    }
+    const float sendTarget =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            inputSend.load(std::memory_order_relaxed));
+    smoothedInputSend.setTargetValue(sendTarget);
+    const float sendStart =
+        smoothedInputSend.getCurrentValue();
+    const float sendEnd =
+        smoothedInputSend.skip(numSamples);
+    const float sendInterpolationScale =
+        1.0f
+        / static_cast<float>(juce::jmax(1, numSamples));
+    const auto inputSendForSample =
+        [sendStart,
+         sendEnd,
+         sendInterpolationScale] (int sample) noexcept
+    {
+        return sendStart
+            + (sendEnd - sendStart)
+                * static_cast<float>(sample + 1)
+                * sendInterpolationScale;
+    };
+    const float preDelaySamplesTarget =
+        juce::jlimit(
+            0.0f,
+            500.0f,
+            preDelay.load(std::memory_order_relaxed))
+        * 0.001f * safeSampleRate;
+    const float wetTarget =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            wetLevel.load(std::memory_order_relaxed));
+    const float dryTarget =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            dryLevel.load(std::memory_order_relaxed));
+    const float shimmerTarget =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            shimmerAmount.load(std::memory_order_relaxed));
+    constexpr float wakePeakThreshold =
+        3.1622776601683795e-5f; // -90 dBFS
+    constexpr float activityRmsThreshold =
+        1.5848931924611136e-5f; // -96 dBFS
+
+    if (v3TailSilent)
+    {
+        bool wakeForInput = false;
+        if (juce::jmax(sendStart, sendEnd)
+            > 0.0001f)
+        {
+            for (int channel = 0;
+                 channel < numChannels;
+                 ++channel)
+            {
+                wakeForInput =
+                    wakeForInput
+                    || buffer.getMagnitude(
+                           channel, 0, numSamples)
+                           >= wakePeakThreshold
+                    || buffer.getRMSLevel(
+                           channel, 0, numSamples)
+                           >= activityRmsThreshold;
+            }
+        }
+
+        if (! wakeForInput)
+        {
+            // While sleeping, keep the zero-latency dry branch exact and make
+            // inaudible control changes current immediately. No tank,
+            // diffusion, modulation, or pitch-shifter work runs here.
+            smoothedWetLevel.setCurrentAndTargetValue(
+                wetTarget);
+            smoothedDryLevel.setCurrentAndTargetValue(
+                dryTarget);
+            smoothedEarlyLevel.setCurrentAndTargetValue(
+                juce::jlimit(
+                    0.0f,
+                    1.0f,
+                    earlyLevel.load(
+                        std::memory_order_relaxed)));
+            smoothedShimmerAmount
+                .setCurrentAndTargetValue(
+                    shimmerTarget);
+            smoothedV2Movement.setCurrentAndTargetValue(
+                juce::jlimit(
+                    0.0f,
+                    1.0f,
+                    movement.load(std::memory_order_relaxed)));
+            smoothedV2EarlyLate.setCurrentAndTargetValue(
+                juce::jlimit(
+                    0.0f,
+                    1.0f,
+                    earlyLate.load(std::memory_order_relaxed)));
+            smoothedV2Diffusion.setCurrentAndTargetValue(
+                juce::jlimit(
+                    0.0f,
+                    1.0f,
+                    diffusion.load(std::memory_order_relaxed)));
+            smoothedV5AlternativeVoiceBlend.setCurrentAndTargetValue(
+                processV5AlternativeVoice ? 1.0f : 0.0f);
+            const float silentTankSizeScale =
+                calculateReverbV5TankSizeScale(
+                    selectedEngine,
+                    selectedVoiceIndex,
+                    juce::jlimit(
+                        0.2f,
+                        12.0f,
+                        decayTime.load(
+                            std::memory_order_relaxed)));
+            calculateV4TankDelaySamples(
+                silentTankSizeScale,
+                v4ActiveLateDelaySamples);
+            v4MorphTargetLateDelaySamples =
+                v4ActiveLateDelaySamples;
+            v4PendingLateDelaySamples =
+                v4ActiveLateDelaySamples;
+            v4ActiveTankSizeScale =
+                silentTankSizeScale;
+            v4MorphTargetTankSizeScale =
+                silentTankSizeScale;
+            v4PendingTankSizeScale =
+                silentTankSizeScale;
+            v4RequestedTankSizeScale =
+                silentTankSizeScale;
+            v4TankSizeMorphActive = false;
+            v4TankSizeChangePending = false;
+            smoothedV4TankSizeMorph
+                .setCurrentAndTargetValue(0.0f);
+            v3ActivePreDelaySamples =
+                preDelaySamplesTarget;
+            v3MorphTargetPreDelaySamples =
+                preDelaySamplesTarget;
+            v3PendingPreDelaySamples =
+                preDelaySamplesTarget;
+            v3RequestedPreDelaySamples =
+                preDelaySamplesTarget;
+            v3PreDelayMorphActive = false;
+            v3PreDelayChangePending = false;
+            smoothedV3PreDelayMorph
+                .setCurrentAndTargetValue(0.0f);
+            for (int channel = 0;
+                 channel < numChannels;
+                 ++channel)
+            {
+                buffer.applyGain(
+                    channel, 0, numSamples,
+                    dryTarget);
+            }
+            clearNonFiniteSamples(buffer);
+            return;
+        }
+
+        // Signal above the activity floor wakes the engine in this callback;
+        // the dry branch is still zero-latency and the wet onset starts from
+        // freshly invalidated history.
+        v3TailSilent = false;
+        v3TailSilentSamples = 0;
+    }
+
+    for (int channel = 0;
+         channel < numChannels;
+         ++channel)
+    {
+        dryBuffer.copyFrom(
+            channel, 0, buffer, channel, 0, numSamples);
+    }
+
+    const float decaySeconds =
+        juce::jlimit(
+            0.2f,
+            12.0f,
+            decayTime.load(std::memory_order_relaxed));
+    const float v4TankSizeTarget =
+        calculateReverbV5TankSizeScale(
+            selectedEngine,
+            selectedVoiceIndex,
+            decaySeconds);
+    if (std::abs(
+            v4TankSizeTarget
+            - v4RequestedTankSizeScale)
+        > 0.0005f)
+    {
+        v4RequestedTankSizeScale =
+            v4TankSizeTarget;
+        v4PendingTankSizeScale =
+            v4TankSizeTarget;
+        calculateV4TankDelaySamples(
+            v4PendingTankSizeScale,
+            v4PendingLateDelaySamples);
+        v4TankSizeChangePending = true;
+    }
+    if (v4TankSizeChangePending
+        && ! v4TankSizeMorphActive)
+    {
+        if (validLateHistorySamples == 0)
+        {
+            // No readable tank state exists yet, so the requested topology can
+            // become active without a crossfade. This is the normal NAM Rack
+            // startup path because its hidden engine version is configured
+            // after the contained processor is prepared.
+            v4ActiveTankSizeScale =
+                v4PendingTankSizeScale;
+            v4ActiveLateDelaySamples =
+                v4PendingLateDelaySamples;
+            v4MorphTargetTankSizeScale =
+                v4ActiveTankSizeScale;
+            v4MorphTargetLateDelaySamples =
+                v4ActiveLateDelaySamples;
+            smoothedV4TankSizeMorph
+                .setCurrentAndTargetValue(0.0f);
+        }
+        else
+        {
+            v4MorphTargetTankSizeScale =
+                v4PendingTankSizeScale;
+            v4MorphTargetLateDelaySamples =
+                v4PendingLateDelaySamples;
+            smoothedV4TankSizeMorph
+                .setCurrentAndTargetValue(0.0f);
+            smoothedV4TankSizeMorph
+                .setTargetValue(1.0f);
+            v4TankSizeMorphActive = true;
+        }
+        v4TankSizeChangePending = false;
+    }
+    const float lowCutHz =
+        juce::jlimit(
+            20.0f,
+            500.0f,
+            lowCut.load(std::memory_order_relaxed));
+    const float highCutHz =
+        juce::jlimit(
+            1000.0f,
+            juce::jmin(
+                20000.0f,
+                safeSampleRate * 0.45f),
+            highCut.load(std::memory_order_relaxed));
+    const float tone =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            (1.0f
+             - damping.load(std::memory_order_relaxed))
+                / 0.82f);
+    const bool processV5AlternativeTransition =
+        processV5AlternativeVoice
+        || smoothedV5AlternativeVoiceBlend.isSmoothing()
+        || smoothedV5AlternativeVoiceBlend.getCurrentValue() > 0.000001f;
+
+    smoothedWetLevel.setTargetValue(wetTarget);
+    smoothedDryLevel.setTargetValue(dryTarget);
+    smoothedEarlyLevel.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            earlyLevel.load(std::memory_order_relaxed)));
+    smoothedShimmerAmount.setTargetValue(
+        shimmerTarget);
+    smoothedV2Movement.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            movement.load(std::memory_order_relaxed)));
+    smoothedV2EarlyLate.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            earlyLate.load(std::memory_order_relaxed)));
+    smoothedV2Diffusion.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            diffusion.load(std::memory_order_relaxed)));
+    if (std::abs(
+            preDelaySamplesTarget
+            - v3RequestedPreDelaySamples)
+        > 0.25f)
+    {
+        v3RequestedPreDelaySamples =
+            preDelaySamplesTarget;
+        v3PendingPreDelaySamples =
+            preDelaySamplesTarget;
+        v3PreDelayChangePending = true;
+    }
+    if (v3PreDelayChangePending
+        && ! v3PreDelayMorphActive)
+    {
+        v3MorphTargetPreDelaySamples =
+            v3PendingPreDelaySamples;
+        smoothedV3PreDelayMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedV3PreDelayMorph
+            .setTargetValue(1.0f);
+        v3PreDelayMorphActive = true;
+        v3PreDelayChangePending = false;
+    }
+    const bool v3WetToneTargetChanged =
+        std::abs(lowCutHz - v3CachedLowCutHz)
+            > 1.0f
+        || std::abs(highCutHz - v3CachedHighCutHz)
+            > 8.0f;
+    if (v3WetToneTargetChanged)
+    {
+        v3CachedLowCutHz = lowCutHz;
+        v3CachedHighCutHz = highCutHz;
+        if (! lowCutCoefficientLut.empty()
+            && ! highCutCoefficientLut.empty())
+        {
+            v3PendingLowCutCoefficients =
+                lookupRealtimeFilterLut(
+                    lowCutCoefficientLut,
+                    cachedSampleRate,
+                    lowCutHz,
+                    20.0f,
+                    500.0f);
+            v3PendingHighCutCoefficients =
+                lookupRealtimeFilterLut(
+                    highCutCoefficientLut,
+                    cachedSampleRate,
+                    highCutHz,
+                    1000.0f,
+                    20000.0f);
+            v3WetFilterChangePending = true;
+        }
+    }
+    if (v3WetFilterChangePending
+        && ! v3WetFilterMorphActive)
+    {
+        auto& targetLowCutL =
+            v3WetFilterUsesAlternate
+                ? wetLowCutL
+                : v3WetLowCutAlternateL;
+        auto& targetLowCutR =
+            v3WetFilterUsesAlternate
+                ? wetLowCutR
+                : v3WetLowCutAlternateR;
+        auto& targetHighCutL =
+            v3WetFilterUsesAlternate
+                ? wetHighCutL
+                : v3WetHighCutAlternateL;
+        auto& targetHighCutR =
+            v3WetFilterUsesAlternate
+                ? wetHighCutR
+                : v3WetHighCutAlternateR;
+        targetLowCutL.reset();
+        targetLowCutR.reset();
+        targetHighCutL.reset();
+        targetHighCutR.reset();
+        writeRealtimeFilterCoefficients(
+            targetLowCutL,
+            targetLowCutR,
+            v3PendingLowCutCoefficients);
+        writeRealtimeFilterCoefficients(
+            targetHighCutL,
+            targetHighCutR,
+            v3PendingHighCutCoefficients);
+        smoothedV3WetFilterMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedV3WetFilterMorph
+            .setTargetValue(1.0f);
+        v3WetFilterMorphActive = true;
+        v3WetFilterChangePending = false;
+    }
+    if (std::abs(tone - v3CachedTone)
+        > 0.0001f)
+    {
+        v3CachedTone = tone;
+        smoothedV3LoopDampingCoefficient
+            .setTargetValue(
+                1.0f
+                - std::exp(
+                    -juce::MathConstants<float>::twoPi
+                    * (3200.0f + tone * 7800.0f)
+                    / safeSampleRate));
+    }
+    const float feedbackTankSizeScale =
+        processLargeV4
+            ? (v4TankSizeMorphActive
+                   ? v4MorphTargetTankSizeScale
+                   : v4ActiveTankSizeScale)
+            : 1.0f;
+    const float lowDecayRatio =
+        calculateReverbV5LowDecayRatio(
+            selectedEngine,
+            selectedVoiceIndex,
+            feedbackTankSizeScale,
+            bassDecay.load(std::memory_order_relaxed));
+    if (std::abs(
+            decaySeconds
+            - v3CachedDecaySeconds)
+            > 0.0005f
+        || std::abs(
+               feedbackTankSizeScale
+               - v4CachedFeedbackSizeScale)
+            > 0.0005f
+        || std::abs(
+               lowDecayRatio
+               - v5CachedLowDecayRatio)
+            > 0.0005f)
+    {
+        v3CachedDecaySeconds =
+            decaySeconds;
+        v4CachedFeedbackSizeScale =
+            feedbackTankSizeScale;
+        v5CachedLowDecayRatio =
+            lowDecayRatio;
+        for (int line = 0;
+             line < lateLineCount;
+             ++line)
+        {
+            const auto lineIndex =
+                static_cast<size_t>(line);
+            const int feedbackDelaySamples =
+                processLargeV4
+                    ? (v4TankSizeMorphActive
+                           ? v4MorphTargetLateDelaySamples[
+                                 lineIndex]
+                           : v4ActiveLateDelaySamples[
+                                 lineIndex])
+                    : v3LateDelaySamples[lineIndex];
+            const float lineSeconds =
+                static_cast<float>(
+                    feedbackDelaySamples)
+                / safeSampleRate;
+            v3TargetMidBandFeedback[
+                lineIndex] =
+                juce::jlimit(
+                    0.001f,
+                    0.995f,
+                    std::exp(
+                        std::log(0.001f)
+                        * lineSeconds
+                        / decaySeconds));
+            v3TargetLowBandFeedback[
+                lineIndex] =
+                juce::jlimit(
+                    0.001f,
+                    0.995f,
+                    std::exp(
+                        std::log(0.001f)
+                        * lineSeconds
+                        / (decaySeconds
+                           * lowDecayRatio)));
+        }
+    }
+
+    const bool processShimmer =
+        shimmerTarget > 0.0005f
+        || smoothedShimmerAmount.getCurrentValue()
+            > 0.0005f
+        || smoothedShimmerAmount.isSmoothing();
+    constexpr float inverseSqrtEight =
+        0.3535533905932738f;
+    constexpr float shimmerVectorNormalisation =
+        inverseSqrtEight;
+    constexpr float diffusionGain[4] {
+        0.72f, 0.68f, 0.62f, 0.56f
+    };
+    constexpr float earlyTapGain[4] {
+        0.31f, -0.23f, 0.17f, -0.11f
+    };
+    constexpr std::array<float, lateLineCount>
+        midInputVector {
+            1.0f, 1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        sideInputVector {
+            1.0f, 1.0f, -1.0f, -1.0f,
+            -1.0f, -1.0f, 1.0f, 1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        midOutputVector {
+            1.0f, -1.0f, -1.0f, 1.0f,
+            -1.0f, 1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        sideOutputVector {
+            1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        auxiliaryMidOutputVector {
+            1.0f, 1.0f, 1.0f, 1.0f,
+            -1.0f, -1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        auxiliarySideOutputVector {
+            1.0f, -1.0f, -1.0f, 1.0f,
+            1.0f, -1.0f, -1.0f, 1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        auxiliaryOutputTapFraction {
+            0.56f, 0.61f, 0.67f, 0.72f,
+            0.77f, 0.81f, 0.86f, 0.90f
+        };
+    constexpr std::array<float, 8>
+        v4EarlyTapMsL {
+            11.3f, 18.7f, 29.9f, 43.1f,
+            58.7f, 77.9f, 96.1f, 113.3f
+        };
+    constexpr std::array<float, 8>
+        v4EarlyTapMsR {
+            13.9f, 23.3f, 34.7f, 49.9f,
+            66.1f, 84.7f, 103.9f, 117.1f
+        };
+    constexpr std::array<float, 8>
+        v4EarlyTapGainL {
+            0.10f, -0.13f, 0.17f, -0.21f,
+            0.24f, -0.22f, 0.18f, -0.13f
+        };
+    constexpr std::array<float, 8>
+        v4EarlyTapGainR {
+            0.11f, 0.15f, -0.18f, 0.22f,
+            -0.23f, 0.20f, -0.16f, 0.12f
+        };
+    constexpr std::array<float, lateLineCount>
+        shimmerProjection0 {
+            1.0f, -1.0f, -1.0f, 1.0f,
+            -1.0f, 1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        shimmerProjection1 {
+            1.0f, -1.0f, 1.0f, -1.0f,
+            1.0f, -1.0f, 1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        shimmerInjection0 {
+            1.0f, 1.0f, -1.0f, -1.0f,
+            1.0f, 1.0f, -1.0f, -1.0f
+        };
+    constexpr std::array<float, lateLineCount>
+        shimmerInjection1 {
+            1.0f, 1.0f, -1.0f, -1.0f,
+            -1.0f, -1.0f, 1.0f, 1.0f
+        };
+
+    const int lateRingSize =
+        lateTankBuffer.getNumSamples();
+    std::array<float*, lateLineCount>
+        lateTankChannels {};
+    for (int line = 0;
+         line < lateLineCount;
+         ++line)
+    {
+        lateTankChannels[static_cast<size_t>(line)] =
+            lateTankBuffer.getWritePointer(line);
+    }
+    const int maximumPreDelayHistory =
+        juce::roundToInt(
+            safeSampleRate * 0.5f)
+        + 2;
+    std::array<float, 2> modulationPhaseIncrement {};
+    if (! processLargeV4)
+    {
+        // Preserve the exact V3 pair.
+        modulationPhaseIncrement[0] =
+            juce::MathConstants<float>::twoPi
+            * 0.107f / safeSampleRate;
+        modulationPhaseIncrement[1] =
+            juce::MathConstants<float>::twoPi
+            * 0.173f / safeSampleRate;
+    }
+    else if (processV5AlternativeTransition)
+    {
+        // V5 Motion animates only the decoded side field. The recursive tank
+        // keeps V4's fixed taps and stability margin.
+        modulationPhaseIncrement[0] =
+            juce::MathConstants<float>::twoPi
+            * 0.071f / safeSampleRate;
+        modulationPhaseIncrement[1] =
+            juce::MathConstants<float>::twoPi
+            * 0.113f / safeSampleRate;
+    }
+    constexpr float v3InputGain = 0.43f;
+    constexpr float v4InputGain = 0.43f;
+    constexpr float fixedStereoWidth = 0.90f;
+    constexpr float lateOutputGain = 0.74f;
+    constexpr float v3EarlyOutputGain = 0.22f;
+    constexpr float v4CompactEarlyOutputGain = 0.07f;
+    constexpr float v4ArchitecturalEarlyOutputGain = 0.12f;
+    constexpr float v4DirectTankEntryGain = 0.78f;
+    constexpr float v4SpreadTankEntryGain = 0.32f;
+    constexpr float v4PrimaryOutputTapGain = 0.80f;
+    constexpr float v4AuxiliaryOutputTapGain = 0.60f;
+    constexpr std::array<float, v4OutputDiffusionLineCount>
+        v4OutputDiffusionGain {
+            0.45f, -0.43f,
+            0.37f, -0.35f
+        };
+    constexpr float directShimmerGain = 0.055f;
+    const float v4ActiveLateOutputCompensation =
+        processLargeV4
+            ? std::sqrt(v4ActiveTankSizeScale)
+                  * (1.0f
+                     - 0.025f
+                         * calculateReverbV4LongFieldAmount(
+                               v4ActiveTankSizeScale))
+            : 1.0f;
+    const float v4TargetLateOutputCompensation =
+        processLargeV4
+            ? std::sqrt(v4MorphTargetTankSizeScale)
+                  * (1.0f
+                     - 0.025f
+                         * calculateReverbV4LongFieldAmount(
+                               v4MorphTargetTankSizeScale))
+            : 1.0f;
+    const float v4ActiveLongFieldAmount =
+        processLargeV4
+            ? calculateReverbV4LongFieldAmount(
+                  v4ActiveTankSizeScale)
+            : 0.0f;
+    const float v4TargetLongFieldAmount =
+        processLargeV4
+            ? calculateReverbV4LongFieldAmount(
+                  v4MorphTargetTankSizeScale)
+            : 0.0f;
+    constexpr float v4EarlyTapNormalisationL =
+        1.97951896f;
+    constexpr float v4EarlyTapNormalisationR =
+        2.00683488f;
+    const int v4EarlyRingSize =
+        earlyReflectionBuffer.getNumSamples();
+    std::array<int, 8> v4ActiveEarlyTapSamplesL {};
+    std::array<int, 8> v4ActiveEarlyTapSamplesR {};
+    std::array<int, 8> v4TargetEarlyTapSamplesL {};
+    std::array<int, 8> v4TargetEarlyTapSamplesR {};
+    if (processLargeV4
+        && v4EarlyRingSize > 2)
+    {
+        const auto prepareEarlyTapSamples =
+            [safeSampleRate,
+             v4EarlyRingSize] (
+                const std::array<float, 8>& tapMs,
+                float fieldAmount,
+                std::array<int, 8>& destination) noexcept
+        {
+            const float timeScale =
+                0.82f + 0.18f * fieldAmount;
+            for (size_t tap = 0;
+                 tap < destination.size();
+                 ++tap)
+            {
+                destination[tap] =
+                    juce::jlimit(
+                        1,
+                        v4EarlyRingSize - 2,
+                        juce::roundToInt(
+                            tapMs[tap]
+                            * timeScale
+                            * 0.001f
+                            * safeSampleRate));
+            }
+        };
+        prepareEarlyTapSamples(
+            v4EarlyTapMsL,
+            v4ActiveLongFieldAmount,
+            v4ActiveEarlyTapSamplesL);
+        prepareEarlyTapSamples(
+            v4EarlyTapMsR,
+            v4ActiveLongFieldAmount,
+            v4ActiveEarlyTapSamplesR);
+        prepareEarlyTapSamples(
+            v4EarlyTapMsL,
+            v4TargetLongFieldAmount,
+            v4TargetEarlyTapSamplesL);
+        prepareEarlyTapSamples(
+            v4EarlyTapMsR,
+            v4TargetLongFieldAmount,
+            v4TargetEarlyTapSamplesR);
+    }
+    std::uint64_t safetyGuardEventCount = 0;
+    std::uint64_t nonFiniteStateEventCount = 0;
+    std::uint64_t filterNonFiniteEventCount = 0;
+    float rawTankWritePeak = 0.0f;
+    float rawWetOutputPeak = 0.0f;
+    auto sanitizeWetState =
+        [&] (float value) noexcept
+        {
+            if (std::isfinite(value))
+                return value;
+
+            ++safetyGuardEventCount;
+            ++nonFiniteStateEventCount;
+            return 0.0f;
+        };
+
+    auto readLateLine =
+        [&] (int line,
+             float delaySamplesToRead,
+             bool fractional) noexcept
+    {
+        delaySamplesToRead =
+            juce::jlimit(
+                1.0f,
+                static_cast<float>(
+                    lateRingSize - 2),
+                delaySamplesToRead);
+        if (static_cast<float>(
+                validLateHistorySamples)
+            < std::ceil(delaySamplesToRead))
+        {
+            return 0.0f;
+        }
+
+        float readPosition =
+            static_cast<float>(
+                lateTankWriteIndex)
+            - delaySamplesToRead;
+        if (readPosition < 0.0f)
+            readPosition +=
+                static_cast<float>(lateRingSize);
+        const int indexA =
+            static_cast<int>(readPosition);
+        const float sampleA =
+            sanitizeWetState(
+                lateTankChannels[
+                    static_cast<size_t>(line)][indexA]);
+        if (! fractional)
+            return sampleA;
+
+        const int indexB =
+            indexA + 1 < lateRingSize
+                ? indexA + 1
+                : 0;
+        const float fraction =
+            readPosition
+            - static_cast<float>(indexA);
+        const float sampleB =
+            sanitizeWetState(
+                lateTankChannels[
+                    static_cast<size_t>(line)][indexB]);
+        return sampleA
+            + (sampleB - sampleA) * fraction;
+    };
+    auto readLateIntegerLine =
+        [&] (int line,
+             int delaySamplesToRead) noexcept
+    {
+        delaySamplesToRead =
+            juce::jlimit(
+                1,
+                lateRingSize - 2,
+                delaySamplesToRead);
+        if (validLateHistorySamples
+            < delaySamplesToRead)
+        {
+            return 0.0f;
+        }
+
+        int readIndex =
+            lateTankWriteIndex
+            - delaySamplesToRead;
+        if (readIndex < 0)
+            readIndex += lateRingSize;
+        return sanitizeWetState(
+            lateTankChannels[
+                static_cast<size_t>(line)][readIndex]);
+    };
+
+    auto processDiffusionLine =
+        [&] (int line,
+             float input,
+             float gain) noexcept
+    {
+        const size_t lineIndex =
+            static_cast<size_t>(line);
+        const int capacity =
+            v3DiffusionCapacities[lineIndex];
+        int& writeIndex =
+            v3DiffusionWriteIndices[lineIndex];
+        const size_t poolIndex =
+            static_cast<size_t>(
+                v3DiffusionOffsets[lineIndex]
+                + writeIndex);
+        auto& validHistory =
+            v3ValidDiffusionHistorySamples[lineIndex];
+        const float delayed =
+            validHistory >= capacity
+                ? sanitizeWetState(
+                      v3DiffusionPool[poolIndex])
+                : 0.0f;
+        input = sanitizeWetState(input);
+        const float output =
+            sanitizeWetState(
+                delayed - gain * input);
+        v3DiffusionPool[poolIndex] =
+            sanitizeWetState(
+                input + gain * output);
+        validHistory =
+            juce::jmin(capacity, validHistory + 1);
+        ++writeIndex;
+        if (writeIndex >= capacity)
+            writeIndex = 0;
+        return output;
+    };
+    auto processV4OutputDiffusionLine =
+        [&] (int line,
+             float input) noexcept
+    {
+        const auto lineIndex =
+            static_cast<size_t>(line);
+        const int capacity =
+            v4OutputDiffusionCapacities[lineIndex];
+        if (capacity <= 0
+            || v4OutputDiffusionPool.empty())
+        {
+            return sanitizeWetState(input);
+        }
+
+        int& writeIndex =
+            v4OutputDiffusionWriteIndices[lineIndex];
+        const size_t poolIndex =
+            static_cast<size_t>(
+                v4OutputDiffusionOffsets[lineIndex]
+                + writeIndex);
+        auto& validHistory =
+            v4ValidOutputDiffusionHistorySamples[
+                lineIndex];
+        const float delayed =
+            validHistory >= capacity
+                ? sanitizeWetState(
+                      v4OutputDiffusionPool[poolIndex])
+                : 0.0f;
+        input = sanitizeWetState(input);
+        const float gain =
+            v4OutputDiffusionGain[lineIndex];
+        const float output =
+            sanitizeWetState(
+                delayed - gain * input);
+        v4OutputDiffusionPool[poolIndex] =
+            sanitizeWetState(
+                input + gain * output);
+        validHistory =
+            juce::jmin(capacity, validHistory + 1);
+        ++writeIndex;
+        if (writeIndex >= capacity)
+            writeIndex = 0;
+        return output;
+    };
+    auto readV4EarlyTap =
+        [&] (int channel,
+             int delaySamplesToRead) noexcept
+    {
+        if (v4EarlyRingSize <= 2)
+            return 0.0f;
+        delaySamplesToRead =
+            juce::jlimit(
+                1,
+                v4EarlyRingSize - 2,
+                delaySamplesToRead);
+        if (validEarlyHistorySamples
+            < delaySamplesToRead)
+        {
+            return 0.0f;
+        }
+        int readIndex =
+            earlyReflectionWriteIndex
+            - delaySamplesToRead;
+        if (readIndex < 0)
+            readIndex += v4EarlyRingSize;
+        return sanitizeWetState(
+            earlyReflectionBuffer.getSample(
+                channel,
+                readIndex));
+    };
+
+    auto& activeWetLowCutL =
+        v3WetFilterUsesAlternate
+            ? v3WetLowCutAlternateL
+            : wetLowCutL;
+    auto& activeWetLowCutR =
+        v3WetFilterUsesAlternate
+            ? v3WetLowCutAlternateR
+            : wetLowCutR;
+    auto& activeWetHighCutL =
+        v3WetFilterUsesAlternate
+            ? v3WetHighCutAlternateL
+            : wetHighCutL;
+    auto& activeWetHighCutR =
+        v3WetFilterUsesAlternate
+            ? v3WetHighCutAlternateR
+            : wetHighCutR;
+    auto& targetWetLowCutL =
+        v3WetFilterUsesAlternate
+            ? wetLowCutL
+            : v3WetLowCutAlternateL;
+    auto& targetWetLowCutR =
+        v3WetFilterUsesAlternate
+            ? wetLowCutR
+            : v3WetLowCutAlternateR;
+    auto& targetWetHighCutL =
+        v3WetFilterUsesAlternate
+            ? wetHighCutL
+            : v3WetHighCutAlternateL;
+    auto& targetWetHighCutR =
+        v3WetFilterUsesAlternate
+            ? wetHighCutR
+            : v3WetHighCutAlternateR;
+    auto processWetToneBank =
+        [&] (juce::dsp::IIR::Filter<float>& lowCutFilter,
+             juce::dsp::IIR::Filter<float>& highCutFilter,
+             float input) noexcept
+        {
+            input = sanitizeWetState(input);
+            float filtered =
+                lowCutFilter.processSample(input);
+            if (! std::isfinite(filtered))
+            {
+                ++safetyGuardEventCount;
+                ++filterNonFiniteEventCount;
+                lowCutFilter.reset();
+                highCutFilter.reset();
+                return 0.0f;
+            }
+
+            filtered =
+                highCutFilter.processSample(filtered);
+            if (! std::isfinite(filtered))
+            {
+                ++safetyGuardEventCount;
+                ++filterNonFiniteEventCount;
+                lowCutFilter.reset();
+                highCutFilter.reset();
+                return 0.0f;
+            }
+
+            return filtered;
+        };
+
+    auto* wetL =
+        buffer.getWritePointer(0);
+    auto* wetR =
+        numChannels >= 2
+            ? buffer.getWritePointer(1)
+            : nullptr;
+    float wetPeak = 0.0f;
+    float sentInputPeak = 0.0f;
+    double sentInputEnergy = 0.0;
+    const auto clampPreDelay =
+        [maximumPreDelayHistory] (
+            float delaySamples) noexcept
+    {
+        return juce::jlimit(
+            0.0f,
+            static_cast<float>(
+                maximumPreDelayHistory - 2),
+            delaySamples);
+    };
+
+    for (int sample = 0;
+         sample < numSamples;
+         ++sample)
+    {
+        const float sendGain =
+            inputSendForSample(sample);
+        const float inputL =
+            sanitizeWetState(
+                dryBuffer.getSample(0, sample))
+            * sendGain;
+        const float inputR =
+            sanitizeWetState(
+                numChannels >= 2
+                    ? dryBuffer.getSample(1, sample)
+                    : dryBuffer.getSample(0, sample))
+            * sendGain;
+        sentInputPeak =
+            juce::jmax(
+                sentInputPeak,
+                juce::jmax(
+                    std::abs(inputL),
+                    std::abs(inputR)));
+        sentInputEnergy +=
+            static_cast<double>(inputL)
+                * static_cast<double>(inputL)
+            + static_cast<double>(inputR)
+                * static_cast<double>(inputR);
+
+        preDelayLineL.pushSample(0, inputL);
+        preDelayLineR.pushSample(0, inputR);
+        const float activePreDelay =
+            clampPreDelay(
+                v3ActivePreDelaySamples);
+        float delayedL = 0.0f;
+        float delayedR = 0.0f;
+        bool preDelayHistoryValid = false;
+        if (v3PreDelayMorphActive)
+        {
+            const float targetPreDelay =
+                clampPreDelay(
+                    v3MorphTargetPreDelaySamples);
+            const float activeDelayedL =
+                sanitizeWetState(
+                    preDelayLineL.popSample(
+                        0,
+                        activePreDelay,
+                        false));
+            const float activeDelayedR =
+                sanitizeWetState(
+                    preDelayLineR.popSample(
+                        0,
+                        activePreDelay,
+                        false));
+            const float targetDelayedL =
+                sanitizeWetState(
+                    preDelayLineL.popSample(
+                        0,
+                        targetPreDelay,
+                        true));
+            const float targetDelayedR =
+                sanitizeWetState(
+                    preDelayLineR.popSample(
+                        0,
+                        targetPreDelay,
+                        true));
+            const bool activeHistoryValid =
+                static_cast<float>(
+                    validPreDelayHistorySamples)
+                >= std::ceil(activePreDelay);
+            const bool targetHistoryValid =
+                static_cast<float>(
+                    validPreDelayHistorySamples)
+                >= std::ceil(targetPreDelay);
+            const float morph =
+                smoothedV3PreDelayMorph
+                    .getNextValue();
+            delayedL =
+                (activeHistoryValid
+                     ? activeDelayedL
+                     : 0.0f)
+                + ((targetHistoryValid
+                        ? targetDelayedL
+                        : 0.0f)
+                   - (activeHistoryValid
+                          ? activeDelayedL
+                          : 0.0f))
+                    * morph;
+            delayedR =
+                (activeHistoryValid
+                     ? activeDelayedR
+                     : 0.0f)
+                + ((targetHistoryValid
+                        ? targetDelayedR
+                        : 0.0f)
+                   - (activeHistoryValid
+                          ? activeDelayedR
+                          : 0.0f))
+                    * morph;
+            preDelayHistoryValid =
+                activeHistoryValid
+                || targetHistoryValid;
+        }
+        else
+        {
+            delayedL =
+                sanitizeWetState(
+                    preDelayLineL.popSample(
+                        0, activePreDelay));
+            delayedR =
+                sanitizeWetState(
+                    preDelayLineR.popSample(
+                        0, activePreDelay));
+            preDelayHistoryValid =
+                static_cast<float>(
+                    validPreDelayHistorySamples)
+                >= std::ceil(activePreDelay);
+        }
+        float diffusedL =
+            preDelayHistoryValid
+                ? delayedL
+                : 0.0f;
+        float diffusedR =
+            preDelayHistoryValid
+                ? delayedR
+                : 0.0f;
+        validPreDelayHistorySamples =
+            juce::jmin(
+                maximumPreDelayHistory,
+                validPreDelayHistorySamples + 1);
+        const float currentV5Movement =
+            smoothedV2Movement.getNextValue();
+        const float currentV5EarlyLate =
+            smoothedV2EarlyLate.getNextValue();
+        const float currentV5Diffusion =
+            smoothedV2Diffusion.getNextValue();
+        const float currentV5AlternativeVoiceBlend =
+            smoothedV5AlternativeVoiceBlend.getNextValue();
+        const float v5DiffusionScale =
+            1.0f
+            + currentV5AlternativeVoiceBlend
+                * ((0.72f + currentV5Diffusion * 0.34f) - 1.0f);
+
+        float earlyL = 0.0f;
+        float earlyR = 0.0f;
+        for (int stage = 0;
+             stage < v3DiffusionStageCount;
+             ++stage)
+        {
+            diffusedL =
+                processDiffusionLine(
+                    stage * 2,
+                    diffusedL,
+                    diffusionGain[stage]
+                        * v5DiffusionScale);
+            diffusedR =
+                processDiffusionLine(
+                    stage * 2 + 1,
+                    diffusedR,
+                    diffusionGain[stage]
+                        * v5DiffusionScale);
+            earlyL +=
+                diffusedL
+                * earlyTapGain[stage];
+            earlyR +=
+                diffusedR
+                * earlyTapGain[stage];
+        }
+        const float tankSizeMorphAmount =
+            v4TankSizeMorphActive
+                ? smoothedV4TankSizeMorph
+                      .getNextValue()
+                : 0.0f;
+        float v4NormalisedEarlyL = 0.0f;
+        float v4NormalisedEarlyR = 0.0f;
+        float v4ArchitecturalEarlyL = 0.0f;
+        float v4ArchitecturalEarlyR = 0.0f;
+        if (processLargeV4
+            && v4EarlyRingSize > 2)
+        {
+            const float validDelayedL =
+                preDelayHistoryValid ? delayedL : 0.0f;
+            const float validDelayedR =
+                preDelayHistoryValid ? delayedR : 0.0f;
+            // A modest fixed crossfeed puts a stereo delay into one common
+            // space. Unequal tap times create a wide field from mono input.
+            earlyReflectionBuffer.setSample(
+                0,
+                earlyReflectionWriteIndex,
+                sanitizeWetState(
+                    validDelayedL * 0.82f
+                    + validDelayedR * 0.18f));
+            earlyReflectionBuffer.setSample(
+                1,
+                earlyReflectionWriteIndex,
+                sanitizeWetState(
+                    validDelayedR * 0.82f
+                    + validDelayedL * 0.18f));
+
+            float rawEarlyL = 0.0f;
+            float rawEarlyR = 0.0f;
+            for (size_t tap = 0;
+                 tap < v4EarlyTapGainL.size();
+                 ++tap)
+            {
+                const float activeTapL =
+                    readV4EarlyTap(
+                        0,
+                        v4ActiveEarlyTapSamplesL[tap]);
+                const float activeTapR =
+                    readV4EarlyTap(
+                        1,
+                        v4ActiveEarlyTapSamplesR[tap]);
+                float tapL = activeTapL;
+                float tapR = activeTapR;
+                if (v4TankSizeMorphActive)
+                {
+                    const float targetTapL =
+                        readV4EarlyTap(
+                            0,
+                            v4TargetEarlyTapSamplesL[tap]);
+                    const float targetTapR =
+                        readV4EarlyTap(
+                            1,
+                            v4TargetEarlyTapSamplesR[tap]);
+                    tapL +=
+                        (targetTapL - activeTapL)
+                        * tankSizeMorphAmount;
+                    tapR +=
+                        (targetTapR - activeTapR)
+                        * tankSizeMorphAmount;
+                }
+                rawEarlyL +=
+                    tapL * v4EarlyTapGainL[tap];
+                rawEarlyR +=
+                    tapR * v4EarlyTapGainR[tap];
+            }
+            v4NormalisedEarlyL =
+                sanitizeWetState(
+                    rawEarlyL
+                    * v4EarlyTapNormalisationL);
+            v4NormalisedEarlyR =
+                sanitizeWetState(
+                    rawEarlyR
+                    * v4EarlyTapNormalisationR);
+            v4ArchitecturalEarlyL =
+                v4NormalisedEarlyL
+                * v4ArchitecturalEarlyOutputGain;
+            v4ArchitecturalEarlyR =
+                v4NormalisedEarlyR
+                * v4ArchitecturalEarlyOutputGain;
+
+            ++earlyReflectionWriteIndex;
+            if (earlyReflectionWriteIndex
+                >= v4EarlyRingSize)
+            {
+                earlyReflectionWriteIndex = 0;
+            }
+            validEarlyHistorySamples =
+                juce::jmin(
+                    v4EarlyRingSize,
+                    validEarlyHistorySamples + 1);
+        }
+        std::array<float, lateLineCount>
+            tankRead {};
+        std::array<float, lateLineCount>
+            auxiliaryTankRead {};
+        for (int line = 0;
+             line < lateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const int activeDelaySamples =
+                processLargeV4
+                    ? v4ActiveLateDelaySamples[
+                          lineIndex]
+                    : v3LateDelaySamples[lineIndex];
+            float activeDelaySamplesToRead =
+                static_cast<float>(
+                    activeDelaySamples);
+            float targetDelaySamplesToRead =
+                static_cast<float>(
+                    v4MorphTargetLateDelaySamples[
+                        lineIndex]);
+            bool fractional = false;
+            int modulationVoice = -1;
+            if (! processLargeV4
+                && line < 2)
+            {
+                modulationVoice = line;
+            }
+            if (modulationVoice >= 0)
+            {
+                const float phase =
+                    v3ModPhase[
+                        static_cast<size_t>(
+                            modulationVoice)];
+                const float modulationDepthSeconds =
+                    modulationVoice == 0
+                        ? 0.000021f
+                        : 0.000027f;
+                const float modulationOffsetSamples =
+                    lookupModulationSine(phase)
+                    * safeSampleRate
+                    * modulationDepthSeconds;
+                activeDelaySamplesToRead +=
+                    modulationOffsetSamples;
+                targetDelaySamplesToRead +=
+                    modulationOffsetSamples;
+                fractional = true;
+            }
+            const float activeRead =
+                fractional
+                    ? readLateLine(
+                          line,
+                          activeDelaySamplesToRead,
+                          true)
+                    : readLateIntegerLine(
+                          line,
+                          activeDelaySamples);
+            if (processLargeV4
+                && v4TankSizeMorphActive)
+            {
+                const float targetRead =
+                    fractional
+                        ? readLateLine(
+                              line,
+                              targetDelaySamplesToRead,
+                              true)
+                        : readLateIntegerLine(
+                              line,
+                              v4MorphTargetLateDelaySamples[
+                                  lineIndex]);
+                tankRead[lineIndex] =
+                    activeRead
+                    + (targetRead - activeRead)
+                        * tankSizeMorphAmount;
+            }
+            else
+            {
+                tankRead[lineIndex] =
+                    activeRead;
+            }
+            if (processLargeV4)
+            {
+                const int activeAuxiliaryDelay =
+                    juce::jmax(
+                        1,
+                        juce::roundToInt(
+                            static_cast<float>(
+                                activeDelaySamples)
+                            * auxiliaryOutputTapFraction[
+                                lineIndex]));
+                const float activeAuxiliaryRead =
+                    readLateIntegerLine(
+                        line,
+                        activeAuxiliaryDelay);
+                if (v4TankSizeMorphActive)
+                {
+                    const int targetAuxiliaryDelay =
+                        juce::jmax(
+                            1,
+                            juce::roundToInt(
+                                static_cast<float>(
+                                    v4MorphTargetLateDelaySamples[
+                                        lineIndex])
+                                * auxiliaryOutputTapFraction[
+                                    lineIndex]));
+                    const float targetAuxiliaryRead =
+                        readLateIntegerLine(
+                            line,
+                            targetAuxiliaryDelay);
+                    auxiliaryTankRead[lineIndex] =
+                        activeAuxiliaryRead
+                        + (targetAuxiliaryRead
+                           - activeAuxiliaryRead)
+                            * tankSizeMorphAmount;
+                }
+                else
+                {
+                    auxiliaryTankRead[lineIndex] =
+                        activeAuxiliaryRead;
+                }
+            }
+        }
+
+        // V4 uses fixed feedback taps. Its former time-varying interpolated
+        // reads introduced a tiny positive loop-energy error that compounded
+        // into a deterministic finite runaway after several minutes. The
+        // incommensurate eight-line tank and output-only diffuser already
+        // provide stereo decorrelation without moving the recursive poles.
+        const size_t modulationVoiceCount =
+            processV5AlternativeTransition
+                ? 2u
+                : (processLargeV4 ? 0u : 2u);
+        for (size_t voice = 0;
+             voice < modulationVoiceCount;
+             ++voice)
+        {
+            v3ModPhase[voice] +=
+                modulationPhaseIncrement[voice];
+            if (v3ModPhase[voice]
+                >= juce::MathConstants<float>::twoPi)
+            {
+                v3ModPhase[voice] -=
+                    juce::MathConstants<float>::twoPi;
+            }
+        }
+
+        const float loopDampingCoefficient =
+            smoothedV3LoopDampingCoefficient
+                .getNextValue();
+        std::array<float, lateLineCount>
+            feedbackVector {};
+        float feedbackSum = 0.0f;
+        float outputMid = 0.0f;
+        float outputSide = 0.0f;
+        float shimmerInput0 = 0.0f;
+        float shimmerInput1 = 0.0f;
+        float shimmerTargetInput0 = 0.0f;
+        float shimmerTargetInput1 = 0.0f;
+        for (int line = 0;
+             line < lateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const float read =
+                tankRead[lineIndex];
+            lateDampingState[lineIndex] =
+                sanitizeWetState(
+                    lateDampingState[lineIndex]);
+            v3LowBandState[lineIndex] =
+                sanitizeWetState(
+                    v3LowBandState[lineIndex]);
+            lateDampingState[lineIndex] +=
+                (read
+                 - lateDampingState[lineIndex])
+                * loopDampingCoefficient;
+            v3LowBandState[lineIndex] +=
+                (read
+                 - v3LowBandState[lineIndex])
+                * v3BassSplitCoefficient;
+            v3MidBandFeedback[lineIndex] +=
+                (v3TargetMidBandFeedback[lineIndex]
+                 - v3MidBandFeedback[lineIndex])
+                * v3FeedbackSmoothingCoefficient;
+            v3LowBandFeedback[lineIndex] +=
+                (v3TargetLowBandFeedback[lineIndex]
+                 - v3LowBandFeedback[lineIndex])
+                * v3FeedbackSmoothingCoefficient;
+
+            const float lowBand =
+                v3LowBandState[lineIndex];
+            const float dampedRemainder =
+                lateDampingState[lineIndex]
+                - lowBand;
+            const float feedbackSample =
+                sanitizeWetState(
+                    lowBand
+                        * v3LowBandFeedback[lineIndex]
+                    + dampedRemainder
+                        * v3MidBandFeedback[lineIndex]);
+            feedbackVector[lineIndex] =
+                feedbackSample;
+            feedbackSum += feedbackSample;
+            if (processLargeV4)
+            {
+                outputMid +=
+                    read
+                        * midOutputVector[lineIndex]
+                        * v4PrimaryOutputTapGain
+                    + auxiliaryTankRead[lineIndex]
+                        * auxiliaryMidOutputVector[
+                            lineIndex]
+                        * v4AuxiliaryOutputTapGain;
+                outputSide +=
+                    read
+                        * sideOutputVector[lineIndex]
+                        * v4PrimaryOutputTapGain
+                    + auxiliaryTankRead[lineIndex]
+                        * auxiliarySideOutputVector[
+                            lineIndex]
+                        * v4AuxiliaryOutputTapGain;
+            }
+            else
+            {
+                outputMid +=
+                    read
+                    * midOutputVector[lineIndex];
+                outputSide +=
+                    read
+                    * sideOutputVector[lineIndex];
+            }
+            if (processShimmer)
+            {
+                // Project the already-damped feedback field. Using the raw
+                // tank read here let the octave branch bypass the per-line
+                // decay gains and removed the loop's intended stability
+                // margin.
+                shimmerInput0 +=
+                    feedbackSample
+                    * shimmerProjection0[lineIndex];
+                shimmerInput1 +=
+                    feedbackSample
+                    * shimmerProjection1[lineIndex];
+                shimmerTargetInput0 +=
+                    feedbackSample
+                    * shimmerInjection0[lineIndex];
+                shimmerTargetInput1 +=
+                    feedbackSample
+                    * shimmerInjection1[lineIndex];
+            }
+        }
+        outputMid *= inverseSqrtEight;
+        outputSide *= inverseSqrtEight;
+        float currentShimmerAmount = 0.0f;
+        float shimmerMix = 0.0f;
+        float shifted0 = 0.0f;
+        float shifted1 = 0.0f;
+        float shiftedFeedbackGain = 0.0f;
+        float unshiftedProjectionScale = 1.0f;
+        if (processShimmer)
+        {
+            shimmerInput0 *=
+                shimmerVectorNormalisation;
+            shimmerInput1 *=
+                shimmerVectorNormalisation;
+            // H*U = -U for these zero-sum Householder modes, so this is
+            // q = U'*(H*f) without a second eight-line projection pass.
+            shimmerTargetInput0 *=
+                -shimmerVectorNormalisation;
+            shimmerTargetInput1 *=
+                -shimmerVectorNormalisation;
+            currentShimmerAmount =
+                smoothedShimmerAmount.getNextValue();
+            // The ease-out law makes the useful bloom arrive before the final
+            // quarter-turn while retaining an exact zero/off endpoint.
+            shimmerMix =
+                currentShimmerAmount
+                * (2.0f - currentShimmerAmount);
+            v3ShimmerInputHighPassState[0] =
+                sanitizeWetState(
+                    v3ShimmerInputHighPassState[0]);
+            v3ShimmerInputLowPassState[0] =
+                sanitizeWetState(
+                    v3ShimmerInputLowPassState[0]);
+            v3ShimmerInputHighPassState[0] +=
+                (shimmerInput0
+                 - v3ShimmerInputHighPassState[0])
+                * v3ShimmerInputHighPassCoefficient;
+            const float highPassed0 =
+                shimmerInput0
+                - v3ShimmerInputHighPassState[0];
+            v3ShimmerInputLowPassState[0] +=
+                (highPassed0
+                 - v3ShimmerInputLowPassState[0])
+                * v3ShimmerInputLowPassCoefficient;
+
+            v3ShimmerInputHighPassState[1] =
+                sanitizeWetState(
+                    v3ShimmerInputHighPassState[1]);
+            v3ShimmerInputLowPassState[1] =
+                sanitizeWetState(
+                    v3ShimmerInputLowPassState[1]);
+            v3ShimmerInputHighPassState[1] +=
+                (shimmerInput1
+                 - v3ShimmerInputHighPassState[1])
+                * v3ShimmerInputHighPassCoefficient;
+            const float highPassed1 =
+                shimmerInput1
+                - v3ShimmerInputHighPassState[1];
+            v3ShimmerInputLowPassState[1] +=
+                (highPassed1
+                 - v3ShimmerInputLowPassState[1])
+                * v3ShimmerInputLowPassCoefficient;
+
+            shifted0 =
+                sanitizeWetState(
+                    v2ShimmerShifters[0]
+                        .processSample(
+                            v3ShimmerInputLowPassState[0]));
+            shifted1 =
+                sanitizeWetState(
+                    v2ShimmerShifters[1]
+                        .processSample(
+                            v3ShimmerInputLowPassState[1]));
+            shiftedFeedbackGain =
+                0.11f * shimmerMix;
+            constexpr float
+                shimmerShifterFeedbackDesignAllowance =
+                    1.5f;
+            const float boundedShiftedGain =
+                shiftedFeedbackGain
+                * shimmerShifterFeedbackDesignAllowance;
+            unshiftedProjectionScale =
+                1.0f - 0.56f * boundedShiftedGain;
+        }
+        // P is the pair of orthonormal shimmer projections, H is the
+        // Householder tank matrix, V = H*P' = -P', and U is the orthonormal
+        // injection pair. U and V are mutually orthogonal. Scale both affected
+        // source/target mode pairs before adding U*shift(p); leaving the
+        // existing U component at unity permits coherent, non-normal growth.
+        // The other four tank modes remain unchanged.
+        //
+        // Reserve a 1.5x design allowance above the measured sequence gain of
+        // the stateful grain shifter. Scaling both affected mode pairs removes
+        // the coherent non-normal growth mechanism that existed when shifted
+        // feedback was added to an undiminished unitary field.
+        const float tankEntryL =
+            processLargeV4
+                ? diffusedL
+                        * v4DirectTankEntryGain
+                    + v4NormalisedEarlyL
+                        * v4SpreadTankEntryGain
+                : diffusedL;
+        const float tankEntryR =
+            processLargeV4
+                ? diffusedR
+                        * v4DirectTankEntryGain
+                    + v4NormalisedEarlyR
+                        * v4SpreadTankEntryGain
+                : diffusedR;
+        const float inputMid =
+            (tankEntryL + tankEntryR) * 0.5f;
+        const float rawInputSide =
+            (tankEntryL - tankEntryR) * 0.5f;
+        v3InputSideLowPassState =
+            sanitizeWetState(
+                v3InputSideLowPassState);
+        v3InputSideLowPassState +=
+            (rawInputSide
+             - v3InputSideLowPassState)
+            * v3SideBassCoefficient;
+        const float inputSide =
+            rawInputSide
+            - v3InputSideLowPassState;
+
+        for (int line = 0;
+             line < lateLineCount;
+             ++line)
+        {
+            const size_t lineIndex =
+                static_cast<size_t>(line);
+            const float householder =
+                feedbackSum * 0.25f
+                - feedbackVector[lineIndex];
+            const float stereoInjection =
+                (inputMid
+                     * midInputVector[lineIndex]
+                 + inputSide
+                     * sideInputVector[lineIndex])
+                * inverseSqrtEight
+                * (processLargeV4
+                       ? v4InputGain
+                       : v3InputGain);
+            float write =
+                stereoInjection
+                + householder;
+            if (processShimmer)
+            {
+                const float
+                    unshiftedShimmerProjection =
+                        -(shimmerInput0
+                              * shimmerProjection0[lineIndex]
+                          + shimmerInput1
+                              * shimmerProjection1[lineIndex])
+                        * shimmerVectorNormalisation;
+                const float unshiftedShimmerTarget =
+                    (shimmerTargetInput0
+                          * shimmerInjection0[lineIndex]
+                     + shimmerTargetInput1
+                          * shimmerInjection1[lineIndex])
+                    * shimmerVectorNormalisation;
+                const float shimmerInjection =
+                    (shifted0
+                         * shimmerInjection0[lineIndex]
+                     + shifted1
+                         * shimmerInjection1[lineIndex])
+                    * shimmerVectorNormalisation
+                    * shiftedFeedbackGain;
+                write +=
+                    (unshiftedShimmerProjection
+                     + unshiftedShimmerTarget)
+                        * (unshiftedProjectionScale
+                           - 1.0f)
+                    + shimmerInjection;
+            }
+            if (std::isfinite(write))
+            {
+                rawTankWritePeak =
+                    juce::jmax(
+                        rawTankWritePeak,
+                        std::abs(write));
+            }
+            // The rack owns the one finite-value safety knee. Reverb only
+            // repairs invalid recursive state so a NaN cannot persist in the
+            // feedback network; every finite tank value remains untouched.
+            write = sanitizeWetState(write);
+            lateTankChannels[
+                static_cast<size_t>(line)]
+                    [lateTankWriteIndex] =
+                        write;
+        }
+
+        const float v5Motion =
+            1.0f
+            + currentV5AlternativeVoiceBlend
+                * currentV5Movement
+                        * 0.10f
+                        * (lookupModulationSine(v3ModPhase[0]) * 0.62f
+                           + lookupModulationSine(v3ModPhase[1]) * 0.38f);
+        float decodedLateL =
+            outputMid
+            + outputSide * fixedStereoWidth * v5Motion;
+        float decodedLateR =
+            outputMid
+            - outputSide * fixedStereoWidth * v5Motion;
+        const float currentLateOutputCompensation =
+            v4ActiveLateOutputCompensation
+            + (v4TargetLateOutputCompensation
+               - v4ActiveLateOutputCompensation)
+                * tankSizeMorphAmount;
+        float lateL =
+            decodedLateL
+            * lateOutputGain
+            * currentLateOutputCompensation;
+        float lateR =
+            decodedLateR
+            * lateOutputGain
+            * currentLateOutputCompensation;
+        const float v5LateBalance =
+            1.0f
+            + currentV5AlternativeVoiceBlend
+                * ((0.82f + currentV5EarlyLate * 0.28f) - 1.0f);
+        const float v5EarlyBalance =
+            1.0f
+            + currentV5AlternativeVoiceBlend
+                * ((1.22f - currentV5EarlyLate * 0.44f) - 1.0f);
+        lateL *= v5LateBalance;
+        lateR *= v5LateBalance;
+        lateL +=
+            shifted0
+            * shimmerMix
+            * directShimmerGain;
+        lateR +=
+            shifted1
+            * shimmerMix
+            * directShimmerGain;
+        if (processLargeV4)
+        {
+            for (int stage = 0;
+                 stage < v4OutputDiffusionStageCount;
+                 ++stage)
+            {
+                lateL =
+                    processV4OutputDiffusionLine(
+                        stage * 2,
+                        lateL);
+                lateR =
+                    processV4OutputDiffusionLine(
+                        stage * 2 + 1,
+                        lateR);
+            }
+        }
+
+        float outputWetL =
+            lateL
+            + (processLargeV4
+                   ? earlyL
+                           * v4CompactEarlyOutputGain
+                           * v5EarlyBalance
+                       + v4ArchitecturalEarlyL
+                           * v5EarlyBalance
+                   : earlyL
+                       * v3EarlyOutputGain);
+        float outputWetR =
+            lateR
+            + (processLargeV4
+                   ? earlyR
+                           * v4CompactEarlyOutputGain
+                           * v5EarlyBalance
+                       + v4ArchitecturalEarlyR
+                           * v5EarlyBalance
+                   : earlyR
+                       * v3EarlyOutputGain);
+        const float activeFilteredL =
+            processWetToneBank(
+                activeWetLowCutL,
+                activeWetHighCutL,
+                outputWetL);
+        const float activeFilteredR =
+            processWetToneBank(
+                activeWetLowCutR,
+                activeWetHighCutR,
+                outputWetR);
+        if (v3WetFilterMorphActive)
+        {
+            const float targetFilteredL =
+                processWetToneBank(
+                    targetWetLowCutL,
+                    targetWetHighCutL,
+                    outputWetL);
+            const float targetFilteredR =
+                processWetToneBank(
+                    targetWetLowCutR,
+                    targetWetHighCutR,
+                    outputWetR);
+            const float morph =
+                smoothedV3WetFilterMorph
+                    .getNextValue();
+            outputWetL =
+                activeFilteredL
+                + (targetFilteredL - activeFilteredL)
+                    * morph;
+            outputWetR =
+                activeFilteredR
+                + (targetFilteredR - activeFilteredR)
+                    * morph;
+        }
+        else
+        {
+            outputWetL = activeFilteredL;
+            outputWetR = activeFilteredR;
+        }
+
+        if (std::isfinite(outputWetL))
+        {
+            rawWetOutputPeak =
+                juce::jmax(
+                    rawWetOutputPeak,
+                    std::abs(outputWetL));
+        }
+        if (std::isfinite(outputWetR))
+        {
+            rawWetOutputPeak =
+                juce::jmax(
+                    rawWetOutputPeak,
+                    std::abs(outputWetR));
+        }
+
+        outputWetL = sanitizeWetState(outputWetL);
+        outputWetR = sanitizeWetState(outputWetR);
+
+        if (wetR != nullptr)
+        {
+            wetL[sample] = outputWetL;
+            wetR[sample] = outputWetR;
+        }
+        else
+        {
+            wetL[sample] =
+                (outputWetL + outputWetR)
+                * 0.5f;
+        }
+        wetPeak =
+            juce::jmax(
+                wetPeak,
+                juce::jmax(
+                    std::abs(outputWetL),
+                    std::abs(outputWetR)));
+
+        ++lateTankWriteIndex;
+        if (lateTankWriteIndex
+            >= lateRingSize)
+        {
+            lateTankWriteIndex = 0;
+        }
+        validLateHistorySamples =
+            juce::jmin(
+                lateRingSize,
+                validLateHistorySamples + 1);
+    }
+
+    if (v4TankSizeMorphActive
+        && ! smoothedV4TankSizeMorph.isSmoothing())
+    {
+        v4ActiveTankSizeScale =
+            v4MorphTargetTankSizeScale;
+        v4ActiveLateDelaySamples =
+            v4MorphTargetLateDelaySamples;
+        v4TankSizeMorphActive = false;
+        smoothedV4TankSizeMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    if (v3PreDelayMorphActive
+        && ! smoothedV3PreDelayMorph.isSmoothing())
+    {
+        v3ActivePreDelaySamples =
+            v3MorphTargetPreDelaySamples;
+        v3PreDelayMorphActive = false;
+        smoothedV3PreDelayMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    if (v3WetFilterMorphActive
+        && ! smoothedV3WetFilterMorph.isSmoothing())
+    {
+        v3WetFilterUsesAlternate =
+            ! v3WetFilterUsesAlternate;
+        v3WetFilterMorphActive = false;
+        smoothedV3WetFilterMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    if (safetyGuardEventCount > 0)
+    {
+        emergencyBoundHitCount.fetch_add(
+            safetyGuardEventCount,
+            std::memory_order_relaxed);
+        v3NonFiniteStateHitCount.fetch_add(
+            nonFiniteStateEventCount,
+            std::memory_order_relaxed);
+        v3FilterNonFiniteHitCount.fetch_add(
+            filterNonFiniteEventCount,
+            std::memory_order_relaxed);
+    }
+    updateAtomicMaximum(
+        maximumRawInputSendPeak,
+        sentInputPeak);
+    updateAtomicMaximum(
+        maximumV3RawTankWritePeak,
+        rawTankWritePeak);
+    updateAtomicMaximum(
+        maximumV3RawWetOutputPeak,
+        rawWetOutputPeak);
+
+    // This is a last-resort recursive-state integrity recovery, not a second
+    // output limiter or a noise gate. Normal finite wet samples are untouched.
+    // If a future defect or corrupt state ever exceeds generous internal
+    // headroom, invalidate the delay histories in O(1), mute only this block's
+    // wet contribution, and let the existing smoothers restart the effect.
+    // The dry branch below remains sample-exact.
+    constexpr float catastrophicWetStatePeak = 16.0f;
+    const bool recoverWetState =
+        rawTankWritePeak > catastrophicWetStatePeak
+        || rawWetOutputPeak > catastrophicWetStatePeak
+        || nonFiniteStateEventCount > 0
+        || filterNonFiniteEventCount > 0;
+    if (recoverWetState)
+    {
+        v3FiniteRunawayRecoveryCount.fetch_add(
+            1, std::memory_order_relaxed);
+        resetTailState();
+        buffer.clear(0, numSamples);
+        wetPeak = 0.0f;
+    }
+    else
+    {
+        if (! processShimmer
+            && v3ShimmerWasActive)
+        {
+            for (auto& shifter :
+                 v2ShimmerShifters)
+            {
+                shifter.reset();
+            }
+            v3ShimmerInputHighPassState.fill(0.0f);
+            v3ShimmerInputLowPassState.fill(0.0f);
+        }
+        v3ShimmerWasActive = processShimmer;
+    }
+
+    const float wetStart =
+        smoothedWetLevel.getCurrentValue();
+    const float dryStart =
+        smoothedDryLevel.getCurrentValue();
+    const float wetEnd =
+        smoothedWetLevel.skip(numSamples);
+    const float dryEnd =
+        smoothedDryLevel.skip(numSamples);
+    smoothedEarlyLevel.skip(numSamples);
+    const float interpolationScale =
+        1.0f
+        / static_cast<float>(
+            juce::jmax(1, numSamples));
+    for (int channel = 0;
+         channel < numChannels;
+         ++channel)
+    {
+        auto* output =
+            buffer.getWritePointer(channel);
+        const auto* dry =
+            dryBuffer.getReadPointer(channel);
+        for (int sample = 0;
+             sample < numSamples;
+             ++sample)
+        {
+            const float amount =
+                static_cast<float>(sample + 1)
+                * interpolationScale;
+            const float currentWet =
+                wetStart
+                + (wetEnd - wetStart) * amount;
+            const float currentDry =
+                dryStart
+                + (dryEnd - dryStart) * amount;
+            output[sample] =
+                dry[sample] * currentDry
+                + output[sample] * currentWet;
+        }
+    }
+
+    const double activityEnergyThreshold =
+        static_cast<double>(activityRmsThreshold)
+        * static_cast<double>(activityRmsThreshold)
+        * static_cast<double>(numSamples)
+        * 2.0;
+    const bool hasMeaningfulInput =
+        sentInputPeak >= wakePeakThreshold
+        || sentInputEnergy >= activityEnergyThreshold;
+    if (hasMeaningfulInput)
+    {
+        v3TailSilentSamples = 0;
+        v3TailSilent = false;
+    }
+    else if (wetPeak < 3.1622776601683795e-5f)
+    {
+        v3TailSilentSamples =
+            juce::jmin(
+                juce::roundToInt(
+                    safeSampleRate * 2.0f),
+                v3TailSilentSamples
+                    + numSamples);
+        v3TailSilent =
+            v3TailSilentSamples
+            >= juce::roundToInt(
+                safeSampleRate * 0.65f);
+        if (v3TailSilent)
+        {
+            // Invalidate, rather than sweeping, all prepared history. Every
+            // addressed sample is overwritten before its valid count permits
+            // a read after wake, keeping this audio-thread transition bounded.
+            validEarlyHistorySamples = 0;
+            validPreDelayHistorySamples = 0;
+            validLateHistorySamples = 0;
+            earlyReflectionWriteIndex = 0;
+            v3ValidDiffusionHistorySamples.fill(0);
+            v4OutputDiffusionWriteIndices.fill(0);
+            v4ValidOutputDiffusionHistorySamples.fill(0);
+            lateDampingState.fill(0.0f);
+            v3LowBandState.fill(0.0f);
+            wetLowCutL.reset();
+            wetLowCutR.reset();
+            wetHighCutL.reset();
+            wetHighCutR.reset();
+            v3WetLowCutAlternateL.reset();
+            v3WetLowCutAlternateR.reset();
+            v3WetHighCutAlternateL.reset();
+            v3WetHighCutAlternateR.reset();
+            v3ShimmerInputHighPassState.fill(0.0f);
+            v3ShimmerInputLowPassState.fill(0.0f);
+            v3InputSideLowPassState = 0.0f;
+            for (auto& shifter :
+                 v2ShimmerShifters)
+            {
+                shifter.reset();
+            }
+            v3ShimmerWasActive = false;
+        }
+    }
+    else
+    {
+        v3TailSilentSamples = 0;
+        v3TailSilent = false;
+    }
+
+    clearNonFiniteSamples(buffer);
+}
+
 void S13Reverb::resetTailState() noexcept
 {
     validEarlyHistorySamples = 0;
     validPreDelayHistorySamples = 0;
     validLateHistorySamples = 0;
     lateDampingState.fill(0.0f);
+    for (size_t line = 0;
+         line < lateModPhase.size();
+         ++line)
+        lateModPhase[line] =
+            static_cast<float>(line) * 0.77f;
     shimmerShifter.reset();
+    for (auto& shifter : v2ShimmerShifters)
+        shifter.reset();
+    // The audio-thread tail-completion path calls this method. Resetting every
+    // line's write index plus the valid-history count makes old tank samples
+    // unreadable until each addressed location has been overwritten, avoiding
+    // a large full-pool memory sweep in one callback.
+    // V3 invalidates its delay histories by index/count only. Preserve the V2
+    // sweep solely for old states because that diffuser has no history guard.
+    if (engineVersion.load(std::memory_order_relaxed)
+        < 2.5f)
+    {
+        std::fill(
+            v2DiffusionPool.begin(),
+            v2DiffusionPool.end(),
+            0.0f);
+    }
+    v2LateWriteIndices.fill(0);
+    v2DiffusionWriteIndices.fill(0);
+    v2LowBandState.fill(0.0f);
+    v2BelowHighBandState.fill(0.0f);
+    for (size_t line = 0;
+         line < v2ModPhase.size();
+         ++line)
+        v2ModPhase[line] =
+            static_cast<float>(line) * 0.413f;
+    v2ShimmerPreLowPassState.fill(0.0f);
+    v2InputLowPassStateL = 0.0f;
+    v2InputLowPassStateR = 0.0f;
+    v2SideLowPassState = 0.0f;
+    v2DuckEnvelope = 0.0f;
+    v2ValidLateHistorySamples = 0;
+    v2CachedDecaySeconds = -1.0f;
+    v2CachedBassRatio = -1.0f;
+    v2CachedHighRatio = -1.0f;
+    v2CachedFreeze = false;
+    v2DecayTargetsValid = false;
+    v3DiffusionWriteIndices.fill(0);
+    v3LowBandState.fill(0.0f);
+    v3ShimmerInputHighPassState.fill(0.0f);
+    v3ShimmerInputLowPassState.fill(0.0f);
+    v3InputSideLowPassState = 0.0f;
+    v3ValidDiffusionHistorySamples.fill(0);
+    v3TailSilentSamples = 0;
+    v3TailSilent = false;
+    v3ModPhase[0] = 0.0f;
+    v3ModPhase[1] = 2.39996323f;
+    v3ModPhase[2] = 4.79992646f;
+    v3ModPhase[3] = 1.48325885f;
+    earlyReflectionWriteIndex = 0;
+    v4OutputDiffusionWriteIndices.fill(0);
+    v4ValidOutputDiffusionHistorySamples.fill(0);
+    v4WasProcessing =
+        engineVersion.load(
+            std::memory_order_relaxed)
+        >= kReverbV4SelectionFloor;
+    v3ShimmerWasActive = false;
     wetLowCutL.reset();
     wetLowCutR.reset();
     wetHighCutL.reset();
     wetHighCutR.reset();
+    v3WetLowCutAlternateL.reset();
+    v3WetLowCutAlternateR.reset();
+    v3WetHighCutAlternateL.reset();
+    v3WetHighCutAlternateR.reset();
+    v3WetFilterUsesAlternate = false;
+    v3WetFilterMorphActive = false;
+    v3WetFilterChangePending = false;
+    smoothedV3WetFilterMorph
+        .setCurrentAndTargetValue(0.0f);
     smoothedWetLevel.setCurrentAndTargetValue(0.0f);
     smoothedEarlyLevel.setCurrentAndTargetValue(0.0f);
+    smoothedInputSend.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            inputSend.load(std::memory_order_relaxed)));
     smoothedShimmerAmount.setCurrentAndTargetValue(0.0f);
+    const bool resetAlternativeVoice =
+        engineVersion.load(std::memory_order_relaxed)
+                >= kReverbV5SelectionFloor
+        && sanitizeReverbV5VoiceIndex(
+               rackVoice.load(std::memory_order_relaxed))
+            != S13NAMRack::studioReverbVoice;
+    smoothedV5AlternativeVoiceBlend.setCurrentAndTargetValue(
+        resetAlternativeVoice ? 1.0f : 0.0f);
+    const float resetV4TankSizeScale =
+        calculateReverbV5TankSizeScale(
+            engineVersion.load(std::memory_order_relaxed),
+            sanitizeReverbV5VoiceIndex(
+                rackVoice.load(std::memory_order_relaxed)),
+            juce::jlimit(
+                0.2f,
+                12.0f,
+                decayTime.load(std::memory_order_relaxed)));
+    calculateV4TankDelaySamples(
+        resetV4TankSizeScale,
+        v4ActiveLateDelaySamples);
+    v4MorphTargetLateDelaySamples =
+        v4ActiveLateDelaySamples;
+    v4PendingLateDelaySamples =
+        v4ActiveLateDelaySamples;
+    v4ActiveTankSizeScale =
+        resetV4TankSizeScale;
+    v4MorphTargetTankSizeScale =
+        resetV4TankSizeScale;
+    v4PendingTankSizeScale =
+        resetV4TankSizeScale;
+    v4RequestedTankSizeScale =
+        resetV4TankSizeScale;
+    v4TankSizeMorphActive = false;
+    v4TankSizeChangePending = false;
+    v4CachedFeedbackSizeScale = -1.0f;
+    v5CachedLowDecayRatio = -1.0f;
+    smoothedV4TankSizeMorph
+        .setCurrentAndTargetValue(0.0f);
+    smoothedV2Width.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.25f,
+            width.load(std::memory_order_relaxed)));
+    smoothedV2Ducking.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            ducking.load(std::memory_order_relaxed)));
+    smoothedV2Movement.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            movement.load(std::memory_order_relaxed)));
+    smoothedV2EarlyLate.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            earlyLate.load(std::memory_order_relaxed)));
+    smoothedV2Diffusion.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            diffusion.load(std::memory_order_relaxed)));
+    smoothedV2ShimmerRegen.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+                shimmerRegen.load(
+                    std::memory_order_relaxed)));
+    const float safeSampleRate =
+        static_cast<float>(
+            juce::jmax(1.0, cachedSampleRate));
+    const float tone =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            (1.0f
+             - damping.load(std::memory_order_relaxed))
+                / 0.82f);
+    const float resetPreDelaySamples =
+        juce::jlimit(
+            0.0f,
+            500.0f,
+            preDelay.load(std::memory_order_relaxed))
+        * 0.001f * safeSampleRate;
+    v3ActivePreDelaySamples =
+        resetPreDelaySamples;
+    v3MorphTargetPreDelaySamples =
+        resetPreDelaySamples;
+    v3PendingPreDelaySamples =
+        resetPreDelaySamples;
+    v3RequestedPreDelaySamples =
+        resetPreDelaySamples;
+    v3PreDelayMorphActive = false;
+    v3PreDelayChangePending = false;
+    smoothedV3PreDelayMorph
+        .setCurrentAndTargetValue(0.0f);
+    v3CachedLowCutHz = -1.0f;
+    v3CachedHighCutHz = -1.0f;
+    smoothedV3LoopDampingCoefficient
+        .setCurrentAndTargetValue(
+            1.0f
+            - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * (3200.0f + tone * 7800.0f)
+                / safeSampleRate));
     smoothedDryLevel.setCurrentAndTargetValue(
         juce::jlimit(0.0f, 1.0f, dryLevel.load(std::memory_order_relaxed)));
 }
 
 void S13Reverb::releaseResources()
 {
-    reverb.reset();
     preDelayLineL.reset();
     preDelayLineR.reset();
     wetLowCutL.reset();
     wetLowCutR.reset();
     wetHighCutL.reset();
     wetHighCutR.reset();
+    v3WetLowCutAlternateL.reset();
+    v3WetLowCutAlternateR.reset();
+    v3WetHighCutAlternateL.reset();
+    v3WetHighCutAlternateR.reset();
+    v3WetFilterUsesAlternate = false;
+    v3WetFilterMorphActive = false;
+    v3WetFilterChangePending = false;
+    smoothedV3WetFilterMorph
+        .setCurrentAndTargetValue(0.0f);
+    v3ActivePreDelaySamples = 0.0f;
+    v3MorphTargetPreDelaySamples = 0.0f;
+    v3PendingPreDelaySamples = 0.0f;
+    v3RequestedPreDelaySamples = -1.0f;
+    v3PreDelayMorphActive = false;
+    v3PreDelayChangePending = false;
+    smoothedV3PreDelayMorph
+        .setCurrentAndTargetValue(0.0f);
+    v4ActiveLateDelaySamples.fill(0);
+    v4MorphTargetLateDelaySamples.fill(0);
+    v4PendingLateDelaySamples.fill(0);
+    v4ActiveTankSizeScale = 1.0f;
+    v4MorphTargetTankSizeScale = 1.0f;
+    v4PendingTankSizeScale = 1.0f;
+    v4RequestedTankSizeScale = -1.0f;
+    v4TankSizeMorphActive = false;
+    v4TankSizeChangePending = false;
+    v4CachedFeedbackSizeScale = -1.0f;
+    v5CachedLowDecayRatio = -1.0f;
+    smoothedV4TankSizeMorph
+        .setCurrentAndTargetValue(0.0f);
     earlyReflectionBuffer.clear();
     earlyOutputBuffer.clear();
     earlyReflectionWriteIndex = 0;
@@ -1622,10 +8792,45 @@ void S13Reverb::releaseResources()
     lateTankWriteIndex = 0;
     lateDampingState.fill(0.0f);
     shimmerShifter.reset();
+    for (auto& shifter : v2ShimmerShifters)
+        shifter.reset();
+    v2LatePool.clear();
+    v2DiffusionPool.clear();
+    v3DiffusionPool.clear();
+    v4OutputDiffusionPool.clear();
+    v2LateWriteIndices.fill(0);
+    v2DiffusionWriteIndices.fill(0);
+    v2LowBandState.fill(0.0f);
+    v2BelowHighBandState.fill(0.0f);
+    v2ShimmerPreLowPassState.fill(0.0f);
+    v2InputLowPassStateL = 0.0f;
+    v2InputLowPassStateR = 0.0f;
+    v2SideLowPassState = 0.0f;
+    v2DuckEnvelope = 0.0f;
+    v2ValidLateHistorySamples = 0;
+    v2CachedDecaySeconds = -1.0f;
+    v2CachedBassRatio = -1.0f;
+    v2CachedHighRatio = -1.0f;
+    v2CachedFreeze = false;
+    v2DecayTargetsValid = false;
+    v3DiffusionWriteIndices.fill(0);
+    v4OutputDiffusionWriteIndices.fill(0);
+    v4ValidOutputDiffusionHistorySamples.fill(0);
+    v3LowBandState.fill(0.0f);
+    v3ShimmerInputHighPassState.fill(0.0f);
+    v3ShimmerInputLowPassState.fill(0.0f);
+    v3InputSideLowPassState = 0.0f;
+    v3ValidDiffusionHistorySamples.fill(0);
+    v3TailSilentSamples = 0;
+    v3TailSilent = false;
+    v4WasProcessing = false;
+    v3ShimmerWasActive = false;
     validEarlyHistorySamples = 0;
     validPreDelayHistorySamples = 0;
     validLateHistorySamples = 0;
     inputSend.store(1.0f, std::memory_order_relaxed);
+    smoothedInputSend
+        .setCurrentAndTargetValue(1.0f);
     smoothedShimmerAmount.setCurrentAndTargetValue(
         juce::jlimit(
             0.0f,
@@ -1708,8 +8913,187 @@ double S13Reverb::calculateTailLengthSeconds(int algorithmIndex,
     return juce::jmax(tailSeconds, lateTailSeconds);
 }
 
+double S13Reverb::calculateTailLengthSecondsV2(
+    int algorithmIndex,
+    float roomSizeValue,
+    float wetLevelValue,
+    float earlyLevelValue,
+    bool freezeEnabled,
+    float preDelayMs,
+    float decaySeconds,
+    double sampleRate,
+    float shimmerAmountValue,
+    float shimmerRegenValue)
+{
+    const bool hasLateTail =
+        wetLevelValue > 0.0001f;
+    const bool hasEarlyTail =
+        earlyLevelValue > 0.0001f;
+    if (! hasLateTail && ! hasEarlyTail)
+        return 0.0;
+
+    // Preserve a declaration at least as conservative as the historical tank
+    // for the same public controls, then add the V2 diffuser/grain state. This
+    // keeps old render/export callers safe while the contractive V2 loop makes
+    // Decay the true mid-band T60.
+    const double legacyDeclaration =
+        calculateTailLengthSeconds(
+            algorithmIndex,
+            roomSizeValue,
+            wetLevelValue,
+            earlyLevelValue,
+            freezeEnabled,
+            preDelayMs,
+            decaySeconds,
+            sampleRate);
+    const double earlySeconds =
+        hasEarlyTail ? 0.080 : 0.0;
+    if (! hasLateTail)
+        return juce::jmax(
+            earlySeconds,
+            legacyDeclaration);
+
+    const double safeDecay =
+        juce::jlimit(
+            0.1,
+            20.0,
+            static_cast<double>(
+                decaySeconds));
+    const double safePreDelay =
+        juce::jlimit(
+            0.0,
+            0.5,
+            static_cast<double>(
+                preDelayMs) * 0.001);
+    const double sampleRateGuard =
+        8.0 / juce::jmax(1.0, sampleRate);
+    const double v2BaseDeclaration =
+        safePreDelay
+        + safeDecay * 1.20
+        + 0.19
+        + sampleRateGuard;
+    double result =
+        juce::jmax(
+            legacyDeclaration,
+            v2BaseDeclaration);
+
+    const double shimmerAmountSafe =
+        juce::jlimit(
+            0.0,
+            1.0,
+            static_cast<double>(
+                shimmerAmountValue));
+    const double shimmerRegenSafe =
+        juce::jlimit(
+            0.0,
+            1.0,
+            static_cast<double>(
+                shimmerRegenValue));
+    if (shimmerAmountSafe > 0.0001)
+    {
+        // Two grain windows plus a conservative regenerative settling margin.
+        // The feedback law remains non-expansive, so this is deliberately a
+        // render/spillover allowance rather than a claim of a longer T60.
+        result +=
+            0.22
+            + safeDecay
+                * 0.30
+                * shimmerAmountSafe
+                * shimmerRegenSafe;
+    }
+    if (freezeEnabled)
+        result = juce::jmax(result, 120.0);
+    return result;
+}
+
+double S13Reverb::calculateTailLengthSecondsV3(
+    float wetLevelValue,
+    float preDelayMs,
+    float decaySeconds,
+    double sampleRate,
+    float shimmerAmountValue)
+{
+    if (wetLevelValue <= 0.0001f)
+        return 0.0;
+
+    const double safePreDelay =
+        juce::jlimit(
+            0.0,
+            0.5,
+            static_cast<double>(preDelayMs)
+                * 0.001);
+    const double safeDecay =
+        juce::jlimit(
+            0.2,
+            12.0,
+            static_cast<double>(decaySeconds));
+    const double shimmer =
+        juce::jlimit(
+            0.0,
+            1.0,
+            static_cast<double>(
+                shimmerAmountValue));
+    const double grainAndDiffusionState =
+        0.20
+        + 8.0 / juce::jmax(1.0, sampleRate);
+    // The shared V3/V4 loop is regression-bounded at maximum Shimmer and the
+    // octave branch has an explicit settling allowance. V4's enlarged delay
+    // lengths change echo spacing, while their per-line feedback coefficients
+    // are recalculated to preserve the requested RT60. The existing 20-percent
+    // decay margin therefore remains conservative and keeps V3 render plans
+    // exact. The rack can stop earlier after 650 ms below -90 dB.
+    return safePreDelay
+        + safeDecay * 1.20
+        + grainAndDiffusionState
+        + shimmer
+            * (0.25 + safeDecay * 0.20);
+}
+
 double S13Reverb::getTailLengthSeconds() const
 {
+    const float selectedEngine =
+        engineVersion.load(
+            std::memory_order_relaxed);
+    if (selectedEngine >= 2.5f)
+    {
+        return calculateTailLengthSecondsV3(
+            wetLevel.load(
+                std::memory_order_relaxed),
+            preDelay.load(
+                std::memory_order_relaxed),
+            decayTime.load(
+                std::memory_order_relaxed),
+            cachedSampleRate,
+            shimmerAmount.load(
+                std::memory_order_relaxed));
+    }
+
+    if (selectedEngine >= 1.5f)
+    {
+        return calculateTailLengthSecondsV2(
+            static_cast<int>(
+                std::round(
+                    algorithm.load(
+                        std::memory_order_relaxed))),
+            roomSize.load(
+                std::memory_order_relaxed),
+            wetLevel.load(
+                std::memory_order_relaxed),
+            earlyLevel.load(
+                std::memory_order_relaxed),
+            freezeMode.load(
+                std::memory_order_relaxed)
+                >= 0.5f,
+            preDelay.load(
+                std::memory_order_relaxed),
+            decayTime.load(
+                std::memory_order_relaxed),
+            cachedSampleRate,
+            shimmerAmount.load(
+                std::memory_order_relaxed),
+            shimmerRegen.load(
+                std::memory_order_relaxed));
+    }
     return calculateTailLengthSeconds(
         static_cast<int>(std::round(algorithm.load(std::memory_order_relaxed))),
         roomSize.load(std::memory_order_relaxed),
@@ -1723,6 +9107,21 @@ double S13Reverb::getTailLengthSeconds() const
 
 void S13Reverb::getStateInformation(juce::MemoryBlock& destData)
 {
+    const float activeEngineVersion =
+        engineVersion.load(
+            std::memory_order_relaxed);
+    const float persistedDspVersion =
+        activeEngineVersion < 1.5f
+            ? 1.0f
+            : (activeEngineVersion < 2.5f
+                   ? 2.0f
+                   : (activeEngineVersion
+                               < kReverbV4SelectionFloor
+                          ? 3.0f
+                          : (activeEngineVersion
+                                     < kReverbV5SelectionFloor
+                                 ? 4.0f
+                                 : 5.0f)));
     saveParamsToMemory(destData, "S13Reverb", {
         { "algorithm",  algorithm.load() },
         { "roomSize",   roomSize.load() },
@@ -1737,7 +9136,15 @@ void S13Reverb::getStateInformation(juce::MemoryBlock& destData)
         { "highCut",    highCut.load() },
         { "earlyLevel", earlyLevel.load() },
         { "decayTime",  decayTime.load() },
-        { "shimmerAmount", shimmerAmount.load() }
+        { "shimmerAmount", shimmerAmount.load() },
+        { "ducking", ducking.load() },
+        { "bassDecay", bassDecay.load() },
+        { "movement", movement.load() },
+        { "earlyLate", earlyLate.load() },
+        { "shimmerRegen", shimmerRegen.load() },
+        { "engineVersion", activeEngineVersion },
+        { "reverbDspVersion", persistedDspVersion },
+        { "reverbShimmerDspVersion", persistedDspVersion }
     });
 }
 
@@ -1763,12 +9170,87 @@ void S13Reverb::setStateInformation(const void* data, int sizeInBytes)
     highCut    = static_cast<float>((double)tree.getProperty("highCut", 20000.0));
     earlyLevel = static_cast<float>((double)tree.getProperty("earlyLevel", 0.5));
     decayTime  = static_cast<float>((double)tree.getProperty("decayTime", 2.0));
-    shimmerAmount = juce::jlimit(
+    ducking = juce::jlimit(
         0.0f,
         1.0f,
         static_cast<float>(
             static_cast<double>(
-                tree.getProperty("shimmerAmount", 0.0))));
+                tree.getProperty("ducking", 0.12))));
+    bassDecay = juce::jlimit(
+        0.40f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty("bassDecay", 0.70))));
+    movement = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty("movement", 0.35))));
+    earlyLate = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty("earlyLate", 0.42))));
+    shimmerRegen = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "shimmerRegen", 0.55))));
+    const int reverbDspVersion =
+        static_cast<int>(
+            tree.getProperty(
+                "reverbDspVersion", 0));
+    const double fallbackEngineVersion =
+        reverbDspVersion >= 5
+            ? 5.0
+            : (reverbDspVersion >= 4
+                   ? 4.0
+                   : (reverbDspVersion >= 3 ? 3.0 : 2.0));
+    const float storedEngineVersion = static_cast<float>(
+        static_cast<double>(tree.getProperty(
+            "engineVersion", fallbackEngineVersion)));
+    engineVersion =
+        reverbDspVersion >= 5
+            ? juce::jmax(
+                  5.0f,
+                  storedEngineVersion)
+            : (reverbDspVersion >= 4
+                   ? juce::jlimit(
+                         4.0f,
+                         kReverbV5SelectionFloor - 0.01f,
+                         storedEngineVersion)
+            : (reverbDspVersion >= 3
+                   ? juce::jlimit(
+                         3.0f,
+                         kReverbV4SelectionFloor
+                             - 0.01f,
+                         storedEngineVersion)
+                   : (reverbDspVersion >= 2
+                          ? juce::jlimit(
+                                2.0f,
+                                2.49f,
+                                storedEngineVersion)
+                           : 0.0f)));
+    // Standalone state has no Rack topology selector. Never infer a V5 voice
+    // from the historical Algorithm enum: the old Rack's audible Plate marker
+    // was ignored by the V3/V4 core and migrates to Studio.
+    rackVoice.store(0.0f, std::memory_order_relaxed);
+    shimmerAmount =
+        tree.hasProperty("shimmerAmount")
+            ? juce::jlimit(
+                  0.0f,
+                  1.0f,
+                  static_cast<float>(
+                      static_cast<double>(
+                          tree.getProperty(
+                              "shimmerAmount",
+                              0.0))))
+            : 0.0f;
 }
 
 bool S13Reverb::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -1825,33 +9307,187 @@ void S13Chorus::prepareToPlay(double sampleRate, int samplesPerBlock)
     smoothedMix.reset(sampleRate, 0.02);
     smoothedMix.setCurrentAndTargetValue(
         juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed)));
+    smoothedUnityDry.reset(sampleRate, 0.03);
+    smoothedUnityDry.setCurrentAndTargetValue(
+        unityDry.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f);
+    const auto initialiseSmoother =
+        [sampleRate] (auto& smoother,
+                      double rampSeconds,
+                      float value)
+        {
+            smoother.reset(sampleRate, rampSeconds);
+            smoother.setCurrentAndTargetValue(value);
+        };
+    initialiseSmoother(
+        smoothedRate,
+        0.03,
+        juce::jlimit(
+            0.01f,
+            20.0f,
+            rate.load(std::memory_order_relaxed)));
+    initialiseSmoother(
+        smoothedDepth,
+        0.03,
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            depth.load(std::memory_order_relaxed)));
+    activeDelayDepth = juce::jlimit(
+        0.0f,
+        1.0f,
+        depth.load(std::memory_order_relaxed));
+    delayDepthMorphTarget = activeDelayDepth;
+    pendingDelayDepth = activeDelayDepth;
+    requestedDelayDepth = activeDelayDepth;
+    smoothedDelayDepthMorph.reset(
+        sampleRate, 0.03);
+    smoothedDelayDepthMorph
+        .setCurrentAndTargetValue(0.0f);
+    delayDepthMorphActive = false;
+    delayDepthChangePending = false;
+    initialiseSmoother(
+        smoothedFeedback,
+        0.02,
+        juce::jlimit(
+            -1.0f,
+            1.0f,
+            fbAmount.load(std::memory_order_relaxed)));
+    initialiseSmoother(
+        smoothedSpread,
+        0.03,
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            spread.load(std::memory_order_relaxed)));
+    const int initialMode = juce::jlimit(
+        0,
+        2,
+        static_cast<int>(std::round(
+            mode.load(std::memory_order_relaxed))));
+    const int initialCharacter = juce::jlimit(
+        0,
+        1,
+        static_cast<int>(std::round(
+            characterMode.load(std::memory_order_relaxed))));
+    activeModeIndex = initialMode;
+    activeLFOShapeIndex = juce::jlimit(
+        0,
+        3,
+        static_cast<int>(std::round(
+            lfoShape.load(std::memory_order_relaxed))));
+    activeCharacterIndex = initialCharacter;
+    topologyTransitionStage = 0;
+    // Mode and character changes replace delay/all-pass topology and state.
+    // Fade the wet topology fully to dry before committing either selector.
+    initialiseSmoother(
+        smoothedTopologyGain,
+        0.080,
+        1.0f);
+    float initialVoiceCount = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxVoices),
+        voices.load(std::memory_order_relaxed));
+    if (initialCharacter == 1
+        && initialMode
+            == static_cast<int>(Mode::Chorus))
+    {
+        initialVoiceCount =
+            juce::jmax(4.0f, initialVoiceCount);
+    }
+    initialiseSmoother(
+        smoothedVoiceCount,
+        0.03,
+        initialVoiceCount);
+    initialiseSmoother(
+        smoothedRandomBlend,
+        0.03,
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            randomBlend.load(std::memory_order_relaxed)));
+    initialiseSmoother(
+        smoothedInputSend,
+        0.01,
+        1.0f);
+    sendReleaseState[0] = 0.0f;
+    sendReleaseState[1] = 0.0f;
 
     wetLowCutL.reset();
     wetLowCutR.reset();
     wetHighCutL.reset();
     wetHighCutR.reset();
+    alternateWetLowCutL.reset();
+    alternateWetLowCutR.reset();
+    alternateWetHighCutL.reset();
+    alternateWetHighCutR.reset();
     lastLowCut = juce::jlimit(20.0f, 2000.0f, lowCut.load());
     lastHighCut = juce::jlimit(200.0f, 20000.0f, highCut.load());
     auto lowCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastLowCut);
     wetLowCutL.coefficients = lowCutCoeffs;
     wetLowCutR.coefficients = lowCutCoeffs;
+    auto alternateLowCutCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeHighPass(
+            sampleRate,
+            lastLowCut);
+    alternateWetLowCutL.coefficients =
+        alternateLowCutCoeffs;
+    alternateWetLowCutR.coefficients =
+        alternateLowCutCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 2000.0f, true);
     auto highCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, lastHighCut);
     wetHighCutL.coefficients = highCutCoeffs;
     wetHighCutR.coefficients = highCutCoeffs;
+    auto alternateHighCutCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeLowPass(
+            sampleRate,
+            lastHighCut);
+    alternateWetHighCutL.coefficients =
+        alternateHighCutCoeffs;
+    alternateWetHighCutR.coefficients =
+        alternateHighCutCoeffs;
     prepareRealtimeFilterLut(highCutCoefficientLut, sampleRate, 200.0f, 20000.0f, false);
+    pendingLowCutCoefficients =
+        lookupRealtimeFilterLut(
+            lowCutCoefficientLut,
+            sampleRate,
+            lastLowCut,
+            20.0f,
+            2000.0f);
+    pendingHighCutCoefficients =
+        lookupRealtimeFilterLut(
+            highCutCoefficientLut,
+            sampleRate,
+            lastHighCut,
+            200.0f,
+            20000.0f);
     writeRealtimeFilterCoefficients(
         wetLowCutL,
         wetLowCutR,
-        lookupRealtimeFilterLut(lowCutCoefficientLut, sampleRate, lastLowCut, 20.0f, 2000.0f));
+        pendingLowCutCoefficients);
+    writeRealtimeFilterCoefficients(
+        alternateWetLowCutL,
+        alternateWetLowCutR,
+        pendingLowCutCoefficients);
     writeRealtimeFilterCoefficients(
         wetHighCutL,
         wetHighCutR,
-        lookupRealtimeFilterLut(highCutCoefficientLut, sampleRate, lastHighCut, 200.0f, 20000.0f));
+        pendingHighCutCoefficients);
+    writeRealtimeFilterCoefficients(
+        alternateWetHighCutL,
+        alternateWetHighCutR,
+        pendingHighCutCoefficients);
+    smoothedWetFilterMorph.reset(sampleRate, 0.015);
+    smoothedWetFilterMorph.setCurrentAndTargetValue(0.0f);
+    wetFiltersUseAlternate = false;
+    wetFilterMorphActive = false;
+    wetFilterChangePending = false;
     sampleHoldRandomState = 0x8f6a2c1du;
-    characterNoiseSample = 0;
+    lastRandomSlewMs = juce::jlimit(
+        2.0f, 200.0f, randomSlewMs.load(std::memory_order_relaxed));
     sampleHoldSlewCoefficient = 1.0f - std::exp(
-        -1.0f / (0.012f * static_cast<float>(juce::jmax(1.0, sampleRate))));
+        -1.0f
+        / (lastRandomSlewMs * 0.001f
+           * static_cast<float>(juce::jmax(1.0, sampleRate))));
     for (int voice = 0; voice < maxVoices; ++voice)
     {
         lfoPhase[voice] = static_cast<float>(voice)
@@ -1985,11 +9621,59 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
     if (numChannels < 1 || numSamples == 0)
         return;
 
-    const auto currentMode = static_cast<Mode>(juce::jlimit(0, 2, static_cast<int>(mode.load())));
-    const auto currentLFOShape = static_cast<LFOShape>(juce::jlimit(0, 3, static_cast<int>(lfoShape.load())));
-    const int characterIndex = juce::jlimit(0, 2, static_cast<int>(std::round(characterMode.load(std::memory_order_relaxed))));
-    float lfoRate = juce::jlimit(0.01f, 20.0f, rate.load());
-    if (tempoSync.load() >= 0.5f)
+    const int requestedModeIndex =
+        juce::jlimit(
+            0,
+            2,
+            static_cast<int>(std::round(
+                mode.load(std::memory_order_relaxed))));
+    const int requestedLFOShapeIndex =
+        juce::jlimit(
+            0,
+            3,
+            static_cast<int>(std::round(
+                lfoShape.load(std::memory_order_relaxed))));
+    const int requestedCharacterIndex =
+        juce::jlimit(
+            0,
+            1,
+            static_cast<int>(std::round(
+                characterMode.load(
+                    std::memory_order_relaxed))));
+    const bool topologyChangeRequested =
+        requestedModeIndex != activeModeIndex
+        || requestedLFOShapeIndex
+            != activeLFOShapeIndex
+        || requestedCharacterIndex
+            != activeCharacterIndex;
+    if (topologyChangeRequested)
+    {
+        if (topologyTransitionStage != 1)
+        {
+            smoothedTopologyGain.setTargetValue(0.0f);
+            topologyTransitionStage = 1;
+        }
+    }
+    else if (topologyTransitionStage == 1)
+    {
+        // A rapid reversal before the dry point simply returns to the active
+        // topology; no block-edge switch is needed.
+        smoothedTopologyGain.setTargetValue(1.0f);
+        topologyTransitionStage = 2;
+    }
+    const auto currentMode =
+        static_cast<Mode>(activeModeIndex);
+    const auto currentLFOShape =
+        static_cast<LFOShape>(activeLFOShapeIndex);
+    const int characterIndex =
+        activeCharacterIndex;
+    float targetLFORate =
+        juce::jlimit(
+            0.01f,
+            20.0f,
+            rate.load(std::memory_order_relaxed));
+    if (loadDelayParameter(
+            tempoSync, 0.0f, 1.0f, 0.0f) >= 0.5f)
     {
         double bpm = 120.0;
         if (auto* ph = getPlayHead())
@@ -2000,61 +9684,196 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
                     bpm = *bpmVal;
         }
 
-        const int syncIndex = juce::jlimit(0, 5, static_cast<int>(std::round(rate.load())));
+        const int syncIndex =
+            juce::jlimit(
+                0,
+                5,
+                static_cast<int>(
+                    std::round(
+                        rate.load(
+                            std::memory_order_relaxed))));
         const float barsPerCycle[] { 4.0f, 2.0f, 1.0f, 0.5f, 0.25f, 0.125f };
-        lfoRate = static_cast<float>((bpm / 60.0) / (barsPerCycle[syncIndex] * 4.0));
+        targetLFORate =
+            static_cast<float>(
+                (bpm / 60.0)
+                / (barsPerCycle[syncIndex] * 4.0));
     }
-    const float lfoDepth = juce::jlimit(0.0f, 1.0f, depth.load());
-    const float fb = juce::jlimit(-1.0f, 1.0f, fbAmount.load());
+    smoothedRate.setTargetValue(targetLFORate);
+    const float targetDepth = juce::jlimit(
+        0.0f,
+        1.0f,
+        depth.load(std::memory_order_relaxed));
+    smoothedDepth.setTargetValue(targetDepth);
+    if (currentMode == Mode::Phaser)
+    {
+        activeDelayDepth = targetDepth;
+        delayDepthMorphTarget = targetDepth;
+        pendingDelayDepth = targetDepth;
+        requestedDelayDepth = targetDepth;
+        delayDepthMorphActive = false;
+        delayDepthChangePending = false;
+        smoothedDelayDepthMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    else
+    {
+        if (std::abs(
+                targetDepth - requestedDelayDepth)
+            > 1.0e-5f)
+        {
+            requestedDelayDepth = targetDepth;
+            pendingDelayDepth = targetDepth;
+            delayDepthChangePending = true;
+        }
+        if (delayDepthChangePending
+            && ! delayDepthMorphActive)
+        {
+            delayDepthMorphTarget =
+                pendingDelayDepth;
+            smoothedDelayDepthMorph
+                .setCurrentAndTargetValue(0.0f);
+            smoothedDelayDepthMorph
+                .setTargetValue(1.0f);
+            delayDepthMorphActive = true;
+            delayDepthChangePending = false;
+        }
+    }
+    smoothedFeedback.setTargetValue(
+        juce::jlimit(
+            -0.95f,
+            0.95f,
+            fbAmount.load(std::memory_order_relaxed)));
+    smoothedSpread.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            spread.load(std::memory_order_relaxed)));
+    smoothedRandomBlend.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            randomBlend.load(std::memory_order_relaxed)));
     smoothedMix.setTargetValue(
         juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed)));
-    const float sendGain = juce::jlimit(
+    smoothedUnityDry.setTargetValue(
+        unityDry.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f);
+    const float sendTarget = juce::jlimit(
         0.0f, 1.0f, inputSend.load(std::memory_order_relaxed));
-    const float randomness = juce::jlimit(
-        0.0f, 1.0f, randomBlend.load(std::memory_order_relaxed));
+    if (sendTarget > 0.0f)
+        smoothedInputSend.setTargetValue(sendTarget);
+    else
+        smoothedInputSend.setCurrentAndTargetValue(0.0f);
+    const float requestedRandomSlewMs = juce::jlimit(
+        2.0f, 200.0f, randomSlewMs.load(std::memory_order_relaxed));
+    if (std::abs(requestedRandomSlewMs - lastRandomSlewMs) > 0.01f)
+    {
+        lastRandomSlewMs = requestedRandomSlewMs;
+        sampleHoldSlewCoefficient = 1.0f - std::exp(
+            -1.0f
+            / (lastRandomSlewMs * 0.001f
+               * static_cast<float>(juce::jmax(1.0, cachedSampleRate))));
+    }
     const bool useEqualPowerMix =
         mixLaw.load(std::memory_order_relaxed) >= 0.5f;
-    const int baseVoices = juce::jlimit(1, maxVoices, static_cast<int>(voices.load()));
-    const int numVoices = characterIndex == 1 && currentMode == Mode::Chorus ? juce::jmax(baseVoices, 4) : baseVoices;
-    const float spreadVal = juce::jlimit(0.0f, 1.0f, spread.load());
+    float targetVoiceCount =
+        juce::jlimit(
+            1.0f,
+            static_cast<float>(maxVoices),
+            voices.load(std::memory_order_relaxed));
+    if (characterIndex == 1
+        && currentMode == Mode::Chorus)
+    {
+        targetVoiceCount =
+            juce::jmax(4.0f, targetVoiceCount);
+    }
+    smoothedVoiceCount.setTargetValue(
+        targetVoiceCount);
+    const int maximumVoicesThisBlock =
+        juce::jlimit(
+            1,
+            maxVoices,
+            static_cast<int>(
+                std::ceil(
+                    juce::jmax(
+                        smoothedVoiceCount
+                            .getCurrentValue(),
+                        targetVoiceCount))));
 
     const float currentLowCut = juce::jlimit(20.0f, 2000.0f, lowCut.load());
-    if (std::abs(currentLowCut - lastLowCut) > 1.0f)
+    const float requestedHighCut =
+        juce::jlimit(
+            200.0f,
+            20000.0f,
+            highCut.load(std::memory_order_relaxed));
+    const float currentHighCut =
+        characterIndex == 1
+            ? juce::jmin(requestedHighCut, 12000.0f)
+            : requestedHighCut;
+    const bool filterTargetChanged =
+        std::abs(currentLowCut - lastLowCut) > 1.0f
+        || std::abs(currentHighCut - lastHighCut) > 8.0f;
+    if (filterTargetChanged)
     {
         lastLowCut = currentLowCut;
-        if (! lowCutCoefficientLut.empty())
-            writeRealtimeFilterCoefficients(
-                wetLowCutL,
-                wetLowCutR,
-                lookupRealtimeFilterLut(lowCutCoefficientLut,
-                                        cachedSampleRate,
-                                        currentLowCut,
-                                        20.0f,
-                                        2000.0f));
-    }
-
-    const float requestedHighCut = juce::jlimit(200.0f, 20000.0f, highCut.load());
-    const float currentHighCut = characterIndex == 2 ? juce::jmin(requestedHighCut, 7200.0f)
-                               : (characterIndex == 1 ? juce::jmin(requestedHighCut, 12000.0f)
-                                                       : requestedHighCut);
-    if (std::abs(currentHighCut - lastHighCut) > 8.0f)
-    {
         lastHighCut = currentHighCut;
-        if (! highCutCoefficientLut.empty())
-            writeRealtimeFilterCoefficients(
-                wetHighCutL,
-                wetHighCutR,
-                lookupRealtimeFilterLut(highCutCoefficientLut,
-                                        cachedSampleRate,
-                                        currentHighCut,
-                                        200.0f,
-                                        20000.0f));
+        if (! lowCutCoefficientLut.empty()
+            && ! highCutCoefficientLut.empty())
+        {
+            pendingLowCutCoefficients =
+                lookupRealtimeFilterLut(
+                    lowCutCoefficientLut,
+                    cachedSampleRate,
+                    currentLowCut,
+                    20.0f,
+                    2000.0f);
+            pendingHighCutCoefficients =
+                lookupRealtimeFilterLut(
+                    highCutCoefficientLut,
+                    cachedSampleRate,
+                    currentHighCut,
+                    200.0f,
+                    20000.0f);
+            wetFilterChangePending = true;
+        }
+    }
+    if (wetFilterChangePending
+        && ! wetFilterMorphActive)
+    {
+        auto& targetLowCutL =
+            wetFiltersUseAlternate
+                ? wetLowCutL
+                : alternateWetLowCutL;
+        auto& targetLowCutR =
+            wetFiltersUseAlternate
+                ? wetLowCutR
+                : alternateWetLowCutR;
+        auto& targetHighCutL =
+            wetFiltersUseAlternate
+                ? wetHighCutL
+                : alternateWetHighCutL;
+        auto& targetHighCutR =
+            wetFiltersUseAlternate
+                ? wetHighCutR
+                : alternateWetHighCutR;
+        targetLowCutL.reset();
+        targetLowCutR.reset();
+        targetHighCutL.reset();
+        targetHighCutR.reset();
+        writeRealtimeFilterCoefficients(
+            targetLowCutL,
+            targetLowCutR,
+            pendingLowCutCoefficients);
+        writeRealtimeFilterCoefficients(
+            targetHighCutL,
+            targetHighCutR,
+            pendingHighCutCoefficients);
+        smoothedWetFilterMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedWetFilterMorph.setTargetValue(1.0f);
+        wetFilterMorphActive = true;
+        wetFilterChangePending = false;
     }
 
-    const float phaseInc = lfoRate * juce::MathConstants<float>::twoPi
-                         / static_cast<float>(cachedSampleRate);
-
-    const float voiceGain = 1.0f / static_cast<float>(numVoices);
     constexpr std::array<float, maxVoices>
         ensembleRateRatios {
             0.83f, 0.93f, 1.0f, 1.08f, 1.17f, 1.29f
@@ -2062,23 +9881,58 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
 
     auto* dataL = buffer.getWritePointer(0);
     auto* dataR = (numChannels >= 2) ? buffer.getWritePointer(1) : nullptr;
+    const float safeSampleRate =
+        static_cast<float>(
+            juce::jmax(1.0, cachedSampleRate));
+    const float sendReleaseCoefficient =
+        std::exp(
+            -1.0f
+            / (0.002f * safeSampleRate));
+
+    auto& activeLowCutL =
+        wetFiltersUseAlternate
+            ? alternateWetLowCutL
+            : wetLowCutL;
+    auto& activeLowCutR =
+        wetFiltersUseAlternate
+            ? alternateWetLowCutR
+            : wetLowCutR;
+    auto& activeHighCutL =
+        wetFiltersUseAlternate
+            ? alternateWetHighCutL
+            : wetHighCutL;
+    auto& activeHighCutR =
+        wetFiltersUseAlternate
+            ? alternateWetHighCutR
+            : wetHighCutR;
+    auto& targetLowCutL =
+        wetFiltersUseAlternate
+            ? wetLowCutL
+            : alternateWetLowCutL;
+    auto& targetLowCutR =
+        wetFiltersUseAlternate
+            ? wetLowCutR
+            : alternateWetLowCutR;
+    auto& targetHighCutL =
+        wetFiltersUseAlternate
+            ? wetHighCutL
+            : alternateWetHighCutL;
+    auto& targetHighCutR =
+        wetFiltersUseAlternate
+            ? wetHighCutR
+            : alternateWetHighCutR;
 
     auto applyCharacter = [&] (float value, int sampleIndex, int channelIndex)
     {
+        juce::ignoreUnused(sampleIndex, channelIndex);
         if (characterIndex == 1)
             return std::tanh(value * 1.05f) * 0.98f;
-        if (characterIndex == 2)
-            return std::tanh(value * 1.18f) * 0.9f
-                 + builtinNoise(
-                       static_cast<int>(
-                           (characterNoiseSample
-                            + static_cast<std::uint64_t>(sampleIndex))
-                           & 0x7fffffffu),
-                       400 + channelIndex)
-                       * 0.0014f;
         return value;
     };
-    auto getModulationValue = [&] (float phase, int voice)
+    auto getModulationValue =
+        [&] (float phase,
+             int voice,
+             float randomness)
     {
         const float smoothValue =
             getLFOValue(phase, currentLFOShape, voice);
@@ -2086,34 +9940,144 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
             getLFOValue(phase, LFOShape::SampleAndHold, voice);
         return smoothValue + (randomValue - smoothValue) * randomness;
     };
+    auto getSentInput =
+        [&] (float inputL,
+             float inputR,
+             float& sentL,
+             float& sentR) noexcept
+    {
+        if (sendTarget > 0.0f)
+        {
+            const float sendGain =
+                smoothedInputSend.getNextValue();
+            sentL = inputL * sendGain;
+            sentR = inputR * sendGain;
+            sendReleaseState[0] = sentL;
+            sendReleaseState[1] = sentR;
+            return;
+        }
+
+        sendReleaseState[0] *=
+            sendReleaseCoefficient;
+        sendReleaseState[1] *=
+            sendReleaseCoefficient;
+        if (std::abs(sendReleaseState[0]) < 1.0e-9f)
+            sendReleaseState[0] = 0.0f;
+        if (std::abs(sendReleaseState[1]) < 1.0e-9f)
+            sendReleaseState[1] = 0.0f;
+        sentL = sendReleaseState[0];
+        sentR = sendReleaseState[1];
+    };
+    auto processWetFilters =
+        [&] (float& left,
+             float& right) noexcept
+    {
+        const float activeLeft =
+            activeHighCutL.processSample(
+                activeLowCutL.processSample(left));
+        const float activeRight =
+            activeHighCutR.processSample(
+                activeLowCutR.processSample(right));
+        if (! wetFilterMorphActive)
+        {
+            left = activeLeft;
+            right = activeRight;
+            return;
+        }
+
+        const float targetLeft =
+            targetHighCutL.processSample(
+                targetLowCutL.processSample(left));
+        const float targetRight =
+            targetHighCutR.processSample(
+                targetLowCutR.processSample(right));
+        const float morph =
+            smoothedWetFilterMorph.getNextValue();
+        left =
+            activeLeft
+            + (targetLeft - activeLeft) * morph;
+        right =
+            activeRight
+            + (targetRight - activeRight) * morph;
+    };
 
     if (currentMode == Mode::Phaser)
     {
         // Phaser mode: modulated all-pass filters
-        const int baseStages = juce::jlimit(2, maxPhaserStages, numVoices * 2);
-        const int numStages = characterIndex == 1 ? juce::jmax(baseStages, 8)
-                            : (characterIndex == 2 ? juce::jmin(baseStages, 6) : baseStages);
-        const float minFreq = characterIndex == 2 ? 120.0f : 200.0f;
-        const float maxFreq = characterIndex == 2 ? 2500.0f : 4000.0f;
+        constexpr float minFreq = 200.0f;
+        constexpr float maxFreq = 4000.0f;
 
         for (int i = 0; i < numSamples; ++i)
         {
+            const float currentRate =
+                smoothedRate.getNextValue();
+            const float currentDepth =
+                smoothedDepth.getNextValue();
+            const float currentFeedback =
+                smoothedFeedback.getNextValue();
+            const float currentSpread =
+                smoothedSpread.getNextValue();
+            const float currentRandomness =
+                smoothedRandomBlend.getNextValue();
+            const float currentVoiceCount =
+                smoothedVoiceCount.getNextValue();
+            juce::ignoreUnused(currentSpread);
             const float inL = dataL[i];
             const float inR = dataR ? dataR[i] : inL;
-            const float sentL = inL * sendGain;
-            const float sentR = inR * sendGain;
+            float sentL = 0.0f;
+            float sentR = 0.0f;
+            getSentInput(inL, inR, sentL, sentR);
 
             // LFO modulates the all-pass center frequency.
             const float lfoVal =
-                getModulationValue(lfoPhase[0], 0);
-            const float modFreq = minFreq + (maxFreq - minFreq) * (lfoVal * lfoDepth * 0.5f + 0.5f);
+                getModulationValue(
+                    lfoPhase[0],
+                    0,
+                    currentRandomness);
+            const float modFreq =
+                minFreq
+                + (maxFreq - minFreq)
+                    * (lfoVal * currentDepth * 0.5f
+                       + 0.5f);
             const float warped = std::tan(juce::MathConstants<float>::pi * modFreq / static_cast<float>(cachedSampleRate));
             const float allPassCoeff = (warped - 1.0f) / (warped + 1.0f);
 
-            float procL = sentL + feedbackState[0] * fb;
-            float procR = sentR + feedbackState[1] * fb;
+            float procL =
+                sentL
+                + feedbackState[0] * currentFeedback;
+            float procR =
+                sentR
+                + feedbackState[1] * currentFeedback;
 
-            for (int s = 0; s < numStages; ++s)
+            const int lowerVoiceCount =
+                juce::jlimit(
+                    1,
+                    maxVoices,
+                    static_cast<int>(
+                        std::floor(
+                            currentVoiceCount)));
+            const int upperVoiceCount =
+                juce::jlimit(
+                    lowerVoiceCount,
+                    maxVoices,
+                    static_cast<int>(
+                        std::ceil(
+                            currentVoiceCount)));
+            const int lowerStageCount =
+                juce::jlimit(
+                    2,
+                    maxPhaserStages,
+                    lowerVoiceCount * 2);
+            const int upperStageCount =
+                juce::jlimit(
+                    lowerStageCount,
+                    maxPhaserStages,
+                    upperVoiceCount * 2);
+            float lowerStageOutputL = procL;
+            float lowerStageOutputR = procR;
+            for (int s = 0;
+                 s < upperStageCount;
+                 ++s)
             {
                 const auto stateIndex = static_cast<size_t>(s);
                 const float outL = -allPassCoeff * procL + phaserStateL[stateIndex];
@@ -2123,113 +10087,221 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
                 const float outR = -allPassCoeff * procR + phaserStateR[stateIndex];
                 phaserStateR[stateIndex] = procR + allPassCoeff * outR;
                 procR = outR;
+                if (s + 1 == lowerStageCount)
+                {
+                    lowerStageOutputL = procL;
+                    lowerStageOutputR = procR;
+                }
             }
+            const float stageMorph =
+                currentVoiceCount
+                - static_cast<float>(
+                    lowerVoiceCount);
+            procL =
+                lowerStageOutputL
+                + (procL - lowerStageOutputL)
+                    * stageMorph;
+            procR =
+                lowerStageOutputR
+                + (procR - lowerStageOutputR)
+                    * stageMorph;
 
             feedbackState[0] = procL;
             feedbackState[1] = procR;
             procL = applyCharacter(procL, i, 0);
             procR = applyCharacter(procR, i, 1);
-            procL = wetHighCutL.processSample(wetLowCutL.processSample(procL));
-            procR = wetHighCutR.processSample(wetLowCutR.processSample(procR));
+            processWetFilters(procL, procR);
 
             const float wet = smoothedMix.getNextValue();
-            const float dryGain = useEqualPowerMix
+            const float baseDryGain = useEqualPowerMix
                 ? lookupModulationSine(
                       (1.0f - wet)
                       * juce::MathConstants<float>::halfPi)
                 : 1.0f - wet;
+            const float unityDryBlend =
+                smoothedUnityDry.getNextValue();
+            const float dryGain =
+                baseDryGain
+                + (1.0f - baseDryGain) * unityDryBlend;
             const float wetGain = useEqualPowerMix
                 ? lookupModulationSine(
                       wet
                       * juce::MathConstants<float>::halfPi)
                 : wet;
-            dataL[i] =
+            const float topologyGain =
+                smoothedTopologyGain.getNextValue();
+            const float processedL =
                 inL * dryGain + procL * wetGain;
+            dataL[i] =
+                inL
+                + (processedL - inL)
+                    * topologyGain;
             if (dataR)
-                dataR[i] =
+            {
+                const float processedR =
                     inR * dryGain + procR * wetGain;
+                dataR[i] =
+                    inR
+                    + (processedR - inR)
+                        * topologyGain;
+            }
 
             // Advance LFO
-            advanceLFO(0, phaseInc);
+            const float phaseIncrement =
+                currentRate
+                * juce::MathConstants<float>::twoPi
+                / safeSampleRate;
+            advanceLFO(0, phaseIncrement);
         }
     }
     else
     {
         // Chorus / Flanger mode
-        float centerDelaySamples, depthSamples;
+        float centerDelaySamples;
+        float baseDepthSamples;
         if (currentMode == Mode::Flanger)
         {
             // Flanger: shorter delay range (0.5ms - 5ms)
             centerDelaySamples =
                 static_cast<float>(0.00275 * cachedSampleRate);
-            depthSamples =
-                static_cast<float>(0.0022 * cachedSampleRate) * lfoDepth;
+            baseDepthSamples =
+                static_cast<float>(0.0022 * cachedSampleRate);
         }
         else
         {
             // Chorus: longer delay range (7ms - 20ms)
             centerDelaySamples = static_cast<float>(0.007 * cachedSampleRate);
-            depthSamples = static_cast<float>(0.013 * cachedSampleRate) * lfoDepth;
+            baseDepthSamples =
+                static_cast<float>(0.013 * cachedSampleRate);
         }
         if (characterIndex == 1 && currentMode == Mode::Chorus)
         {
             centerDelaySamples *= 1.22f;
-            depthSamples *= 1.18f;
-        }
-        else if (characterIndex == 2)
-        {
-            centerDelaySamples *= 1.08f;
-            depthSamples *= 0.82f;
+            baseDepthSamples *= 1.18f;
         }
 
         for (int i = 0; i < numSamples; ++i)
         {
+            const float currentRate =
+                smoothedRate.getNextValue();
+            juce::ignoreUnused(
+                smoothedDepth.getNextValue());
+            const float currentFeedback =
+                smoothedFeedback.getNextValue();
+            const float currentSpread =
+                smoothedSpread.getNextValue();
+            const float currentRandomness =
+                smoothedRandomBlend.getNextValue();
+            const float currentVoiceCount =
+                smoothedVoiceCount.getNextValue();
+            const float activeDepthSamples =
+                baseDepthSamples * activeDelayDepth;
+            const float targetDepthSamples =
+                baseDepthSamples
+                * delayDepthMorphTarget;
+            const float depthMorph =
+                delayDepthMorphActive
+                    ? smoothedDelayDepthMorph
+                          .getNextValue()
+                    : 0.0f;
             const float inL = dataL[i];
             const float inR = dataR ? dataR[i] : inL;
-            const float sentL = inL * sendGain;
-            const float sentR = inR * sendGain;
+            float sentL = 0.0f;
+            float sentR = 0.0f;
+            getSentInput(inL, inR, sentL, sentR);
 
             float wetL = 0.0f;
             float wetR = 0.0f;
 
             delayBuffers[0][
                 static_cast<size_t>(delayWritePosition)] =
-                sentL + feedbackState[0] * fb;
+                sentL
+                + feedbackState[0] * currentFeedback;
             if (numChannels >= 2)
                 delayBuffers[1][
                     static_cast<size_t>(
                         delayWritePosition)] =
-                    sentR + feedbackState[1] * fb;
+                    sentR
+                    + feedbackState[1] * currentFeedback;
 
-            for (int v = 0; v < numVoices; ++v)
+            for (int v = 0;
+                 v < maximumVoicesThisBlock;
+                 ++v)
             {
+                const float voiceWeight =
+                    juce::jlimit(
+                        0.0f,
+                        1.0f,
+                        currentVoiceCount
+                            - static_cast<float>(v));
                 const float lfoVal =
-                    getModulationValue(lfoPhase[v], v);
+                    getModulationValue(
+                        lfoPhase[v],
+                        v,
+                        currentRandomness);
                 const float ensembleOffset = characterIndex == 1
                     ? lookupModulationSine(
                           lfoPhase[v] * 0.37f
                           + static_cast<float>(v) * 1.61f)
                         * 0.18f
                     : 0.0f;
-                const float delaySamples = juce::jlimit(1.0f, static_cast<float>(maxChorusDelaySamples - 4),
-                                                        centerDelaySamples + depthSamples * (lfoVal + ensembleOffset));
-
-                // Read with modulated delay
-                const float delayedL =
-                    readDelayTap(0, delaySamples);
-                const float outL =
+                const float modulationL =
+                    lfoVal + ensembleOffset;
+                const float activeDelaySamplesL =
+                    juce::jlimit(
+                        1.0f,
+                        static_cast<float>(
+                            maxChorusDelaySamples - 4),
+                        centerDelaySamples
+                            + activeDepthSamples
+                                * modulationL);
+                const float activeTapL =
                     validDelayHistorySamples
-                            >= static_cast<int>(std::ceil(delaySamples)) + 3
-                        ? delayedL
+                            >= static_cast<int>(
+                                   std::ceil(
+                                       activeDelaySamplesL))
+                                + 3
+                        ? readDelayTap(
+                              0, activeDelaySamplesL)
                         : 0.0f;
-                wetL += outL;
+                float outL = activeTapL;
+                if (delayDepthMorphActive)
+                {
+                    const float targetDelaySamplesL =
+                        juce::jlimit(
+                            1.0f,
+                            static_cast<float>(
+                                maxChorusDelaySamples - 4),
+                            centerDelaySamples
+                                + targetDepthSamples
+                                    * modulationL);
+                    const float targetTapL =
+                        validDelayHistorySamples
+                                >= static_cast<int>(
+                                       std::ceil(
+                                           targetDelaySamplesL))
+                                    + 3
+                            ? readDelayTap(
+                                  0,
+                                  targetDelaySamplesL)
+                            : 0.0f;
+                    outL +=
+                        (targetTapL - activeTapL)
+                        * depthMorph;
+                }
+                wetL += outL * voiceWeight;
 
                 if (numChannels >= 2)
                 {
                     // Stereo spread: offset phase for right channel
-                    const float phaseOffset = juce::MathConstants<float>::pi * spreadVal * static_cast<float>(v % 2);
+                    const float phaseOffset =
+                        juce::MathConstants<float>::pi
+                        * currentSpread
+                        * static_cast<float>(v % 2);
                     const float lfoValR = getModulationValue(
-                        lfoPhase[v] + phaseOffset, v);
+                        lfoPhase[v] + phaseOffset,
+                        v,
+                        currentRandomness);
                     const float decorrelatedEnsembleOffsetR =
                         characterIndex == 1
                             ? lookupModulationSine(
@@ -2242,19 +10314,56 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
                         ensembleOffset
                         + (decorrelatedEnsembleOffsetR
                            - ensembleOffset)
-                            * spreadVal;
-                    const float delaySamplesR = juce::jlimit(1.0f, static_cast<float>(maxChorusDelaySamples - 4),
-                                                             centerDelaySamples + depthSamples * (lfoValR + ensembleOffsetR));
-                    const float delayedR =
-                        readDelayTap(1, delaySamplesR);
-                    const float outR =
+                            * currentSpread;
+                    const float modulationR =
+                        lfoValR + ensembleOffsetR;
+                    const float activeDelaySamplesR =
+                        juce::jlimit(
+                            1.0f,
+                            static_cast<float>(
+                                maxChorusDelaySamples
+                                - 4),
+                            centerDelaySamples
+                                + activeDepthSamples
+                                    * modulationR);
+                    const float activeTapR =
                         validDelayHistorySamples
                                 >= static_cast<int>(
-                                       std::ceil(delaySamplesR))
+                                       std::ceil(
+                                           activeDelaySamplesR))
                                     + 3
-                            ? delayedR
+                            ? readDelayTap(
+                                  1,
+                                  activeDelaySamplesR)
                             : 0.0f;
-                    wetR += outR;
+                    float outR = activeTapR;
+                    if (delayDepthMorphActive)
+                    {
+                        const float
+                            targetDelaySamplesR =
+                                juce::jlimit(
+                                    1.0f,
+                                    static_cast<float>(
+                                        maxChorusDelaySamples
+                                        - 4),
+                                    centerDelaySamples
+                                        + targetDepthSamples
+                                            * modulationR);
+                        const float targetTapR =
+                            validDelayHistorySamples
+                                    >= static_cast<int>(
+                                           std::ceil(
+                                               targetDelaySamplesR))
+                                        + 3
+                                ? readDelayTap(
+                                      1,
+                                      targetDelaySamplesR)
+                                : 0.0f;
+                        outR +=
+                            (targetTapR - activeTapR)
+                            * depthMorph;
+                    }
+                    wetR += outR * voiceWeight;
                 }
 
                 // Advance LFO phase
@@ -2264,7 +10373,13 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
                         ? ensembleRateRatios[
                               static_cast<size_t>(v)]
                         : 1.0f;
-                advanceLFO(v, phaseInc * voiceRateRatio);
+                const float phaseIncrement =
+                    currentRate
+                    * juce::MathConstants<float>::twoPi
+                    / safeSampleRate;
+                advanceLFO(
+                    v,
+                    phaseIncrement * voiceRateRatio);
             }
             --delayWritePosition;
             if (delayWritePosition < 0)
@@ -2274,39 +10389,103 @@ void S13Chorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&
                 maxChorusDelaySamples,
                 validDelayHistorySamples + 1);
 
-            wetL *= voiceGain;
-            wetR *= voiceGain;
+            const float voiceNormalisation =
+                1.0f
+                / juce::jmax(
+                    1.0f,
+                    currentVoiceCount);
+            wetL *= voiceNormalisation;
+            wetR *= voiceNormalisation;
             wetL = applyCharacter(wetL, i, 0);
             wetR = applyCharacter(wetR, i, 1);
-            wetL = wetHighCutL.processSample(wetLowCutL.processSample(wetL));
-            wetR = wetHighCutR.processSample(wetLowCutR.processSample(wetR));
+            processWetFilters(wetL, wetR);
 
             feedbackState[0] = wetL;
             feedbackState[1] = wetR;
 
             const float wet = smoothedMix.getNextValue();
-            const float dryGain = useEqualPowerMix
+            const float baseDryGain = useEqualPowerMix
                 ? lookupModulationSine(
                       (1.0f - wet)
                       * juce::MathConstants<float>::halfPi)
                 : 1.0f - wet;
+            const float unityDryBlend =
+                smoothedUnityDry.getNextValue();
+            const float dryGain =
+                baseDryGain
+                + (1.0f - baseDryGain) * unityDryBlend;
             const float wetGain = useEqualPowerMix
                 ? lookupModulationSine(
                       wet
                       * juce::MathConstants<float>::halfPi)
                 : wet;
-            dataL[i] =
+            const float topologyGain =
+                smoothedTopologyGain.getNextValue();
+            const float processedL =
                 inL * dryGain + wetL * wetGain;
+            dataL[i] =
+                inL
+                + (processedL - inL)
+                    * topologyGain;
             if (dataR)
-                dataR[i] =
+            {
+                const float processedR =
                     inR * dryGain + wetR * wetGain;
+                dataR[i] =
+                    inR
+                    + (processedR - inR)
+                        * topologyGain;
+            }
         }
+    }
+    if (topologyTransitionStage == 1
+        && ! smoothedTopologyGain.isSmoothing())
+    {
+        const bool modeChanged =
+            activeModeIndex != requestedModeIndex;
+        activeModeIndex = requestedModeIndex;
+        activeLFOShapeIndex =
+            requestedLFOShapeIndex;
+        activeCharacterIndex =
+            requestedCharacterIndex;
+        feedbackState[0] = 0.0f;
+        feedbackState[1] = 0.0f;
+        if (modeChanged)
+        {
+            validDelayHistorySamples = 0;
+            phaserStateL.fill(0.0f);
+            phaserStateR.fill(0.0f);
+        }
+        smoothedTopologyGain.setTargetValue(1.0f);
+        topologyTransitionStage = 2;
+    }
+    else if (topologyTransitionStage == 2
+             && ! smoothedTopologyGain.isSmoothing())
+    {
+        topologyTransitionStage = 0;
+    }
+    if (delayDepthMorphActive
+        && ! smoothedDelayDepthMorph.isSmoothing())
+    {
+        activeDelayDepth =
+            delayDepthMorphTarget;
+        delayDepthMorphActive = false;
+        smoothedDelayDepthMorph
+            .setCurrentAndTargetValue(0.0f);
+    }
+    if (wetFilterMorphActive
+        && ! smoothedWetFilterMorph.isSmoothing())
+    {
+        wetFiltersUseAlternate =
+            ! wetFiltersUseAlternate;
+        wetFilterMorphActive = false;
+        smoothedWetFilterMorph
+            .setCurrentAndTargetValue(0.0f);
     }
     // Feedback is constrained by fbAmount and the rack maps it below unity.
     // Only clear non-finite output samples here; clipping the mixed buffer
     // would also clip the fully dry path while the effect is bypassed.
     clearNonFiniteSamples(buffer);
-    characterNoiseSample += static_cast<std::uint64_t>(numSamples);
 }
 
 void S13Chorus::resetTailState() noexcept
@@ -2314,13 +10493,72 @@ void S13Chorus::resetTailState() noexcept
     validDelayHistorySamples = 0;
     feedbackState[0] = 0.0f;
     feedbackState[1] = 0.0f;
+    sendReleaseState[0] = 0.0f;
+    sendReleaseState[1] = 0.0f;
+    activeDelayDepth = requestedDelayDepth;
+    delayDepthMorphTarget = requestedDelayDepth;
+    pendingDelayDepth = requestedDelayDepth;
+    delayDepthMorphActive = false;
+    delayDepthChangePending = false;
+    smoothedDelayDepthMorph
+        .setCurrentAndTargetValue(0.0f);
     phaserStateL.fill(0.0f);
     phaserStateR.fill(0.0f);
+    if (wetFilterMorphActive)
+        wetFiltersUseAlternate =
+            ! wetFiltersUseAlternate;
     wetLowCutL.reset();
     wetLowCutR.reset();
     wetHighCutL.reset();
     wetHighCutR.reset();
+    alternateWetLowCutL.reset();
+    alternateWetLowCutR.reset();
+    alternateWetHighCutL.reset();
+    alternateWetHighCutR.reset();
+    wetFilterMorphActive = false;
+    wetFilterChangePending = false;
+    smoothedWetFilterMorph
+        .setCurrentAndTargetValue(0.0f);
+    smoothedInputSend.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            inputSend.load(std::memory_order_relaxed)));
+    const int resetMode = juce::jlimit(
+        0,
+        2,
+        static_cast<int>(std::round(
+            mode.load(std::memory_order_relaxed))));
+    const int resetCharacter = juce::jlimit(
+        0,
+        1,
+        static_cast<int>(std::round(
+            characterMode.load(std::memory_order_relaxed))));
+    float resetVoiceCount = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxVoices),
+        voices.load(std::memory_order_relaxed));
+    if (resetCharacter == 1
+        && resetMode == static_cast<int>(Mode::Chorus))
+    {
+        resetVoiceCount =
+            juce::jmax(4.0f, resetVoiceCount);
+    }
+    smoothedVoiceCount.setCurrentAndTargetValue(
+        resetVoiceCount);
+    activeModeIndex = resetMode;
+    activeLFOShapeIndex = juce::jlimit(
+        0,
+        3,
+        static_cast<int>(std::round(
+            lfoShape.load(std::memory_order_relaxed))));
+    activeCharacterIndex = resetCharacter;
+    topologyTransitionStage = 0;
+    smoothedTopologyGain
+        .setCurrentAndTargetValue(1.0f);
     smoothedMix.setCurrentAndTargetValue(0.0f);
+    smoothedUnityDry.setCurrentAndTargetValue(
+        unityDry.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f);
 }
 
 void S13Chorus::releaseResources()
@@ -2345,15 +10583,72 @@ void S13Chorus::releaseResources()
     wetLowCutR.reset();
     wetHighCutL.reset();
     wetHighCutR.reset();
+    alternateWetLowCutL.reset();
+    alternateWetLowCutR.reset();
+    alternateWetHighCutL.reset();
+    alternateWetHighCutR.reset();
 
     feedbackState[0] = 0.0f;
     feedbackState[1] = 0.0f;
+    sendReleaseState[0] = 0.0f;
+    sendReleaseState[1] = 0.0f;
+    activeDelayDepth = juce::jlimit(
+        0.0f,
+        1.0f,
+        depth.load(std::memory_order_relaxed));
+    delayDepthMorphTarget = activeDelayDepth;
+    pendingDelayDepth = activeDelayDepth;
+    requestedDelayDepth = activeDelayDepth;
+    delayDepthMorphActive = false;
+    delayDepthChangePending = false;
+    smoothedDelayDepthMorph
+        .setCurrentAndTargetValue(0.0f);
     validDelayHistorySamples = 0;
     inputSend.store(1.0f, std::memory_order_relaxed);
+    smoothedInputSend
+        .setCurrentAndTargetValue(1.0f);
+    const int resetMode = juce::jlimit(
+        0,
+        2,
+        static_cast<int>(std::round(
+            mode.load(std::memory_order_relaxed))));
+    const int resetCharacter = juce::jlimit(
+        0,
+        1,
+        static_cast<int>(std::round(
+            characterMode.load(std::memory_order_relaxed))));
+    float resetVoiceCount = juce::jlimit(
+        1.0f,
+        static_cast<float>(maxVoices),
+        voices.load(std::memory_order_relaxed));
+    if (resetCharacter == 1
+        && resetMode == static_cast<int>(Mode::Chorus))
+    {
+        resetVoiceCount =
+            juce::jmax(4.0f, resetVoiceCount);
+    }
+    smoothedVoiceCount.setCurrentAndTargetValue(
+        resetVoiceCount);
+    activeModeIndex = resetMode;
+    activeLFOShapeIndex = juce::jlimit(
+        0,
+        3,
+        static_cast<int>(std::round(
+            lfoShape.load(std::memory_order_relaxed))));
+    activeCharacterIndex = resetCharacter;
+    topologyTransitionStage = 0;
+    smoothedTopologyGain
+        .setCurrentAndTargetValue(1.0f);
     smoothedMix.setCurrentAndTargetValue(
         juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed)));
+    smoothedUnityDry.setCurrentAndTargetValue(
+        unityDry.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f);
+    wetFiltersUseAlternate = false;
+    wetFilterMorphActive = false;
+    wetFilterChangePending = false;
+    smoothedWetFilterMorph
+        .setCurrentAndTargetValue(0.0f);
     sampleHoldRandomState = 0x8f6a2c1du;
-    characterNoiseSample = 0;
     for (int voice = 0; voice < maxVoices; ++voice)
     {
         lfoPhase[voice] = static_cast<float>(voice) * juce::MathConstants<float>::twoPi
@@ -2418,7 +10713,12 @@ void S13Chorus::setStateInformation(const void* data, int sizeInBytes)
     highCut   = static_cast<float>((double)tree.getProperty("highCut", 20000.0));
     lowCut    = static_cast<float>((double)tree.getProperty("lowCut", 20.0));
     tempoSync = static_cast<float>((double)tree.getProperty("tempoSync", 0.0));
-    characterMode = static_cast<float>((double)tree.getProperty("characterMode", 0.0));
+    characterMode = static_cast<float>(juce::jlimit(
+        0,
+        1,
+        static_cast<int>(std::round(
+            static_cast<double>(
+                tree.getProperty("characterMode", 0.0))))));
     randomBlend = static_cast<float>((double)tree.getProperty("randomBlend", 0.0));
     mixLaw = static_cast<float>(
         static_cast<double>(
@@ -2450,12 +10750,16 @@ S13Saturator::S13Saturator(bool shouldUseLowLatencyOversampling)
 
 void S13Saturator::setOversamplingEnabled(bool enabled)
 {
+    const juce::ScopedLock callbackGuard(
+        getCallbackLock());
     oversamplingEnabled.store(enabled, std::memory_order_relaxed);
     updateOversamplingConfiguration(true);
 }
 
 void S13Saturator::setOversamplingMode(float mode)
 {
+    const juce::ScopedLock callbackGuard(
+        getCallbackLock());
     oversampleMode.store(
         static_cast<float>(juce::jlimit(
             0, 2, static_cast<int>(std::round(mode)))),
@@ -2529,6 +10833,8 @@ void S13Saturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     toneFilterR.reset();
     lowCutFilterL.reset();
     lowCutFilterR.reset();
+    toneCoefficientsSmoothing = false;
+    lowCutCoefficientsSmoothing = false;
     lastToneFreq = juce::jlimit(200.0f, 20000.0f, toneFreq.load());
     auto coeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, lastToneFreq);
     toneFilterL.coefficients = coeffs;
@@ -2539,14 +10845,30 @@ void S13Saturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     lowCutFilterL.coefficients = lowCutCoeffs;
     lowCutFilterR.coefficients = lowCutCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 1000.0f, true);
+    targetToneCoefficients =
+        lookupRealtimeFilterLut(
+            toneCoefficientLut,
+            sampleRate,
+            lastToneFreq,
+            200.0f,
+            20000.0f);
+    targetLowCutCoefficients =
+        lookupRealtimeFilterLut(
+            lowCutCoefficientLut,
+            sampleRate,
+            lastLowCutFreq,
+            20.0f,
+            1000.0f);
     writeRealtimeFilterCoefficients(
         toneFilterL,
         toneFilterR,
-        lookupRealtimeFilterLut(toneCoefficientLut, sampleRate, lastToneFreq, 200.0f, 20000.0f));
+        targetToneCoefficients);
     writeRealtimeFilterCoefficients(
         lowCutFilterL,
         lowCutFilterR,
-        lookupRealtimeFilterLut(lowCutCoefficientLut, sampleRate, lastLowCutFreq, 20.0f, 1000.0f));
+        targetLowCutCoefficients);
+    toneCoefficientsSmoothing = false;
+    lowCutCoefficientsSmoothing = false;
 
     const auto oversamplingFilterType = useLowLatencyOversampling
         ? juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR
@@ -2583,6 +10905,23 @@ void S13Saturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     smoothedDriveGain.reset(sampleRate, 0.02);
     smoothedMix.reset(sampleRate, 0.02);
     smoothedOutputGain.reset(sampleRate, 0.02);
+    smoothedTopologyGain.reset(sampleRate, 0.010);
+    smoothedTopologyGain.setCurrentAndTargetValue(1.0f);
+    activeSaturationType = juce::jlimit(
+        0,
+        static_cast<int>(SatType::DiodeClipper),
+        static_cast<int>(std::round(
+            satType.load(std::memory_order_relaxed))));
+    topologyTransitionStage = 0;
+    for (auto& asymmetrySmoother : smoothedAsymmetry)
+    {
+        asymmetrySmoother.reset(sampleRate * 4.0, 0.02);
+        asymmetrySmoother.setCurrentAndTargetValue(
+            juce::jlimit(
+                -1.0f,
+                1.0f,
+                asymmetry.load(std::memory_order_relaxed)));
+    }
     for (auto& modeSmoother : smoothedDiodeMode)
     {
         modeSmoother.reset(sampleRate * 2.0, 0.02);
@@ -2597,15 +10936,16 @@ void S13Saturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     // from the realtime callback.
     juce::ignoreUnused(getDiodeCurveLut());
     const float initialDriveDB = juce::jlimit(0.0f, 30.0f, drive.load());
-    const float initialAutoCompDB = -initialDriveDB * 0.42f;
+    const float initialAutoCompDB = automaticDriveCompensationEnabled
+        ? -initialDriveDB * 0.42f
+        : 0.0f;
     lastDriveDbTarget = initialDriveDB;
     lastMixTarget =
         juce::jlimit(0.0f, 1.0f, mix.load());
     lastOutputDbTarget =
-        juce::jlimit(
-            -12.0f,
-            0.0f,
-            outputGain.load())
+        (automaticDriveCompensationEnabled
+             ? juce::jlimit(-12.0f, 0.0f, outputGain.load())
+             : juce::jlimit(-24.0f, 12.0f, outputGain.load()))
         + initialAutoCompDB;
     smoothedDriveGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(initialDriveDB));
     smoothedMix.setCurrentAndTargetValue(
@@ -2649,94 +10989,137 @@ float S13Saturator::processSample(
     float asym,
     int channel)
 {
-    // Apply asymmetry shift
-    float x = input * driveLinear + asym * 0.1f;
+    const bool centreAtZero = zeroInputInvariantEnabled;
+    // The stateful diode circuit remains an unbiased anti-parallel pair until
+    // it has a genuine asymmetric topology. Other embedded Rack curves retain
+    // asymmetric curvature by subtracting their response at the bias point.
+    const float bias = centreAtZero && type == SatType::DiodeClipper
+        ? 0.0f
+        : asym * 0.1f;
+    const float x = input * driveLinear + bias;
 
     switch (type)
     {
         case SatType::Tape:
         {
             // Tape saturation: soft, warm compression
-            float y = std::tanh(x * 0.8f);
-            // Add subtle even harmonics
-            y += 0.05f * x * x * (x > 0.0f ? 1.0f : -1.0f);
-            return y;
+            const auto shape = [] (float value)
+            {
+                float shaped = std::tanh(value * 0.8f);
+                // Add subtle even harmonics
+                shaped += 0.05f * value * value
+                    * (value > 0.0f ? 1.0f : -1.0f);
+                return shaped;
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Tube:
         {
             // Tube saturation: asymmetric, rich harmonics
-            float y;
-            if (x >= 0.0f)
-                y = 1.0f - std::exp(-x);
-            else
-                y = -1.0f + std::exp(x * 0.5f); // Asymmetric negative side
-            return y;
+            const auto shape = [] (float value)
+            {
+                if (value >= 0.0f)
+                    return 1.0f - std::exp(-value);
+                return -1.0f
+                    + std::exp(value * 0.5f); // Asymmetric negative side
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Transistor:
         {
             // Transistor: hard clipping with smooth transition
-            float y = x;
-            if (y > 1.0f)
-                y = 2.0f / 3.0f;
-            else if (y > 0.0f)
-                y = y - (y * y * y) / 3.0f;
-            else if (y > -1.0f)
-                y = y - (y * y * y) / 3.0f;
-            else
-                y = -2.0f / 3.0f;
-            return y;
+            const auto shape = [] (float value)
+            {
+                if (value > 1.0f)
+                    return 2.0f / 3.0f;
+                if (value > -1.0f)
+                    return value
+                        - (value * value * value) / 3.0f;
+                return -2.0f / 3.0f;
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Clip:
         {
             // Hard clip
-            return juce::jlimit(-1.0f, 1.0f, x);
+            const auto shape = [] (float value)
+            {
+                return juce::jlimit(-1.0f, 1.0f, value);
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Crush:
         {
             // Bit crush effect: quantize
-            constexpr float levels = 256.0f;
-            float y = std::round(x * levels) / levels;
-            return juce::jlimit(-1.0f, 1.0f, y);
+            const auto shape = [] (float value)
+            {
+                constexpr float levels = 256.0f;
+                const float quantized =
+                    std::round(value * levels) / levels;
+                return juce::jlimit(-1.0f, 1.0f, quantized);
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Console:
         {
             // Console: subtle soft knee with restrained odd harmonics.
-            const float knee = x / (1.0f + 0.28f * std::abs(x));
-            return std::tanh(knee * 1.15f) * 0.92f;
+            const auto shape = [] (float value)
+            {
+                const float knee =
+                    value / (1.0f + 0.28f * std::abs(value));
+                return std::tanh(knee * 1.15f) * 0.92f;
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Transformer:
         {
             // Transformer: rounded low-mid weight with asymmetric magnetic push.
-            const float biased = x + asym * 0.18f;
-            const float magnetic = std::tanh(biased * 0.95f) + 0.08f * std::sin(biased * 2.0f);
-            return magnetic * 0.9f;
+            const auto shape = [asym] (float value)
+            {
+                const float biased = value + asym * 0.18f;
+                const float magnetic = std::tanh(biased * 0.95f)
+                    + 0.08f * std::sin(biased * 2.0f);
+                return magnetic * 0.9f;
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::Foldback:
         {
             // Foldback: controlled creative distortion, level bounded for safety.
-            float y = x;
-            const float threshold = 0.78f;
-            if (std::abs(y) > threshold)
+            const auto shape = [] (float value)
             {
+                float shaped = value;
+                constexpr float threshold = 0.78f;
+                if (std::abs(shaped) <= threshold)
+                    return shaped;
                 const float period = threshold * 4.0f;
-                const float phase = y - threshold;
+                const float phase = shaped - threshold;
                 const float wrapped =
                     phase
                     - std::trunc(phase / period)
                         * period;
-                y = std::abs(
+                shaped = std::abs(
                         wrapped
                         - threshold * 2.0f)
                     - threshold;
-            }
-            return juce::jlimit(-1.0f, 1.0f, y);
+                return juce::jlimit(-1.0f, 1.0f, shaped);
+            };
+            const float y = shape(x);
+            return centreAtZero ? y - shape(bias) : y;
         }
 
         case SatType::DiodeClipper:
@@ -2787,7 +11170,8 @@ float S13Saturator::processSample(
         }
     }
 
-    return std::tanh(x); // fallback
+    const float y = std::tanh(x);
+    return centreAtZero ? y - std::tanh(bias) : y; // fallback
 }
 
 void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -2806,33 +11190,76 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
     {
         lastToneFreq = currentToneFreq;
         if (! toneCoefficientLut.empty())
-            writeRealtimeFilterCoefficients(
-                toneFilterL,
-                toneFilterR,
-                lookupRealtimeFilterLut(toneCoefficientLut,
-                                        cachedSampleRate,
-                                        currentToneFreq,
-                                        200.0f,
-                                        20000.0f));
+        {
+            targetToneCoefficients =
+                lookupRealtimeFilterLut(
+                    toneCoefficientLut,
+                    cachedSampleRate,
+                    currentToneFreq,
+                    200.0f,
+                    20000.0f);
+            toneCoefficientsSmoothing = true;
+        }
     }
     const float currentLowCutFreq = juce::jlimit(20.0f, 1000.0f, lowCutFreq.load());
     if (std::abs(currentLowCutFreq - lastLowCutFreq) > 1.0f)
     {
         lastLowCutFreq = currentLowCutFreq;
         if (! lowCutCoefficientLut.empty())
-            writeRealtimeFilterCoefficients(
-                lowCutFilterL,
-                lowCutFilterR,
-                lookupRealtimeFilterLut(lowCutCoefficientLut,
-                                        cachedSampleRate,
-                                        currentLowCutFreq,
-                                        20.0f,
-                                        1000.0f));
+        {
+            targetLowCutCoefficients =
+                lookupRealtimeFilterLut(
+                    lowCutCoefficientLut,
+                    cachedSampleRate,
+                    currentLowCutFreq,
+                    20.0f,
+                    1000.0f);
+            lowCutCoefficientsSmoothing = true;
+        }
     }
+    const float filterSmoothingCoefficient =
+        1.0f
+        - std::exp(
+            -1.0f
+            / static_cast<float>(
+                    juce::jmax(
+                        1.0,
+                        cachedSampleRate
+                            * filterSmoothingSeconds)));
+    const auto advanceToneCoefficients =
+        [&] () noexcept
+    {
+        if (toneCoefficientsSmoothing)
+        {
+            toneCoefficientsSmoothing =
+                smoothRealtimeFilterCoefficients(
+                    toneFilterL,
+                    toneFilterR,
+                    targetToneCoefficients,
+                    filterSmoothingCoefficient);
+        }
+    };
+    const auto advanceLowCutCoefficients =
+        [&] () noexcept
+    {
+        if (lowCutCoefficientsSmoothing)
+        {
+            lowCutCoefficientsSmoothing =
+                smoothRealtimeFilterCoefficients(
+                    lowCutFilterL,
+                    lowCutFilterR,
+                    targetLowCutCoefficients,
+                    filterSmoothingCoefficient);
+        }
+    };
 
     const float driveDB = juce::jlimit(0.0f, 30.0f, drive.load());
-    const float outGainDB = juce::jlimit(-12.0f, 0.0f, outputGain.load());
-    const float autoCompDB = -driveDB * 0.42f;
+    const float outGainDB = automaticDriveCompensationEnabled
+        ? juce::jlimit(-12.0f, 0.0f, outputGain.load())
+        : juce::jlimit(-24.0f, 12.0f, outputGain.load());
+    const float autoCompDB = automaticDriveCompensationEnabled
+        ? -driveDB * 0.42f
+        : 0.0f;
     const float currentMix =
         juce::jlimit(0.0f, 1.0f, mix.load());
     const float outputDbTarget =
@@ -2856,11 +11283,31 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             juce::Decibels::decibelsToGain(
                 outputDbTarget));
     }
-    const auto type = static_cast<SatType>(juce::jlimit(
+    const int requestedSaturationType = juce::jlimit(
         0,
         static_cast<int>(SatType::DiodeClipper),
-        static_cast<int>(satType.load())));
-    const float asym = juce::jlimit(-1.0f, 1.0f, asymmetry.load());
+        static_cast<int>(std::round(
+            satType.load(std::memory_order_relaxed))));
+    if (requestedSaturationType
+        != activeSaturationType)
+    {
+        if (topologyTransitionStage != 1)
+        {
+            smoothedTopologyGain.setTargetValue(0.0f);
+            topologyTransitionStage = 1;
+        }
+    }
+    else if (topologyTransitionStage == 1)
+    {
+        smoothedTopologyGain.setTargetValue(1.0f);
+        topologyTransitionStage = 2;
+    }
+    const auto type =
+        static_cast<SatType>(activeSaturationType);
+    const float asymmetryTarget =
+        juce::jlimit(-1.0f, 1.0f, asymmetry.load());
+    for (auto& asymmetrySmoother : smoothedAsymmetry)
+        asymmetrySmoother.setTargetValue(asymmetryTarget);
     const int osMode =
         activeOversamplingMode.load(std::memory_order_relaxed);
     const float nonlinearSampleRate =
@@ -2883,7 +11330,39 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
     if (! hasPreparedDryPath)
         return;
 
-    auto applyNonlinearity = [this, type, asym] (auto& audioBlock)
+    const auto finishTopologyTransition =
+        [&] () noexcept
+    {
+        if (topologyTransitionStage == 1
+            && ! smoothedTopologyGain.isSmoothing())
+        {
+            activeSaturationType =
+                requestedSaturationType;
+            diodeCapacitorState.fill(0.0f);
+            const float committedDiodeMode =
+                activeSaturationType
+                        == static_cast<int>(
+                            SatType::DiodeClipper)
+                    ? 1.0f
+                    : 0.0f;
+            for (auto& modeSmoother :
+                 smoothedDiodeMode)
+            {
+                modeSmoother
+                    .setCurrentAndTargetValue(
+                        committedDiodeMode);
+            }
+            smoothedTopologyGain.setTargetValue(1.0f);
+            topologyTransitionStage = 2;
+        }
+        else if (topologyTransitionStage == 2
+                 && ! smoothedTopologyGain.isSmoothing())
+        {
+            topologyTransitionStage = 0;
+        }
+    };
+
+    auto applyNonlinearity = [this, type] (auto& audioBlock)
     {
         const int samples = static_cast<int>(audioBlock.getNumSamples());
         const int channels = static_cast<int>(audioBlock.getNumChannels());
@@ -2892,6 +11371,8 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             auto* data = audioBlock.getChannelPointer(
                 static_cast<size_t>(channel));
             auto& modeSmoother = smoothedDiodeMode[
+                static_cast<size_t>(juce::jlimit(0, 1, channel))];
+            auto& asymmetrySmoother = smoothedAsymmetry[
                 static_cast<size_t>(juce::jlimit(0, 1, channel))];
             const bool processDiode =
                 type == SatType::DiodeClipper
@@ -2902,19 +11383,21 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                         0.0f;
             for (int sample = 0; sample < samples; ++sample)
             {
+                const float currentAsymmetry =
+                    asymmetrySmoother.getNextValue();
                 if (processDiode)
                 {
                     const float precisionSample = processSample(
                         data[sample],
                         1.0f,
                         SatType::Transistor,
-                        asym,
+                        currentAsymmetry,
                         channel);
                     const float distortionSample = processSample(
                         data[sample],
                         1.0f,
                         SatType::DiodeClipper,
-                        asym,
+                        currentAsymmetry,
                         channel);
                     const float modeMix = modeSmoother.getNextValue();
                     data[sample] =
@@ -2924,7 +11407,11 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 else
                 {
                     data[sample] = processSample(
-                        data[sample], 1.0f, type, asym, channel);
+                        data[sample],
+                        1.0f,
+                        type,
+                        currentAsymmetry,
+                        channel);
                 }
             }
         }
@@ -2951,8 +11438,9 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             diodeCapacitorState[1] = 0.0f;
 
         auto shapeSample =
-            [this, type, asym] (
+            [this, type] (
                 float driven,
+                float currentAsymmetry,
                 int channel,
                 bool processDiode,
                 juce::SmoothedValue<
@@ -2966,7 +11454,7 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                     driven,
                     1.0f,
                     type,
-                    asym,
+                    currentAsymmetry,
                     channel);
             }
 
@@ -2974,13 +11462,13 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 driven,
                 1.0f,
                 SatType::Transistor,
-                asym,
+                currentAsymmetry,
                 channel);
             const float distortionSample = processSample(
                 driven,
                 1.0f,
                 SatType::DiodeClipper,
-                asym,
+                currentAsymmetry,
                 channel);
             const float modeMix =
                 modeSmoother.getNextValue();
@@ -2991,6 +11479,8 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
+            advanceToneCoefficients();
+            advanceLowCutCoefficients();
             const float driveLinear =
                 smoothedDriveGain.getNextValue();
             const float wetMix =
@@ -2998,6 +11488,12 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             const float dryMix = 1.0f - wetMix;
             const float outGainLinear =
                 smoothedOutputGain.getNextValue();
+            const float topologyGain =
+                smoothedTopologyGain.getNextValue();
+            const float leftAsymmetry =
+                smoothedAsymmetry[0].getNextValue();
+            const float rightAsymmetry =
+                smoothedAsymmetry[1].getNextValue();
 
             const float dryLeft = wetLeft[sample];
             float drivenLeft = dryLeft;
@@ -3008,6 +11504,7 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             drivenLeft *= driveLinear;
             float processedLeft = shapeSample(
                 drivenLeft,
+                leftAsymmetry,
                 0,
                 processLeftDiode,
                 leftModeSmoother);
@@ -3031,9 +11528,13 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             const float mixedLeft =
                 dryLeft * dryMix
                 + processedLeft * wetMix;
+            const float topologyMixedLeft =
+                dryLeft
+                + (mixedLeft - dryLeft)
+                    * topologyGain;
             wetLeft[sample] =
-                std::isfinite(mixedLeft)
-                    ? mixedLeft
+                std::isfinite(topologyMixedLeft)
+                    ? topologyMixedLeft
                     : 0.0f;
 
             if (wetRight != nullptr)
@@ -3050,6 +11551,7 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 drivenRight *= driveLinear;
                 float processedRight = shapeSample(
                     drivenRight,
+                    rightAsymmetry,
                     1,
                     processRightDiode,
                     rightModeSmoother);
@@ -3073,13 +11575,18 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 const float mixedRight =
                     dryRight * dryMix
                     + processedRight * wetMix;
+                const float topologyMixedRight =
+                    dryRight
+                    + (mixedRight - dryRight)
+                        * topologyGain;
                 wetRight[sample] =
-                    std::isfinite(mixedRight)
-                        ? mixedRight
+                    std::isfinite(topologyMixedRight)
+                        ? topologyMixedRight
                         : 0.0f;
             }
         }
 
+        finishTopologyTransition();
         return;
     }
 
@@ -3115,6 +11622,7 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 : nullptr;
             for (int sample = 0; sample < samplesThisChunk; ++sample)
             {
+                advanceLowCutCoefficients();
                 wetLeft[sample] =
                     lowCutFilterL.processSample(wetLeft[sample]);
                 if (wetRight != nullptr)
@@ -3158,9 +11666,14 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             : nullptr;
         for (int sample = 0; sample < samplesThisChunk; ++sample)
         {
+            advanceToneCoefficients();
+            if (! lowCutBeforeSaturation)
+                advanceLowCutCoefficients();
             const float wetMix = smoothedMix.getNextValue();
             const float dryMix = 1.0f - wetMix;
             const float outGainLinear = smoothedOutputGain.getNextValue();
+            const float topologyGain =
+                smoothedTopologyGain.getNextValue();
             float processedLeft = toneFilterL.processSample(wetLeft[sample]);
             if (! lowCutBeforeSaturation)
                 processedLeft = lowCutFilterL.processSample(processedLeft);
@@ -3168,9 +11681,13 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
             processedLeft = std::isfinite(processedLeft)
                 ? juce::jlimit(-2.5f, 2.5f, processedLeft)
                 : 0.0f;
-            wetLeft[sample] =
+            const float mixedLeft =
                 dryLeft[sample] * dryMix
                 + processedLeft * wetMix;
+            wetLeft[sample] =
+                dryLeft[sample]
+                + (mixedLeft - dryLeft[sample])
+                    * topologyGain;
 
             if (wetRight != nullptr && dryRight != nullptr)
             {
@@ -3183,9 +11700,13 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 processedRight = std::isfinite(processedRight)
                     ? juce::jlimit(-2.5f, 2.5f, processedRight)
                     : 0.0f;
-                wetRight[sample] =
+                const float mixedRight =
                     dryRight[sample] * dryMix
                     + processedRight * wetMix;
+                wetRight[sample] =
+                    dryRight[sample]
+                    + (mixedRight - dryRight[sample])
+                        * topologyGain;
             }
         }
 
@@ -3195,6 +11716,7 @@ void S13Saturator::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
     // is applied to the effect branch above; after the aligned mix only invalid
     // values are removed so Mix=0 remains sample-transparent.
     clearNonFiniteSamples(buffer);
+    finishTopologyTransition();
 }
 
 void S13Saturator::releaseResources()
@@ -3203,6 +11725,44 @@ void S13Saturator::releaseResources()
     toneFilterR.reset();
     lowCutFilterL.reset();
     lowCutFilterR.reset();
+    lastToneFreq = juce::jlimit(
+        200.0f,
+        20000.0f,
+        toneFreq.load(std::memory_order_relaxed));
+    lastLowCutFreq = juce::jlimit(
+        20.0f,
+        1000.0f,
+        lowCutFreq.load(std::memory_order_relaxed));
+    if (! toneCoefficientLut.empty())
+    {
+        targetToneCoefficients =
+            lookupRealtimeFilterLut(
+                toneCoefficientLut,
+                cachedSampleRate,
+                lastToneFreq,
+                200.0f,
+                20000.0f);
+        writeRealtimeFilterCoefficients(
+            toneFilterL,
+            toneFilterR,
+            targetToneCoefficients);
+    }
+    if (! lowCutCoefficientLut.empty())
+    {
+        targetLowCutCoefficients =
+            lookupRealtimeFilterLut(
+                lowCutCoefficientLut,
+                cachedSampleRate,
+                lastLowCutFreq,
+                20.0f,
+                1000.0f);
+        writeRealtimeFilterCoefficients(
+            lowCutFilterL,
+            lowCutFilterR,
+            targetLowCutCoefficients);
+    }
+    toneCoefficientsSmoothing = false;
+    lowCutCoefficientsSmoothing = false;
     if (oversampler2x)
         oversampler2x->reset();
     if (oversampler4x)
@@ -3210,6 +11770,14 @@ void S13Saturator::releaseResources()
     oversamplingDryDelay.reset();
     oversamplingDryBuffer.clear();
     diodeCapacitorState.fill(0.0f);
+    activeSaturationType = juce::jlimit(
+        0,
+        static_cast<int>(SatType::DiodeClipper),
+        static_cast<int>(std::round(
+            satType.load(std::memory_order_relaxed))));
+    topologyTransitionStage = 0;
+    smoothedTopologyGain
+        .setCurrentAndTargetValue(1.0f);
     for (auto& modeSmoother : smoothedDiodeMode)
     {
         modeSmoother.setCurrentAndTargetValue(
@@ -3218,11 +11786,34 @@ void S13Saturator::releaseResources()
                 ? 1.0f
                 : 0.0f);
     }
+    for (auto& asymmetrySmoother : smoothedAsymmetry)
+    {
+        asymmetrySmoother.setCurrentAndTargetValue(
+            juce::jlimit(
+                -1.0f,
+                1.0f,
+                asymmetry.load(std::memory_order_relaxed)));
+    }
     smoothedDriveGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(juce::jlimit(0.0f, 30.0f, drive.load())));
     smoothedMix.setCurrentAndTargetValue(juce::jlimit(0.0f, 1.0f, mix.load()));
     const float driveDB = juce::jlimit(0.0f, 30.0f, drive.load());
+    const float restoredOutputDb = automaticDriveCompensationEnabled
+        ? juce::jlimit(-12.0f, 0.0f, outputGain.load())
+            - driveDB * 0.42f
+        : juce::jlimit(-24.0f, 12.0f, outputGain.load());
     smoothedOutputGain.setCurrentAndTargetValue(
-        juce::Decibels::decibelsToGain(juce::jlimit(-12.0f, 0.0f, outputGain.load()) - driveDB * 0.42f));
+        juce::Decibels::decibelsToGain(restoredOutputDb));
+}
+
+void S13Saturator::resetRealtimeStateForEmbeddedBypass() noexcept
+{
+    toneFilterL.reset();
+    toneFilterR.reset();
+    lowCutFilterL.reset();
+    lowCutFilterR.reset();
+    diodeCapacitorState.fill(0.0f);
+    topologyTransitionStage = 0;
+    smoothedTopologyGain.setCurrentAndTargetValue(1.0f);
 }
 
 void S13Saturator::getStateInformation(juce::MemoryBlock& destData)
@@ -3286,16 +11877,94 @@ static float getBufferPeakDb(const juce::AudioBuffer<float>& buffer) noexcept
     return juce::jlimit(-90.0f, 6.0f, juce::Decibels::gainToDecibels(peak, -90.0f));
 }
 
-static float bufferPeakLinear(const juce::AudioBuffer<float>& buffer) noexcept
+static float sanitizeAndGetBufferPeakDb(
+    juce::AudioBuffer<float>& buffer,
+    float* const peakLinear = nullptr) noexcept
 {
     float peak = 0.0f;
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    for (int channel = 0;
+         channel < buffer.getNumChannels();
+         ++channel)
     {
-        const auto* samples = buffer.getReadPointer(ch);
+        auto* const samples =
+            buffer.getWritePointer(channel);
+        for (int sample = 0;
+             sample < buffer.getNumSamples();
+             ++sample)
+        {
+            const float value = samples[sample];
+            if (std::isfinite(value))
+                peak = juce::jmax(peak, std::abs(value));
+            else
+                samples[sample] = 0.0f;
+        }
+    }
+    if (peakLinear != nullptr)
+        *peakLinear = peak;
+
+    return juce::jlimit(
+        -90.0f,
+        6.0f,
+        juce::Decibels::gainToDecibels(
+            peak, -90.0f));
+}
+
+static float sanitizeAndGetBufferPeakLinear(
+    juce::AudioBuffer<float>& buffer,
+    std::uint64_t& nonFiniteSampleCount) noexcept
+{
+    float peak = 0.0f;
+    nonFiniteSampleCount = 0;
+    for (int channel = 0;
+         channel < buffer.getNumChannels();
+         ++channel)
+    {
+        auto* const samples = buffer.getWritePointer(channel);
         for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-            peak = juce::jmax(peak, std::abs(samples[sample]));
+        {
+            const float value = samples[sample];
+            if (std::isfinite(value))
+            {
+                peak = juce::jmax(peak, std::abs(value));
+            }
+            else
+            {
+                // Invalid upstream samples must not enter the gate, filters,
+                // neural model, delay, or reverb histories. This is not a gate
+                // or limiter: every finite clean/high-gain sample is unchanged.
+                samples[sample] = 0.0f;
+                ++nonFiniteSampleCount;
+            }
+        }
     }
     return peak;
+}
+
+static int findSingleActiveNAMInputChannel(
+    const juce::AudioBuffer<float>& source,
+    int numSamples) noexcept
+{
+    if (numSamples <= 0 || source.getNumChannels() < 2)
+        return source.getNumChannels() == 1 ? 0 : -1;
+
+    const auto* const left = source.getReadPointer(0);
+    const auto* const right = source.getReadPointer(1);
+    float leftPeak = 0.0f;
+    float rightPeak = 0.0f;
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        leftPeak = juce::jmax(leftPeak, std::abs(left[sample]));
+        rightPeak = juce::jmax(rightPeak, std::abs(right[sample]));
+    }
+
+    constexpr float silentChannelThreshold = 1.0e-9f;
+    if (leftPeak > silentChannelThreshold
+        && rightPeak <= silentChannelThreshold)
+        return 0;
+    if (rightPeak > silentChannelThreshold
+        && leftPeak <= silentChannelThreshold)
+        return 1;
+    return -1;
 }
 
 static void copyNAMMonoInput(juce::AudioBuffer<float>& dest,
@@ -3312,32 +11981,20 @@ static void copyNAMMonoInput(juce::AudioBuffer<float>& dest,
         return;
     }
 
-    const auto* const left = source.getReadPointer(0);
-    const auto* const right = source.getReadPointer(1);
-    float leftPeak = 0.0f;
-    float rightPeak = 0.0f;
-    for (int sample = 0; sample < numSamples; ++sample)
+    const int singleActiveChannel =
+        findSingleActiveNAMInputChannel(source, numSamples);
+    if (singleActiveChannel >= 0)
     {
-        leftPeak = juce::jmax(leftPeak, std::abs(left[sample]));
-        rightPeak = juce::jmax(rightPeak, std::abs(right[sample]));
-    }
-
-    constexpr float silentChannelThreshold = 1.0e-9f;
-    if (rightPeak <= silentChannelThreshold)
-    {
-        // AudioEngine maps a single routed hardware input to rack channel 0 and
-        // leaves channel 1 silent. Keep that mono route at unity instead of
-        // attenuating it by 6.02 dB.
-        dest.copyFrom(destChannel, 0, source, 0, 0, numSamples);
-        return;
-    }
-
-    if (leftPeak <= silentChannelThreshold)
-    {
-        // A raw stereo route can also carry a valid signal on only its right
-        // side. Catch that channel at unity rather than silently feeding NAM an
-        // empty left input.
-        dest.copyFrom(destChannel, 0, source, 1, 0, numSamples);
+        // AudioEngine maps a single routed hardware input to one side of the
+        // rack buffer. Preserve that side at unity instead of reducing it by
+        // 6.02 dB.
+        dest.copyFrom(
+            destChannel,
+            0,
+            source,
+            singleActiveChannel,
+            0,
+            numSamples);
         return;
     }
 
@@ -3345,18 +12002,11 @@ static void copyNAMMonoInput(juce::AudioBuffer<float>& dest,
     // plug-in's DAW convention for a genuinely stereo source by folding L/R
     // down at unity for correlated mono material. This retains both sides and
     // avoids the 6 dB boost of a straight sum.
+    const auto* const left = source.getReadPointer(0);
+    const auto* const right = source.getReadPointer(1);
     auto* const destination = dest.getWritePointer(destChannel);
     for (int sample = 0; sample < numSamples; ++sample)
         destination[sample] = 0.5f * (left[sample] + right[sample]);
-}
-
-static float softLimitCreativeEffect(float value) noexcept
-{
-    if (! std::isfinite(value))
-        return 0.0f;
-
-    value = juce::jlimit(-8.0f, 8.0f, value);
-    return std::tanh(value * 1.1f) * 0.95f;
 }
 
 static float finiteNAMSample(float value) noexcept
@@ -3477,6 +12127,65 @@ void S13NAMRack::NAMResamplerKernel::prepare(double newInputRate, double newOutp
     outputRate = juce::jmax(1.0, newOutputRate);
     sourceStep = inputRate / outputRate;
 
+    // Audio-device and NAM model rates are normally integral. Preserve that
+    // exact rational relationship in the streaming phase accumulator instead
+    // of repeatedly adding a binary floating-point approximation. The latter
+    // drifts by a complete frame after several hours at 44.1 <-> 48 kHz.
+    constexpr double maximumIntegralSampleRate = 1000000.0;
+    const bool ratesCanUseIntegralPhase =
+        std::isfinite(inputRate)
+        && std::isfinite(outputRate)
+        && inputRate <= maximumIntegralSampleRate
+        && outputRate <= maximumIntegralSampleRate;
+    const auto roundedInputRate =
+        ratesCanUseIntegralPhase
+            ? static_cast<std::int64_t>(
+                std::llround(inputRate))
+            : static_cast<std::int64_t>(1);
+    const auto roundedOutputRate =
+        ratesCanUseIntegralPhase
+            ? static_cast<std::int64_t>(
+                std::llround(outputRate))
+            : static_cast<std::int64_t>(1);
+    usesExactIntegerRatePhase =
+        ratesCanUseIntegralPhase
+        && std::abs(inputRate - static_cast<double>(roundedInputRate))
+            <= 1.0e-6
+        && std::abs(outputRate - static_cast<double>(roundedOutputRate))
+            <= 1.0e-6;
+    if (usesExactIntegerRatePhase)
+    {
+        auto numerator =
+            static_cast<std::uint64_t>(
+                juce::jmax<std::int64_t>(1, roundedInputRate));
+        auto denominator =
+            static_cast<std::uint64_t>(
+                juce::jmax<std::int64_t>(1, roundedOutputRate));
+        auto lhs = numerator;
+        auto rhs = denominator;
+        while (rhs != 0)
+        {
+            const auto remainder = lhs % rhs;
+            lhs = rhs;
+            rhs = remainder;
+        }
+        const auto divisor = juce::jmax<std::uint64_t>(1, lhs);
+        numerator /= divisor;
+        denominator /= divisor;
+        sourceStepWhole = numerator / denominator;
+        sourceStepRemainder = numerator % denominator;
+        sourceStepDenominator = denominator;
+        inverseSourceStepDenominator =
+            1.0 / static_cast<double>(denominator);
+    }
+    else
+    {
+        sourceStepWhole = 0;
+        sourceStepRemainder = 0;
+        sourceStepDenominator = 1;
+        inverseSourceStepDenominator = 1.0;
+    }
+
     // A fixed, precomputed polyphase windowed-sinc table keeps every callback
     // allocation-free and avoids running trigonometric functions on the audio
     // thread. Narrowing the cutoff when downsampling provides the anti-alias
@@ -3524,7 +12233,9 @@ void S13NAMRack::NAMResamplerState::reset() noexcept
     history.fill(0.0f);
     writeIndex = 0;
     totalInputSamples = 0;
-    nextSourcePosition = 0.0;
+    totalOutputSamples = 0;
+    nextSourceWhole = 0;
+    nextSourceRemainder = 0;
 }
 
 float S13NAMRack::NAMResamplerState::sampleAt(std::int64_t absoluteIndex) const noexcept
@@ -3553,7 +12264,6 @@ float S13NAMRack::NAMResamplerState::interpolate(double sourcePosition,
                                   namResamplerKernelPhases - 1,
                                   static_cast<int>(fraction * static_cast<double>(namResamplerKernelPhases)));
     const auto phaseOffset = static_cast<size_t>(phase * namResamplerKernelTaps);
-
     double result = 0.0;
     for (int tap = 0; tap < namResamplerKernelTaps; ++tap)
     {
@@ -3580,13 +12290,45 @@ int S13NAMRack::NAMResamplerState::process(const float* input,
         writeIndex = (writeIndex + 1) % namResamplerHistorySize;
         ++totalInputSamples;
 
-        while (nextSourcePosition < static_cast<double>(totalInputSamples))
+        for (;;)
         {
+            if (kernel.usesExactIntegerRatePhase
+                ? nextSourceWhole >= totalInputSamples
+                : static_cast<double>(totalOutputSamples)
+                        * kernel.sourceStep
+                    >= static_cast<double>(
+                        totalInputSamples))
+            {
+                break;
+            }
+
             if (outputSamples >= outputCapacity)
                 return -1;
 
+            const double nextSourcePosition =
+                kernel.usesExactIntegerRatePhase
+                    ? static_cast<double>(nextSourceWhole)
+                        + static_cast<double>(nextSourceRemainder)
+                            * kernel.inverseSourceStepDenominator
+                    : static_cast<double>(totalOutputSamples)
+                        * kernel.sourceStep;
             output[outputSamples++] = interpolate(nextSourcePosition, kernel);
-            nextSourcePosition += kernel.sourceStep;
+            ++totalOutputSamples;
+            if (kernel.usesExactIntegerRatePhase)
+            {
+                nextSourceWhole +=
+                    static_cast<std::int64_t>(
+                        kernel.sourceStepWhole);
+                nextSourceRemainder +=
+                    kernel.sourceStepRemainder;
+                if (nextSourceRemainder
+                    >= kernel.sourceStepDenominator)
+                {
+                    nextSourceRemainder -=
+                        kernel.sourceStepDenominator;
+                    ++nextSourceWhole;
+                }
+            }
         }
     }
 
@@ -3741,27 +12483,555 @@ static juce::Array<int> normalizeNAMRackPostCabOrder(const juce::var& uiState)
     return order;
 }
 
-static float getNAMPrecisionDriveOutputGainDb(
-    bool distortionMode,
-    float driveAmount,
-    int dspVersion) noexcept
+static constexpr std::uint32_t packNAMRackPostCabOrder(
+    int first,
+    int second,
+    int third,
+    int fourth) noexcept
 {
-    const float drive =
-        juce::jlimit(0.0f, 1.0f, driveAmount);
-    if (dspVersion < 2)
+    return (static_cast<std::uint32_t>(first) & 0x3u)
+        | ((static_cast<std::uint32_t>(second) & 0x3u) << 2u)
+        | ((static_cast<std::uint32_t>(third) & 0x3u) << 4u)
+        | ((static_cast<std::uint32_t>(fourth) & 0x3u) << 6u);
+}
+
+static std::uint32_t packNAMRackPostCabOrder(
+    const juce::Array<int>& order) noexcept
+{
+    if (order.size() < namRackPostCabModuleCount)
     {
-        return distortionMode
-            ? -2.0f - drive * 2.0f
-            : -1.5f - drive * 3.5f;
+        return packNAMRackPostCabOrder(
+            namRackPostCabEQ,
+            namRackPostCabMod,
+            namRackPostCabDelay,
+            namRackPostCabReverb);
     }
 
-    // V2 compensation is calibrated against the deterministic 220/997 Hz
-    // two-tone reference used by the native level/spectral gate. It counters
-    // the reusable kernel's drive-dependent auto compensation without turning
-    // higher Drive settings into an automatic loudness boost.
-    return distortionMode
-        ? -2.7f - drive * 0.3f
-        : -1.5f - drive * 0.2f;
+    return packNAMRackPostCabOrder(
+        order[0], order[1], order[2], order[3]);
+}
+
+static int unpackNAMRackPostCabModule(
+    std::uint32_t packedOrder,
+    int position) noexcept
+{
+    return static_cast<int>(
+        (packedOrder
+         >> static_cast<std::uint32_t>(
+             juce::jlimit(0, namRackPostCabModuleCount - 1, position) * 2))
+        & 0x3u);
+}
+
+static std::uint32_t sanitizeNAMRackPostCabOrder(
+    std::uint32_t packedOrder) noexcept
+{
+    bool seen[namRackPostCabModuleCount] = {};
+    for (int position = 0;
+         position < namRackPostCabModuleCount;
+         ++position)
+    {
+        const int moduleId =
+            unpackNAMRackPostCabModule(
+                packedOrder, position);
+        if (seen[moduleId])
+        {
+            return packNAMRackPostCabOrder(
+                namRackPostCabEQ,
+                namRackPostCabMod,
+                namRackPostCabDelay,
+                namRackPostCabReverb);
+        }
+        seen[moduleId] = true;
+    }
+    return packedOrder & 0xffu;
+}
+
+static constexpr float namNativeDriveCalibrationReferenceDbu = 12.0f;
+
+struct NAMChaosVoice
+{
+    float preGainDb = 38.0f;
+    float density = 1.0f;
+    float diodeDriveDb = 20.0f;
+    float presenceBias = 0.0f;
+};
+
+static NAMChaosVoice getNAMChaosVoice(
+    float modeValue,
+    float driveAmount) noexcept
+{
+    const int mode = juce::jlimit(
+        0, 2, static_cast<int>(std::round(modeValue)));
+    const float drive = juce::jlimit(0.0f, 1.0f, driveAmount);
+    switch (mode)
+    {
+        case 1: // Extreme: more gain and a more open upper register.
+            return {
+                32.0f + drive * 28.0f,
+                1.10f + drive * 0.32f,
+                18.0f + drive * 12.0f,
+                0.18f
+            };
+        case 2: // Crunch: still distortion, with less compression/density.
+            return {
+                14.0f + drive * 18.0f,
+                0.48f + drive * 0.20f,
+                8.0f + drive * 8.0f,
+                -0.10f
+            };
+        default: // Heavy is the deliberately high-gain default.
+            return {
+                24.0f + drive * 24.0f,
+                0.80f + drive * 0.24f,
+                14.0f + drive * 10.0f,
+                0.0f
+            };
+    }
+}
+
+static float getNAMEmbeddedDriveOperatingGain(
+    float calibrationReferenceDbu) noexcept
+{
+    // 0 dBFS is interpreted as the selected interface reference. Converting
+    // into the fixed +12 dBu pedal domain before the nonlinear island, then
+    // applying the exact reciprocal afterwards, holds the represented analog
+    // level constant when the interface reference changes. +12 dBu is unity
+    // in both directions and therefore preserves the established baseline.
+    const float operatingGainDb = juce::jlimit(
+        -36.0f,
+        36.0f,
+        calibrationReferenceDbu
+            - namNativeDriveCalibrationReferenceDbu);
+    return juce::Decibels::decibelsToGain(operatingGainDb);
+}
+
+static float getNAMPrecisionDriveBandGain(
+    float driveAmount) noexcept
+{
+    const float drive = juce::jlimit(
+        0.0f, 1.0f, driveAmount);
+    const float driveDb =
+        3.0f + 35.0f * std::pow(drive, 0.65f);
+    return juce::Decibels::decibelsToGain(driveDb);
+}
+
+static float getNAMPrecisionDriveAttackCoefficient(
+    float attackAmount,
+    float sampleRate,
+    bool bassProfile) noexcept
+{
+    const float attack = juce::jlimit(
+        0.0f, 1.0f, attackAmount);
+    const float cutoffHz = bassProfile
+        ? 55.0f + 645.0f * attack * attack
+        : 85.0f + 1015.0f * attack * attack;
+    return 1.0f - std::exp(
+        -juce::MathConstants<float>::twoPi
+        * cutoffHz / juce::jmax(1.0f, sampleRate));
+}
+
+static float getNAMPrecisionDriveBrightCoefficient(
+    float brightAmount,
+    float sampleRate) noexcept
+{
+    const float bright = juce::jlimit(
+        0.0f, 1.0f, brightAmount);
+    const float cutoffHz =
+        2600.0f
+        + 15400.0f * std::pow(bright, 1.35f);
+    return 1.0f - std::exp(
+        -juce::MathConstants<float>::twoPi
+        * cutoffHz / juce::jmax(1.0f, sampleRate));
+}
+
+int S13NAMRack::sanitizeDelayMode(float value) noexcept
+{
+    if (! std::isfinite(value))
+        return tapeDelayMode;
+
+    const float bounded = juce::jlimit(
+        static_cast<float>(digitalDelayMode),
+        static_cast<float>(dualDelayMode),
+        value);
+    return static_cast<int>(std::floor(bounded + 0.5f));
+}
+
+S13NAMRack::DelaySyncSelection
+S13NAMRack::resolveDelaySyncSelection(
+    float modulation,
+    bool pingPong) noexcept
+{
+    const float boundedModulation = std::isfinite(modulation)
+        ? juce::jlimit(0.0f, 1.0f, modulation)
+        : 0.18f;
+    const int step = juce::jmin(
+        2,
+        static_cast<int>(
+            std::floor(boundedModulation * 2.0f)));
+    constexpr std::array<int, 3> leftIndices { 2, 3, 4 };
+    constexpr std::array<int, 3> pingPongRightIndices { 3, 4, 4 };
+    const auto boundedStep = static_cast<size_t>(step);
+    return {
+        leftIndices[boundedStep],
+        pingPong
+            ? pingPongRightIndices[boundedStep]
+            : leftIndices[boundedStep]
+    };
+}
+
+S13NAMRack::DelayMacroState S13NAMRack::resolveDelayMacroState(
+    float timeMs,
+    float feedback,
+    float mix,
+    float modulation,
+    float ducker,
+    float mode,
+    float pingPong,
+    float tempoSync,
+    int instrumentProfileValue) noexcept
+{
+    const auto finiteOr = [] (float value, float fallback) noexcept
+    {
+        return std::isfinite(value) ? value : fallback;
+    };
+    const float boundedTimeMs = juce::jlimit(
+        1.0f, 2000.0f, finiteOr(timeMs, 360.0f));
+    const float boundedFeedback = juce::jlimit(
+        0.0f, 0.85f, finiteOr(feedback, 0.22f));
+    const float boundedMix = juce::jlimit(
+        0.0f, 1.0f, finiteOr(mix, 0.22f));
+    const float mod = juce::jlimit(
+        0.0f, 1.0f, finiteOr(modulation, 0.18f));
+    const float boundedDucker = juce::jlimit(
+        0.0f, 1.0f, finiteOr(ducker, 0.12f));
+    const bool usePingPong =
+        finiteOr(pingPong, 1.0f) >= 0.5f;
+    const bool useTempoSync =
+        finiteOr(tempoSync, 0.0f) >= 0.5f;
+    const bool bassProfile = instrumentProfileValue == bassInstrumentProfile;
+    const int selectedMode = sanitizeDelayMode(mode);
+    const float normalizedTime = std::sqrt(
+        juce::jlimit(0.0f, 1.0f, boundedTimeMs / 2000.0f));
+
+    DelayMacroState state;
+    state.mode = selectedMode;
+    state.sync = resolveDelaySyncSelection(mod, usePingPong);
+    state.timeMsL = boundedTimeMs;
+    state.timeMsR = juce::jlimit(
+        1.0f,
+        2000.0f,
+        boundedTimeMs * (usePingPong ? 1.18f : 1.0f));
+    state.mix = boundedMix;
+    state.dryGain = bassProfile ? 1.0f : 1.0f - boundedMix;
+    state.duckAmount = boundedDucker;
+    state.duckAttackMs = 6.0f + 6.0f * mod;
+    state.duckReleaseMs = juce::jlimit(
+        140.0f,
+        650.0f,
+        100.0f + 0.55f * juce::jmax(state.timeMsL, state.timeMsR));
+    // The visible Ducker remains the sole amount control. The fixed ceiling
+    // retains the standalone processor's established linear ducking law.
+    state.duckMaxReduction = 0.82f;
+    state.pingPong = usePingPong;
+    state.tempoSync = useTempoSync;
+    state.topologyControl = mod;
+    state.multiTapRatios = {
+        1.0f,
+        0.79f - 0.08f * mod,
+        0.61f - 0.08f * mod,
+        0.43f - 0.07f * mod
+    };
+    state.multiTapWeights = { 0.42f, 0.25f, 0.20f, 0.13f };
+    state.multiFeedbackGain = boundedFeedback * 0.96f;
+    state.dualTimeRatio = 0.5f + 0.5f * mod;
+    state.dualFeedbackGain = boundedFeedback * (0.82f + 0.12f * mod);
+    state.dualLowPassHz = 8800.0f - 3000.0f * mod;
+    state.dualHighPassHz =
+        (bassProfile ? 28.0f : 65.0f)
+        + (bassProfile ? 62.0f : 115.0f) * mod;
+    state.dualSaturation = 0.18f + 0.30f * mod;
+    state.dualModDepthMs = 0.12f + 0.75f * mod;
+    state.dualModRateHz = 0.19f + 0.25f * mod;
+
+    switch (selectedMode)
+    {
+        case digitalDelayMode:
+            state.feedbackGain = boundedFeedback;
+            state.lowPassHz = 19500.0f - 5000.0f * mod;
+            state.highPassHz =
+                (bassProfile ? 28.0f : 55.0f)
+                + (bassProfile ? 42.0f : 75.0f) * mod;
+            state.saturation = 0.10f * mod;
+            state.wowDepthMs = 0.55f * mod;
+            state.wowRateHz = 0.15f + 0.65f * mod;
+            state.flutterDepthMs = 0.0f;
+            state.flutterRateHz = 6.4f;
+            state.crossFeed = usePingPong
+                ? 0.08f + 0.14f * mod
+                : 0.02f;
+            state.stereoWidth = usePingPong
+                ? 1.08f + 0.24f * mod
+                : 0.96f + 0.12f * mod;
+            break;
+
+        case analogDelayMode:
+            state.feedbackGain = boundedFeedback
+                * (0.975f - 0.035f * mod);
+            state.lowPassHz = juce::jlimit(
+                2800.0f,
+                9000.0f,
+                8800.0f - 3600.0f * mod
+                    - 1600.0f * normalizedTime);
+            state.highPassHz =
+                (bassProfile ? 30.0f : 75.0f)
+                + (bassProfile ? 65.0f : 155.0f) * mod;
+            state.saturation = 0.10f + 0.38f * mod;
+            state.wowDepthMs = 0.04f + 0.42f * mod;
+            state.wowRateHz = 0.18f + 0.24f * mod;
+            state.flutterDepthMs = 0.0f;
+            state.flutterRateHz = 6.4f;
+            state.crossFeed = usePingPong
+                ? 0.10f + 0.12f * mod
+                : 0.03f;
+            state.stereoWidth = usePingPong
+                ? 1.03f + 0.16f * mod
+                : 0.90f + 0.10f * mod;
+            break;
+
+        case multiDelayMode:
+            state.feedbackGain = state.multiFeedbackGain;
+            state.lowPassHz = juce::jmin(
+                20000.0f,
+                (12000.0f - 6500.0f * mod)
+                    * (bassProfile ? 1.05f : 1.0f));
+            state.highPassHz = state.dualHighPassHz;
+            state.saturation = 0.10f + 0.35f * mod;
+            state.wowDepthMs = 0.25f + 2.0f * mod;
+            state.wowRateHz = 0.22f + 0.33f * mod;
+            state.flutterDepthMs = 0.05f + 0.22f * mod;
+            state.flutterRateHz = 5.3f + 2.2f * mod;
+            state.crossFeed = usePingPong
+                ? 0.10f + 0.14f * mod
+                : 0.03f + 0.03f * mod;
+            // The alternating tap matrix already creates the stereo image.
+            // Unity width keeps its per-destination L1 norm non-expansive.
+            state.stereoWidth = 1.0f;
+            break;
+
+        case dualDelayMode:
+            // Engine A remains a clean full-time reference while the fully
+            // independent B engine supplies the shorter cross-fed repeat.
+            state.feedbackGain = boundedFeedback;
+            state.lowPassHz = 19500.0f - 5000.0f * mod;
+            state.highPassHz =
+                (bassProfile ? 28.0f : 55.0f)
+                + (bassProfile ? 42.0f : 75.0f) * mod;
+            state.saturation = 0.10f * mod;
+            state.wowDepthMs = 0.0f;
+            state.wowRateHz = 0.15f + 0.65f * mod;
+            state.flutterDepthMs = 0.0f;
+            state.flutterRateHz = 6.4f;
+            state.crossFeed = usePingPong
+                ? 0.06f + 0.10f * mod
+                : 0.02f;
+            state.stereoWidth = 1.0f;
+            break;
+
+        case tapeDelayMode:
+        default:
+            state.feedbackGain = boundedFeedback
+                * (0.99f - 0.025f * mod);
+            state.lowPassHz = juce::jmin(
+                20000.0f,
+                (11500.0f - 6300.0f * mod)
+                    * (bassProfile ? 1.05f : 1.0f));
+            state.highPassHz =
+                (bassProfile ? 28.0f : 65.0f)
+                + (bassProfile ? 62.0f : 115.0f) * mod;
+            state.saturation = 0.14f + 0.48f * mod;
+            state.wowDepthMs = 0.25f + 2.0f * mod;
+            state.wowRateHz = 0.22f + 0.33f * mod;
+            state.flutterDepthMs = 0.05f + 0.22f * mod;
+            state.flutterRateHz = 5.3f + 2.2f * mod;
+            state.crossFeed = usePingPong
+                ? 0.12f + 0.16f * mod
+                : 0.04f + 0.04f * mod;
+            state.stereoWidth = usePingPong
+                ? 1.06f + 0.20f * mod
+                : 0.92f + 0.14f * mod;
+            break;
+    }
+
+    return state;
+}
+
+int S13NAMRack::sanitizeReverbVoice(float value) noexcept
+{
+    return sanitizeReverbV5VoiceIndex(value);
+}
+
+S13NAMRack::ReverbMacroState S13NAMRack::resolveReverbMacroState(
+    float voiceValue,
+    float mixValue,
+    float decayValue,
+    float toneValue,
+    float preDelayValue,
+    float lowCutValue,
+    float shimmerValue,
+    int instrumentProfileValue) noexcept
+{
+    ReverbMacroState result;
+    result.voice = sanitizeReverbVoice(voiceValue);
+    const auto finiteClamp = [] (
+        float value, float minimum, float maximum, float fallback) noexcept
+    {
+        return std::isfinite(value)
+            ? juce::jlimit(minimum, maximum, value)
+            : fallback;
+    };
+    const float mix = finiteClamp(mixValue, 0.0f, 1.0f, 0.28f);
+    const float tone = finiteClamp(toneValue, 0.0f, 1.0f, 0.62f);
+    const float texture = finiteClamp(
+        shimmerValue, 0.0f, 1.0f, 0.0f);
+    result.wetGain = mix * (2.0f - mix);
+    result.dryGain = 1.0f;
+    result.earlyGain = result.wetGain;
+    result.decaySeconds = finiteClamp(
+        decayValue, 0.2f, 12.0f, 2.2f);
+    result.preDelayMs = finiteClamp(
+        preDelayValue, 0.0f, 500.0f, 18.0f);
+    result.lowCutHz = finiteClamp(
+        lowCutValue, 20.0f, 500.0f, 120.0f);
+    result.shimmerAmount = texture;
+    result.ducking = 0.0f;
+    const bool bassProfile =
+        instrumentProfileValue == bassInstrumentProfile;
+
+    switch (result.voice)
+    {
+        case plateReverbVoice:
+            result.algorithmIndex =
+                static_cast<int>(S13Reverb::Algorithm::Plate);
+            result.roomSize = 0.48f;
+            // The fifth knob is explicitly DAMP for Plate: clockwise means
+            // more high-frequency damping, not the inverse Tone convention.
+            result.damping = 0.18f + tone * 0.70f;
+            result.width = 0.90f;
+            result.diffusion = 0.90f;
+            result.highCutHz = juce::jlimit(
+                2800.0f, 18000.0f, 16000.0f - tone * 11500.0f);
+            result.bassDecay = bassProfile ? 0.90f : 0.78f;
+            result.movement = 0.18f;
+            result.earlyLate = 0.72f;
+            result.shimmerRegen = 0.45f;
+            break;
+        case hallReverbVoice:
+            result.algorithmIndex =
+                static_cast<int>(S13Reverb::Algorithm::Hall);
+            result.roomSize = 0.82f;
+            // Hall shares the truthful DAMP direction. Its sixth macro is
+            // output-field motion, so it never silently enables octave pitch.
+            result.damping = 0.16f + tone * 0.68f;
+            result.width = 1.0f;
+            result.diffusion = 0.88f;
+            result.highCutHz = juce::jlimit(
+                2800.0f, 18000.0f, 14500.0f - tone * 9800.0f);
+            result.bassDecay = bassProfile ? 0.98f : 0.92f;
+            result.shimmerAmount = 0.0f;
+            result.movement = 0.08f + texture * 0.72f;
+            result.earlyLate = 0.68f;
+            result.shimmerRegen = 0.55f;
+            break;
+        case roomReverbVoice:
+        {
+            // Room's second knob is a SIZE macro. Keep the public stored range
+            // stable for presets while mapping it to a compact physical field
+            // and a bounded room-length decay rather than a 12-second RT60.
+            const float sizeMacro = juce::jlimit(
+                0.0f,
+                1.0f,
+                (result.decaySeconds - 0.2f) / (12.0f - 0.2f));
+            result.algorithmIndex =
+                static_cast<int>(S13Reverb::Algorithm::Room);
+            result.roomSize = 0.18f + sizeMacro * 0.68f;
+            result.decaySeconds = 0.45f + sizeMacro * 2.75f;
+            result.damping = 1.0f - tone * 0.78f;
+            result.width = 0.72f;
+            result.diffusion = 0.72f;
+            result.highCutHz = juce::jlimit(
+                2800.0f, 18000.0f, 4200.0f + tone * 9000.0f);
+            result.bassDecay = bassProfile ? 0.85f : 0.72f;
+            result.movement = 0.12f;
+            result.shimmerAmount = 0.0f;
+            // EARLY increases the early-field share clockwise. The hidden
+            // parameter is historically 0=early/1=late, hence the inversion.
+            result.earlyLate = 0.82f - texture * 0.62f;
+            result.shimmerRegen = 0.35f;
+            break;
+        }
+        case studioReverbVoice:
+        default:
+            // Do not reorder or simplify this mapping: it is the exact V4 Rack
+            // macro and is the compatibility oracle for every pre-V9 preset.
+            result.voice = studioReverbVoice;
+            result.algorithmIndex =
+                static_cast<int>(S13Reverb::Algorithm::Plate);
+            result.roomSize = 0.55f;
+            result.damping = 1.0f - tone * 0.82f;
+            result.width = 0.88f;
+            result.diffusion = 0.82f;
+            result.highCutHz = juce::jlimit(
+                2800.0f, 18000.0f, 3800.0f + tone * 9200.0f);
+            result.bassDecay = 0.82f;
+            result.movement = 0.25f;
+            result.earlyLate = 0.55f;
+            result.shimmerRegen = 0.55f;
+            break;
+    }
+    return result;
+}
+
+namespace
+{
+    void applyNAMRackReverbMacro(
+        S13Reverb& reverb,
+        const S13NAMRack::ReverbMacroState& state,
+        float wetGain,
+        float dryGain,
+        float earlyGain,
+        bool inputEnabled) noexcept
+    {
+        reverb.engineVersion.store(
+            static_cast<float>(S13NAMRack::currentReverbEngineVersion),
+            std::memory_order_relaxed);
+        reverb.rackVoice.store(
+            static_cast<float>(state.voice), std::memory_order_relaxed);
+        reverb.algorithm.store(
+            static_cast<float>(state.algorithmIndex),
+            std::memory_order_relaxed);
+        reverb.roomSize.store(state.roomSize, std::memory_order_relaxed);
+        reverb.damping.store(state.damping, std::memory_order_relaxed);
+        reverb.wetLevel.store(wetGain, std::memory_order_relaxed);
+        reverb.dryLevel.store(dryGain, std::memory_order_relaxed);
+        reverb.width.store(state.width, std::memory_order_relaxed);
+        reverb.freezeMode.store(0.0f, std::memory_order_relaxed);
+        reverb.preDelay.store(state.preDelayMs, std::memory_order_relaxed);
+        reverb.diffusion.store(state.diffusion, std::memory_order_relaxed);
+        reverb.lowCut.store(state.lowCutHz, std::memory_order_relaxed);
+        reverb.highCut.store(state.highCutHz, std::memory_order_relaxed);
+        reverb.earlyLevel.store(earlyGain, std::memory_order_relaxed);
+        reverb.decayTime.store(state.decaySeconds, std::memory_order_relaxed);
+        reverb.shimmerAmount.store(
+            state.shimmerAmount, std::memory_order_relaxed);
+        reverb.ducking.store(state.ducking, std::memory_order_relaxed);
+        reverb.bassDecay.store(state.bassDecay, std::memory_order_relaxed);
+        reverb.movement.store(state.movement, std::memory_order_relaxed);
+        reverb.earlyLate.store(state.earlyLate, std::memory_order_relaxed);
+        reverb.shimmerRegen.store(
+            state.shimmerRegen, std::memory_order_relaxed);
+        reverb.inputSend.store(
+            inputEnabled ? 1.0f : 0.0f, std::memory_order_relaxed);
+    }
 }
 
 S13NAMRack::S13NAMRack()
@@ -3773,14 +13043,13 @@ S13NAMRack::S13NAMRack()
 {
     retiredCabIRs.reserve(8);
     // The Rack owns one fixed 2x island around both adjacent nonlinear stages.
-    // The reusable Saturator wrappers therefore run as high-rate kernels only;
-    // paying one shared up/down conversion keeps PDC constant and avoids two
-    // redundant oversampling filter pairs.
-    rackPrecisionDrive.setOversamplingMode(0.0f);
+    // Precision uses its purpose-built feedback circuit there, while the
+    // Distortion Saturator runs only as a high-rate final cell. One shared
+    // conversion keeps PDC constant and avoids redundant resampling filters.
     rackChaos.setOversamplingMode(0.0f);
-    rackPrecisionDrive.setOversamplingEnabled(false);
     rackChaos.setOversamplingEnabled(false);
-    rackPrecisionDrive.setLowCutBeforeSaturation(true);
+    rackChaos.setLowCutBeforeSaturation(true);
+    rackChaos.setZeroInputInvariantEnabled(true);
 }
 
 void S13NAMRack::setTransposeSemitones(float legacySemitones) noexcept
@@ -3812,11 +13081,49 @@ void S13NAMRack::updateReportedLatency()
 
     {
         const juce::ScopedLock lock(modelSwapLock);
+        // The Pedal and Amp captures are serial processors. Each sample-rate
+        // converter therefore contributes independently to the rack latency.
+        addModelResamplerLatency(pedalModel);
         addModelResamplerLatency(ampModel);
     }
 
     if (getLatencySamples() != requiredLatency)
         setLatencySamples(requiredLatency);
+}
+
+bool S13NAMRack::readStableModelHostConfiguration(
+    ModelHostConfigurationSnapshot& snapshot) const noexcept
+{
+    constexpr int maximumSnapshotAttempts = 64;
+    for (int attempt = 0; attempt < maximumSnapshotAttempts; ++attempt)
+    {
+        const auto generationBefore =
+            modelHostConfigurationGeneration.load(
+                std::memory_order_acquire);
+        if ((generationBefore & 1U) != 0U)
+        {
+            std::this_thread::yield();
+            continue;
+        }
+
+        snapshot.sampleRate =
+            modelHostSampleRate.load(std::memory_order_relaxed);
+        snapshot.blockSize =
+            modelHostBlockSize.load(std::memory_order_relaxed);
+        snapshot.bufferCapacity =
+            modelHostBufferCapacity.load(std::memory_order_relaxed);
+        const auto generationAfter =
+            modelHostConfigurationGeneration.load(
+                std::memory_order_acquire);
+        if (generationBefore == generationAfter
+            && (generationAfter & 1U) == 0U)
+        {
+            snapshot.generation = generationAfter;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 double S13NAMRack::getTailLengthSeconds() const
@@ -3828,17 +13135,36 @@ double S13NAMRack::getAutomatedTailLengthSeconds(std::uint32_t moduleMask) const
 {
     double tailSeconds = 0.0;
 
-    const auto addFeedbackTail = [&tailSeconds] (bool enabled, float mix, float delayMs, float feedback)
+    const auto addFeedbackTail = [&tailSeconds, this] (
+        bool enabled,
+        float mix,
+        float delayMs,
+        float feedback,
+        float maximumOutputGain)
     {
         if (! enabled || mix <= 0.0001f)
             return;
 
-        const double delaySeconds = juce::jmax(0.001, static_cast<double>(delayMs) * 0.001);
+        // feedbackSample is updated after the current recursive sample is
+        // pushed, so every repeat includes one additional unit-delay sample.
+        const double delaySeconds = juce::jmax(
+            0.001,
+            static_cast<double>(delayMs) * 0.001
+                + 1.0 / juce::jmax(1.0, cachedSampleRate));
         const double clampedFeedback = juce::jlimit(0.0, 0.999, static_cast<double>(feedback));
-        const double repeatsToMinus60 = clampedFeedback > 0.0001
-            ? std::log(0.001) / std::log(clampedFeedback)
+        const double outputGain = juce::jmax(
+            1.0, static_cast<double>(maximumOutputGain));
+        const double internalMinus60Threshold = 0.001 / outputGain;
+        const double tailIntervals = clampedFeedback > 0.0001
+            ? std::log(internalMinus60Threshold)
+                  / std::log(clampedFeedback)
+                + 1.0
             : 1.0;
-        tailSeconds += delaySeconds * juce::jmax(1.0, repeatsToMinus60);
+        // The first wet repeat is unity at one delay interval; feedback^N is
+        // heard one interval later. Include that final interval so a last-
+        // sample impulse cannot be truncated just above -60 dB.
+        tailSeconds += delaySeconds
+            * juce::jmax(1.0, tailIntervals);
     };
 
     const bool automateTape = (moduleMask & tailAutomationTapeEcho) != 0;
@@ -3857,23 +13183,55 @@ double S13NAMRack::getAutomatedTailLengthSeconds(std::uint32_t moduleMask) const
         return juce::jmin(rackTapeEcho.getMaximumSupportedDelaySeconds() * 1000.0f,
                           juce::jmax(timeMs, rightTimeMs) + maximumWowMs);
     }();
+    const float requestedTapeMod =
+        tapeEchoMod.load(std::memory_order_relaxed);
+    const float effectiveTapeWidth = automateTape
+        ? 1.16f
+        : 0.82f
+            + (std::isfinite(requestedTapeMod)
+                   ? juce::jlimit(0.0f, 1.0f, requestedTapeMod)
+                   : 0.18f)
+                * 0.34f;
+    const double tailBeforeTape = tailSeconds;
     addFeedbackTail(automateTape || tapeEchoEnabled.load(std::memory_order_relaxed) >= 0.5f,
                     automateTape ? 1.0f : tapeEchoMix.load(std::memory_order_relaxed),
                     effectiveTapeTimeMs,
                     automateTape ? 0.85f
-                                 : juce::jlimit(0.0f, 0.85f, tapeEchoFeedback.load(std::memory_order_relaxed)));
+                                 : juce::jlimit(0.0f, 0.85f, tapeEchoFeedback.load(std::memory_order_relaxed)),
+                    effectiveTapeWidth);
+    const double requestedTapeTail = juce::jmax(
+        0.0, tailSeconds - tailBeforeTape);
+    const float publishedTapeTailValue =
+        publishedTapeEchoTailSeconds.load(std::memory_order_relaxed);
+    const double publishedTapeTail = std::isfinite(publishedTapeTailValue)
+        ? juce::jlimit(
+              0.0,
+              600.0,
+              static_cast<double>(publishedTapeTailValue))
+        : 0.0;
+    tailSeconds = tailBeforeTape + juce::jmax(
+        requestedTapeTail, publishedTapeTail);
     const bool automateDelay = (moduleMask & tailAutomationDelay) != 0;
+    const auto tailDelayMacro = resolveDelayMacroState(
+        automateDelay ? 2000.0f : delayTimeMs.load(std::memory_order_relaxed),
+        automateDelay ? 0.85f : delayFeedback.load(std::memory_order_relaxed),
+        automateDelay ? 1.0f : delayMix.load(std::memory_order_relaxed),
+        automateDelay ? 1.0f : delayMod.load(std::memory_order_relaxed),
+        automateDelay ? 1.0f : delayDucker.load(std::memory_order_relaxed),
+        automateDelay ? static_cast<float>(dualDelayMode)
+                      : delayMode.load(std::memory_order_relaxed),
+        automateDelay ? 1.0f : delayPingPong.load(std::memory_order_relaxed),
+        automateDelay ? 1.0f : delayTempoSync.load(std::memory_order_relaxed),
+        getInstrumentProfile());
     const float effectiveDelayTimeMs = [&]
     {
-        double bpm = 120.0;
-        if (auto* currentPlayHead = getPlayHead())
-        {
-            const auto position = currentPlayHead->getPosition();
-            if (position.hasValue())
-                if (const auto positionBpm = position->getBpm())
-                    bpm = *positionBpm;
-        }
-        bpm = juce::jlimit(10.0, 300.0, bpm);
+        const float publishedBpm = publishedTempoBpm.load(
+            std::memory_order_relaxed);
+        const double bpm = std::isfinite(publishedBpm)
+                && publishedBpm >= 10.0f
+            ? juce::jlimit(
+                  10.0, 300.0, static_cast<double>(publishedBpm))
+            : 10.0;
         const auto syncNoteMs = [bpm] (int index)
         {
             static constexpr std::array<float, 9> multipliers {
@@ -3884,60 +13242,119 @@ double S13NAMRack::getAutomatedTailLengthSeconds(std::uint32_t moduleMask) const
                 * multipliers[static_cast<size_t>(juce::jlimit(0, 8, index))];
         };
 
-        const float modulation = automateDelay
-            ? 1.0f
-            : juce::jlimit(0.0f, 1.0f, delayMod.load(std::memory_order_relaxed));
-        const bool pingPong = automateDelay
-            || delayPingPong.load(std::memory_order_relaxed) >= 0.5f;
-        const bool tempoSync = automateDelay
-            || delayTempoSync.load(std::memory_order_relaxed) >= 0.5f;
         float maximumTimeMs = 0.0f;
-        if (tempoSync)
+        float maximumModulationMs = 0.0f;
+        if (automateDelay)
         {
-            if (automateDelay)
+            // Mod is also the three-step sync selector. Its maximum value
+            // chooses the shortest (1/16) division, so a single all-max macro
+            // is not a valid automation tail bound. Enumerate every reachable
+            // selector step, ping route, and topology; the longest legal case
+            // is the Mod=0 quarter note (six seconds at the 10 BPM floor).
+            constexpr std::array<float, 3> syncStepModulation {
+                0.0f, 0.5f, 1.0f
+            };
+            for (int mode = digitalDelayMode; mode <= dualDelayMode; ++mode)
             {
-                // Rack sync routes span 1/4 through 1/4T. At the supported
-                // 10-BPM floor, 1/4 is the longest reachable selection.
-                maximumTimeMs = syncNoteMs(2);
+                for (const float modulation : syncStepModulation)
+                {
+                    for (const bool pingPong : { false, true })
+                    {
+                        const auto candidate = resolveDelayMacroState(
+                            2000.0f,
+                            0.85f,
+                            1.0f,
+                            modulation,
+                            1.0f,
+                            static_cast<float>(mode),
+                            pingPong ? 1.0f : 0.0f,
+                            1.0f,
+                            getInstrumentProfile());
+                        maximumTimeMs = juce::jmax(
+                            maximumTimeMs,
+                            juce::jmax(
+                                syncNoteMs(candidate.sync.leftNoteIndex),
+                                syncNoteMs(candidate.sync.rightNoteIndex)));
+                        maximumModulationMs = juce::jmax(
+                            maximumModulationMs,
+                            juce::jmax(
+                                candidate.wowDepthMs
+                                    + candidate.flutterDepthMs,
+                                juce::jmax(
+                                    0.30f
+                                        + 2.22f
+                                            * candidate.topologyControl,
+                                    candidate.dualModDepthMs)));
+                    }
+                }
             }
-            else
+            maximumTimeMs = juce::jmax(maximumTimeMs, 2000.0f);
+        }
+        else
+        {
+            if (tailDelayMacro.tempoSync)
             {
-                const int leftIndex = static_cast<int>(juce::jlimit(0.0f, 8.0f,
-                                                                   2.0f + modulation * 2.0f));
-                const int rightIndex = static_cast<int>(juce::jlimit(0.0f, 8.0f,
-                    pingPong ? 3.0f + modulation * 2.0f : 2.0f + modulation * 2.0f));
-                maximumTimeMs = juce::jmax(syncNoteMs(leftIndex), syncNoteMs(rightIndex));
+                maximumTimeMs = juce::jmax(
+                    syncNoteMs(tailDelayMacro.sync.leftNoteIndex),
+                    syncNoteMs(tailDelayMacro.sync.rightNoteIndex));
             }
+
+            if (! tailDelayMacro.tempoSync)
+            {
+                maximumTimeMs = juce::jmax(
+                    maximumTimeMs,
+                    juce::jmax(
+                        tailDelayMacro.timeMsL,
+                        tailDelayMacro.timeMsR));
+            }
+            maximumModulationMs = juce::jmax(
+                tailDelayMacro.wowDepthMs
+                    + tailDelayMacro.flutterDepthMs,
+                juce::jmax(
+                    0.30f
+                        + 2.22f * tailDelayMacro.topologyControl,
+                    tailDelayMacro.dualModDepthMs));
         }
 
-        const float manualTimeMs = automateDelay
-            ? 2000.0f
-            : juce::jlimit(1.0f, 2000.0f, delayTimeMs.load(std::memory_order_relaxed));
-        const float rightManualTimeMs = juce::jlimit(
-            1.0f, 2000.0f, manualTimeMs * (pingPong ? 1.18f : 1.0f));
-        if (! tempoSync || automateDelay)
-            maximumTimeMs = juce::jmax(maximumTimeMs,
-                                       juce::jmax(manualTimeMs, rightManualTimeMs));
-
-        const int mode = automateDelay
-            ? 1
-            : juce::jlimit(0, 2, static_cast<int>(std::round(
-                delayMode.load(std::memory_order_relaxed))));
-        if (mode == 1)
-        {
-            const float saturation = 0.08f + modulation * 0.55f;
-            maximumTimeMs += 1.8f * (0.25f + saturation * 0.75f);
-        }
-        return juce::jmin(rackDelay.getMaximumSupportedDelaySeconds() * 1000.0f,
-                          maximumTimeMs);
+        maximumTimeMs += maximumModulationMs;
+        return juce::jmin(
+            rackDelay.getMaximumSupportedDelaySeconds() * 1000.0f,
+            maximumTimeMs);
     }();
+    const float maximumDelayFeedback = juce::jmax(
+        automateDelay
+            ? 0.85f
+            : juce::jlimit(
+                  0.0f,
+                  0.85f,
+                  delayFeedback.load(std::memory_order_relaxed)),
+        juce::jmax(
+            tailDelayMacro.feedbackGain,
+            juce::jmax(
+                tailDelayMacro.multiFeedbackGain,
+                tailDelayMacro.dualFeedbackGain)));
+    const double tailBeforeDelay = tailSeconds;
     addFeedbackTail(automateDelay || delayEnabled.load(std::memory_order_relaxed) >= 0.5f,
-                    automateDelay ? 1.0f : delayMix.load(std::memory_order_relaxed),
+                    tailDelayMacro.mix,
                     effectiveDelayTimeMs,
-                    automateDelay ? 0.85f
-                                  : juce::jlimit(0.0f, 0.85f, delayFeedback.load(std::memory_order_relaxed)));
+                    maximumDelayFeedback,
+                    automateDelay
+                        ? 2.0f
+                        : juce::jmax(
+                              1.0f, tailDelayMacro.stereoWidth));
+    const double requestedDelayTail = juce::jmax(
+        0.0, tailSeconds - tailBeforeDelay);
+    const double publishedDelayTail = static_cast<double>(juce::jlimit(
+        0.0f,
+        600.0f,
+        publishedDelayTailSeconds.load(std::memory_order_relaxed)));
+    tailSeconds = tailBeforeDelay + juce::jmax(
+        requestedDelayTail,
+        publishedDelayTail);
 
-    const bool automateReverb = (moduleMask & tailAutomationReverb) != 0;
+    const bool automateReverb =
+        (moduleMask
+         & tailAutomationReverb) != 0;
     if ((automateReverb || reverbEnabled.load(std::memory_order_relaxed) >= 0.5f)
         && (automateReverb || reverbMix.load(std::memory_order_relaxed) > 0.0001f))
     {
@@ -3950,16 +13367,16 @@ double S13NAMRack::getAutomatedTailLengthSeconds(std::uint32_t moduleMask) const
         const float mix = automateReverb
             ? 1.0f
             : juce::jlimit(0.0f, 1.0f, reverbMix.load(std::memory_order_relaxed));
-        const float roomSize = juce::jlimit(0.18f, 0.92f, decay / 8.0f);
-        tailSeconds += S13Reverb::calculateTailLengthSeconds(
-            static_cast<int>(S13Reverb::Algorithm::Plate),
-            roomSize,
-            mix,
-            mix * 0.28f,
-            false,
-            preDelayMs,
-            decay,
-            cachedSampleRate);
+        tailSeconds +=
+            S13Reverb::calculateTailLengthSecondsV3(
+                mix,
+                preDelayMs,
+                decay,
+                cachedSampleRate,
+                automateReverb
+                    ? 1.0f
+                    : reverbShimmer.load(
+                          std::memory_order_relaxed));
     }
 
     const bool automateModulator = (moduleMask & tailAutomationModulator) != 0;
@@ -3991,6 +13408,19 @@ double S13NAMRack::getAutomatedTailLengthSeconds(std::uint32_t moduleMask) const
         tailSeconds += cabIRDurationSeconds.load(std::memory_order_relaxed);
     }
 
+    // Cabinet Space is a bounded feed-forward presentation field. It has no
+    // feedback, but its fixed room/doubler histories must still be rendered
+    // after live input stops. Keep this distinct from the historical cabinet
+    // IR and Low Bloom controls.
+    if ((moduleMask & tailAutomationCab) != 0
+        || (cabRoomEnabled.load(std::memory_order_relaxed) >= 0.5f
+            && cabRoomAmount.load(std::memory_order_relaxed) > 0.0001f)
+        || (cabDoublerEnabled.load(std::memory_order_relaxed) >= 0.5f
+            && cabDoublerMix.load(std::memory_order_relaxed) > 0.0001f))
+    {
+        tailSeconds += rackCabPresentation.getMaximumTailSeconds();
+    }
+
     // These modules are serial, so their conservative decay windows add rather
     // than compete. Processing latency is deliberately separate from this tail.
     return juce::jlimit(0.0, 600.0, tailSeconds);
@@ -4006,6 +13436,16 @@ double S13NAMRack::getMaximumAutomatedTailLengthSeconds() const
 void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const juce::ScopedLock processorConfigurationLock(getCallbackLock());
+    publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    publishedTapeEchoTailSeconds.store(0.0f, std::memory_order_relaxed);
+    publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
+    namEffectsDspVersion.store(
+        currentNAMEffectsDspVersion, std::memory_order_relaxed);
+    reverbEngineVersion.store(
+        static_cast<float>(currentReverbEngineVersion),
+        std::memory_order_relaxed);
+    modelHostConfigurationGeneration.fetch_add(
+        1, std::memory_order_acq_rel);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     cachedBlockSize = juce::jmax(1, samplesPerBlock);
     const auto resetLiveSmoother = [this] (auto& smoother, float value)
@@ -4018,27 +13458,68 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
         juce::Decibels::decibelsToGain(
             juce::jlimit(-24.0f, 24.0f, inputTrimDb.load(std::memory_order_relaxed))));
     resetLiveSmoother(
+        smoothedInputMonoMix,
+        0.0f);
+    resetInputRoutingHandoff();
+    resetLiveSmoother(
+        smoothedAuditionSourceMix,
+        0.0f);
+    resetLiveSmoother(
         smoothedOutputGain,
         juce::Decibels::decibelsToGain(
             juce::jlimit(-24.0f, 24.0f, outputTrimDb.load(std::memory_order_relaxed))));
-    resetLiveSmoother(
-        smoothedPedalMix,
+    // Capture outputs can differ radically from their aligned dry signals.
+    // These musical crossfades keep the slope bounded even for high-gain NAMs.
+    smoothedPedalMix.reset(cachedSampleRate, 0.05);
+    smoothedPedalMix.setCurrentAndTargetValue(
         juce::jlimit(
             0.0f, 1.0f, pedalMix.load(std::memory_order_relaxed)));
     resetLiveSmoother(
         smoothedAmpMix,
         juce::jlimit(0.0f, 1.0f, ampMix.load(std::memory_order_relaxed)));
-    resetLiveSmoother(
-        smoothedAmpPowerMix,
-        ampEnabled.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f);
+    smoothedAmpPowerMix.reset(cachedSampleRate, 0.08);
+    smoothedAmpPowerMix.setCurrentAndTargetValue(
+        activeAmpModel.load(std::memory_order_acquire) != nullptr
+                && ampEnabled.load(std::memory_order_relaxed) >= 0.5f
+            ? 1.0f
+            : 0.0f);
     smoothedAmpInputGain.reset(cachedSampleRate, 0.02);
     smoothedAmpInputGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(-24.0f, 24.0f, ampGainDb.load(std::memory_order_relaxed))
                                        + (ampBoost.load(std::memory_order_relaxed) >= 0.5f ? 6.0f : 0.0f)));
-    smoothedAmpOutputGain.reset(cachedSampleRate, 0.02);
+    smoothedAmpOutputGain.reset(cachedSampleRate, 0.10);
     smoothedAmpOutputGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(-24.0f, 12.0f, ampOutputDb.load(std::memory_order_relaxed))));
-    smoothedCabMix.reset(cachedSampleRate, 0.02);
+    const bool initialAmpBoost =
+        ampBoost.load(std::memory_order_relaxed)
+            >= 0.5f;
+    const bool initialAmpVoice =
+        ampVoice.load(std::memory_order_relaxed)
+            >= 0.5f;
+    const bool initialBassProfile = isBassInstrumentProfile();
+    resetLiveSmoother(
+        smoothedAmpVoiceLowCoefficient,
+        std::exp(
+            -2.0f
+            * juce::MathConstants<float>::pi
+            * (initialAmpBoost
+                ? (initialBassProfile ? 100.0f : 185.0f)
+                : (initialBassProfile ? 80.0f : 120.0f))
+            / static_cast<float>(
+                cachedSampleRate)));
+    resetLiveSmoother(
+        smoothedAmpVoiceLowMix,
+        initialAmpVoice
+            ? (initialBassProfile ? 0.80f : 0.55f)
+            : (initialAmpBoost
+                ? (initialBassProfile ? 0.94f : 0.86f)
+                : 1.0f));
+    resetLiveSmoother(
+        smoothedAmpVoiceHighMix,
+        initialAmpVoice
+            ? (initialBassProfile ? 1.18f : 1.24f)
+            : 1.0f);
+    smoothedCabMix.reset(cachedSampleRate, 0.06);
     smoothedCabMix.setCurrentAndTargetValue(
         cabIRLoaded.load(std::memory_order_acquire)
                 && cabEnabled.load(std::memory_order_relaxed) >= 0.5f
@@ -4048,6 +13529,60 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
         smoothedCabLevelGain,
         juce::Decibels::decibelsToGain(
             juce::jlimit(-24.0f, 12.0f, cabLevelDb.load(std::memory_order_relaxed))));
+    const float initialCabDistance = juce::jlimit(
+        0.0f,
+        1.0f,
+        cabMicDistance.load(std::memory_order_relaxed));
+    resetLiveSmoother(
+        smoothedCabPolarity,
+        cabPhaseInvert.load(std::memory_order_relaxed)
+                >= 0.5f
+            ? -1.0f
+            : 1.0f);
+    resetLiveSmoother(
+        smoothedCabMicPosition,
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            cabMicPosition.load(
+                std::memory_order_relaxed)));
+    resetLiveSmoother(
+        smoothedCabMicDistance,
+        initialCabDistance);
+    resetLiveSmoother(
+        smoothedCabMicBlend,
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            cabMicBlend.load(
+                std::memory_order_relaxed)));
+    resetLiveSmoother(
+        smoothedCabRoomSend,
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            cabRoomSend.load(
+                std::memory_order_relaxed)));
+    resetLiveSmoother(
+        smoothedCabPan,
+        juce::jlimit(
+            -1.0f,
+            1.0f,
+            cabPan.load(
+                std::memory_order_relaxed)));
+    resetLiveSmoother(
+        smoothedCabLowCoefficient,
+        std::exp(
+            -2.0f
+            * juce::MathConstants<float>::pi
+            * (420.0f
+               + initialCabDistance * 1100.0f)
+            / static_cast<float>(
+                cachedSampleRate)));
+    resetLiveSmoother(
+        smoothedCabDistanceGain,
+        juce::Decibels::decibelsToGain(
+            -4.5f * initialCabDistance));
     resetLiveSmoother(
         smoothedPrecisionDrivePower,
         precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f
@@ -4055,10 +13590,12 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
             : 0.0f);
     resetLiveSmoother(
         smoothedPrecisionDriveVolumeGain,
-        juce::Decibels::decibelsToGain(juce::jlimit(
-            -24.0f,
-            12.0f,
-            precisionDriveVolumeDb.load(std::memory_order_relaxed))));
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                precisionDriveVolumeDb.load(
+                    std::memory_order_relaxed))));
     resetLiveSmoother(
         smoothedChaosPower,
         chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
@@ -4067,8 +13604,11 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     resetLiveSmoother(
         smoothedChaosLevelGain,
         juce::Decibels::decibelsToGain(
-            juce::jlimit(-12.0f, 12.0f,
-                         chaosLevelDb.load(std::memory_order_relaxed))));
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                chaosLevelDb.load(
+                    std::memory_order_relaxed))));
     resetLiveSmoother(
         smoothedEmbeddedDriveIslandPower,
         precisionDriveEnabled.load(
@@ -4079,40 +13619,69 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
                         std::memory_order_relaxed) > 0.0001f)
             ? 1.0f
             : 0.0f);
-    const bool octaverIsEnabled =
-        octaverEnabled.load(std::memory_order_relaxed) >= 0.5f;
+    const bool compressorIsActive =
+        compressorEnabled.load(
+            std::memory_order_relaxed) >= 0.5f
+        && compressorMix.load(
+            std::memory_order_relaxed) > 0.0001f;
     resetLiveSmoother(
-        smoothedOctaverDownMix,
-        octaverIsEnabled
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  octaverDownMix.load(std::memory_order_relaxed))
-            : 0.0f);
-    resetLiveSmoother(
-        smoothedOctaverUpMix,
-        octaverIsEnabled
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  octaverUpMix.load(std::memory_order_relaxed))
-            : 0.0f);
-    resetLiveSmoother(
-        smoothedOctaverDirectMix,
-        octaverIsEnabled
-            ? juce::jlimit(
-                  0.0f,
-                  1.25f,
-                  octaverDirectMix.load(std::memory_order_relaxed))
+        smoothedCompressorStageGain,
+        compressorIsActive
+            ? juce::Decibels::decibelsToGain(
+                  juce::jlimit(
+                      -18.0f,
+                      18.0f,
+                      compressorVolumeDb.load(
+                          std::memory_order_relaxed)))
             : 1.0f);
+    compressorToneLowpassCoefficient =
+        std::exp(
+            -2.0f
+            * juce::MathConstants<float>::pi
+            * 500.0f
+            / static_cast<float>(cachedSampleRate));
+    resetCompressorToneStage(compressorIsActive);
     resetLiveSmoother(
-        smoothedLaserMix,
-        laserEnabled.load(std::memory_order_relaxed) >= 0.5f
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  laserMix.load(std::memory_order_relaxed))
+        smoothedGraphicEqPower,
+        eqEnabled.load(std::memory_order_relaxed)
+                >= 0.5f
+            ? 1.0f
             : 0.0f);
+    resetLiveSmoother(
+        smoothedGraphicEqLevelGain,
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                eqLevelDb.load(std::memory_order_relaxed))));
+    smoothedModulatorAutoRandom.reset(cachedSampleRate, 0.30);
+    smoothedModulatorAutoRandom.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            modulatorAutoRandom.load(std::memory_order_relaxed)));
+    smoothedModulatorPedalMode.reset(cachedSampleRate, 0.10);
+    smoothedModulatorPedalMode.setCurrentAndTargetValue(
+        modulatorPedalMode.load(std::memory_order_relaxed) >= 0.5f
+            ? 1.0f
+            : 0.0f);
+    smoothedModulatorModeBlend.reset(cachedSampleRate, 0.10);
+    smoothedModulatorModeBlend.setCurrentAndTargetValue(
+        modulatorMode.load(std::memory_order_relaxed) >= 0.5f
+            ? 1.0f
+            : 0.0f);
+    smoothedEmbeddedDriveIslandPower.reset(cachedSampleRate, 0.06);
+    smoothedEmbeddedDriveIslandPower.setCurrentAndTargetValue(
+        precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f
+                || (chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
+                    && chaosMix.load(std::memory_order_relaxed) > 0.0001f)
+            ? 1.0f
+            : 0.0f);
+    smoothedEmbeddedDriveOperatingGain.reset(
+        cachedSampleRate, 0.04);
+    smoothedEmbeddedDriveOperatingGain.setCurrentAndTargetValue(
+        getNAMEmbeddedDriveOperatingGain(
+            calibrationReferenceDbu.load(std::memory_order_relaxed)));
     realtimeBufferCapacity = getNAMRackRealtimeCapacity(cachedBlockSize);
     const int resampledCapacity = getNAMRackDspFrameCapacity(realtimeBufferCapacity, cachedSampleRate, cachedSampleRate * 4.0);
 
@@ -4122,12 +13691,40 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     namResampledInputBuffer.setSize(2, resampledCapacity, false, false, true);
     namResampledOutputBuffer.setSize(2, resampledCapacity + kNAMRackResamplerGuardSamples, false, false, true);
     namTransitionBuffer.setSize(2, realtimeBufferCapacity, false, false, true);
+    dualNAMStagingBuffer.setSize(
+        2, realtimeBufferCapacity, false, false, true);
+    dualNAMDelayedDryBuffer.setSize(
+        2, realtimeBufferCapacity, false, false, true);
     ampBypassBuffer.setSize(2, realtimeBufferCapacity, false, false, true);
-    liveTransitionBuffer.setSize(3, realtimeBufferCapacity, false, false, true);
+    liveTransitionBuffer.setSize(5, realtimeBufferCapacity, false, false, true);
+    graphicEqDryBuffer.setSize(
+        2,
+        realtimeBufferCapacity,
+        false,
+        false,
+        true);
+    postCabDryBuffer.setSize(
+        2,
+        realtimeBufferCapacity,
+        false,
+        false,
+        true);
     const int embeddedDriveHighRateCapacity =
         realtimeBufferCapacity * 2;
     embeddedDriveSharedDryBuffer.setSize(
         2, realtimeBufferCapacity, false, false, true);
+    embeddedDriveOperatingGainBuffer.setSize(
+        1,
+        realtimeBufferCapacity,
+        false,
+        false,
+        true);
+    chaosGateGainBuffer.setSize(
+        1,
+        embeddedDriveHighRateCapacity,
+        false,
+        false,
+        true);
     precisionDriveBypassBuffer.setSize(
         2,
         embeddedDriveHighRateCapacity,
@@ -4141,6 +13738,8 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
         false,
         true);
     embeddedDriveSharedDryBuffer.clear();
+    embeddedDriveOperatingGainBuffer.clear();
+    chaosGateGainBuffer.clear();
     precisionDriveBypassBuffer.clear();
     chaosBypassBuffer.clear();
     namInputPtrs.resize(2);
@@ -4206,38 +13805,81 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
             cabIR->preparedIRSize = cabIR->convolution.getCurrentIRSize();
         }
     }
+    // The embedded Delay must know that Rack-only topologies are available
+    // before its recalled macro is resolved and before any histories/smoothers
+    // are prepared.  This keeps the very first callback at the recalled V10
+    // topology instead of morphing from the standalone Delay defaults.
+    rackDelay.setExtendedModesEnabled(true);
     syncEmbeddedProcessorParameters();
     rackCompressor.prepareToPlay(cachedSampleRate, cachedBlockSize);
     rackTapeEcho.prepareToPlay(cachedSampleRate, cachedBlockSize);
+    const bool preparedTapeEchoActive =
+        tapeEchoEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && tapeEchoMix.load(std::memory_order_relaxed) > 0.0001f;
+    rackTapeEcho.resetRackRuntimeMixState(
+        preparedTapeEchoActive ? 1.0f : 0.0f,
+        true);
     const double embeddedDriveSampleRate =
         cachedSampleRate * 2.0;
-    rackPrecisionDrive.prepareToPlay(
-        embeddedDriveSampleRate,
-        embeddedDriveHighRateCapacity);
     rackChaos.prepareToPlay(
         embeddedDriveSampleRate,
         embeddedDriveHighRateCapacity);
-    rackPrecisionDrive.setOversamplingEnabled(false);
     rackChaos.setOversamplingEnabled(false);
     smoothedPrecisionDrivePower.reset(
-        embeddedDriveSampleRate, 0.02);
+        embeddedDriveSampleRate, 0.08);
     smoothedPrecisionDrivePower.setCurrentAndTargetValue(
         precisionDriveEnabled.load(
             std::memory_order_relaxed) >= 0.5f
             ? 1.0f
             : 0.0f);
     smoothedPrecisionDriveVolumeGain.reset(
-        embeddedDriveSampleRate, 0.02);
+        embeddedDriveSampleRate, 0.06);
     smoothedPrecisionDriveVolumeGain
         .setCurrentAndTargetValue(
             juce::Decibels::decibelsToGain(
                 juce::jlimit(
-                    -24.0f,
+                    -12.0f,
                     12.0f,
                     precisionDriveVolumeDb.load(
                         std::memory_order_relaxed))));
+    const float preparedPrecisionDrive = juce::jlimit(
+        0.0f,
+        1.0f,
+        precisionDriveDrive.load(std::memory_order_relaxed));
+    const float preparedPrecisionAttack = juce::jlimit(
+        0.0f,
+        1.0f,
+        precisionDriveAttack.load(std::memory_order_relaxed));
+    const float preparedPrecisionBright = juce::jlimit(
+        0.0f,
+        1.0f,
+        precisionDriveBright.load(std::memory_order_relaxed));
+    const auto resetPrecisionDriveSmoother =
+        [embeddedDriveSampleRate] (auto& smoother, float value)
+    {
+        smoother.reset(embeddedDriveSampleRate, 0.025);
+        smoother.setCurrentAndTargetValue(value);
+    };
+    resetPrecisionDriveSmoother(
+        smoothedPrecisionDriveBandGain,
+        getNAMPrecisionDriveBandGain(preparedPrecisionDrive));
+    resetPrecisionDriveSmoother(
+        smoothedPrecisionDriveAttackCoefficient,
+        getNAMPrecisionDriveAttackCoefficient(
+            preparedPrecisionAttack,
+            static_cast<float>(embeddedDriveSampleRate),
+            isBassInstrumentProfile()));
+    resetPrecisionDriveSmoother(
+        smoothedPrecisionDriveBrightCoefficient,
+        getNAMPrecisionDriveBrightCoefficient(
+            preparedPrecisionBright,
+            static_cast<float>(embeddedDriveSampleRate)));
+    precisionDriveAttackLowState.fill(0.0f);
+    precisionDriveBrightLowState.fill(0.0f);
+    precisionDriveDcInputState.fill(0.0f);
+    precisionDriveDcOutputState.fill(0.0f);
     smoothedChaosPower.reset(
-        embeddedDriveSampleRate, 0.02);
+        embeddedDriveSampleRate, 0.06);
     smoothedChaosPower.setCurrentAndTargetValue(
         chaosEnabled.load(
             std::memory_order_relaxed) >= 0.5f
@@ -4246,12 +13888,116 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
             ? 1.0f
             : 0.0f);
     smoothedChaosLevelGain.reset(
-        embeddedDriveSampleRate, 0.02);
+        embeddedDriveSampleRate,
+        0.06);
     smoothedChaosLevelGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(
-            juce::jlimit(-12.0f, 12.0f,
-                         chaosLevelDb.load(std::memory_order_relaxed))));
-
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                chaosLevelDb.load(
+                    std::memory_order_relaxed))));
+    const float preparedChaosDrive = juce::jlimit(
+        0.0f,
+        1.0f,
+        chaosDrive.load(std::memory_order_relaxed));
+    smoothedChaosWetMix.reset(
+        embeddedDriveSampleRate,
+        0.030);
+    smoothedChaosWetMix.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            chaosMix.load(std::memory_order_relaxed)));
+    const float preparedChaosMode = juce::jlimit(
+        0.0f, 2.0f, chaosMode.load(std::memory_order_relaxed));
+    const float preparedChaosWeight = juce::jlimit(
+        0.0f, 1.0f, chaosWeight.load(std::memory_order_relaxed));
+    const float preparedChaosTone = juce::jlimit(
+        0.0f, 1.0f, chaosTone.load(std::memory_order_relaxed));
+    const auto preparedChaosVoice = getNAMChaosVoice(
+        preparedChaosMode, preparedChaosDrive);
+    const auto resetChaosSmoother = [embeddedDriveSampleRate] (
+        auto& smoother,
+        float value)
+    {
+        smoother.reset(embeddedDriveSampleRate, 0.025);
+        smoother.setCurrentAndTargetValue(value);
+    };
+    resetChaosSmoother(
+        smoothedChaosPreGain,
+        juce::Decibels::decibelsToGain(
+            preparedChaosVoice.preGainDb));
+    resetChaosSmoother(
+        smoothedChaosDensity,
+        preparedChaosVoice.density);
+    const float preparedWeightCutHz =
+        isBassInstrumentProfile()
+            ? 35.0f
+                + (1.0f - preparedChaosWeight)
+                    * (1.0f - preparedChaosWeight)
+                    * 165.0f
+            : 65.0f
+                + (1.0f - preparedChaosWeight)
+                    * (1.0f - preparedChaosWeight)
+                    * 260.0f;
+    resetChaosSmoother(
+        smoothedChaosWeightCoefficient,
+        1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * preparedWeightCutHz
+            / static_cast<float>(embeddedDriveSampleRate)));
+    const float preparedInterstageLowHz = juce::jlimit(
+        3200.0f,
+        15000.0f,
+        4300.0f
+            + preparedChaosTone * 7200.0f
+            + preparedChaosVoice.presenceBias * 2400.0f);
+    resetChaosSmoother(
+        smoothedChaosInterstageLowCoefficient,
+        1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * preparedInterstageLowHz
+            / static_cast<float>(embeddedDriveSampleRate)));
+    resetChaosSmoother(
+        smoothedChaosPresenceCoefficient,
+        1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * (1350.0f + preparedChaosTone * 1250.0f)
+            / static_cast<float>(embeddedDriveSampleRate)));
+    resetChaosSmoother(
+        smoothedChaosPresenceAmount,
+        (preparedChaosTone - 0.5f) * 1.15f
+            + preparedChaosVoice.presenceBias);
+    smoothedChaosBassLowBlend.reset(
+        embeddedDriveSampleRate, 0.030);
+    smoothedChaosBassLowBlend.setCurrentAndTargetValue(
+        isBassInstrumentProfile() ? 1.0f : 0.0f);
+    chaosWeightLowState.fill(0.0f);
+    chaosCell1LowState.fill(0.0f);
+    chaosCell2LowState.fill(0.0f);
+    chaosPresenceLowState.fill(0.0f);
+    chaosBassDryLowState.fill(0.0f);
+    chaosBassWetLowState.fill(0.0f);
+    chaosDcInputState.fill(0.0f);
+    chaosDcOutputState.fill(0.0f);
+    resetChaosGateState(
+        chaosGate.load(std::memory_order_relaxed) <= 0.0001f);
+    embeddedDriveIslandWasActive =
+        precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f
+        || (chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
+            && chaosMix.load(std::memory_order_relaxed) > 0.0001f);
+    precisionDriveWasActive =
+        precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f;
+    chaosWasActive =
+        chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && chaosMix.load(std::memory_order_relaxed) > 0.0001f;
+    embeddedDriveIslandTransitionOwnsFade = false;
+    embeddedDriveIslandOwnedFadeDirection = 0;
+    embeddedDriveIslandOwnedPrecisionWet = false;
+    embeddedDriveIslandOwnedChaosWet = false;
+    embeddedDriveIslandOwnedChaosMix = 1.0f;
+    embeddedDriveOversamplerDrainSamplesRemaining = 0;
     embeddedDriveOversampler2x =
         std::make_unique<
             juce::dsp::Oversampling<float>>(
@@ -4293,9 +14039,6 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     compressorWasActive = false;
     tapeEchoWasActive = false;
     octaverWasActive = false;
-    precisionDriveWasActive = false;
-    chaosWasActive = false;
-    laserWasActive = false;
     cabWasActive = false;
     modulationWasActive = false;
     modulationBypassDrainSamples = 0;
@@ -4304,28 +14047,90 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     tapeEchoTailSamplesRemaining = 0;
     delayTailSamplesRemaining = 0;
     reverbTailSamplesRemaining = 0;
+    reverbTailCache.valid = false;
+    reverbTailCacheMissCount.store(
+        0, std::memory_order_relaxed);
     tapeEchoTailMix = 0.0f;
+    tapeEchoTailMacroValid = false;
     delayTailMix = 0.0f;
+    delayTailMacroValid = false;
     reverbTailWet = 0.0f;
     reverbTailEarly = 0.0f;
-    resetOctaverState();
-    resetLaserState();
+    activePostCabOrderPacked =
+        sanitizeNAMRackPostCabOrder(
+            requestedPostCabOrderPacked.load(
+                std::memory_order_acquire));
+    pendingPostCabOrderPacked =
+        activePostCabOrderPacked;
+    smoothedPostCabProcessedMix.reset(
+        cachedSampleRate, 0.02);
+    smoothedPostCabProcessedMix
+        .setCurrentAndTargetValue(1.0f);
+    postCabOrderTransitionStage = 0;
+    const bool octaverIsEnabled =
+        octaverEnabled.load(std::memory_order_relaxed) >= 0.5f;
+    rackPolyOctaver.setInstrumentProfile(getInstrumentProfile());
+    rackPolyOctaver.setLevels(
+        octaverIsEnabled
+            ? juce::jlimit(0.0f, 1.25f,
+                           octaverDirectMix.load(std::memory_order_relaxed))
+            : 1.0f,
+        octaverIsEnabled
+            ? juce::jlimit(0.0f, 1.0f,
+                           octaverDownMix.load(std::memory_order_relaxed))
+            : 0.0f,
+        octaverIsEnabled
+            ? juce::jlimit(0.0f, 1.0f,
+                           octaverUpMix.load(std::memory_order_relaxed))
+            : 0.0f);
+    rackPolyOctaver.prepare(cachedSampleRate, cachedBlockSize);
     precisionDriveGateEnvelope = 0.0f;
     precisionDriveGateGain = 1.0f;
     resetAmpFaceplateState();
     rackChorus.prepareToPlay(cachedSampleRate, cachedBlockSize);
-    rackDelay.setPlayHead(getPlayHead());
     rackDelay.prepareToPlay(cachedSampleRate, cachedBlockSize);
+    const bool preparedDelayActive =
+        delayEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && delayMix.load(std::memory_order_relaxed) > 0.0001f;
+    rackDelay.resetRackRuntimeMixState(
+        preparedDelayActive ? 1.0f : 0.0f,
+        ! preparedDelayActive || isBassInstrumentProfile());
+    rackReverb.inputSend.store(
+        reverbEnabled.load(
+            std::memory_order_relaxed) >= 0.5f
+                && reverbMix.load(
+                    std::memory_order_relaxed) > 0.0001f
+            ? 1.0f
+            : 0.0f,
+        std::memory_order_relaxed);
     rackReverb.prepareToPlay(cachedSampleRate, cachedBlockSize);
+    rackCabPresentation.setParameters({
+        cabRoomEnabled.load(std::memory_order_relaxed) >= 0.5f
+            ? juce::jlimit(0.0f, 1.0f,
+                           cabRoomAmount.load(std::memory_order_relaxed))
+            : 0.0f,
+        juce::jlimit(0.0f, 1.0f,
+                     cabRoomWidth.load(std::memory_order_relaxed)),
+        cabDoublerEnabled.load(std::memory_order_relaxed) >= 0.5f
+                && activeInputRoutingMode != 2
+            ? juce::jlimit(0.0f, 1.0f,
+                           cabDoublerMix.load(std::memory_order_relaxed))
+            : 0.0f,
+        juce::jlimit(0.0f, 1.0f,
+                     cabDoublerSpread.load(std::memory_order_relaxed))
+    });
+    rackCabPresentation.prepare(cachedSampleRate, cachedBlockSize);
     lastBassDb = lastMidDb = lastTrebleDb = lastPresenceDb = 999.0f;
     lastGraphicEqDb.fill(999.0f);
     lastCabHPFHz = -1.0f;
     lastCabLPFHz = -1.0f;
     rackFilterCoefficientsInitialised = false;
+    toneFilterCoefficientsSmoothing = false;
     graphicEqCoefficientsSmoothing = false;
     cabFilterCoefficientsSmoothing = false;
     gateEnvelope = 0.0f;
     gateGain = 1.0f;
+    compressorBypassDrainSamples = 0;
     auditionSourceSample = 0;
     {
         const juce::ScopedLock lock(modelSwapLock);
@@ -4333,28 +14138,23 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
         {
             if (model == nullptr || model->dsp == nullptr)
                 return;
-            const double modelSampleRate = model->expectedSampleRate > 1000.0
-                ? model->expectedSampleRate
-                : cachedSampleRate;
-            const double sampleRateRatio = modelSampleRate / juce::jmax(1.0, cachedSampleRate);
-            if (sampleRateRatio < (1.0 / kNAMRackMaximumResampleRatio)
-                || sampleRateRatio > kNAMRackMaximumResampleRatio)
-            {
-                model->processFaulted.store(true, std::memory_order_relaxed);
-                return;
-            }
-            const int processBlockSize = getNAMRackDspFrameCapacity(realtimeBufferCapacity,
-                                                                     cachedSampleRate,
-                                                                     modelSampleRate);
-            model->dsp->ResetAndPrewarm(modelSampleRate, processBlockSize);
-            model->processFaulted.store(false, std::memory_order_relaxed);
-            resetModelStreamingState(*model, cachedSampleRate, modelSampleRate, realtimeBufferCapacity);
-            model->preparedHostSampleRate = cachedSampleRate;
-            model->preparedHostBufferCapacity = realtimeBufferCapacity;
+            juce::String preparationError;
+            (void) prepareModelForHostConfiguration(
+                *model,
+                cachedSampleRate,
+                realtimeBufferCapacity,
+                preparationError);
             model->transitionSamplesRemaining.store(0, std::memory_order_relaxed);
+            if (model->dualMonoLane != nullptr)
+            {
+                model->dualMonoLane
+                    ->transitionSamplesRemaining.store(
+                        0, std::memory_order_relaxed);
+            }
         };
         resetModelForHost(pedalModel);
         resetModelForHost(ampModel);
+        resetAmpModelHandoffForCurrentOwner();
     }
     inputLevelDb.store(-90.0f, std::memory_order_relaxed);
     outputLevelDb.store(-90.0f, std::memory_order_relaxed);
@@ -4366,12 +14166,34 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     diagnosticMaxBlockSize.store(0, std::memory_order_relaxed);
     diagnosticProcessedBlockCount.store(0, std::memory_order_relaxed);
     diagnosticLastDspFrames.store(0, std::memory_order_relaxed);
+    diagnosticLastPedalDspFrames.store(0, std::memory_order_relaxed);
+    diagnosticLastAmpDspFrames.store(0, std::memory_order_relaxed);
     diagnosticMaxDspFrames.store(0, std::memory_order_relaxed);
     diagnosticPreparedSampleRate.store(static_cast<float>(cachedSampleRate), std::memory_order_relaxed);
     diagnosticLastModelSampleRate.store(0.0f, std::memory_order_relaxed);
     diagnosticLastInputPeakDb.store(-90.0f, std::memory_order_relaxed);
     diagnosticLastRawInputPeakDb.store(-90.0f, std::memory_order_relaxed);
+    diagnosticInputNonFiniteSampleCount.store(
+        0, std::memory_order_relaxed);
     diagnosticLastOutputPeakDb.store(-90.0f, std::memory_order_relaxed);
+    diagnosticLastOutputPeakLinear.store(0.0f, std::memory_order_relaxed);
+    diagnosticMaximumOutputPeakLinear.store(0.0f, std::memory_order_relaxed);
+    diagnosticPedalNAMMaximumRawOutputPeakLinear.store(
+        0.0f, std::memory_order_relaxed);
+    diagnosticAmpNAMMaximumRawOutputPeakLinear.store(
+        0.0f, std::memory_order_relaxed);
+    diagnosticPedalNAMMaximumRawOutputDeltaLinear.store(
+        0.0f, std::memory_order_relaxed);
+    diagnosticAmpNAMMaximumRawOutputDeltaLinear.store(
+        0.0f, std::memory_order_relaxed);
+    previousRackRawOutput.fill(0.0f);
+    hasPreviousRackRawOutput.fill(false);
+    diagnosticRackMaximumRawOutputPeakLinear.store(
+        0.0f, std::memory_order_relaxed);
+    diagnosticRackMaximumRawOutputDeltaLinear.store(
+        0.0f, std::memory_order_relaxed);
+    diagnosticRackOutputSafetyGuardHitCount.store(
+        0, std::memory_order_relaxed);
     diagnosticLastAuditionSourceActive.store(false, std::memory_order_relaxed);
     diagnosticLastAuditionSourceRendered.store(false, std::memory_order_relaxed);
     diagnosticLastResampled.store(false, std::memory_order_relaxed);
@@ -4408,10 +14230,21 @@ void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     cabHPFR.reset();
     cabLPFL.reset();
     cabLPFR.reset();
+    modelHostSampleRate.store(
+        cachedSampleRate, std::memory_order_relaxed);
+    modelHostBlockSize.store(
+        cachedBlockSize, std::memory_order_relaxed);
+    modelHostBufferCapacity.store(
+        realtimeBufferCapacity, std::memory_order_relaxed);
+    modelHostConfigurationGeneration.fetch_add(
+        1, std::memory_order_release);
 }
 
 void S13NAMRack::releaseResources()
 {
+    publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    publishedTapeEchoTailSeconds.store(0.0f, std::memory_order_relaxed);
+    publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
     inputLevelDb.store(-90.0f, std::memory_order_relaxed);
     outputLevelDb.store(-90.0f, std::memory_order_relaxed);
     inputMeterHoldSamplesRemaining = 0;
@@ -4419,6 +14252,8 @@ void S13NAMRack::releaseResources()
     diagnosticLastInputPeakDb.store(-90.0f, std::memory_order_relaxed);
     diagnosticLastRawInputPeakDb.store(-90.0f, std::memory_order_relaxed);
     diagnosticLastOutputPeakDb.store(-90.0f, std::memory_order_relaxed);
+    previousRackRawOutput.fill(0.0f);
+    hasPreviousRackRawOutput.fill(false);
     diagnosticLastAuditionSourceActive.store(false, std::memory_order_relaxed);
     diagnosticLastAuditionSourceRendered.store(false, std::memory_order_relaxed);
     workBuffer.setSize(0, 0);
@@ -4427,9 +14262,15 @@ void S13NAMRack::releaseResources()
     namResampledInputBuffer.setSize(0, 0);
     namResampledOutputBuffer.setSize(0, 0);
     namTransitionBuffer.setSize(0, 0);
+    dualNAMStagingBuffer.setSize(0, 0);
+    dualNAMDelayedDryBuffer.setSize(0, 0);
     ampBypassBuffer.setSize(0, 0);
     liveTransitionBuffer.setSize(0, 0);
+    graphicEqDryBuffer.setSize(0, 0);
+    postCabDryBuffer.setSize(0, 0);
     embeddedDriveSharedDryBuffer.setSize(0, 0);
+    embeddedDriveOperatingGainBuffer.setSize(0, 0);
+    chaosGateGainBuffer.setSize(0, 0);
     precisionDriveBypassBuffer.setSize(0, 0);
     chaosBypassBuffer.setSize(0, 0);
     if (embeddedDriveOversampler2x != nullptr)
@@ -4438,11 +14279,9 @@ void S13NAMRack::releaseResources()
          embeddedDriveSharedDryRing)
         channel.fill(0.0f);
     embeddedDriveSharedDryWriteIndex = 0;
+    embeddedDriveOversamplerDrainSamplesRemaining = 0;
     precisionDriveBypassDelay.reset();
     chaosBypassDelay.reset();
-    resetLaserState();
-    smoothedLaserMix.setCurrentAndTargetValue(0.0f);
-    laserWasActive = false;
     resetAmpFaceplateState();
     lowShelfL.reset();
     lowShelfR.reset();
@@ -4472,10 +14311,13 @@ void S13NAMRack::releaseResources()
         }
     }
     rackCompressor.releaseResources();
+    resetCompressorToneStage(false);
     rackTapeEcho.releaseResources();
-    rackPrecisionDrive.releaseResources();
+    rackPolyOctaver.setLevels(1.0f, 0.0f, 0.0f);
+    rackPolyOctaver.reset();
     rackChaos.releaseResources();
     compressorWasActive = false;
+    compressorBypassDrainSamples = 0;
     tapeEchoWasActive = false;
     octaverWasActive = false;
     precisionDriveWasActive = false;
@@ -4488,41 +14330,96 @@ void S13NAMRack::releaseResources()
     tapeEchoTailSamplesRemaining = 0;
     delayTailSamplesRemaining = 0;
     reverbTailSamplesRemaining = 0;
+    reverbTailCache.valid = false;
+    reverbTailCacheMissCount.store(
+        0, std::memory_order_relaxed);
     tapeEchoTailMix = 0.0f;
+    tapeEchoTailMacroValid = false;
     delayTailMix = 0.0f;
+    delayTailMacroValid = false;
     reverbTailWet = 0.0f;
     reverbTailEarly = 0.0f;
-    smoothedOctaverDownMix.setCurrentAndTargetValue(0.0f);
-    smoothedOctaverUpMix.setCurrentAndTargetValue(0.0f);
-    smoothedOctaverDirectMix.setCurrentAndTargetValue(1.0f);
-    resetOctaverState();
+    activePostCabOrderPacked =
+        sanitizeNAMRackPostCabOrder(
+            requestedPostCabOrderPacked.load(
+                std::memory_order_acquire));
+    pendingPostCabOrderPacked =
+        activePostCabOrderPacked;
+    smoothedPostCabProcessedMix
+        .setCurrentAndTargetValue(1.0f);
+    postCabOrderTransitionStage = 0;
     precisionDriveGateEnvelope = 0.0f;
     precisionDriveGateGain = 1.0f;
+    precisionDriveAttackLowState.fill(0.0f);
+    precisionDriveBrightLowState.fill(0.0f);
+    precisionDriveDcInputState.fill(0.0f);
+    precisionDriveDcOutputState.fill(0.0f);
+    chaosWeightLowState.fill(0.0f);
+    chaosCell1LowState.fill(0.0f);
+    chaosCell2LowState.fill(0.0f);
+    chaosPresenceLowState.fill(0.0f);
+    chaosBassDryLowState.fill(0.0f);
+    chaosBassWetLowState.fill(0.0f);
+    chaosDcInputState.fill(0.0f);
+    chaosDcOutputState.fill(0.0f);
+    resetChaosGateState(
+        chaosGate.load(std::memory_order_relaxed) <= 0.0001f);
     rackChorus.releaseResources();
     rackDelay.releaseResources();
     rackReverb.releaseResources();
+    rackCabPresentation.reset();
+    resetInputRoutingHandoff();
 }
 
 void S13NAMRack::syncEmbeddedProcessorParameters() noexcept
 {
     const float compressorAmount = juce::jlimit(0.0f, 1.0f,
         compressorComp.load(std::memory_order_relaxed));
-    const float compressorDetailValue = juce::jlimit(0.0f, 1.0f,
-        compressorDetail.load(std::memory_order_relaxed));
-    const float compressorVolume = juce::jlimit(-12.0f, 12.0f,
-        compressorVolumeDb.load(std::memory_order_relaxed));
-    rackCompressor.threshold.store(-6.0f - compressorAmount * 38.0f, std::memory_order_relaxed);
-    rackCompressor.ratio.store(1.2f + compressorAmount * 8.8f, std::memory_order_relaxed);
-    rackCompressor.attack.store(2.0f + (1.0f - compressorDetailValue) * 28.0f, std::memory_order_relaxed);
-    rackCompressor.release.store(70.0f + compressorDetailValue * 260.0f, std::memory_order_relaxed);
-    rackCompressor.knee.store(5.0f + (1.0f - compressorAmount) * 10.0f, std::memory_order_relaxed);
-    rackCompressor.makeupGain.store(juce::jmax(0.0f, compressorVolume), std::memory_order_relaxed);
-    rackCompressor.mix.store(juce::jlimit(0.0f, 1.0f, compressorMix.load(std::memory_order_relaxed)),
-                             std::memory_order_relaxed);
-    rackCompressor.style.store(1.0f, std::memory_order_relaxed);
+    rackTapeEcho.setEmbeddedModulationSmoothingSeconds(0.04);
+    rackCompressor.threshold.store(
+        mapNAMRackCompressorThresholdDb(compressorAmount),
+        std::memory_order_relaxed);
+    rackCompressor.ratio.store(
+        mapNAMRackCompressorRatio(compressorAmount),
+        std::memory_order_relaxed);
+    rackCompressor.attack.store(
+        juce::jlimit(
+            0.1f,
+            50.0f,
+            compressorAttackMs.load(std::memory_order_relaxed)),
+        std::memory_order_relaxed);
+    rackCompressor.release.store(
+        juce::jlimit(
+            50.0f,
+            1000.0f,
+            compressorReleaseMs.load(std::memory_order_relaxed)),
+        std::memory_order_relaxed);
+    rackCompressor.knee.store(
+        mapNAMRackCompressorKneeDb(compressorAmount),
+        std::memory_order_relaxed);
+    rackCompressor.makeupGain.store(0.0f, std::memory_order_relaxed);
+    const bool compressorActive =
+        compressorEnabled.load(
+            std::memory_order_relaxed) >= 0.5f;
+    rackCompressor.mix.store(
+        compressorActive
+            ? juce::jlimit(
+                  0.0f,
+                  1.0f,
+                  compressorMix.load(
+                      std::memory_order_relaxed))
+            : 0.0f,
+        std::memory_order_relaxed);
+    // Clean style preserves the explicit user attack/release values. The old
+    // Punch multiplier is applied once during V6 state migration instead.
+    rackCompressor.style.store(0.0f, std::memory_order_relaxed);
     rackCompressor.autoMakeup.store(0.0f, std::memory_order_relaxed);
     rackCompressor.autoRelease.store(0.0f, std::memory_order_relaxed);
-    rackCompressor.sidechainHPF.store(90.0f, std::memory_order_relaxed);
+    rackCompressor.sidechainHPF.store(
+        mapNAMRackCompressorSidechainHPF(
+            compressorSidechainHPF.load(
+                std::memory_order_relaxed)),
+        std::memory_order_relaxed);
     rackCompressor.lookaheadMs.store(0.0f, std::memory_order_relaxed);
     rackCompressor.detectorMode.store(2.0f, std::memory_order_relaxed);
     rackCompressor.stereoLink.store(1.0f, std::memory_order_relaxed);
@@ -4543,66 +14440,50 @@ void S13NAMRack::syncEmbeddedProcessorParameters() noexcept
     rackTapeEcho.mix.store(tapeEchoActive
         ? juce::jlimit(0.0f, 1.0f, tapeEchoMix.load(std::memory_order_relaxed))
         : 0.0f, std::memory_order_relaxed);
+    rackTapeEcho.inputSend.store(
+        tapeEchoActive ? 1.0f : 0.0f,
+        std::memory_order_relaxed);
+    rackTapeEcho.unityDry.store(1.0f, std::memory_order_relaxed);
     rackTapeEcho.pingPong.store(0.0f, std::memory_order_relaxed);
     rackTapeEcho.tempoSync.store(0.0f, std::memory_order_relaxed);
     rackTapeEcho.lpfFreq.store(2600.0f + tapeTone * 11200.0f, std::memory_order_relaxed);
-    rackTapeEcho.hpfFreq.store(45.0f + (1.0f - tapeTone) * 210.0f, std::memory_order_relaxed);
+    rackTapeEcho.hpfFreq.store(
+        45.0f + (1.0f - tapeTone) * 210.0f,
+        std::memory_order_relaxed);
     rackTapeEcho.fbSaturation.store(0.16f + tapeMod * 0.46f, std::memory_order_relaxed);
     rackTapeEcho.stereoWidth.store(0.82f + tapeMod * 0.34f, std::memory_order_relaxed);
     rackTapeEcho.delayMode.store(1.0f, std::memory_order_relaxed);
     rackTapeEcho.ducking.store(0.0f, std::memory_order_relaxed);
+    rackTapeEcho.wowDepthMs.store(
+        1.8f * (0.25f + (0.16f + tapeMod * 0.46f) * 0.75f),
+        std::memory_order_relaxed);
+    rackTapeEcho.wowRateHz.store(0.37f, std::memory_order_relaxed);
+    rackTapeEcho.flutterDepthMs.store(0.0f, std::memory_order_relaxed);
 
-    const float precisionDriveAmount = juce::jlimit(0.0f, 1.0f,
-        precisionDriveDrive.load(std::memory_order_relaxed));
-    const float precisionBright = juce::jlimit(0.0f, 1.0f,
-        precisionDriveBright.load(std::memory_order_relaxed));
-    const float precisionAttack = juce::jlimit(0.0f, 1.0f,
-        precisionDriveAttack.load(std::memory_order_relaxed));
-    rackPrecisionDrive.satType.store(
-        static_cast<float>(S13Saturator::SatType::Transistor),
-        std::memory_order_relaxed);
-    rackPrecisionDrive.drive.store(
-        6.0f + precisionDriveAmount * 21.0f,
-        std::memory_order_relaxed);
-    rackPrecisionDrive.mix.store(
-        0.90f + precisionDriveAmount * 0.10f,
-        std::memory_order_relaxed);
-    rackPrecisionDrive.toneFreq.store(2600.0f + precisionBright * 12600.0f, std::memory_order_relaxed);
-    rackPrecisionDrive.lowCutFreq.store(70.0f + precisionAttack * precisionAttack * 760.0f, std::memory_order_relaxed);
-    rackPrecisionDrive.outputGain.store(
-        getNAMPrecisionDriveOutputGainDb(
-            false,
-            precisionDriveAmount,
-            namEffectsDspVersion.load(
-                std::memory_order_relaxed)),
-        std::memory_order_relaxed);
-    rackPrecisionDrive.asymmetry.store(
-        0.06f + precisionDriveAmount * 0.22f,
-        std::memory_order_relaxed);
-    rackPrecisionDrive.oversampleMode.store(0.0f, std::memory_order_relaxed);
+    rackChaos.setZeroInputInvariantEnabled(true);
+    rackChaos.setAutomaticDriveCompensationEnabled(false);
 
     const float chaosDriveValue = juce::jlimit(
         0.0f, 1.0f, chaosDrive.load(std::memory_order_relaxed));
     const float chaosToneValue = juce::jlimit(
         0.0f, 1.0f, chaosTone.load(std::memory_order_relaxed));
-    const float chaosWet = juce::jlimit(
-        0.0f, 1.0f, chaosMix.load(std::memory_order_relaxed));
+    const auto chaosVoice = getNAMChaosVoice(
+        chaosMode.load(std::memory_order_relaxed),
+        chaosDriveValue);
+    rackChaos.setLowCutBeforeSaturation(true);
+    rackChaos.setFilterSmoothingSeconds(0.080);
     rackChaos.satType.store(
         static_cast<float>(S13Saturator::SatType::DiodeClipper),
         std::memory_order_relaxed);
     rackChaos.drive.store(
-        12.0f + chaosDriveValue * 18.0f,
+        chaosVoice.diodeDriveDb,
         std::memory_order_relaxed);
-    rackChaos.mix.store(chaosWet, std::memory_order_relaxed);
+    rackChaos.mix.store(1.0f, std::memory_order_relaxed);
     rackChaos.toneFreq.store(
-        2100.0f + chaosToneValue * 12900.0f,
+        3000.0f + chaosToneValue * 10500.0f,
         std::memory_order_relaxed);
-    rackChaos.lowCutFreq.store(
-        70.0f + (1.0f - chaosToneValue) * 180.0f,
-        std::memory_order_relaxed);
-    rackChaos.outputGain.store(
-        -1.5f - chaosDriveValue * 1.5f,
-        std::memory_order_relaxed);
+    rackChaos.lowCutFreq.store(20.0f, std::memory_order_relaxed);
+    rackChaos.outputGain.store(-2.5f, std::memory_order_relaxed);
     rackChaos.asymmetry.store(
         0.12f + chaosDriveValue * 0.24f,
         std::memory_order_relaxed);
@@ -4619,9 +14500,9 @@ void S13NAMRack::syncEmbeddedProcessorParameters() noexcept
     const bool modulationAuto = modulatorPedalMode.load(std::memory_order_relaxed) >= 0.5f;
     const float pedalPosition = juce::jlimit(0.0f, 1.0f,
         modulatorPedalPosition.load(std::memory_order_relaxed));
-    const float sweep = modulationAuto ? modulationRandom : pedalPosition * 0.5f;
-    const float rateScale = modulationAuto ? (0.72f + modulationSpeed * 1.55f)
-                                           : (0.55f + pedalPosition * 1.65f);
+    const float sweep = modulationAuto
+        ? modulationRandom * (0.65f + modulationSpeed * 0.35f)
+        : pedalPosition * 0.5f;
     const float modulationDepthValue = juce::jlimit(0.0f, 1.0f,
         chorusDepth.load(std::memory_order_relaxed));
     const float effectiveDepth = modulationAuto
@@ -4630,13 +14511,27 @@ void S13NAMRack::syncEmbeddedProcessorParameters() noexcept
     const float effectiveFeedback = modulationAuto
         ? modulationFeedbackValue
         : juce::jlimit(0.0f, 1.0f, modulationFeedbackValue * (0.45f + pedalPosition * 1.1f));
+    const float preparedChorusMix =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            chorusMix.load(std::memory_order_relaxed));
+    const bool modulationInitiallyActive =
+        modulatorEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && preparedChorusMix > 0.0001f;
     rackChorus.mode.store(static_cast<float>(modulationModeValue), std::memory_order_relaxed);
-    rackChorus.rate.store(juce::jlimit(0.05f, 8.0f,
-        chorusRateHz.load(std::memory_order_relaxed) * rateScale), std::memory_order_relaxed);
+    rackChorus.rate.store(
+        juce::jlimit(
+            0.01f, 8.0f,
+            chorusRateHz.load(std::memory_order_relaxed)),
+        std::memory_order_relaxed);
     rackChorus.depth.store(effectiveDepth, std::memory_order_relaxed);
-    rackChorus.mix.store(juce::jlimit(0.0f, 1.0f, chorusMix.load(std::memory_order_relaxed)),
-                         std::memory_order_relaxed);
-    rackChorus.inputSend.store(1.0f, std::memory_order_relaxed);
+    rackChorus.mix.store(
+        modulationInitiallyActive ? preparedChorusMix : 0.0f,
+        std::memory_order_relaxed);
+    rackChorus.inputSend.store(
+        modulationInitiallyActive ? 1.0f : 0.0f,
+        std::memory_order_relaxed);
     rackChorus.fbAmount.store(modulationModeValue == 1
         ? (0.08f + effectiveFeedback * 0.72f)
         : (effectiveFeedback * 0.16f), std::memory_order_relaxed);
@@ -4646,104 +14541,117 @@ void S13NAMRack::syncEmbeddedProcessorParameters() noexcept
     rackChorus.randomBlend.store(
         modulationAuto ? modulationRandom : 0.0f,
         std::memory_order_relaxed);
+    rackChorus.randomSlewMs.store(
+        modulationAuto
+            ? 120.0f - modulationSpeed * 112.0f
+            : 12.0f,
+        std::memory_order_relaxed);
     rackChorus.spread.store(modulationModeValue == 1 ? 0.58f : 0.72f + sweep * 0.18f,
                             std::memory_order_relaxed);
     rackChorus.highCut.store(modulationModeValue == 1 ? 9200.0f : 12000.0f,
                              std::memory_order_relaxed);
-    rackChorus.lowCut.store(modulationModeValue == 1 ? 120.0f : 90.0f,
+    rackChorus.lowCut.store(
+        modulationModeValue == 1 ? 120.0f : 90.0f,
                             std::memory_order_relaxed);
     rackChorus.characterMode.store(
         static_cast<float>(juce::jlimit(
             0,
-            2,
+            1,
             static_cast<int>(std::round(
                 chorusCharacter.load(
                     std::memory_order_relaxed))))),
         std::memory_order_relaxed);
-    rackChorus.mixLaw.store(
-        namEffectsDspVersion.load(
-            std::memory_order_relaxed) >= 2
-            ? 1.0f
-            : 0.0f,
+    rackChorus.mixLaw.store(1.0f, std::memory_order_relaxed);
+    rackChorus.unityDry.store(
+        isBassInstrumentProfile() ? 1.0f : 0.0f,
         std::memory_order_relaxed);
 
-    const float postDelayTime = juce::jlimit(1.0f, 2000.0f,
-        delayTimeMs.load(std::memory_order_relaxed));
-    const float postDelayMod = juce::jlimit(0.0f, 1.0f,
-        delayMod.load(std::memory_order_relaxed));
-    const bool postDelayPingPong = delayPingPong.load(std::memory_order_relaxed) >= 0.5f;
-    const int postDelayMode = juce::jlimit(0, 2, static_cast<int>(std::round(
-        delayMode.load(std::memory_order_relaxed))));
-    rackDelay.delayTimeL.store(postDelayTime, std::memory_order_relaxed);
-    rackDelay.delayTimeR.store(juce::jlimit(1.0f, 2000.0f,
-        postDelayTime * (postDelayPingPong ? 1.18f : 1.0f)), std::memory_order_relaxed);
-    rackDelay.feedback.store(juce::jlimit(0.0f, 0.85f,
-        delayFeedback.load(std::memory_order_relaxed)), std::memory_order_relaxed);
-    rackDelay.crossFeed.store(postDelayPingPong ? 0.12f + postDelayMod * 0.16f : 0.02f,
-                              std::memory_order_relaxed);
-    rackDelay.mix.store(juce::jlimit(0.0f, 1.0f, delayMix.load(std::memory_order_relaxed)),
-                        std::memory_order_relaxed);
-    rackDelay.pingPong.store(postDelayPingPong ? 1.0f : 0.0f, std::memory_order_relaxed);
-    rackDelay.tempoSync.store(delayTempoSync.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f,
-                              std::memory_order_relaxed);
-    rackDelay.syncNoteL.store(juce::jlimit(0.0f, 8.0f, 2.0f + postDelayMod * 2.0f),
-                              std::memory_order_relaxed);
-    rackDelay.syncNoteR.store(juce::jlimit(0.0f, 8.0f,
-        postDelayPingPong ? 3.0f + postDelayMod * 2.0f : 2.0f + postDelayMod * 2.0f),
+    const auto preparedDelay = resolveDelayMacroState(
+        delayTimeMs.load(std::memory_order_relaxed),
+        delayFeedback.load(std::memory_order_relaxed),
+        delayMix.load(std::memory_order_relaxed),
+        delayMod.load(std::memory_order_relaxed),
+        delayDucker.load(std::memory_order_relaxed),
+        delayMode.load(std::memory_order_relaxed),
+        delayPingPong.load(std::memory_order_relaxed),
+        delayTempoSync.load(std::memory_order_relaxed),
+        getInstrumentProfile());
+    const bool delayInitiallyActive =
+        delayEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && preparedDelay.mix > 0.0001f;
+    rackDelay.delayTimeL.store(preparedDelay.timeMsL, std::memory_order_relaxed);
+    rackDelay.delayTimeR.store(preparedDelay.timeMsR, std::memory_order_relaxed);
+    rackDelay.feedback.store(preparedDelay.feedbackGain, std::memory_order_relaxed);
+    rackDelay.crossFeed.store(preparedDelay.crossFeed, std::memory_order_relaxed);
+    rackDelay.mix.store(
+        delayInitiallyActive ? preparedDelay.mix : 0.0f,
         std::memory_order_relaxed);
-    rackDelay.lpfFreq.store(postDelayMode == 0 ? 12000.0f
-        : (4300.0f + (1.0f - postDelayMod) * 4200.0f), std::memory_order_relaxed);
-    rackDelay.hpfFreq.store(70.0f + postDelayMod * 110.0f, std::memory_order_relaxed);
-    rackDelay.fbSaturation.store(0.08f + postDelayMod * 0.55f, std::memory_order_relaxed);
-    rackDelay.stereoWidth.store(postDelayPingPong ? 1.15f + postDelayMod * 0.18f : 0.92f,
-                                std::memory_order_relaxed);
-    rackDelay.delayMode.store(static_cast<float>(postDelayMode), std::memory_order_relaxed);
-    rackDelay.ducking.store(juce::jlimit(0.0f, 1.0f, delayDucker.load(std::memory_order_relaxed)),
-                            std::memory_order_relaxed);
+    rackDelay.inputSend.store(
+        delayInitiallyActive ? 1.0f : 0.0f,
+        std::memory_order_relaxed);
+    rackDelay.unityDry.store(
+        delayInitiallyActive && preparedDelay.dryGain < 1.0f
+            ? 0.0f
+            : 1.0f,
+        std::memory_order_relaxed);
+    rackDelay.pingPong.store(preparedDelay.pingPong ? 1.0f : 0.0f, std::memory_order_relaxed);
+    rackDelay.tempoSync.store(preparedDelay.tempoSync ? 1.0f : 0.0f, std::memory_order_relaxed);
+    rackDelay.syncNoteL.store(static_cast<float>(preparedDelay.sync.leftNoteIndex), std::memory_order_relaxed);
+    rackDelay.syncNoteR.store(static_cast<float>(preparedDelay.sync.rightNoteIndex), std::memory_order_relaxed);
+    rackDelay.lpfFreq.store(preparedDelay.lowPassHz, std::memory_order_relaxed);
+    rackDelay.hpfFreq.store(preparedDelay.highPassHz, std::memory_order_relaxed);
+    rackDelay.fbSaturation.store(preparedDelay.saturation, std::memory_order_relaxed);
+    rackDelay.stereoWidth.store(preparedDelay.stereoWidth, std::memory_order_relaxed);
+    rackDelay.delayMode.store(static_cast<float>(preparedDelay.mode), std::memory_order_relaxed);
+    rackDelay.ducking.store(preparedDelay.duckAmount, std::memory_order_relaxed);
+    rackDelay.wowDepthMs.store(preparedDelay.wowDepthMs, std::memory_order_relaxed);
+    rackDelay.wowRateHz.store(preparedDelay.wowRateHz, std::memory_order_relaxed);
+    rackDelay.flutterDepthMs.store(preparedDelay.flutterDepthMs, std::memory_order_relaxed);
+    rackDelay.flutterRateHz.store(preparedDelay.flutterRateHz, std::memory_order_relaxed);
+    rackDelay.duckAttackMs.store(preparedDelay.duckAttackMs, std::memory_order_relaxed);
+    rackDelay.duckReleaseMs.store(preparedDelay.duckReleaseMs, std::memory_order_relaxed);
+    rackDelay.duckMaxReduction.store(preparedDelay.duckMaxReduction, std::memory_order_relaxed);
+    rackDelay.topologyControl.store(preparedDelay.topologyControl, std::memory_order_relaxed);
+    rackDelay.multiFeedback.store(preparedDelay.multiFeedbackGain, std::memory_order_relaxed);
+    rackDelay.dualTimeRatio.store(preparedDelay.dualTimeRatio, std::memory_order_relaxed);
+    rackDelay.dualFeedback.store(preparedDelay.dualFeedbackGain, std::memory_order_relaxed);
+    rackDelay.dualLowPassHz.store(preparedDelay.dualLowPassHz, std::memory_order_relaxed);
+    rackDelay.dualHighPassHz.store(preparedDelay.dualHighPassHz, std::memory_order_relaxed);
+    rackDelay.dualSaturation.store(preparedDelay.dualSaturation, std::memory_order_relaxed);
+    rackDelay.dualModDepthMs.store(preparedDelay.dualModDepthMs, std::memory_order_relaxed);
+    rackDelay.dualModRateHz.store(preparedDelay.dualModRateHz, std::memory_order_relaxed);
 
-    const float reverbToneValue = juce::jlimit(0.0f, 1.0f,
-        reverbTone.load(std::memory_order_relaxed));
-    const float reverbDecay = juce::jlimit(0.2f, 12.0f,
-        reverbDecaySec.load(std::memory_order_relaxed));
-    rackReverb.algorithm.store(2.0f, std::memory_order_relaxed);
-    rackReverb.roomSize.store(juce::jlimit(0.18f, 0.92f, reverbDecay / 8.0f),
-                              std::memory_order_relaxed);
-    rackReverb.damping.store(1.0f - reverbToneValue * 0.82f,
-                             std::memory_order_relaxed);
-    rackReverb.wetLevel.store(juce::jlimit(0.0f, 1.0f, reverbMix.load(std::memory_order_relaxed)),
-                              std::memory_order_relaxed);
-    rackReverb.dryLevel.store(1.0f, std::memory_order_relaxed);
-    rackReverb.width.store(1.0f, std::memory_order_relaxed);
-    rackReverb.freezeMode.store(0.0f, std::memory_order_relaxed);
-    rackReverb.preDelay.store(juce::jlimit(0.0f, 500.0f,
-        reverbPreDelayMs.load(std::memory_order_relaxed)), std::memory_order_relaxed);
-    rackReverb.diffusion.store(0.72f, std::memory_order_relaxed);
-    rackReverb.lowCut.store(
-        juce::jlimit(
-            20.0f,
-            500.0f,
-            reverbLowCutHz.load(
-                std::memory_order_relaxed)),
-        std::memory_order_relaxed);
-    rackReverb.highCut.store(juce::jlimit(2800.0f, 18000.0f,
-        3800.0f + reverbToneValue * 9200.0f),
-        std::memory_order_relaxed);
     const float recalledReverbMix = juce::jlimit(
         0.0f, 1.0f, reverbMix.load(std::memory_order_relaxed));
-    rackReverb.earlyLevel.store(recalledReverbMix * 0.28f,
-                                std::memory_order_relaxed);
-    rackReverb.decayTime.store(reverbDecay, std::memory_order_relaxed);
-    rackReverb.shimmerAmount.store(
-        juce::jlimit(
-            0.0f,
-            1.0f,
-            reverbShimmer.load(
-                std::memory_order_relaxed)),
-        std::memory_order_relaxed);
+    const auto recalledReverbMacro = resolveReverbMacroState(
+        reverbVoice.load(std::memory_order_relaxed),
+        recalledReverbMix,
+        reverbDecaySec.load(std::memory_order_relaxed),
+        reverbTone.load(std::memory_order_relaxed),
+        reverbPreDelayMs.load(std::memory_order_relaxed),
+        reverbLowCutHz.load(std::memory_order_relaxed),
+        reverbShimmer.load(std::memory_order_relaxed),
+        getInstrumentProfile());
+    cachedReverbMixForGains = recalledReverbMix;
+    cachedReverbWetGain = recalledReverbMacro.wetGain;
+    cachedReverbDryGain = recalledReverbMacro.dryGain;
+    cachedReverbUsesV3MixLaw = true;
+    cachedReverbUsesV4WetLaw = true;
+    applyNAMRackReverbMacro(
+        rackReverb,
+        recalledReverbMacro,
+        recalledReverbMacro.wetGain,
+        recalledReverbMacro.dryGain,
+        recalledReverbMacro.earlyGain,
+        reverbEnabled.load(std::memory_order_relaxed) >= 0.5f
+            && recalledReverbMix > 0.0001f);
 }
 
 void S13NAMRack::reset()
 {
+    publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    publishedTapeEchoTailSeconds.store(0.0f, std::memory_order_relaxed);
+    publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
     inputLevelDb.store(-90.0f, std::memory_order_relaxed);
     outputLevelDb.store(-90.0f, std::memory_order_relaxed);
     inputMeterHoldSamplesRemaining = 0;
@@ -4755,6 +14663,9 @@ void S13NAMRack::reset()
     smoothedInputGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(
             -24.0f, 24.0f, inputTrimDb.load(std::memory_order_relaxed))));
+    smoothedInputMonoMix.setCurrentAndTargetValue(
+        0.0f);
+    smoothedAuditionSourceMix.setCurrentAndTargetValue(0.0f);
     smoothedOutputGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(
             -24.0f, 24.0f, outputTrimDb.load(std::memory_order_relaxed))));
@@ -4764,7 +14675,10 @@ void S13NAMRack::reset()
     smoothedAmpMix.setCurrentAndTargetValue(
         juce::jlimit(0.0f, 1.0f, ampMix.load(std::memory_order_relaxed)));
     smoothedAmpPowerMix.setCurrentAndTargetValue(
-        ampEnabled.load(std::memory_order_relaxed) >= 0.5f ? 1.0f : 0.0f);
+        activeAmpModel.load(std::memory_order_acquire) != nullptr
+                && ampEnabled.load(std::memory_order_relaxed) >= 0.5f
+            ? 1.0f
+            : 0.0f);
     smoothedAmpInputGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(-24.0f, 24.0f,
             ampGainDb.load(std::memory_order_relaxed))
@@ -4772,6 +14686,35 @@ void S13NAMRack::reset()
     smoothedAmpOutputGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(-24.0f, 12.0f,
             ampOutputDb.load(std::memory_order_relaxed))));
+    const bool resetAmpBoost =
+        ampBoost.load(std::memory_order_relaxed)
+            >= 0.5f;
+    const bool resetAmpVoice =
+        ampVoice.load(std::memory_order_relaxed)
+            >= 0.5f;
+    const bool resetBassProfile = isBassInstrumentProfile();
+    smoothedAmpVoiceLowCoefficient
+        .setCurrentAndTargetValue(
+            std::exp(
+                -2.0f
+                * juce::MathConstants<float>::pi
+                * (resetAmpBoost
+                    ? (resetBassProfile ? 100.0f : 185.0f)
+                    : (resetBassProfile ? 80.0f : 120.0f))
+                / static_cast<float>(
+                    cachedSampleRate)));
+    smoothedAmpVoiceLowMix
+        .setCurrentAndTargetValue(
+            resetAmpVoice
+                ? (resetBassProfile ? 0.80f : 0.55f)
+                : (resetAmpBoost
+                    ? (resetBassProfile ? 0.94f : 0.86f)
+                    : 1.0f));
+    smoothedAmpVoiceHighMix
+        .setCurrentAndTargetValue(
+            resetAmpVoice
+                ? (resetBassProfile ? 1.18f : 1.24f)
+                : 1.0f);
     smoothedCabMix.setCurrentAndTargetValue(
         cabIRLoaded.load(std::memory_order_acquire)
                 && cabEnabled.load(std::memory_order_relaxed) >= 0.5f
@@ -4780,23 +14723,110 @@ void S13NAMRack::reset()
     smoothedCabLevelGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(juce::jlimit(
             -24.0f, 12.0f, cabLevelDb.load(std::memory_order_relaxed))));
+    const float resetCabDistance = juce::jlimit(
+        0.0f,
+        1.0f,
+        cabMicDistance.load(std::memory_order_relaxed));
+    smoothedCabPolarity.setCurrentAndTargetValue(
+        cabPhaseInvert.load(std::memory_order_relaxed)
+                >= 0.5f
+            ? -1.0f
+            : 1.0f);
+    smoothedCabMicPosition
+        .setCurrentAndTargetValue(
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                cabMicPosition.load(
+                    std::memory_order_relaxed)));
+    smoothedCabMicDistance
+        .setCurrentAndTargetValue(
+            resetCabDistance);
+    smoothedCabMicBlend
+        .setCurrentAndTargetValue(
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                cabMicBlend.load(
+                    std::memory_order_relaxed)));
+    smoothedCabRoomSend
+        .setCurrentAndTargetValue(
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                cabRoomSend.load(
+                    std::memory_order_relaxed)));
+    smoothedCabPan
+        .setCurrentAndTargetValue(
+            juce::jlimit(
+                -1.0f,
+                1.0f,
+                cabPan.load(
+                    std::memory_order_relaxed)));
+    smoothedCabLowCoefficient
+        .setCurrentAndTargetValue(
+            std::exp(
+                -2.0f
+                * juce::MathConstants<float>::pi
+                * (420.0f
+                   + resetCabDistance * 1100.0f)
+                / static_cast<float>(
+                    cachedSampleRate)));
+    smoothedCabDistanceGain
+        .setCurrentAndTargetValue(
+            juce::Decibels::decibelsToGain(
+                -4.5f * resetCabDistance));
     smoothedPrecisionDrivePower.setCurrentAndTargetValue(
         precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f
             ? 1.0f
             : 0.0f);
     smoothedPrecisionDriveVolumeGain.setCurrentAndTargetValue(
-        juce::Decibels::decibelsToGain(juce::jlimit(
-            -24.0f,
-            12.0f,
-            precisionDriveVolumeDb.load(std::memory_order_relaxed))));
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                precisionDriveVolumeDb.load(
+                    std::memory_order_relaxed))));
+    const float resetPrecisionDrive = juce::jlimit(
+        0.0f,
+        1.0f,
+        precisionDriveDrive.load(std::memory_order_relaxed));
+    const float resetPrecisionAttack = juce::jlimit(
+        0.0f,
+        1.0f,
+        precisionDriveAttack.load(std::memory_order_relaxed));
+    const float resetPrecisionBright = juce::jlimit(
+        0.0f,
+        1.0f,
+        precisionDriveBright.load(std::memory_order_relaxed));
+    const float resetPrecisionSampleRate = static_cast<float>(
+        juce::jmax(1.0, cachedSampleRate * 2.0));
+    smoothedPrecisionDriveBandGain.setCurrentAndTargetValue(
+        getNAMPrecisionDriveBandGain(resetPrecisionDrive));
+    smoothedPrecisionDriveAttackCoefficient.setCurrentAndTargetValue(
+        getNAMPrecisionDriveAttackCoefficient(
+            resetPrecisionAttack,
+            resetPrecisionSampleRate,
+            isBassInstrumentProfile()));
+    smoothedPrecisionDriveBrightCoefficient.setCurrentAndTargetValue(
+        getNAMPrecisionDriveBrightCoefficient(
+            resetPrecisionBright,
+            resetPrecisionSampleRate));
+    precisionDriveAttackLowState.fill(0.0f);
+    precisionDriveBrightLowState.fill(0.0f);
+    precisionDriveDcInputState.fill(0.0f);
+    precisionDriveDcOutputState.fill(0.0f);
     smoothedChaosPower.setCurrentAndTargetValue(
         chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
             ? 1.0f
             : 0.0f);
     smoothedChaosLevelGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain(
-            juce::jlimit(-12.0f, 12.0f,
-                         chaosLevelDb.load(std::memory_order_relaxed))));
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                chaosLevelDb.load(
+                    std::memory_order_relaxed))));
     smoothedEmbeddedDriveIslandPower
         .setCurrentAndTargetValue(
             precisionDriveEnabled.load(
@@ -4807,37 +14837,152 @@ void S13NAMRack::reset()
                             std::memory_order_relaxed) > 0.0001f)
                 ? 1.0f
                 : 0.0f);
+    const float resetChaosDrive = juce::jlimit(
+        0.0f,
+        1.0f,
+        chaosDrive.load(std::memory_order_relaxed));
+    smoothedChaosWetMix.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            chaosMix.load(std::memory_order_relaxed)));
+    const float resetChaosMode = juce::jlimit(
+        0.0f, 2.0f, chaosMode.load(std::memory_order_relaxed));
+    const float resetChaosWeight = juce::jlimit(
+        0.0f, 1.0f, chaosWeight.load(std::memory_order_relaxed));
+    const float resetChaosTone = juce::jlimit(
+        0.0f, 1.0f, chaosTone.load(std::memory_order_relaxed));
+    const auto resetChaosVoice = getNAMChaosVoice(
+        resetChaosMode, resetChaosDrive);
+    const float embeddedDriveRate = static_cast<float>(
+        juce::jmax(1.0, cachedSampleRate * 2.0));
+    smoothedChaosPreGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            resetChaosVoice.preGainDb));
+    smoothedChaosDensity.setCurrentAndTargetValue(
+        resetChaosVoice.density);
+    const float resetWeightCutHz =
+        isBassInstrumentProfile()
+            ? 35.0f
+                + (1.0f - resetChaosWeight)
+                    * (1.0f - resetChaosWeight)
+                    * 165.0f
+            : 65.0f
+                + (1.0f - resetChaosWeight)
+                    * (1.0f - resetChaosWeight)
+                    * 260.0f;
+    smoothedChaosWeightCoefficient.setCurrentAndTargetValue(
+        1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * resetWeightCutHz / embeddedDriveRate));
+    const float resetInterstageLowHz = juce::jlimit(
+        3200.0f,
+        15000.0f,
+        4300.0f
+            + resetChaosTone * 7200.0f
+            + resetChaosVoice.presenceBias * 2400.0f);
+    smoothedChaosInterstageLowCoefficient.setCurrentAndTargetValue(
+        1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * resetInterstageLowHz / embeddedDriveRate));
+    smoothedChaosPresenceCoefficient.setCurrentAndTargetValue(
+        1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * (1350.0f + resetChaosTone * 1250.0f)
+            / embeddedDriveRate));
+    smoothedChaosPresenceAmount.setCurrentAndTargetValue(
+        (resetChaosTone - 0.5f) * 1.15f
+            + resetChaosVoice.presenceBias);
+    smoothedChaosBassLowBlend.setCurrentAndTargetValue(
+        isBassInstrumentProfile() ? 1.0f : 0.0f);
+    chaosWeightLowState.fill(0.0f);
+    chaosCell1LowState.fill(0.0f);
+    chaosCell2LowState.fill(0.0f);
+    chaosPresenceLowState.fill(0.0f);
+    chaosBassDryLowState.fill(0.0f);
+    chaosBassWetLowState.fill(0.0f);
+    chaosDcInputState.fill(0.0f);
+    chaosDcOutputState.fill(0.0f);
+    resetChaosGateState(
+        chaosGate.load(std::memory_order_relaxed) <= 0.0001f);
+    embeddedDriveIslandWasActive =
+        precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f
+        || (chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
+            && chaosMix.load(std::memory_order_relaxed) > 0.0001f);
+    precisionDriveWasActive =
+        precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f;
+    chaosWasActive =
+        chaosEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && chaosMix.load(std::memory_order_relaxed) > 0.0001f;
+    embeddedDriveIslandTransitionOwnsFade = false;
+    embeddedDriveIslandOwnedFadeDirection = 0;
+    embeddedDriveIslandOwnedPrecisionWet = false;
+    embeddedDriveIslandOwnedChaosWet = false;
+    embeddedDriveIslandOwnedChaosMix = 1.0f;
+    embeddedDriveOversamplerDrainSamplesRemaining = 0;
     const bool resetOctaverEnabled =
         octaverEnabled.load(std::memory_order_relaxed) >= 0.5f;
-    smoothedOctaverDownMix.setCurrentAndTargetValue(
+    rackPolyOctaver.setInstrumentProfile(getInstrumentProfile());
+    rackPolyOctaver.setLevels(
         resetOctaverEnabled
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  octaverDownMix.load(std::memory_order_relaxed))
-            : 0.0f);
-    smoothedOctaverUpMix.setCurrentAndTargetValue(
+            ? juce::jlimit(0.0f, 1.25f,
+                           octaverDirectMix.load(std::memory_order_relaxed))
+            : 1.0f,
         resetOctaverEnabled
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  octaverUpMix.load(std::memory_order_relaxed))
-            : 0.0f);
-    smoothedOctaverDirectMix.setCurrentAndTargetValue(
+            ? juce::jlimit(0.0f, 1.0f,
+                           octaverDownMix.load(std::memory_order_relaxed))
+            : 0.0f,
         resetOctaverEnabled
-            ? juce::jlimit(
-                  0.0f,
-                  1.25f,
-                  octaverDirectMix.load(std::memory_order_relaxed))
-            : 1.0f);
-    smoothedLaserMix.setCurrentAndTargetValue(
-        laserEnabled.load(std::memory_order_relaxed) >= 0.5f
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  laserMix.load(std::memory_order_relaxed))
+            ? juce::jlimit(0.0f, 1.0f,
+                           octaverUpMix.load(std::memory_order_relaxed))
             : 0.0f);
-
+    rackPolyOctaver.reset();
+    const bool resetCompressorActive =
+        compressorEnabled.load(
+            std::memory_order_relaxed) >= 0.5f
+        && compressorMix.load(
+            std::memory_order_relaxed) > 0.0001f;
+    smoothedCompressorStageGain
+        .setCurrentAndTargetValue(
+            resetCompressorActive
+                ? juce::Decibels::decibelsToGain(
+                      juce::jlimit(
+                          -18.0f,
+                          18.0f,
+                          compressorVolumeDb.load(
+                          std::memory_order_relaxed)))
+                : 1.0f);
+    resetCompressorToneStage(resetCompressorActive);
+    smoothedGraphicEqPower
+        .setCurrentAndTargetValue(
+            eqEnabled.load(
+                std::memory_order_relaxed) >= 0.5f
+                ? 1.0f
+                : 0.0f);
+    smoothedGraphicEqLevelGain
+        .setCurrentAndTargetValue(
+            juce::Decibels::decibelsToGain(
+                juce::jlimit(
+                    -12.0f,
+                    12.0f,
+                    eqLevelDb.load(
+                        std::memory_order_relaxed))));
+    smoothedEmbeddedDriveOperatingGain.setCurrentAndTargetValue(
+        getNAMEmbeddedDriveOperatingGain(
+            calibrationReferenceDbu.load(std::memory_order_relaxed)));
+    smoothedModulatorAutoRandom.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            modulatorAutoRandom.load(std::memory_order_relaxed)));
+    smoothedModulatorPedalMode.setCurrentAndTargetValue(
+        modulatorPedalMode.load(std::memory_order_relaxed) >= 0.5f
+            ? 1.0f
+            : 0.0f);
+    smoothedModulatorModeBlend.setCurrentAndTargetValue(
+        modulatorMode.load(std::memory_order_relaxed) >= 0.5f
+            ? 1.0f
+            : 0.0f);
     // Automation may have left coefficient targets at the end of pass 1.
     // Rebuild the starting targets from the restored scalar snapshot and install
     // them immediately; smoothing then begins identically in every pass.
@@ -4846,6 +14991,7 @@ void S13NAMRack::reset()
     lastCabHPFHz = -1.0f;
     lastCabLPFHz = -1.0f;
     rackFilterCoefficientsInitialised = false;
+    toneFilterCoefficientsSmoothing = false;
     graphicEqCoefficientsSmoothing = false;
     cabFilterCoefficientsSmoothing = false;
     updateToneFiltersIfNeeded();
@@ -4882,8 +15028,14 @@ void S13NAMRack::reset()
     }
 
     rackCompressor.releaseResources();
+    resetCompressorToneStage(false);
     rackTapeEcho.releaseResources();
-    rackPrecisionDrive.releaseResources();
+    const bool resetTapeEchoActive =
+        tapeEchoEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && tapeEchoMix.load(std::memory_order_relaxed) > 0.0001f;
+    rackTapeEcho.resetRackRuntimeMixState(
+        resetTapeEchoActive ? 1.0f : 0.0f,
+        true);
     rackChaos.releaseResources();
     if (embeddedDriveOversampler2x != nullptr)
         embeddedDriveOversampler2x->reset();
@@ -4894,17 +15046,39 @@ void S13NAMRack::reset()
     precisionDriveBypassDelay.reset();
     chaosBypassDelay.reset();
     embeddedDriveSharedDryBuffer.clear();
+    embeddedDriveOperatingGainBuffer.clear();
+    chaosGateGainBuffer.clear();
     precisionDriveBypassBuffer.clear();
     chaosBypassBuffer.clear();
     rackChorus.releaseResources();
     rackDelay.releaseResources();
-    rackReverb.releaseResources();
+    const bool resetDelayActive =
+        delayEnabled.load(std::memory_order_relaxed) >= 0.5f
+        && delayMix.load(std::memory_order_relaxed) > 0.0001f;
+    rackDelay.resetRackRuntimeMixState(
+        resetDelayActive ? 1.0f : 0.0f,
+        ! resetDelayActive || isBassInstrumentProfile());
+    rackReverb.resetTailState();
+    rackCabPresentation.setParameters({
+        cabRoomEnabled.load(std::memory_order_relaxed) >= 0.5f
+            ? juce::jlimit(0.0f, 1.0f,
+                           cabRoomAmount.load(std::memory_order_relaxed))
+            : 0.0f,
+        juce::jlimit(0.0f, 1.0f,
+                     cabRoomWidth.load(std::memory_order_relaxed)),
+        cabDoublerEnabled.load(std::memory_order_relaxed) >= 0.5f
+                && activeInputRoutingMode != 2
+            ? juce::jlimit(0.0f, 1.0f,
+                           cabDoublerMix.load(std::memory_order_relaxed))
+            : 0.0f,
+        juce::jlimit(0.0f, 1.0f,
+                     cabDoublerSpread.load(std::memory_order_relaxed))
+    });
+    rackCabPresentation.reset();
     compressorWasActive = false;
+    compressorBypassDrainSamples = 0;
     tapeEchoWasActive = false;
     octaverWasActive = false;
-    precisionDriveWasActive = false;
-    chaosWasActive = false;
-    laserWasActive = false;
     cabWasActive = false;
     modulationWasActive = false;
     modulationBypassDrainSamples = 0;
@@ -4914,16 +15088,32 @@ void S13NAMRack::reset()
     tapeEchoTailSamplesRemaining = 0;
     delayTailSamplesRemaining = 0;
     reverbTailSamplesRemaining = 0;
+    reverbTailCache.valid = false;
+    reverbTailCacheMissCount.store(
+        0, std::memory_order_relaxed);
     tapeEchoTailMix = 0.0f;
+    tapeEchoTailMacroValid = false;
     delayTailMix = 0.0f;
+    delayTailMacroValid = false;
     reverbTailWet = 0.0f;
     reverbTailEarly = 0.0f;
+    activePostCabOrderPacked =
+        sanitizeNAMRackPostCabOrder(
+            requestedPostCabOrderPacked.load(
+                std::memory_order_acquire));
+    pendingPostCabOrderPacked =
+        activePostCabOrderPacked;
+    smoothedPostCabProcessedMix
+        .setCurrentAndTargetValue(1.0f);
+    postCabOrderTransitionStage = 0;
     gateEnvelope = 0.0f;
     gateGain = 1.0f;
-    resetOctaverState();
     precisionDriveGateEnvelope = 0.0f;
     precisionDriveGateGain = 1.0f;
-    resetLaserState();
+    precisionDriveAttackLowState.fill(0.0f);
+    precisionDriveBrightLowState.fill(0.0f);
+    precisionDriveDcInputState.fill(0.0f);
+    precisionDriveDcOutputState.fill(0.0f);
     resetAmpFaceplateState();
     resetCabMicState();
     auditionSourceSample = 0;
@@ -4934,42 +15124,48 @@ void S13NAMRack::reset()
         if (model == nullptr || model->dsp == nullptr)
             return;
 
-        try
+        const auto resetLane = [this] (
+            auto&& self,
+            LoadedNAMModel& lane) -> void
         {
-            const double modelSampleRate = model->expectedSampleRate > 1000.0
-                ? model->expectedSampleRate
-                : cachedSampleRate;
-            const int processBlockSize = getNAMRackDspFrameCapacity(realtimeBufferCapacity,
-                                                                     cachedSampleRate,
-                                                                     modelSampleRate);
-            model->dsp->ResetAndPrewarm(modelSampleRate, processBlockSize);
-            model->processFaulted.store(false, std::memory_order_relaxed);
-        }
-        catch (...)
-        {
-            model->processFaulted.store(true, std::memory_order_relaxed);
-        }
-
-        for (auto& resampler : model->inputResamplers)
-            resampler.reset();
-        for (auto& resampler : model->outputResamplers)
-            resampler.reset();
-        for (auto& channel : model->resampledHostFifo)
-            std::fill(channel.begin(), channel.end(), 0.0f);
-        model->resampledHostFifoRead = 0;
-        model->resampledHostFifoSize = 0;
-        for (auto& channel : model->resampledDryDelay)
-            channel.fill(0.0f);
-        model->resampledDryDelayWrite = 0;
-        for (auto& channel : model->ampBypassDryDelay)
-            channel.fill(0.0f);
-        model->ampBypassDryDelayWrite = 0;
-        model->currentInputCalibrationGain = 1.0f;
-        model->currentOutputCalibrationGain = 1.0f;
-        model->transitionSamplesRemaining.store(0, std::memory_order_release);
+            try
+            {
+                const double modelSampleRate =
+                    lane.expectedSampleRate > 1000.0
+                        ? lane.expectedSampleRate
+                        : cachedSampleRate;
+                const int processBlockSize =
+                    getNAMRackDspFrameCapacity(
+                        realtimeBufferCapacity,
+                        cachedSampleRate,
+                        modelSampleRate);
+                lane.dsp->ResetAndPrewarm(
+                    modelSampleRate,
+                    processBlockSize);
+                lane.processFaulted.store(
+                    false, std::memory_order_relaxed);
+                resetModelStreamingState(
+                    lane,
+                    cachedSampleRate,
+                    modelSampleRate,
+                    realtimeBufferCapacity);
+            }
+            catch (...)
+            {
+                lane.processFaulted.store(
+                    true, std::memory_order_relaxed);
+            }
+            lane.transitionSamplesRemaining.store(
+                0, std::memory_order_release);
+            if (lane.dualMonoLane != nullptr)
+                self(self, *lane.dualMonoLane);
+        };
+        resetLane(resetLane, *model);
     };
     resetModel(pedalModel);
     resetModel(ampModel);
+    resetAmpModelHandoffForCurrentOwner();
+    resetInputRoutingHandoff();
 }
 
 void S13NAMRack::reclaimRetiredModelsFromEarlierPublication()
@@ -4979,6 +15175,13 @@ void S13NAMRack::reclaimRetiredModelsFromEarlierPublication()
         const juce::ScopedLock lock(modelSwapLock);
         if (modelReaders.load(std::memory_order_seq_cst) == 0)
         {
+            const auto* const activePedal =
+                activePedalModel.load(std::memory_order_seq_cst);
+            const auto* const activeAmp =
+                activeAmpModel.load(std::memory_order_seq_cst);
+            const auto* const requestedAmp =
+                ampModelHandoff.requestedModel.load(
+                    std::memory_order_acquire);
             const auto* const pedalTransitionSource = pedalModel != nullptr
                 && pedalModel->transitionSamplesRemaining.load(std::memory_order_acquire) > 0
                 ? pedalModel->transitionFrom
@@ -4993,7 +15196,15 @@ void S13NAMRack::reclaimRetiredModelsFromEarlierPublication()
             modelsToDestroy.reserve(retiredModels.size());
             for (auto& retired : retiredModels)
             {
-                if (retired.get() == pedalTransitionSource || retired.get() == ampTransitionSource)
+                const auto* const retiredPointer =
+                    retired.get();
+                if (retiredPointer == activePedal
+                    || retiredPointer == activeAmp
+                    || retiredPointer == requestedAmp
+                    || retiredPointer
+                        == pedalTransitionSource
+                    || retiredPointer
+                        == ampTransitionSource)
                     stillReferenced.push_back(std::move(retired));
                 else
                     modelsToDestroy.push_back(std::move(retired));
@@ -5068,6 +15279,592 @@ void S13NAMRack::resetModelStreamingState(LoadedNAMModel& model,
     model.ampBypassDryDelayWrite = 0;
     model.currentInputCalibrationGain = 1.0f;
     model.currentOutputCalibrationGain = 1.0f;
+    model.calibrationInitialised = false;
+    model.previousRawOutput.fill(0.0f);
+    model.hasPreviousRawOutput.fill(false);
+}
+
+void S13NAMRack::resetAmpModelHandoffForCurrentOwner() noexcept
+{
+    auto* const currentModel = ampModel.get();
+    activeAmpModel.store(
+        currentModel, std::memory_order_seq_cst);
+    ampModelHandoff.requestedModel.store(
+        currentModel, std::memory_order_release);
+    const auto generation =
+        ampModelHandoff.requestGeneration.fetch_add(
+            1, std::memory_order_acq_rel)
+        + 1;
+    ampModelHandoff.consumedRequestGeneration =
+        generation;
+    ampModelHandoff.phase =
+        AmpModelHandoffPhase::steady;
+    ampModelHandoff.currentGain = 1.0f;
+    ampModelHandoff.phaseStartGain = 1.0f;
+    ampModelHandoff.phaseSamplePosition = 0;
+    ampModelHandoff.phaseSampleCount = 1;
+    ampModelHandoff.primeSamplesRemaining = 0;
+    ampModelHandoff.phaseCompletesAfterBlock =
+        false;
+    const bool includesCab =
+        currentModel != nullptr
+        && currentModel->includesCab.load(
+            std::memory_order_acquire);
+    activeAmpModelIncludesCab.store(
+        includesCab, std::memory_order_release);
+}
+
+void S13NAMRack::resetInputRoutingHandoff() noexcept
+{
+    const bool routedSourceIsStereo =
+        routedInputChannelCount.load(
+            std::memory_order_acquire) >= 2;
+    const auto* const pedalModelForReset =
+        activePedalModel.load(
+            std::memory_order_acquire);
+    const auto* const ampModelForReset =
+        activeAmpModel.load(
+            std::memory_order_acquire);
+    const auto supportsStereoRouting = [] (
+        const LoadedNAMModel* model) noexcept
+    {
+        return model == nullptr
+            || model->dualMonoLane != nullptr
+            || (model->inputChannels == 2
+                && model->outputChannels == 2);
+    };
+    const bool stereoRoutingCapable =
+        supportsStereoRouting(
+            pedalModelForReset)
+        && supportsStereoRouting(
+            ampModelForReset);
+    activeInputRoutingMode =
+        routedSourceIsStereo
+                && stereoRoutingCapable
+            ? 2
+            : 0;
+    inputRoutingHandoff.pendingMode =
+        activeInputRoutingMode;
+    inputRoutingHandoff.phase =
+        InputRoutingHandoffPhase::steady;
+    diagnosticActiveInputRoutingMode.store(
+        activeInputRoutingMode,
+        std::memory_order_relaxed);
+    diagnosticInputRoutingTransitionPhase.store(
+        static_cast<int>(
+            inputRoutingHandoff.phase),
+        std::memory_order_relaxed);
+    inputRoutingHandoff.currentGain = 1.0f;
+    inputRoutingHandoff.phaseStartGain = 1.0f;
+    inputRoutingHandoff.phaseSamplePosition = 0;
+    inputRoutingHandoff.phaseSampleCount = 1;
+    inputRoutingHandoff.primeSamplesRemaining = 0;
+    inputRoutingHandoff.phaseCompletesAfterBlock =
+        false;
+}
+
+void S13NAMRack::beginInputRoutingHandoffBlock(
+    float* const handoffGainEnvelope,
+    int numSamples,
+    bool hasActiveNAMModel,
+    bool stereoRoutingCapable) noexcept
+{
+    const int safeNumSamples = juce::jmax(0, numSamples);
+    const bool routedSourceIsStereo =
+        routedInputChannelCount.load(
+            std::memory_order_acquire) >= 2;
+    // Routing is owned by the DAW. A two-channel route is processed in stereo
+    // when every loaded NAM slot can provide either a prepared second 1x1
+    // graph or one native 2x2 graph; every other case safely uses mono.
+    const int requestedMode =
+        routedSourceIsStereo
+                && stereoRoutingCapable
+            ? 2
+            : 0;
+
+    // A host-routing or model-capability loss is a safety constraint, not a
+    // creative topology change. Stop using the invalid stereo graph before
+    // this callback processes audio, then fade the valid mono graph in from
+    // silence. This keeps an invalid stereo graph from remaining audible
+    // during the ordinary fade-out/prime/fade-in handoff.
+    if (activeInputRoutingMode == 2
+        && requestedMode != 2)
+    {
+        activeInputRoutingMode = requestedMode;
+        inputRoutingHandoff.pendingMode = requestedMode;
+        inputRoutingHandoff.phase =
+            hasActiveNAMModel
+                ? InputRoutingHandoffPhase::fadeIn
+                : InputRoutingHandoffPhase::steady;
+        inputRoutingHandoff.currentGain =
+            hasActiveNAMModel ? 0.0f : 1.0f;
+        inputRoutingHandoff.phaseStartGain =
+            inputRoutingHandoff.currentGain;
+        inputRoutingHandoff.phaseSamplePosition = 0;
+        inputRoutingHandoff.phaseSampleCount =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    cachedSampleRate * 0.012));
+        inputRoutingHandoff.primeSamplesRemaining = 0;
+        inputRoutingHandoff.phaseCompletesAfterBlock = false;
+        diagnosticActiveInputRoutingMode.store(
+            activeInputRoutingMode,
+            std::memory_order_relaxed);
+        diagnosticInputRoutingTransitionPhase.store(
+            static_cast<int>(
+                inputRoutingHandoff.phase),
+            std::memory_order_relaxed);
+    }
+
+    if (! hasActiveNAMModel)
+    {
+        activeInputRoutingMode = requestedMode;
+        inputRoutingHandoff.pendingMode = requestedMode;
+        inputRoutingHandoff.phase =
+            InputRoutingHandoffPhase::steady;
+        diagnosticActiveInputRoutingMode.store(
+            activeInputRoutingMode,
+            std::memory_order_relaxed);
+        diagnosticInputRoutingTransitionPhase.store(
+            static_cast<int>(
+                inputRoutingHandoff.phase),
+            std::memory_order_relaxed);
+        inputRoutingHandoff.currentGain = 1.0f;
+        inputRoutingHandoff.phaseCompletesAfterBlock = false;
+        if (handoffGainEnvelope != nullptr
+            && safeNumSamples > 0)
+        {
+            juce::FloatVectorOperations::fill(
+                handoffGainEnvelope,
+                1.0f,
+                safeNumSamples);
+        }
+        return;
+    }
+
+    if (requestedMode
+        != inputRoutingHandoff.pendingMode)
+    {
+        inputRoutingHandoff.pendingMode =
+            requestedMode;
+        inputRoutingHandoff.phaseStartGain =
+            inputRoutingHandoff.currentGain;
+        inputRoutingHandoff.phaseSamplePosition = 0;
+        if (requestedMode == activeInputRoutingMode)
+        {
+            inputRoutingHandoff.phase =
+                InputRoutingHandoffPhase::fadeIn;
+            inputRoutingHandoff.phaseSampleCount =
+                juce::jmax(
+                    1,
+                    juce::roundToInt(
+                        cachedSampleRate * 0.012));
+        }
+        else
+        {
+            inputRoutingHandoff.phase =
+                InputRoutingHandoffPhase::fadeOut;
+            inputRoutingHandoff.phaseSampleCount =
+                juce::jmax(
+                    1,
+                    juce::roundToInt(
+                        cachedSampleRate * 0.008));
+        }
+    }
+    else if (inputRoutingHandoff.phase
+                 == InputRoutingHandoffPhase::steady
+             && requestedMode
+                    != activeInputRoutingMode)
+    {
+        inputRoutingHandoff.phase =
+            InputRoutingHandoffPhase::fadeOut;
+        inputRoutingHandoff.phaseStartGain =
+            inputRoutingHandoff.currentGain;
+        inputRoutingHandoff.phaseSamplePosition = 0;
+        inputRoutingHandoff.phaseSampleCount =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    cachedSampleRate * 0.008));
+    }
+
+    inputRoutingHandoff.phaseCompletesAfterBlock =
+        false;
+    diagnosticInputRoutingTransitionPhase.store(
+        static_cast<int>(
+            inputRoutingHandoff.phase),
+        std::memory_order_relaxed);
+    if (handoffGainEnvelope == nullptr
+        || safeNumSamples <= 0)
+    {
+        return;
+    }
+
+    if (inputRoutingHandoff.phase
+        == InputRoutingHandoffPhase::steady)
+    {
+        juce::FloatVectorOperations::fill(
+            handoffGainEnvelope,
+            1.0f,
+            safeNumSamples);
+        inputRoutingHandoff.currentGain = 1.0f;
+        return;
+    }
+
+    if (inputRoutingHandoff.phase
+        == InputRoutingHandoffPhase::prime)
+    {
+        juce::FloatVectorOperations::clear(
+            handoffGainEnvelope,
+            safeNumSamples);
+        inputRoutingHandoff.currentGain = 0.0f;
+        inputRoutingHandoff.primeSamplesRemaining -=
+            safeNumSamples;
+        inputRoutingHandoff.phaseCompletesAfterBlock =
+            inputRoutingHandoff.primeSamplesRemaining <= 0;
+        return;
+    }
+
+    const float targetGain =
+        inputRoutingHandoff.phase
+                == InputRoutingHandoffPhase::fadeOut
+            ? 0.0f
+            : 1.0f;
+    for (int sample = 0;
+         sample < safeNumSamples;
+         ++sample)
+    {
+        if (inputRoutingHandoff.phaseSamplePosition
+            < inputRoutingHandoff.phaseSampleCount)
+        {
+            ++inputRoutingHandoff.phaseSamplePosition;
+        }
+        const float progress =
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                static_cast<float>(
+                    inputRoutingHandoff
+                        .phaseSamplePosition)
+                    / static_cast<float>(
+                        inputRoutingHandoff
+                            .phaseSampleCount));
+        const float smoothProgress =
+            progress * progress
+            * (3.0f - 2.0f * progress);
+        inputRoutingHandoff.currentGain =
+            inputRoutingHandoff.phaseStartGain
+            + (targetGain
+               - inputRoutingHandoff.phaseStartGain)
+                * smoothProgress;
+        handoffGainEnvelope[sample] =
+            inputRoutingHandoff.currentGain;
+    }
+    inputRoutingHandoff.phaseCompletesAfterBlock =
+        inputRoutingHandoff.phaseSamplePosition
+        >= inputRoutingHandoff.phaseSampleCount;
+}
+
+void S13NAMRack::finishInputRoutingHandoffBlock(
+    int processedBlockSamples) noexcept
+{
+    juce::ignoreUnused(processedBlockSamples);
+    if (! inputRoutingHandoff
+              .phaseCompletesAfterBlock)
+    {
+        return;
+    }
+
+    inputRoutingHandoff.phaseCompletesAfterBlock =
+        false;
+    if (inputRoutingHandoff.phase
+        == InputRoutingHandoffPhase::fadeOut)
+    {
+        activeInputRoutingMode =
+            inputRoutingHandoff.pendingMode;
+        diagnosticActiveInputRoutingMode.store(
+            activeInputRoutingMode,
+            std::memory_order_relaxed);
+        inputRoutingHandoff.currentGain = 0.0f;
+        inputRoutingHandoff.phaseStartGain = 0.0f;
+        inputRoutingHandoff.phaseSamplePosition = 0;
+        inputRoutingHandoff.phase =
+            InputRoutingHandoffPhase::prime;
+        diagnosticInputRoutingTransitionPhase.store(
+            static_cast<int>(
+                inputRoutingHandoff.phase),
+            std::memory_order_relaxed);
+        const int basePrimeSamples =
+            juce::roundToInt(
+                cachedSampleRate * 0.024);
+        const int maximumPrimeSamples =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    cachedSampleRate * 0.080));
+        constexpr int routingPrimeQuantum = 16;
+        const int requestedPrimeSamples =
+            basePrimeSamples
+            + juce::jmax(
+                0, getLatencySamples());
+        const int quantizedPrimeSamples =
+            ((requestedPrimeSamples
+              + routingPrimeQuantum - 1)
+             / routingPrimeQuantum)
+            * routingPrimeQuantum;
+        inputRoutingHandoff.primeSamplesRemaining =
+            juce::jlimit(
+                1,
+                maximumPrimeSamples,
+                quantizedPrimeSamples);
+        return;
+    }
+
+    if (inputRoutingHandoff.phase
+        == InputRoutingHandoffPhase::prime)
+    {
+        inputRoutingHandoff.phase =
+            InputRoutingHandoffPhase::fadeIn;
+        diagnosticInputRoutingTransitionPhase.store(
+            static_cast<int>(
+                inputRoutingHandoff.phase),
+            std::memory_order_relaxed);
+        inputRoutingHandoff.phaseStartGain = 0.0f;
+        inputRoutingHandoff.phaseSamplePosition = 0;
+        inputRoutingHandoff.phaseSampleCount =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    cachedSampleRate * 0.012));
+        return;
+    }
+
+    inputRoutingHandoff.phase =
+        InputRoutingHandoffPhase::steady;
+    diagnosticInputRoutingTransitionPhase.store(
+        static_cast<int>(
+            inputRoutingHandoff.phase),
+        std::memory_order_relaxed);
+    inputRoutingHandoff.currentGain = 1.0f;
+    inputRoutingHandoff.phaseStartGain = 1.0f;
+    inputRoutingHandoff.phaseSamplePosition = 0;
+    inputRoutingHandoff.phaseSampleCount = 1;
+}
+
+S13NAMRack::LoadedNAMModel*
+S13NAMRack::beginAmpModelHandoffBlock(
+    float* const handoffGainEnvelope,
+    int numSamples) noexcept
+{
+    const int safeNumSamples =
+        juce::jmax(0, numSamples);
+    const auto requestedGeneration =
+        ampModelHandoff.requestGeneration.load(
+            std::memory_order_acquire);
+    if (requestedGeneration
+        != ampModelHandoff
+               .consumedRequestGeneration)
+    {
+        ampModelHandoff
+            .consumedRequestGeneration =
+            requestedGeneration;
+        ampModelHandoff.phase =
+            AmpModelHandoffPhase::fadeOut;
+        ampModelHandoff.phaseStartGain =
+            ampModelHandoff.currentGain;
+        ampModelHandoff.phaseSamplePosition = 0;
+        ampModelHandoff.phaseSampleCount =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    cachedSampleRate * 0.008));
+        ampModelHandoff
+            .primeSamplesRemaining = 0;
+    }
+
+    ampModelHandoff.phaseCompletesAfterBlock =
+        false;
+    if (handoffGainEnvelope == nullptr
+        || safeNumSamples <= 0)
+    {
+        return activeAmpModel.load(
+            std::memory_order_seq_cst);
+    }
+
+    if (ampModelHandoff.phase
+        == AmpModelHandoffPhase::steady)
+    {
+        juce::FloatVectorOperations::fill(
+            handoffGainEnvelope,
+            1.0f,
+            safeNumSamples);
+        ampModelHandoff.currentGain = 1.0f;
+    }
+    else if (ampModelHandoff.phase
+             == AmpModelHandoffPhase::prime)
+    {
+        juce::FloatVectorOperations::clear(
+            handoffGainEnvelope,
+            safeNumSamples);
+        ampModelHandoff.currentGain = 0.0f;
+        ampModelHandoff.primeSamplesRemaining -=
+            safeNumSamples;
+        ampModelHandoff.phaseCompletesAfterBlock =
+            ampModelHandoff
+                .primeSamplesRemaining <= 0;
+    }
+    else
+    {
+        const float targetGain =
+            ampModelHandoff.phase
+                    == AmpModelHandoffPhase::fadeOut
+                ? 0.0f
+                : 1.0f;
+        for (int sample = 0;
+             sample < safeNumSamples;
+             ++sample)
+        {
+            if (ampModelHandoff
+                    .phaseSamplePosition
+                < ampModelHandoff
+                      .phaseSampleCount)
+            {
+                ++ampModelHandoff
+                      .phaseSamplePosition;
+            }
+            const float progress =
+                juce::jlimit(
+                    0.0f,
+                    1.0f,
+                    static_cast<float>(
+                        ampModelHandoff
+                            .phaseSamplePosition)
+                        / static_cast<float>(
+                            ampModelHandoff
+                                .phaseSampleCount));
+            const float smoothProgress =
+                progress * progress
+                * (3.0f - 2.0f * progress);
+            ampModelHandoff.currentGain =
+                ampModelHandoff.phaseStartGain
+                + (targetGain
+                   - ampModelHandoff
+                         .phaseStartGain)
+                    * smoothProgress;
+            handoffGainEnvelope[sample] =
+                ampModelHandoff.currentGain;
+        }
+        ampModelHandoff.phaseCompletesAfterBlock =
+            ampModelHandoff
+                .phaseSamplePosition
+            >= ampModelHandoff
+                   .phaseSampleCount;
+    }
+
+    return activeAmpModel.load(
+        std::memory_order_seq_cst);
+}
+
+void S13NAMRack::finishAmpModelHandoffBlock(
+    int processedBlockSamples) noexcept
+{
+    if (! ampModelHandoff
+              .phaseCompletesAfterBlock)
+    {
+        return;
+    }
+
+    ampModelHandoff.phaseCompletesAfterBlock =
+        false;
+    if (ampModelHandoff.phase
+        == AmpModelHandoffPhase::fadeOut)
+    {
+        const auto latestGeneration =
+            ampModelHandoff.requestGeneration.load(
+                std::memory_order_acquire);
+        auto* const requestedModel =
+            ampModelHandoff.requestedModel.load(
+                std::memory_order_acquire);
+        ampModelHandoff
+            .consumedRequestGeneration =
+            latestGeneration;
+        activeAmpModel.store(
+            requestedModel,
+            std::memory_order_seq_cst);
+
+        const bool includesCab =
+            requestedModel != nullptr
+            && requestedModel->includesCab.load(
+                std::memory_order_acquire);
+        activeAmpModelIncludesCab.store(
+            includesCab,
+            std::memory_order_release);
+        const bool requestedCab =
+            cabRequestedEnabled.load(
+                std::memory_order_relaxed);
+        cabEnabled.store(
+            requestedCab && ! includesCab
+                ? 1.0f
+                : 0.0f,
+            std::memory_order_relaxed);
+
+        const bool ampPowerOn =
+            requestedModel != nullptr
+            && ampEnabled.load(
+                   std::memory_order_relaxed)
+                >= 0.5f;
+        smoothedAmpPowerMix
+            .setCurrentAndTargetValue(
+                ampPowerOn ? 1.0f : 0.0f);
+        ampModelHandoff.currentGain = 0.0f;
+        ampModelHandoff.phaseStartGain = 0.0f;
+        ampModelHandoff.phaseSamplePosition = 0;
+        if (requestedModel != nullptr)
+        {
+            ampModelHandoff.phase =
+                AmpModelHandoffPhase::prime;
+            ampModelHandoff
+                .primeSamplesRemaining =
+                requestedModel
+                    ->resampledDryDelaySamples
+                + juce::jmax(
+                    1, processedBlockSamples);
+        }
+        else
+        {
+            ampModelHandoff.phase =
+                AmpModelHandoffPhase::fadeIn;
+            ampModelHandoff.phaseSampleCount =
+                juce::jmax(
+                    1,
+                    juce::roundToInt(
+                        cachedSampleRate * 0.012));
+        }
+        return;
+    }
+
+    if (ampModelHandoff.phase
+        == AmpModelHandoffPhase::prime)
+    {
+        ampModelHandoff.phase =
+            AmpModelHandoffPhase::fadeIn;
+        ampModelHandoff.phaseStartGain = 0.0f;
+        ampModelHandoff.phaseSamplePosition = 0;
+        ampModelHandoff.phaseSampleCount =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    cachedSampleRate * 0.012));
+        return;
+    }
+
+    ampModelHandoff.phase =
+        AmpModelHandoffPhase::steady;
+    ampModelHandoff.currentGain = 1.0f;
+    ampModelHandoff.phaseStartGain = 1.0f;
+    ampModelHandoff.phaseSamplePosition = 0;
+    ampModelHandoff.phaseSampleCount = 1;
 }
 
 bool S13NAMRack::prepareModelForHostConfiguration(LoadedNAMModel& model,
@@ -5089,6 +15886,13 @@ bool S13NAMRack::prepareModelForHostConfiguration(LoadedNAMModel& model,
             + " Hz / model "
             + juce::String(modelSampleRate)
             + " Hz); maximum supported ratio is 4:1";
+        model.processFaulted.store(
+            true, std::memory_order_relaxed);
+        if (model.dualMonoLane != nullptr)
+        {
+            model.dualMonoLane->processFaulted.store(
+                true, std::memory_order_relaxed);
+        }
         return false;
     }
 
@@ -5098,6 +15902,40 @@ bool S13NAMRack::prepareModelForHostConfiguration(LoadedNAMModel& model,
                                                                  safeHostSampleRate,
                                                                  modelSampleRate);
         model.dsp->ResetAndPrewarm(modelSampleRate, processBlockSize);
+        if (model.slimmableSelectionNeedsActivation)
+        {
+            // SlimmableWavenet stages a newly built graph in
+            // SetSlimmableSize() and transfers ownership on its next process()
+            // call. Let that transfer (including destruction of the original
+            // full-size graph) happen on this non-realtime preparation thread,
+            // then reset/prewarm the selected graph to a pristine state.
+            std::array<std::array<float, 1>, 2>
+                zeroInput {};
+            std::array<std::array<float, 1>, 2>
+                zeroOutput {};
+            std::array<float*, 2> inputPointers {
+                zeroInput[0].data(), zeroInput[1].data()
+            };
+            std::array<float*, 2> outputPointers {
+                zeroOutput[0].data(), zeroOutput[1].data()
+            };
+            if (! guardedNAMProcessBlock(
+                    model.dsp.get(),
+                    inputPointers.data(),
+                    outputPointers.data(),
+                    1))
+            {
+                error =
+                    "Failed to activate prepared NAM Slim model";
+                model.processFaulted.store(
+                    true, std::memory_order_relaxed);
+                return false;
+            }
+
+            model.slimmableSelectionNeedsActivation = false;
+            model.dsp->ResetAndPrewarm(
+                modelSampleRate, processBlockSize);
+        }
         resetModelStreamingState(model,
                                  safeHostSampleRate,
                                  modelSampleRate,
@@ -5105,6 +15943,21 @@ bool S13NAMRack::prepareModelForHostConfiguration(LoadedNAMModel& model,
         model.preparedHostSampleRate = safeHostSampleRate;
         model.preparedHostBufferCapacity = safeHostBufferCapacity;
         model.processFaulted.store(false, std::memory_order_relaxed);
+        if (model.dualMonoLane != nullptr)
+        {
+            juce::String secondaryError;
+            if (! prepareModelForHostConfiguration(
+                    *model.dualMonoLane,
+                    safeHostSampleRate,
+                    safeHostBufferCapacity,
+                    secondaryError))
+            {
+                model.dualMonoPreparationWarning =
+                    "True-stereo NAM lane unavailable: "
+                    + secondaryError;
+                model.dualMonoLane.reset();
+            }
+        }
         error.clear();
         return true;
     }
@@ -5118,67 +15971,130 @@ bool S13NAMRack::prepareModelForHostConfiguration(LoadedNAMModel& model,
     }
 
     model.processFaulted.store(true, std::memory_order_relaxed);
+    if (model.dualMonoLane != nullptr)
+    {
+        model.dualMonoLane->processFaulted.store(
+            true, std::memory_order_relaxed);
+    }
     return false;
 }
 
 void S13NAMRack::processModelDryDelay(juce::AudioBuffer<float>& buffer,
-                                      LoadedNAMModel& model) noexcept
+                                      LoadedNAMModel& model,
+                                      int numSamplesToProcess) noexcept
 {
+    // Rack scratch buffers retain their prepared capacity. Only the current
+    // callback prefix is valid; consuming the tail would feed stale samples
+    // into the latency ring and make its cursor callback-partition dependent.
     const int delaySamples = model.resampledDryDelaySamples;
-    if (delaySamples <= 0)
+    const int numSamples = juce::jlimit(
+        0, buffer.getNumSamples(), numSamplesToProcess);
+    if (delaySamples <= 0 || numSamples <= 0)
         return;
 
     const int channels = juce::jmin(2, buffer.getNumChannels());
-    int writeIndex = model.resampledDryDelayWrite;
-    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+    const int initialWriteIndex = model.resampledDryDelayWrite;
+    int finalWriteIndex = initialWriteIndex;
+    for (int ch = 0; ch < channels; ++ch)
     {
-        for (int ch = 0; ch < channels; ++ch)
+        auto* const data = buffer.getWritePointer(ch);
+        auto& delay = model.resampledDryDelay[static_cast<size_t>(ch)];
+        int writeIndex = initialWriteIndex;
+        for (int sample = 0; sample < numSamples; ++sample)
         {
-            auto* const data = buffer.getWritePointer(ch);
-            auto& delay = model.resampledDryDelay[static_cast<size_t>(ch)];
             const float input = data[sample];
             data[sample] = delay[static_cast<size_t>(writeIndex)];
             delay[static_cast<size_t>(writeIndex)] = input;
-        }
 
-        ++writeIndex;
-        if (writeIndex >= delaySamples)
-            writeIndex = 0;
+            ++writeIndex;
+            if (writeIndex >= delaySamples)
+                writeIndex = 0;
+        }
+        finalWriteIndex = writeIndex;
     }
-    model.resampledDryDelayWrite = writeIndex;
+    model.resampledDryDelayWrite = finalWriteIndex;
 }
 
 void S13NAMRack::processAmpBypassDryDelay(juce::AudioBuffer<float>& buffer,
-                                          LoadedNAMModel& model) noexcept
+                                          LoadedNAMModel& model,
+                                          int numSamplesToProcess) noexcept
 {
+    // ampBypassBuffer is capacity-sized for the same realtime reason as the
+    // model work buffer, so this independent cursor must use the live prefix.
     const int delaySamples = model.resampledDryDelaySamples;
-    if (delaySamples <= 0)
+    const int numSamples = juce::jlimit(
+        0, buffer.getNumSamples(), numSamplesToProcess);
+    if (delaySamples <= 0 || numSamples <= 0)
         return;
 
     const int channels = juce::jmin(2, buffer.getNumChannels());
-    int writeIndex = model.ampBypassDryDelayWrite;
-    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+    const int initialWriteIndex = model.ampBypassDryDelayWrite;
+    int finalWriteIndex = initialWriteIndex;
+    for (int ch = 0; ch < channels; ++ch)
     {
-        for (int ch = 0; ch < channels; ++ch)
+        auto* const data = buffer.getWritePointer(ch);
+        auto& delay = model.ampBypassDryDelay[static_cast<size_t>(ch)];
+        int writeIndex = initialWriteIndex;
+        for (int sample = 0; sample < numSamples; ++sample)
         {
-            auto* const data = buffer.getWritePointer(ch);
-            auto& delay = model.ampBypassDryDelay[static_cast<size_t>(ch)];
             const float input = data[sample];
             data[sample] = delay[static_cast<size_t>(writeIndex)];
             delay[static_cast<size_t>(writeIndex)] = input;
-        }
 
-        ++writeIndex;
-        if (writeIndex >= delaySamples)
-            writeIndex = 0;
+            ++writeIndex;
+            if (writeIndex >= delaySamples)
+                writeIndex = 0;
+        }
+        finalWriteIndex = writeIndex;
     }
-    model.ampBypassDryDelayWrite = writeIndex;
+    model.ampBypassDryDelayWrite = finalWriteIndex;
+}
+
+void S13NAMRack::processAmpBypassDryDelayForRouting(
+    juce::AudioBuffer<float>& buffer,
+    LoadedNAMModel& model,
+    int numSamplesToProcess) noexcept
+{
+    const int routingMode = activeInputRoutingMode;
+    const int numSamples = juce::jlimit(
+        0,
+        buffer.getNumSamples(),
+        numSamplesToProcess);
+    const bool useDualMono =
+        routingMode == 2
+        && buffer.getNumChannels() >= 2
+        && model.inputChannels == 1
+        && model.outputChannels == 1
+        && model.dualMonoLane != nullptr;
+    if (! useDualMono || numSamples <= 0)
+    {
+        processAmpBypassDryDelay(
+            buffer, model, numSamples);
+        return;
+    }
+
+    // These one-channel views use only stack-resident pointer storage. Each
+    // bypass cursor advances with its matching NAM lane, so switching to true
+    // stereo never shares resampler-alignment history between L and R.
+    for (int channel = 0; channel < 2; ++channel)
+    {
+        float* channelPointer =
+            buffer.getWritePointer(channel);
+        juce::AudioBuffer<float> laneView(
+            &channelPointer, 1, numSamples);
+        auto& lane = channel == 0
+            ? model
+            : *model.dualMonoLane;
+        processAmpBypassDryDelay(
+            laneView, lane, numSamples);
+    }
 }
 
 std::shared_ptr<S13NAMRack::LoadedNAMModel> S13NAMRack::prepareModel(
     const juce::String& path,
     juce::String& error,
-    const juce::String& declaredCaptureType)
+    const juce::String& declaredCaptureType,
+    float requestedModelSize)
 {
     const juce::File modelFile(path);
     if (!modelFile.existsAsFile())
@@ -5206,60 +16122,187 @@ std::shared_ptr<S13NAMRack::LoadedNAMModel> S13NAMRack::prepareModel(
         return {};
     }
 
-    double preparedHostSampleRate = 44100.0;
-    int preparedHostBufferCapacity = 512;
+    ModelHostConfigurationSnapshot hostConfiguration;
+    if (! readStableModelHostConfiguration(
+            hostConfiguration))
     {
-        const juce::ScopedLock processorConfigurationLock(getCallbackLock());
-        preparedHostSampleRate = cachedSampleRate;
-        preparedHostBufferCapacity = realtimeBufferCapacity;
+        error =
+            "NAM host configuration is changing; retry the model load";
+        return {};
     }
+    const double preparedHostSampleRate =
+        hostConfiguration.sampleRate;
+    const int preparedHostBufferCapacity =
+        hostConfiguration.bufferCapacity;
 
     try
     {
         ensureNAMCoreParsersRegistered();
 
-        auto loaded = std::make_shared<LoadedNAMModel>();
-        loaded->path = modelFile.getFullPathName();
-        loaded->preparedHostSampleRate = preparedHostSampleRate;
-        loaded->preparedHostBufferCapacity = preparedHostBufferCapacity;
-        loaded->captureType = normaliseNAMCaptureType(modelJson);
-        loaded->declaredCaptureType = normaliseNAMCaptureTypeName(declaredCaptureType);
-        loaded->includesCab = NAMCaptureIncludesCab(loaded->effectiveCaptureType());
-        loaded->dsp = nam::get_dsp(std::filesystem::path(modelFile.getFullPathName().toStdString()));
-        if (loaded->dsp == nullptr)
-            throw std::runtime_error("NeuralAmpModelerCore returned no DSP instance");
-
-        loaded->hasInputLevelDbu = loaded->dsp->HasInputLevel();
-        loaded->hasOutputLevelDbu = loaded->dsp->HasOutputLevel();
-        if (loaded->hasInputLevelDbu)
-            loaded->inputLevelDbu = loaded->dsp->GetInputLevel();
-        if (loaded->hasOutputLevelDbu)
-            loaded->outputLevelDbu = loaded->dsp->GetOutputLevel();
-        loaded->expectedSampleRate = loaded->dsp->GetExpectedSampleRate();
-        loaded->inputChannels = loaded->dsp->NumInputChannels();
-        loaded->outputChannels = loaded->dsp->NumOutputChannels();
-        if (loaded->inputChannels < 1 || loaded->inputChannels > 2
-            || loaded->outputChannels < 1 || loaded->outputChannels > 2)
+        auto requestedSlimmableSize = static_cast<double>(
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                requestedModelSize));
+        const auto benchmarkSlimmableSize =
+            juce::SystemStats::getEnvironmentVariable(
+                "OPENSTUDIO_NAM_BENCHMARK_SLIMMABLE_SIZE", {}).trim();
+        if (benchmarkSlimmableSize.isNotEmpty())
         {
-            throw std::runtime_error(
-                "unsupported channel layout ("
-                + std::to_string(loaded->inputChannels)
-                + " in / "
-                + std::to_string(loaded->outputChannels)
-                + " out); OpenStudio NAM Rack supports mono or stereo models");
+            requestedSlimmableSize = juce::jlimit(
+                0.0,
+                1.0,
+                benchmarkSlimmableSize.getDoubleValue());
         }
-        juce::String preparationError;
-        if (! prepareModelForHostConfiguration(*loaded,
-                                                preparedHostSampleRate,
-                                                preparedHostBufferCapacity,
-                                                preparationError))
+
+        const auto createPreparedLane = [&] (
+            juce::String& preparationError)
+            -> std::unique_ptr<LoadedNAMModel>
         {
-            error = preparationError;
+            auto lane = std::make_unique<LoadedNAMModel>();
+            lane->path = modelFile.getFullPathName();
+            lane->preparedHostSampleRate = preparedHostSampleRate;
+            lane->preparedHostBufferCapacity = preparedHostBufferCapacity;
+            lane->captureType = normaliseNAMCaptureType(modelJson);
+            lane->declaredCaptureType =
+                normaliseNAMCaptureTypeName(declaredCaptureType);
+            lane->includesCab.store(
+                NAMCaptureIncludesCab(
+                    lane->effectiveCaptureType()),
+                std::memory_order_relaxed);
+            lane->dsp = nam::get_dsp(
+                std::filesystem::path(
+                    modelFile.getFullPathName().toStdString()));
+            if (lane->dsp == nullptr)
+            {
+                throw std::runtime_error(
+                    "NeuralAmpModelerCore returned no DSP instance");
+            }
+
+            if (auto* const slimmable =
+                    dynamic_cast<nam::SlimmableModel*>(
+                        lane->dsp.get()))
+            {
+                lane->slimmableSizeBreakpoints =
+                    slimmable->GetSlimmableSizeBreakpoints();
+                lane->slimmableSizeBreakpoints.erase(
+                    std::remove_if(
+                        lane->slimmableSizeBreakpoints.begin(),
+                        lane->slimmableSizeBreakpoints.end(),
+                        [] (double breakpoint)
+                        {
+                            return ! std::isfinite(breakpoint)
+                                || breakpoint <= 0.0
+                                || breakpoint >= 1.0;
+                        }),
+                    lane->slimmableSizeBreakpoints.end());
+                std::sort(
+                    lane->slimmableSizeBreakpoints.begin(),
+                    lane->slimmableSizeBreakpoints.end());
+                lane->slimmableSizeBreakpoints.erase(
+                    std::unique(
+                        lane->slimmableSizeBreakpoints.begin(),
+                        lane->slimmableSizeBreakpoints.end()),
+                    lane->slimmableSizeBreakpoints.end());
+                slimmable->SetSlimmableSize(
+                    requestedSlimmableSize);
+                lane->isSlimmable = true;
+                lane->activeSlimmableSize =
+                    static_cast<float>(requestedSlimmableSize);
+                lane->slimmableSelectionNeedsActivation = true;
+            }
+
+            lane->hasInputLevelDbu =
+                lane->dsp->HasInputLevel();
+            lane->hasOutputLevelDbu =
+                lane->dsp->HasOutputLevel();
+            if (lane->hasInputLevelDbu)
+                lane->inputLevelDbu = lane->dsp->GetInputLevel();
+            if (lane->hasOutputLevelDbu)
+                lane->outputLevelDbu = lane->dsp->GetOutputLevel();
+            lane->expectedSampleRate =
+                lane->dsp->GetExpectedSampleRate();
+            lane->inputChannels =
+                lane->dsp->NumInputChannels();
+            lane->outputChannels =
+                lane->dsp->NumOutputChannels();
+            if (lane->inputChannels < 1
+                || lane->inputChannels > 2
+                || lane->outputChannels < 1
+                || lane->outputChannels > 2)
+            {
+                throw std::runtime_error(
+                    "unsupported channel layout ("
+                    + std::to_string(lane->inputChannels)
+                    + " in / "
+                    + std::to_string(lane->outputChannels)
+                    + " out); OpenStudio NAM Rack supports mono or stereo models");
+            }
+            if (! prepareModelForHostConfiguration(
+                    *lane,
+                    preparedHostSampleRate,
+                    preparedHostBufferCapacity,
+                    preparationError))
+            {
+                return {};
+            }
+            return lane;
+        };
+
+        juce::String primaryPreparationError;
+        auto loaded = createPreparedLane(
+            primaryPreparationError);
+        if (loaded == nullptr)
+        {
+            error = primaryPreparationError;
             return {};
         }
 
+        if (loaded->inputChannels == 1
+            && loaded->outputChannels == 1)
+        {
+            juce::String secondaryPreparationError;
+            try
+            {
+                auto secondary = createPreparedLane(
+                    secondaryPreparationError);
+                if (secondary == nullptr)
+                {
+                    loaded->dualMonoPreparationWarning =
+                        "True-stereo NAM lane unavailable: "
+                        + secondaryPreparationError;
+                }
+                else if (secondary->inputChannels != 1
+                         || secondary->outputChannels != 1
+                         || std::abs(
+                                secondary->expectedSampleRate
+                                - loaded->expectedSampleRate)
+                             > 0.5)
+                {
+                    loaded->dualMonoPreparationWarning =
+                        "True-stereo NAM lane unavailable: inconsistent graph metadata";
+                }
+                else
+                {
+                    loaded->dualMonoLane = std::move(secondary);
+                }
+            }
+            catch (const std::exception& ex)
+            {
+                loaded->dualMonoPreparationWarning =
+                    "True-stereo NAM lane unavailable: "
+                    + juce::String(ex.what());
+            }
+            catch (...)
+            {
+                loaded->dualMonoPreparationWarning =
+                    "True-stereo NAM lane unavailable: unknown preparation error";
+            }
+        }
+
         error.clear();
-        return loaded;
+        return std::shared_ptr<LoadedNAMModel>(
+            std::move(loaded));
     }
     catch (const std::exception& ex)
     {
@@ -5281,13 +16324,12 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
                                      juce::String* error)
 {
     // Reclaiming can run the destructor of a retired NAM graph. Keep that
-    // potentially expensive work outside the processor callback lock; only
-    // configuration revalidation and publication are serialized with audio.
+    // potentially expensive work outside the publication critical section.
     if (reclaimEarlierPublication)
         reclaimRetiredModelsFromEarlierPublication();
 
-    // Reserve retirement storage before touching the callback lock. Publication
-    // then consists only of pointer/scalar swaps and cannot allocate.
+    // Reserve retirement storage before publication so the short owner/pointer
+    // hand-off cannot allocate.
     {
         const juce::ScopedLock lock(modelSwapLock);
         const auto& owner = pedalSlot ? pedalModel : ampModel;
@@ -5298,13 +16340,17 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
     constexpr int maximumConfigurationRetries = 8;
     for (int attempt = 0; attempt < maximumConfigurationRetries; ++attempt)
     {
-        double targetHostSampleRate = 44100.0;
-        int targetHostBufferCapacity = 512;
+        ModelHostConfigurationSnapshot
+            hostConfiguration;
+        if (! readStableModelHostConfiguration(
+                hostConfiguration))
         {
-            const juce::ScopedLock configurationSnapshotLock(getCallbackLock());
-            targetHostSampleRate = cachedSampleRate;
-            targetHostBufferCapacity = realtimeBufferCapacity;
+            continue;
         }
+        const double targetHostSampleRate =
+            hostConfiguration.sampleRate;
+        const int targetHostBufferCapacity =
+            hostConfiguration.bufferCapacity;
 
         if (loaded != nullptr
             && (std::abs(loaded->preparedHostSampleRate - targetHostSampleRate) > 0.5
@@ -5322,18 +16368,14 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
             }
         }
 
-        // The expensive re-prewarm and buffer allocation above happened while
-        // audio continued. Publish only if that configuration is still current;
-        // otherwise release the lock and retry against the new host settings.
-        const juce::ScopedLock processorConfigurationLock(getCallbackLock());
-        if (std::abs(targetHostSampleRate - cachedSampleRate) > 0.5
-            || targetHostBufferCapacity != realtimeBufferCapacity)
-        {
-            continue;
-        }
-
         {
             const juce::ScopedLock lock(modelSwapLock);
+            if (modelHostConfigurationGeneration.load(
+                    std::memory_order_acquire)
+                != hostConfiguration.generation)
+            {
+                continue;
+            }
             auto& owner = pedalSlot ? pedalModel : ampModel;
 
             // A direct slot change starts from the new capture's metadata instead of
@@ -5356,18 +16398,10 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
                 }
             }
 
-            if (! pedalSlot)
-            {
-                const bool nextIncludesCab = loaded != nullptr && loaded->includesCab;
-                // cabRequestedEnabled is the durable user preference. The DSP/UI
-                // value remains an effective state, forced off while the capture
-                // already contains a cabinet and restored for amp-only captures.
-                const bool requested = cabRequestedEnabled.load(std::memory_order_relaxed);
-                cabEnabled.store(requested && ! nextIncludesCab ? 1.0f : 0.0f,
-                                 std::memory_order_relaxed);
-            }
-
-            const bool replacingLiveGraph = loaded != nullptr && owner != nullptr;
+            const bool replacingLiveGraph =
+                pedalSlot
+                && loaded != nullptr
+                && owner != nullptr;
             if (replacingLiveGraph)
             {
                 // Do not restrict this to matching paths. A tone preset, A/B compare,
@@ -5375,13 +16409,16 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
                 // capture, which needs the same click-safe hand-off as a direct load.
                 loaded->transitionFrom = owner.get();
                 loaded->transitionSamplesTotal = juce::jmax(1, juce::roundToInt(
-                    kNAMRackModelTransitionSeconds * cachedSampleRate));
+                    kNAMRackModelTransitionSeconds
+                    * targetHostSampleRate));
                 loaded->transitionSamplesRemaining.store(loaded->transitionSamplesTotal,
                                                            std::memory_order_release);
             }
             else if (loaded != nullptr)
             {
-                // A first load has no audible graph to crossfade from.
+                // Amp changes use the rack-level fade/mute/prime handoff below,
+                // which runs at most one Amp NAM graph per callback. A first
+                // Pedal load has no audible graph to crossfade from.
                 loaded->transitionFrom = nullptr;
                 loaded->transitionSamplesTotal = 0;
                 loaded->transitionSamplesRemaining.store(0, std::memory_order_release);
@@ -5403,13 +16440,14 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
             }
             else
             {
-                activeAmpModelIncludesCab.store(owner != nullptr && owner->includesCab,
-                                                 std::memory_order_release);
-                activeAmpModel.store(published, std::memory_order_seq_cst);
                 ampModelPath = owner != nullptr ? owner->path : juce::String();
                 ampDeclaredCaptureType = owner != nullptr
                     ? owner->declaredCaptureType
                     : juce::String("unknown");
+                ampModelHandoff.requestedModel.store(
+                    published, std::memory_order_release);
+                ampModelHandoff.requestGeneration.fetch_add(
+                    1, std::memory_order_release);
             }
         }
 
@@ -5441,7 +16479,11 @@ bool S13NAMRack::loadModelIntoSlot(const juce::String& path, bool pedalSlot)
     }
 
     juce::String error;
-    auto loaded = prepareModel(path, error);
+    const float requestedModelSize =
+        (pedalSlot ? pedalModelSize : ampModelSize)
+            .load(std::memory_order_relaxed);
+    auto loaded = prepareModel(
+        path, error, {}, requestedModelSize);
     if (loaded == nullptr)
     {
         const juce::ScopedLock lock(modelSwapLock);
@@ -5460,6 +16502,10 @@ bool S13NAMRack::loadModelIntoSlot(const juce::String& path, bool pedalSlot)
                                                              modelSampleRate);
     const int inputChannels = loaded->inputChannels;
     const int outputChannels = loaded->outputChannels;
+    const int preparedLaneGraphs =
+        loaded->dualMonoLane != nullptr ? 2 : 1;
+    const auto dualMonoWarning =
+        loaded->dualMonoPreparationWarning;
     if (! commitPreparedModel(std::move(loaded), pedalSlot, true, true, &error))
     {
         const juce::ScopedLock lock(modelSwapLock);
@@ -5473,11 +16519,16 @@ bool S13NAMRack::loadModelIntoSlot(const juce::String& path, bool pedalSlot)
     double publishedHostRate = preparedHostRate;
     int publishedHostBlockSize = 0;
     int publishedHostCapacity = preparedHostCapacity;
+    ModelHostConfigurationSnapshot publishedConfiguration;
+    if (readStableModelHostConfiguration(
+            publishedConfiguration))
     {
-        const juce::ScopedLock processorConfigurationLock(getCallbackLock());
-        publishedHostRate = cachedSampleRate;
-        publishedHostBlockSize = cachedBlockSize;
-        publishedHostCapacity = realtimeBufferCapacity;
+        publishedHostRate =
+            publishedConfiguration.sampleRate;
+        publishedHostBlockSize =
+            publishedConfiguration.blockSize;
+        publishedHostCapacity =
+            publishedConfiguration.bufferCapacity;
     }
     juce::Logger::writeToLog("S13NAMRack: loaded "
         + juce::String(pedalSlot ? "pedal" : "amp")
@@ -5488,7 +16539,16 @@ bool S13NAMRack::loadModelIntoSlot(const juce::String& path, bool pedalSlot)
         + " capacity=" + juce::String(publishedHostCapacity)
         + " dspFrames=" + juce::String(processBlockSize)
         + " inCh=" + juce::String(inputChannels)
-        + " outCh=" + juce::String(outputChannels));
+        + " outCh=" + juce::String(outputChannels)
+        + " laneGraphs=" + juce::String(preparedLaneGraphs));
+    if (dualMonoWarning.isNotEmpty())
+    {
+        juce::Logger::writeToLog(
+            "S13NAMRack: "
+            + juce::String(pedalSlot ? "pedal" : "amp")
+            + " loaded in single-NAM fallback mode; "
+            + dualMonoWarning);
+    }
     return true;
 }
 
@@ -5541,10 +16601,22 @@ juce::String S13NAMRack::getLastLoadError() const
     const juce::ScopedLock lock(modelSwapLock);
     if (lastLoadError.isEmpty())
     {
-        if (pedalModel != nullptr && pedalModel->processFaulted.load(std::memory_order_relaxed))
+        if (pedalModel != nullptr
+            && (pedalModel->processFaulted.load(
+                    std::memory_order_relaxed)
+                || (pedalModel->dualMonoLane != nullptr
+                    && pedalModel->dualMonoLane
+                           ->processFaulted.load(
+                               std::memory_order_relaxed))))
             return "NAM pedal model failed while processing and was bypassed: " + pedalModel->path;
 
-        if (ampModel != nullptr && ampModel->processFaulted.load(std::memory_order_relaxed))
+        if (ampModel != nullptr
+            && (ampModel->processFaulted.load(
+                    std::memory_order_relaxed)
+                || (ampModel->dualMonoLane != nullptr
+                    && ampModel->dualMonoLane
+                           ->processFaulted.load(
+                               std::memory_order_relaxed))))
             return "NAM amp model failed while processing and was bypassed: " + ampModel->path;
     }
     return lastLoadError;
@@ -5604,13 +16676,61 @@ juce::String S13NAMRack::getAmpDeclaredCaptureType() const
 
 bool S13NAMRack::ampModelIncludesCab() const
 {
-    return activeAmpModelIncludesCab.load(std::memory_order_acquire);
+    const juce::ScopedLock lock(modelSwapLock);
+    return ampModel != nullptr
+        && ampModel->includesCab.load(
+            std::memory_order_acquire);
+}
+
+bool S13NAMRack::hasSlimmableNAMModel() const
+{
+    const juce::ScopedLock lock(modelSwapLock);
+    return (pedalModel != nullptr && pedalModel->isSlimmable)
+        || (ampModel != nullptr && ampModel->isSlimmable);
+}
+
+juce::var S13NAMRack::getNAMModelSizeState(bool pedalSlot) const
+{
+    auto* state = new juce::DynamicObject();
+    const auto requestedSize =
+        (pedalSlot ? pedalModelSize : ampModelSize)
+            .load(std::memory_order_relaxed);
+    state->setProperty("requestedSize", requestedSize);
+
+    juce::Array<juce::var> breakpoints;
+    {
+        const juce::ScopedLock lock(modelSwapLock);
+        const auto& model =
+            pedalSlot ? pedalModel : ampModel;
+        const bool slimmable =
+            model != nullptr && model->isSlimmable;
+        state->setProperty("slimmable", slimmable);
+        state->setProperty(
+            "activeSize",
+            slimmable
+                ? model->activeSlimmableSize
+                : 1.0f);
+        if (model != nullptr)
+        {
+            for (const double breakpoint :
+                 model->slimmableSizeBreakpoints)
+            {
+                breakpoints.add(breakpoint);
+            }
+        }
+    }
+    state->setProperty(
+        "breakpoints", juce::var(breakpoints));
+    return juce::var(state);
 }
 
 void S13NAMRack::setCabRequestedEnabled(bool enabled) noexcept
 {
     cabRequestedEnabled.store(enabled, std::memory_order_relaxed);
-    cabEnabled.store(enabled && ! ampModelIncludesCab() ? 1.0f : 0.0f,
+    const bool activeModelIncludesCab =
+        activeAmpModelIncludesCab.load(
+            std::memory_order_acquire);
+    cabEnabled.store(enabled && ! activeModelIncludesCab ? 1.0f : 0.0f,
                      std::memory_order_relaxed);
 }
 
@@ -5694,6 +16814,17 @@ bool S13NAMRack::hasAuditionSourceActive() const noexcept
     return auditionSource.load(std::memory_order_relaxed) >= 0.5f;
 }
 
+float S13NAMRack::getCompressorGainReductionDb() const noexcept
+{
+    if (compressorEnabled.load(std::memory_order_relaxed) < 0.5f
+        || compressorMix.load(std::memory_order_relaxed) <= 0.0001f)
+    {
+        return 0.0f;
+    }
+
+    return rackCompressor.getCurrentGainReduction();
+}
+
 juce::var S13NAMRack::getDiagnosticState() const
 {
     const double preparedSampleRate =
@@ -5702,6 +16833,18 @@ juce::var S13NAMRack::getDiagnosticState() const
     double ampModelSampleRate = 0.0;
     bool pedalModelLoaded = false;
     bool ampModelLoaded = false;
+    bool pedalModelSlimmable = false;
+    bool ampModelSlimmable = false;
+    bool pedalDualMonoReady = false;
+    bool ampDualMonoReady = false;
+    bool pedalStereoCapable = false;
+    bool ampStereoCapable = false;
+    juce::String pedalDualMonoWarning;
+    juce::String ampDualMonoWarning;
+    bool pedalModelFaulted = false;
+    bool ampModelFaulted = false;
+    float pedalActiveModelSize = 1.0f;
+    float ampActiveModelSize = 1.0f;
     {
         const juce::ScopedLock lock(modelSwapLock);
         if (pedalModel != nullptr)
@@ -5710,6 +16853,23 @@ juce::var S13NAMRack::getDiagnosticState() const
             pedalModelSampleRate = pedalModel->expectedSampleRate > 1000.0
                 ? pedalModel->expectedSampleRate
                 : preparedSampleRate;
+            pedalModelSlimmable = pedalModel->isSlimmable;
+            pedalActiveModelSize = pedalModel->activeSlimmableSize;
+            pedalDualMonoReady =
+                pedalModel->dualMonoLane != nullptr;
+            pedalStereoCapable =
+                pedalDualMonoReady
+                || (pedalModel->inputChannels == 2
+                    && pedalModel->outputChannels == 2);
+            pedalDualMonoWarning =
+                pedalModel->dualMonoPreparationWarning;
+            pedalModelFaulted =
+                pedalModel->processFaulted.load(
+                    std::memory_order_relaxed)
+                || (pedalModel->dualMonoLane != nullptr
+                    && pedalModel->dualMonoLane
+                           ->processFaulted.load(
+                               std::memory_order_relaxed));
         }
         if (ampModel != nullptr)
         {
@@ -5717,10 +16877,36 @@ juce::var S13NAMRack::getDiagnosticState() const
             ampModelSampleRate = ampModel->expectedSampleRate > 1000.0
                 ? ampModel->expectedSampleRate
                 : preparedSampleRate;
+            ampModelSlimmable = ampModel->isSlimmable;
+            ampActiveModelSize = ampModel->activeSlimmableSize;
+            ampDualMonoReady =
+                ampModel->dualMonoLane != nullptr;
+            ampStereoCapable =
+                ampDualMonoReady
+                || (ampModel->inputChannels == 2
+                    && ampModel->outputChannels == 2);
+            ampDualMonoWarning =
+                ampModel->dualMonoPreparationWarning;
+            ampModelFaulted =
+                ampModel->processFaulted.load(
+                    std::memory_order_relaxed)
+                || (ampModel->dualMonoLane != nullptr
+                    && ampModel->dualMonoLane
+                           ->processFaulted.load(
+                               std::memory_order_relaxed));
         }
     }
 
     auto* obj = new juce::DynamicObject();
+    obj->setProperty("instrumentProfile", getInstrumentProfile());
+    obj->setProperty(
+        "instrumentProfileName",
+        isBassInstrumentProfile() ? "bass" : "guitar");
+    obj->setProperty(
+        "instrumentProfileMapping",
+        isBassInstrumentProfile()
+            ? "bass_extended_octaver_and_internal_voicing"
+            : "guitar_default");
     obj->setProperty("preparedSampleRate", diagnosticPreparedSampleRate.load(std::memory_order_relaxed));
     obj->setProperty("preparedBlockSize", diagnosticPreparedBlockSize.load(std::memory_order_relaxed));
     obj->setProperty("bufferCapacity", diagnosticBufferCapacity.load(std::memory_order_relaxed));
@@ -5730,18 +16916,206 @@ juce::var S13NAMRack::getDiagnosticState() const
         "processedBlockCount",
         static_cast<juce::int64>(diagnosticProcessedBlockCount.load(std::memory_order_relaxed)));
     obj->setProperty("lastDspFrames", diagnosticLastDspFrames.load(std::memory_order_relaxed));
+    obj->setProperty(
+        "lastPedalDspFrames",
+        diagnosticLastPedalDspFrames.load(std::memory_order_relaxed));
+    obj->setProperty(
+        "lastAmpDspFrames",
+        diagnosticLastAmpDspFrames.load(std::memory_order_relaxed));
     obj->setProperty("maxDspFrames", diagnosticMaxDspFrames.load(std::memory_order_relaxed));
     obj->setProperty("lastModelSampleRate", diagnosticLastModelSampleRate.load(std::memory_order_relaxed));
     obj->setProperty("pedalModelSampleRate", pedalModelSampleRate);
     obj->setProperty("ampModelSampleRate", ampModelSampleRate);
+    obj->setProperty("pedalModelSlimmable", pedalModelSlimmable);
+    obj->setProperty("ampModelSlimmable", ampModelSlimmable);
+    obj->setProperty(
+        "pedalRequestedModelSize",
+        pedalModelSize.load(std::memory_order_relaxed));
+    obj->setProperty(
+        "ampRequestedModelSize",
+        ampModelSize.load(std::memory_order_relaxed));
+    obj->setProperty("pedalActiveModelSize", pedalActiveModelSize);
+    obj->setProperty("ampActiveModelSize", ampActiveModelSize);
+    const int diagnosticActiveRoutingMode =
+        diagnosticActiveInputRoutingMode.load(
+            std::memory_order_relaxed);
+    obj->setProperty(
+        "activeInputRoutingMode",
+        diagnosticActiveRoutingMode);
+    obj->setProperty(
+        "inputRoutingTransitionPhase",
+        diagnosticInputRoutingTransitionPhase.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "pedalNAMLaneCount",
+        pedalDualMonoReady ? 2 : (pedalModelLoaded ? 1 : 0));
+    obj->setProperty(
+        "ampNAMLaneCount",
+        ampDualMonoReady ? 2 : (ampModelLoaded ? 1 : 0));
+    obj->setProperty(
+        "pedalDualMonoReady", pedalDualMonoReady);
+    obj->setProperty(
+        "ampDualMonoReady", ampDualMonoReady);
+    obj->setProperty(
+        "pedalStereoCapable", pedalStereoCapable);
+    obj->setProperty(
+        "ampStereoCapable", ampStereoCapable);
+    obj->setProperty(
+        "pedalDualMonoWarning", pedalDualMonoWarning);
+    obj->setProperty(
+        "ampDualMonoWarning", ampDualMonoWarning);
+    obj->setProperty(
+        "pedalModelFaulted", pedalModelFaulted);
+    obj->setProperty(
+        "ampModelFaulted", ampModelFaulted);
+    const bool allLoadedSlotsStereoCapable =
+        (! pedalModelLoaded || pedalStereoCapable)
+        && (! ampModelLoaded || ampStereoCapable);
+    const int routedChannels =
+        routedInputChannelCount.load(
+            std::memory_order_acquire);
+    const bool routedSourceStereoCapable =
+        routedChannels >= 2;
+    const int automaticInputRoutingMode =
+        routedSourceStereoCapable
+                && allLoadedSlotsStereoCapable
+            ? 2
+            : 0;
+    obj->setProperty(
+        "inputRoutingMode", automaticInputRoutingMode);
+    obj->setProperty(
+        "automaticInputRoutingMode", automaticInputRoutingMode);
+    obj->setProperty("inputRoutingAutomatic", true);
+    const int routingTransitionPhase =
+        diagnosticInputRoutingTransitionPhase.load(
+            std::memory_order_relaxed);
+    juce::String inputRoutingReadbackReason;
+    if (! routedSourceStereoCapable)
+    {
+        inputRoutingReadbackReason =
+            "source_is_mono";
+    }
+    else if (! allLoadedSlotsStereoCapable)
+    {
+        inputRoutingReadbackReason =
+            "capture_not_stereo_capable";
+    }
+    else if (automaticInputRoutingMode
+                 != diagnosticActiveRoutingMode
+             || routingTransitionPhase
+                    != static_cast<int>(
+                        InputRoutingHandoffPhase::steady))
+    {
+        inputRoutingReadbackReason = "transitioning";
+    }
+    const bool doublerRequestedEnabled =
+        cabDoublerEnabled.load(
+            std::memory_order_relaxed) >= 0.5f;
+    const bool doublerPausedForStereo =
+        doublerRequestedEnabled
+        && diagnosticActiveRoutingMode == 2;
+    const bool doublerActive =
+        doublerRequestedEnabled
+        && ! doublerPausedForStereo
+        && cabDoublerMix.load(
+               std::memory_order_relaxed) > 0.0001f;
+    obj->setProperty(
+        "effectiveInputRoutingMode",
+        diagnosticActiveRoutingMode);
+    obj->setProperty(
+        "routedInputChannelCount",
+        routedChannels);
+    obj->setProperty(
+        "inputRoutingStereoHostCapable",
+        routedSourceStereoCapable);
+    obj->setProperty(
+        "inputRoutingStereoModelCapable",
+        allLoadedSlotsStereoCapable);
+    obj->setProperty(
+        "inputRoutingRequestHonored",
+        automaticInputRoutingMode
+                == diagnosticActiveRoutingMode
+            && routingTransitionPhase
+                   == static_cast<int>(
+                       InputRoutingHandoffPhase::steady));
+    obj->setProperty(
+        "inputRoutingReadbackReason",
+        inputRoutingReadbackReason);
+    obj->setProperty(
+        "doublerRequestedEnabled",
+        doublerRequestedEnabled);
+    obj->setProperty("doublerActive", doublerActive);
+    obj->setProperty(
+        "doublerPausedForStereo",
+        doublerPausedForStereo);
+    obj->setProperty(
+        "trueStereoDualNAMActive",
+        diagnosticActiveRoutingMode == 2
+            && (pedalModelLoaded || ampModelLoaded)
+            && routedSourceStereoCapable
+            && allLoadedSlotsStereoCapable);
+    // Historical key: two serial slots loaded, not two stereo lanes.
     obj->setProperty("dualNAMActive", pedalModelLoaded && ampModelLoaded);
     obj->setProperty("lastRawInputPeakDb", diagnosticLastRawInputPeakDb.load(std::memory_order_relaxed));
+    obj->setProperty(
+        "inputNonFiniteSampleCount",
+        static_cast<juce::int64>(
+            diagnosticInputNonFiniteSampleCount.load(
+                std::memory_order_relaxed)));
     obj->setProperty("lastInputPeakDb", diagnosticLastInputPeakDb.load(std::memory_order_relaxed));
     obj->setProperty("lastOutputPeakDb", diagnosticLastOutputPeakDb.load(std::memory_order_relaxed));
+    obj->setProperty(
+        "lastOutputPeakLinear",
+        diagnosticLastOutputPeakLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "maximumOutputPeakLinear",
+        diagnosticMaximumOutputPeakLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "pedalNAMMaximumRawOutputPeakLinear",
+        diagnosticPedalNAMMaximumRawOutputPeakLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "ampNAMMaximumRawOutputPeakLinear",
+        diagnosticAmpNAMMaximumRawOutputPeakLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "pedalNAMMaximumRawOutputDeltaLinear",
+        diagnosticPedalNAMMaximumRawOutputDeltaLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "ampNAMMaximumRawOutputDeltaLinear",
+        diagnosticAmpNAMMaximumRawOutputDeltaLinear.load(
+            std::memory_order_relaxed));
+    // Mixed-version packaged frontends may still request these retired
+    // per-model keys. Finite protection now occurs only once at rack output.
+    obj->setProperty(
+        "pedalNAMOutputSafetyGuardHitCount",
+        static_cast<juce::int64>(0));
+    obj->setProperty(
+        "ampNAMOutputSafetyGuardHitCount",
+        static_cast<juce::int64>(0));
+    obj->setProperty(
+        "rackMaximumRawOutputPeakLinear",
+        diagnosticRackMaximumRawOutputPeakLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "rackMaximumRawOutputDeltaLinear",
+        diagnosticRackMaximumRawOutputDeltaLinear.load(
+            std::memory_order_relaxed));
+    obj->setProperty(
+        "rackOutputSafetyGuardHitCount",
+        static_cast<juce::int64>(
+            diagnosticRackOutputSafetyGuardHitCount.load(
+                std::memory_order_relaxed)));
     // Live meters use these processor-smoothed linked peaks instead of the
     // one-time values returned with the initial schema.
     obj->setProperty("inputLevelDb", inputLevelDb.load(std::memory_order_relaxed));
     obj->setProperty("outputLevelDb", outputLevelDb.load(std::memory_order_relaxed));
+    obj->setProperty(
+        "compressorGainReductionDb",
+        getCompressorGainReductionDb());
     obj->setProperty("auditionSourceActive", diagnosticLastAuditionSourceActive.load(std::memory_order_relaxed));
     obj->setProperty("auditionSourceRendered", diagnosticLastAuditionSourceRendered.load(std::memory_order_relaxed));
     obj->setProperty("lastResampled", diagnosticLastResampled.load(std::memory_order_relaxed));
@@ -5757,16 +17131,19 @@ juce::var S13NAMRack::getDiagnosticState() const
     obj->setProperty("realtimeDSPBlocked", diagnosticRealtimeDSPBlocked.load(std::memory_order_relaxed));
     obj->setProperty(
         "precisionDriveOversamplingEnabled",
-        rackPrecisionDrive.isOversamplingEnabled());
+        false);
     obj->setProperty(
         "precisionDriveOversampleMode",
-        rackPrecisionDrive.oversampleMode.load(std::memory_order_relaxed));
+        0.0f);
     obj->setProperty(
         "precisionDriveActiveOversampleMode",
-        rackPrecisionDrive.getActiveOversamplingMode());
+        0);
     obj->setProperty(
         "precisionDriveOversamplingLatencySamples",
-        rackPrecisionDrive.getOversamplingLatencySamples());
+        0);
+    obj->setProperty(
+        "precisionDriveZeroInputInvariantEnabled",
+        true);
     obj->setProperty(
         "chaosOversamplingEnabled",
         rackChaos.isOversamplingEnabled());
@@ -5780,6 +17157,9 @@ juce::var S13NAMRack::getDiagnosticState() const
         "chaosOversamplingLatencySamples",
         rackChaos.getOversamplingLatencySamples());
     obj->setProperty(
+        "chaosZeroInputInvariantEnabled",
+        rackChaos.isZeroInputInvariantEnabled());
+    obj->setProperty(
         "embeddedDriveSharedOversamplingEnabled",
         embeddedDriveOversampler2x != nullptr);
     obj->setProperty(
@@ -5787,6 +17167,40 @@ juce::var S13NAMRack::getDiagnosticState() const
     obj->setProperty(
         "embeddedDriveSharedOversamplingLatencySamples",
         embeddedDriveOversamplingLatencySamples);
+    obj->setProperty(
+        "reverbEmergencyBoundHitCount",
+        static_cast<juce::int64>(
+            rackReverb
+                .getEmergencyBoundHitCount()));
+    obj->setProperty(
+        "reverbV2EmergencyBoundHitCount",
+        static_cast<juce::int64>(
+            rackReverb
+                .getV2EmergencyBoundHitCount()));
+    obj->setProperty(
+        "reverbV3NonFiniteStateHitCount",
+        static_cast<juce::int64>(
+            rackReverb
+                .getV3NonFiniteStateHitCount()));
+    obj->setProperty(
+        "reverbV3FilterNonFiniteHitCount",
+        static_cast<juce::int64>(
+            rackReverb
+                .getV3FilterNonFiniteHitCount()));
+    obj->setProperty(
+        "reverbV3FiniteRunawayRecoveryCount",
+        static_cast<juce::int64>(
+            rackReverb
+                .getV3FiniteRunawayRecoveryCount()));
+    obj->setProperty(
+        "reverbMaximumRawInputSendPeakLinear",
+        rackReverb.getMaximumRawInputSendPeak());
+    obj->setProperty(
+        "reverbMaximumV3RawTankWritePeakLinear",
+        rackReverb.getMaximumV3RawTankWritePeak());
+    obj->setProperty(
+        "reverbMaximumV3RawWetOutputPeakLinear",
+        rackReverb.getMaximumV3RawWetOutputPeak());
     obj->setProperty("modelSnapshotLockMissCount", static_cast<double>(modelSnapshotLockMissCount.load(std::memory_order_relaxed)));
     return juce::var(obj);
 }
@@ -5845,13 +17259,15 @@ bool S13NAMRack::loadCabIR(const juce::String& path)
     constexpr int maximumConfigurationRetries = 8;
     for (int attempt = 0; attempt < maximumConfigurationRetries; ++attempt)
     {
-        double targetHostSampleRate = 44100.0;
-        int targetHostBlockSize = 512;
-        {
-            const juce::ScopedLock configurationSnapshotLock(getCallbackLock());
-            targetHostSampleRate = cachedSampleRate;
-            targetHostBlockSize = cachedBlockSize;
-        }
+        ModelHostConfigurationSnapshot hostConfiguration;
+        if (! readStableModelHostConfiguration(
+                hostConfiguration))
+            continue;
+
+        const double targetHostSampleRate =
+            hostConfiguration.sampleRate;
+        const int targetHostBlockSize =
+            hostConfiguration.blockSize;
 
         juce::String preparationError;
         auto prepared = prepareCabIR(irFile,
@@ -5866,9 +17282,9 @@ bool S13NAMRack::loadCabIR(const juce::String& path)
             return false;
         }
 
-        const juce::ScopedLock processorCallbackGuard(getCallbackLock());
-        if (std::abs(targetHostSampleRate - cachedSampleRate) > 0.5
-            || targetHostBlockSize != cachedBlockSize)
+        if (modelHostConfigurationGeneration.load(
+                std::memory_order_acquire)
+            != hostConfiguration.generation)
         {
             continue;
         }
@@ -5934,7 +17350,9 @@ bool S13NAMRack::publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared)
     if (prepared == nullptr)
         return false;
 
-    const bool ampIncludesCab = ampModelIncludesCab();
+    const bool ampIncludesCab =
+        activeAmpModelIncludesCab.load(
+            std::memory_order_acquire);
     {
         const juce::ScopedLock lock(cabIRLock);
         auto old = std::move(cabIR);
@@ -5966,7 +17384,6 @@ bool S13NAMRack::publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared)
 
 void S13NAMRack::clearCabIR()
 {
-    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     {
         const juce::ScopedLock lock(cabIRLock);
         cabIRLoaded.store(false, std::memory_order_release);
@@ -6010,7 +17427,11 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
                                            const juce::String& requestedAmpDeclaredCaptureType,
                                            const std::function<void()>& publishAdditionalState,
                                            const std::function<std::shared_ptr<void>()>& publicationLeaseFactory,
-                                           std::shared_ptr<void>* retainedPublicationLease)
+                                           std::shared_ptr<void>* retainedPublicationLease,
+                                           bool pedalModelSizeSpecified,
+                                           float requestedPedalModelSize,
+                                           bool ampModelSizeSpecified,
+                                           float requestedAmpModelSize)
 {
     if (retainedPublicationLease != nullptr)
         retainedPublicationLease->reset();
@@ -6018,6 +17439,28 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
     std::shared_ptr<LoadedNAMModel> preparedPedal;
     std::shared_ptr<LoadedNAMModel> preparedAmp;
     std::shared_ptr<LoadedCabIR> preparedCab;
+    const float targetPedalModelSize =
+        pedalModelSizeSpecified
+            ? juce::jlimit(
+                  0.0f, 1.0f,
+                  requestedPedalModelSize)
+            : pedalModelSize.load(
+                  std::memory_order_relaxed);
+    const float targetAmpModelSize =
+        ampModelSizeSpecified
+            ? juce::jlimit(
+                  0.0f, 1.0f,
+                  requestedAmpModelSize)
+            : ampModelSize.load(
+                  std::memory_order_relaxed);
+    const juce::String effectivePedalPath =
+        pedalPathSpecified
+            ? pedalPath
+            : getPedalModelPath();
+    const juce::String effectiveAmpPath =
+        ampPathSpecified
+            ? ampPath
+            : getAmpModelPath();
     bool pedalAvailable = true;
     bool ampAvailable = true;
     bool cabAvailable = true;
@@ -6078,7 +17521,21 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
                 ? pedalModel != nullptr || pedalModelPath.isNotEmpty()
                 : pedalModel == nullptr
                     || pedalModel->processFaulted.load(std::memory_order_relaxed)
+                    || (pedalModel->dualMonoLane != nullptr
+                        && pedalModel->dualMonoLane
+                               ->processFaulted.load(
+                                   std::memory_order_relaxed))
                     || ! pathsMatch(pedalPath, pedalModelPath);
+        }
+        if (pedalModelSizeSpecified
+            && pedalModel != nullptr
+            && pedalModel->isSlimmable
+            && std::abs(
+                   pedalModel->activeSlimmableSize
+                   - targetPedalModelSize)
+                > 0.000001f)
+        {
+            pedalResourceNeedsChange = true;
         }
         if (ampPathSpecified)
         {
@@ -6086,7 +17543,21 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
                 ? ampModel != nullptr || ampModelPath.isNotEmpty()
                 : ampModel == nullptr
                     || ampModel->processFaulted.load(std::memory_order_relaxed)
+                    || (ampModel->dualMonoLane != nullptr
+                        && ampModel->dualMonoLane
+                               ->processFaulted.load(
+                                   std::memory_order_relaxed))
                     || ! pathsMatch(ampPath, ampModelPath);
+        }
+        if (ampModelSizeSpecified
+            && ampModel != nullptr
+            && ampModel->isSlimmable
+            && std::abs(
+                   ampModel->activeSlimmableSize
+                   - targetAmpModelSize)
+                > 0.000001f)
+        {
+            ampResourceNeedsChange = true;
         }
     }
     bool cabResourceNeedsChange = cabPathSpecified;
@@ -6104,15 +17575,17 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
     // Prepare every NAM graph before publishing any of them. Strict tone recalls
     // can therefore fail without changing the audible rack. Project recovery may
     // instead publish an unloaded slot carrying the missing path for relinking.
-    if (pedalResourceNeedsChange && pedalPath.trim().isNotEmpty())
+    if (pedalResourceNeedsChange
+        && effectivePedalPath.trim().isNotEmpty())
     {
         juce::String error;
         preparedPedal = prepareModel(
-            pedalPath,
+            effectivePedalPath,
             error,
             pedalDeclarationNeedsPublication
                 ? nextPedalDeclaredCaptureType
-                : getPedalDeclaredCaptureType());
+                : getPedalDeclaredCaptureType(),
+            targetPedalModelSize);
         if (preparedPedal == nullptr)
         {
             pedalAvailable = false;
@@ -6120,15 +17593,17 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
         }
     }
 
-    if (ampResourceNeedsChange && ampPath.trim().isNotEmpty())
+    if (ampResourceNeedsChange
+        && effectiveAmpPath.trim().isNotEmpty())
     {
         juce::String error;
         preparedAmp = prepareModel(
-            ampPath,
+            effectiveAmpPath,
             error,
             ampDeclarationNeedsPublication
                 ? nextAmpDeclaredCaptureType
-                : getAmpDeclaredCaptureType());
+                : getAmpDeclaredCaptureType(),
+            targetAmpModelSize);
         if (preparedAmp == nullptr)
         {
             ampAvailable = false;
@@ -6157,9 +17632,9 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
         return false;
     }
 
-    // Reclaiming old graphs can run destructors, so attempt that before the
-    // callback lock too. The newly retired owners remain available for a later
-    // off-lock reclamation pass.
+    // Reclaiming old graphs can run destructors, so do it before publication.
+    // Newly retired owners remain available for a later off-lock reclamation
+    // pass.
     reclaimRetiredModelsFromEarlierPublication();
     reclaimRetiredCabIRsFromEarlierPublication();
     {
@@ -6170,20 +17645,23 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
     }
 
     // The host can change while files are probed. Re-prewarm both graphs for a
-    // single configuration off-lock, then verify and publish the entire model /
-    // IR / scalar transaction under one short callback lock.
+    // single stable configuration, then publish through the lock-free realtime
+    // pointers. Taking AudioProcessor's callback lock here made a 16-sample
+    // callback either wait or substitute a dry block while a model was loaded.
     constexpr int maximumConfigurationRetries = 8;
     for (int attempt = 0; attempt < maximumConfigurationRetries; ++attempt)
     {
-        double targetHostSampleRate = 44100.0;
-        int targetHostBufferCapacity = 512;
-        int targetHostBlockSize = 512;
-        {
-            const juce::ScopedLock configurationSnapshotLock(getCallbackLock());
-            targetHostSampleRate = cachedSampleRate;
-            targetHostBufferCapacity = realtimeBufferCapacity;
-            targetHostBlockSize = cachedBlockSize;
-        }
+        ModelHostConfigurationSnapshot hostConfiguration;
+        if (! readStableModelHostConfiguration(
+                hostConfiguration))
+            continue;
+
+        const double targetHostSampleRate =
+            hostConfiguration.sampleRate;
+        const int targetHostBufferCapacity =
+            hostConfiguration.bufferCapacity;
+        const int targetHostBlockSize =
+            hostConfiguration.blockSize;
 
         const auto reprepareForCurrentHost = [&] (std::shared_ptr<LoadedNAMModel>& model,
                                                    bool& available)
@@ -6249,13 +17727,9 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
                 return false;
         }
 
-        // Lock ordering is publication state/generation -> processor callback,
-        // matching message-thread topology mutations. Model preparation above
-        // remains entirely outside both locks.
-        const juce::ScopedLock processorCallbackGuard(getCallbackLock());
-        if (std::abs(targetHostSampleRate - cachedSampleRate) > 0.5
-            || targetHostBufferCapacity != realtimeBufferCapacity
-            || targetHostBlockSize != cachedBlockSize)
+        if (modelHostConfigurationGeneration.load(
+                std::memory_order_acquire)
+            != hostConfiguration.generation)
         {
             continue;
         }
@@ -6323,9 +17797,9 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
 
     // A declaration belongs to the selected library record, not to an earlier
     // graph in the slot. Path publication without an accompanying declaration
-    // therefore clears stale fallback state. For an already-loaded path, update
-    // the fallback and effective Cab topology in the same callback-locked
-    // publication before any scalar/UI state derives cabEnabled.
+    // therefore clears stale fallback state. For an already-active path, update
+    // its effective Cab topology immediately. A newly requested Amp publishes
+    // that topology only when the audio-thread handoff reaches zero.
     if (pedalDeclarationNeedsPublication || ampDeclarationNeedsPublication)
     {
         const juce::ScopedLock lock(modelSwapLock);
@@ -6335,8 +17809,10 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
             if (pedalModel != nullptr)
             {
                 pedalModel->declaredCaptureType = nextPedalDeclaredCaptureType;
-                pedalModel->includesCab = NAMCaptureIncludesCab(
-                    pedalModel->effectiveCaptureType());
+                pedalModel->includesCab.store(
+                    NAMCaptureIncludesCab(
+                        pedalModel->effectiveCaptureType()),
+                    std::memory_order_release);
             }
         }
         if (ampDeclarationNeedsPublication)
@@ -6345,20 +17821,46 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
             if (ampModel != nullptr)
             {
                 ampModel->declaredCaptureType = nextAmpDeclaredCaptureType;
-                ampModel->includesCab = NAMCaptureIncludesCab(
-                    ampModel->effectiveCaptureType());
+                ampModel->includesCab.store(
+                    NAMCaptureIncludesCab(
+                        ampModel->effectiveCaptureType()),
+                    std::memory_order_release);
             }
 
-            const bool nextIncludesCab =
-                ampModel != nullptr && ampModel->includesCab;
-            activeAmpModelIncludesCab.store(
-                nextIncludesCab, std::memory_order_release);
-            const bool requested =
-                cabRequestedEnabled.load(std::memory_order_relaxed);
-            cabEnabled.store(
-                requested && ! nextIncludesCab ? 1.0f : 0.0f,
-                std::memory_order_relaxed);
+            if (activeAmpModel.load(
+                    std::memory_order_seq_cst)
+                == ampModel.get())
+            {
+                const bool nextIncludesCab =
+                    ampModel != nullptr
+                    && ampModel->includesCab.load(
+                        std::memory_order_acquire);
+                activeAmpModelIncludesCab.store(
+                    nextIncludesCab,
+                    std::memory_order_release);
+                const bool requested =
+                    cabRequestedEnabled.load(
+                        std::memory_order_relaxed);
+                cabEnabled.store(
+                    requested && ! nextIncludesCab
+                        ? 1.0f
+                        : 0.0f,
+                    std::memory_order_relaxed);
+            }
         }
+    }
+
+    if (pedalModelSizeSpecified)
+    {
+        pedalModelSize.store(
+            targetPedalModelSize,
+            std::memory_order_relaxed);
+    }
+    if (ampModelSizeSpecified)
+    {
+        ampModelSize.store(
+            targetAmpModelSize,
+            std::memory_order_relaxed);
     }
 
     if (publishAdditionalState)
@@ -6383,7 +17885,14 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
 
 void S13NAMRack::setUiStateJSON(const juce::String& json)
 {
-    const auto trimmed = json.trim();
+    auto parsedUiState = juce::JSON::parse(json);
+    if (! parsedUiState.isVoid())
+        (void) canonicalizeNAMRackUiStateVar(parsedUiState);
+    const auto sanitizedJSON = stripRetiredNAMRackUIState(
+        parsedUiState.isVoid()
+            ? json
+            : juce::JSON::toString(parsedUiState, false));
+    const auto trimmed = sanitizedJSON.trim();
     if (trimmed.isEmpty())
     {
         resetPostCabOrder();
@@ -6396,7 +17905,7 @@ void S13NAMRack::setUiStateJSON(const juce::String& json)
     }
 
     const juce::ScopedLock lock(uiStateLock);
-    uiStateJSON = json;
+    uiStateJSON = sanitizedJSON;
 }
 
 juce::String S13NAMRack::getUiStateJSON() const
@@ -6457,10 +17966,12 @@ static bool smoothNAMRackBiquad(juce::dsp::IIR::Filter<float>& left,
 void S13NAMRack::prepareFilterTargetTables()
 {
     filterTargetTablesPrepared = false;
-    for (auto& table : toneFilterTables)
-        table.resize(static_cast<size_t>(filterGainTableSize));
-    for (auto& table : graphicEqFilterTables)
-        table.resize(static_cast<size_t>(filterGainTableSize));
+    for (auto& profileTables : toneFilterTables)
+        for (auto& table : profileTables)
+            table.resize(static_cast<size_t>(filterGainTableSize));
+    for (auto& profileTables : graphicEqFilterTables)
+        for (auto& table : profileTables)
+            table.resize(static_cast<size_t>(filterGainTableSize));
     cabHPFFilterTable.resize(static_cast<size_t>(cabHPFTableSize));
     cabLPFFilterTable.resize(static_cast<size_t>(cabLPFTableSize));
 
@@ -6468,14 +17979,18 @@ void S13NAMRack::prepareFilterTargetTables()
     {
         const float gainDb = -12.0f + static_cast<float>(index) * 0.1f;
         const float gain = juce::Decibels::decibelsToGain(gainDb);
-        toneFilterTables[0][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-            juce::dsp::IIR::ArrayCoefficients<float>::makeLowShelf(cachedSampleRate, 115.0f, 0.707f, gain));
-        toneFilterTables[1][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-            juce::dsp::IIR::ArrayCoefficients<float>::makePeakFilter(cachedSampleRate, 780.0f, 0.85f, gain));
-        toneFilterTables[2][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-            juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, 2400.0f, 0.707f, gain));
-        toneFilterTables[3][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-            juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, 5200.0f, 0.8f, gain));
+        for (int profile = 0; profile < 2; ++profile)
+        {
+            const bool bassProfile = profile == bassInstrumentProfile;
+            toneFilterTables[static_cast<std::size_t>(profile)][0][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
+                juce::dsp::IIR::ArrayCoefficients<float>::makeLowShelf(cachedSampleRate, bassProfile ? 80.0f : 115.0f, 0.707f, gain));
+            toneFilterTables[static_cast<std::size_t>(profile)][1][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
+                juce::dsp::IIR::ArrayCoefficients<float>::makePeakFilter(cachedSampleRate, bassProfile ? 500.0f : 780.0f, 0.85f, gain));
+            toneFilterTables[static_cast<std::size_t>(profile)][2][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
+                juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, 2400.0f, 0.707f, gain));
+            toneFilterTables[static_cast<std::size_t>(profile)][3][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
+                juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, 5200.0f, 0.8f, gain));
+        }
     }
 
     const float nyquistSafeMax = juce::jmax(1000.0f, static_cast<float>(cachedSampleRate) * 0.45f);
@@ -6484,13 +17999,26 @@ void S13NAMRack::prepareFilterTargetTables()
         const float frequency = juce::jlimit(20.0f,
                                              nyquistSafeMax,
                                              kNAMRackGraphicEqFrequencies[static_cast<size_t>(band)]);
-        const float q = band == 0 || band == kNAMRackGraphicEqBandCount - 1 ? 0.9f : 1.15f;
+        const float q = band == 0 ? 0.9f : 1.15f;
         for (int index = 0; index < filterGainTableSize; ++index)
         {
             const float gainDb = -12.0f + static_cast<float>(index) * 0.1f;
-            graphicEqFilterTables[static_cast<size_t>(band)][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-                juce::dsp::IIR::ArrayCoefficients<float>::makePeakFilter(
-                    cachedSampleRate, frequency, q, juce::Decibels::decibelsToGain(gainDb)));
+            const float gain = juce::Decibels::decibelsToGain(gainDb);
+            for (int profile = 0; profile < 2; ++profile)
+            {
+                const bool bassLowShelf =
+                    profile == bassInstrumentProfile && band == 0;
+                const auto coefficients = bassLowShelf
+                    ? juce::dsp::IIR::ArrayCoefficients<float>::makeLowShelf(
+                        cachedSampleRate, frequency, 0.70710678f, gain)
+                    : band == kNAMRackGraphicEqBandCount - 1
+                        ? juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(
+                            cachedSampleRate, frequency, 0.70710678f, gain)
+                        : juce::dsp::IIR::ArrayCoefficients<float>::makePeakFilter(
+                            cachedSampleRate, frequency, q, gain);
+                graphicEqFilterTables[static_cast<std::size_t>(profile)][static_cast<size_t>(band)][static_cast<size_t>(index)] =
+                    normaliseNAMRackBiquad(coefficients);
+            }
         }
     }
 
@@ -6513,17 +18041,20 @@ void S13NAMRack::prepareFilterTargetTables()
 
 void S13NAMRack::updateToneFiltersIfNeeded()
 {
+    const int profile = getInstrumentProfile();
     const float bass = juce::jlimit(-12.0f, 12.0f, bassDb.load(std::memory_order_relaxed));
     const float mid = juce::jlimit(-12.0f, 12.0f, midDb.load(std::memory_order_relaxed));
     const float treble = juce::jlimit(-12.0f, 12.0f, trebleDb.load(std::memory_order_relaxed));
     const float presence = juce::jlimit(-12.0f, 12.0f, presenceDb.load(std::memory_order_relaxed));
-    if (bass == lastBassDb && mid == lastMidDb && treble == lastTrebleDb && presence == lastPresenceDb)
+    if (profile == lastToneInstrumentProfile
+        && bass == lastBassDb && mid == lastMidDb && treble == lastTrebleDb && presence == lastPresenceDb)
         return;
 
     lastBassDb = bass;
     lastMidDb = mid;
     lastTrebleDb = treble;
     lastPresenceDb = presence;
+    lastToneInstrumentProfile = profile;
 
     if (! filterTargetTablesPrepared)
         return;
@@ -6533,10 +18064,11 @@ void S13NAMRack::updateToneFiltersIfNeeded()
         return juce::jlimit(0, filterGainTableSize - 1,
                             juce::roundToInt((gainDb + 12.0f) * 10.0f));
     };
-    lowShelfTarget = toneFilterTables[0][static_cast<size_t>(gainIndex(bass))];
-    midPeakTarget = toneFilterTables[1][static_cast<size_t>(gainIndex(mid))];
-    highShelfTarget = toneFilterTables[2][static_cast<size_t>(gainIndex(treble))];
-    presenceShelfTarget = toneFilterTables[3][static_cast<size_t>(gainIndex(presence))];
+    const auto& tables = toneFilterTables[static_cast<std::size_t>(profile)];
+    lowShelfTarget = tables[0][static_cast<size_t>(gainIndex(bass))];
+    midPeakTarget = tables[1][static_cast<size_t>(gainIndex(mid))];
+    highShelfTarget = tables[2][static_cast<size_t>(gainIndex(treble))];
+    presenceShelfTarget = tables[3][static_cast<size_t>(gainIndex(presence))];
 
     if (! rackFilterCoefficientsInitialised)
     {
@@ -6545,10 +18077,12 @@ void S13NAMRack::updateToneFiltersIfNeeded()
         initialiseNAMRackBiquad(highShelfL, highShelfR, highShelfTarget);
         initialiseNAMRackBiquad(presenceShelfL, presenceShelfR, presenceShelfTarget);
     }
+    toneFilterCoefficientsSmoothing = rackFilterCoefficientsInitialised;
 }
 
 void S13NAMRack::updateGraphicEQFiltersIfNeeded()
 {
+    const int profile = getInstrumentProfile();
     const std::array<float, kNAMRackGraphicEqBandCount> gains {
         juce::jlimit(-12.0f, 12.0f, eq65Db.load(std::memory_order_relaxed)),
         juce::jlimit(-12.0f, 12.0f, eq125Db.load(std::memory_order_relaxed)),
@@ -6561,7 +18095,7 @@ void S13NAMRack::updateGraphicEQFiltersIfNeeded()
         juce::jlimit(-12.0f, 12.0f, eq16kDb.load(std::memory_order_relaxed))
     };
 
-    bool changed = false;
+    bool changed = profile != lastGraphicEqInstrumentProfile;
     for (int band = 0; band < kNAMRackGraphicEqBandCount; ++band)
     {
         if (std::abs(gains[static_cast<size_t>(band)] - lastGraphicEqDb[static_cast<size_t>(band)]) > 0.001f)
@@ -6576,13 +18110,16 @@ void S13NAMRack::updateGraphicEQFiltersIfNeeded()
     if (! filterTargetTablesPrepared)
         return;
 
+    lastGraphicEqInstrumentProfile = profile;
+    const auto& tables = graphicEqFilterTables[static_cast<std::size_t>(profile)];
+
     for (int band = 0; band < kNAMRackGraphicEqBandCount; ++band)
     {
         const auto index = static_cast<size_t>(band);
         lastGraphicEqDb[index] = gains[index];
         const int gainTableIndex = juce::jlimit(0, filterGainTableSize - 1,
             juce::roundToInt((gains[index] + 12.0f) * 10.0f));
-        graphicEqTargets[index] = graphicEqFilterTables[index][static_cast<size_t>(gainTableIndex)];
+        graphicEqTargets[index] = tables[index][static_cast<size_t>(gainTableIndex)];
         if (! rackFilterCoefficientsInitialised)
             initialiseNAMRackBiquad(graphicEqL[index], graphicEqR[index], graphicEqTargets[index]);
     }
@@ -6699,26 +18236,87 @@ void S13NAMRack::processCabStage(juce::AudioBuffer<float>& buffer, LoadedCabIR* 
     const int numChannels = processed.getNumChannels();
     smoothedCabLevelGain.setTargetValue(juce::Decibels::decibelsToGain(
         juce::jlimit(-24.0f, 12.0f, cabLevelDb.load(std::memory_order_relaxed))));
-    const bool phaseInverted = cabPhaseInvert.load(std::memory_order_relaxed) >= 0.5f;
-    const float position = juce::jlimit(0.0f, 1.0f, cabMicPosition.load(std::memory_order_relaxed));
-    const float distance = juce::jlimit(0.0f, 1.0f, cabMicDistance.load(std::memory_order_relaxed));
-    const float blend = juce::jlimit(0.0f, 1.0f, cabMicBlend.load(std::memory_order_relaxed));
-    const float roomSend = juce::jlimit(0.0f, 1.0f, cabRoomSend.load(std::memory_order_relaxed));
-    const float pan = juce::jlimit(-1.0f, 1.0f, cabPan.load(std::memory_order_relaxed));
-    const float positionOffset = position - 0.5f;
-    const float lowCutoff = 420.0f + distance * 1100.0f;
-    const float lowCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * lowCutoff / static_cast<float>(cachedSampleRate));
+    const float targetDistance = juce::jlimit(
+        0.0f,
+        1.0f,
+        cabMicDistance.load(std::memory_order_relaxed));
+    smoothedCabPolarity.setTargetValue(
+        cabPhaseInvert.load(std::memory_order_relaxed)
+                >= 0.5f
+            ? -1.0f
+            : 1.0f);
+    smoothedCabMicPosition.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            cabMicPosition.load(
+                std::memory_order_relaxed)));
+    smoothedCabMicDistance.setTargetValue(
+        targetDistance);
+    smoothedCabMicBlend.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            cabMicBlend.load(
+                std::memory_order_relaxed)));
+    smoothedCabRoomSend.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            cabRoomSend.load(
+                std::memory_order_relaxed)));
+    smoothedCabPan.setTargetValue(
+        juce::jlimit(
+            -1.0f,
+            1.0f,
+            cabPan.load(
+                std::memory_order_relaxed)));
+    smoothedCabLowCoefficient.setTargetValue(
+        std::exp(
+            -2.0f
+            * juce::MathConstants<float>::pi
+            * (420.0f
+               + targetDistance * 1100.0f)
+            / static_cast<float>(
+                cachedSampleRate)));
+    smoothedCabDistanceGain.setTargetValue(
+        juce::Decibels::decibelsToGain(
+            -4.5f * targetDistance));
     const float roomCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * 38.0f / static_cast<float>(cachedSampleRate));
-    const float distanceGain = juce::Decibels::decibelsToGain(-4.5f * distance);
-    const float panLeft = pan > 0.0f ? 1.0f - pan * 0.55f : 1.0f;
-    const float panRight = pan < 0.0f ? 1.0f + pan * 0.55f : 1.0f;
     const float coefficientSmoothing = 1.0f - std::exp(-1.0f
         / static_cast<float>(juce::jmax(1.0, cachedSampleRate * 0.025)));
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const float level = smoothedCabLevelGain.getNextValue();
-        const float polarity = phaseInverted ? -level : level;
+        const float polarity =
+            level
+            * smoothedCabPolarity.getNextValue();
+        const float positionOffset =
+            smoothedCabMicPosition.getNextValue()
+            - 0.5f;
+        const float distance =
+            smoothedCabMicDistance.getNextValue();
+        const float blend =
+            smoothedCabMicBlend.getNextValue();
+        const float roomSend =
+            smoothedCabRoomSend.getNextValue();
+        const float pan =
+            smoothedCabPan.getNextValue();
+        const float lowCoeff =
+            smoothedCabLowCoefficient
+                .getNextValue();
+        const float distanceGain =
+            smoothedCabDistanceGain
+                .getNextValue();
+        const float panLeft =
+            pan > 0.0f
+                ? 1.0f - pan * 0.55f
+                : 1.0f;
+        const float panRight =
+            pan < 0.0f
+                ? 1.0f + pan * 0.55f
+                : 1.0f;
         if (cabFilterCoefficientsSmoothing)
         {
             const bool highPassSmoothing = smoothNAMRackBiquad(
@@ -6772,20 +18370,22 @@ void S13NAMRack::processCabStage(juce::AudioBuffer<float>& buffer, LoadedCabIR* 
 
 void S13NAMRack::resetPostCabOrder() noexcept
 {
-    postCabOrder0.store(namRackPostCabEQ, std::memory_order_relaxed);
-    postCabOrder1.store(namRackPostCabMod, std::memory_order_relaxed);
-    postCabOrder2.store(namRackPostCabDelay, std::memory_order_relaxed);
-    postCabOrder3.store(namRackPostCabReverb, std::memory_order_relaxed);
+    requestedPostCabOrderPacked.store(
+        packNAMRackPostCabOrder(
+            namRackPostCabEQ,
+            namRackPostCabMod,
+            namRackPostCabDelay,
+            namRackPostCabReverb),
+        std::memory_order_release);
 }
 
 void S13NAMRack::updatePostCabOrderFromUiState(const juce::var& uiState)
 {
     const auto order = normalizeNAMRackPostCabOrder(uiState);
     jassert(order.size() >= namRackPostCabModuleCount);
-    postCabOrder0.store(order[0], std::memory_order_relaxed);
-    postCabOrder1.store(order[1], std::memory_order_relaxed);
-    postCabOrder2.store(order[2], std::memory_order_relaxed);
-    postCabOrder3.store(order[3], std::memory_order_relaxed);
+    requestedPostCabOrderPacked.store(
+        packNAMRackPostCabOrder(order),
+        std::memory_order_release);
 }
 
 void S13NAMRack::resetAmpFaceplateState() noexcept
@@ -6798,27 +18398,75 @@ void S13NAMRack::processAmpFaceplateInputStage(juce::AudioBuffer<float>& buffer)
     const float gainDb = juce::jlimit(-24.0f, 24.0f, ampGainDb.load(std::memory_order_relaxed));
     const bool boostActive = ampBoost.load(std::memory_order_relaxed) >= 0.5f;
     const bool voiceActive = ampVoice.load(std::memory_order_relaxed) >= 0.5f;
+    const bool bassProfile = isBassInstrumentProfile();
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
     if (numSamples <= 0 || numChannels <= 0)
         return;
 
     const float boostDb = boostActive ? 6.0f : 0.0f;
-    smoothedAmpInputGain.setTargetValue(juce::Decibels::decibelsToGain(gainDb + boostDb));
+    const float totalGainDb = gainDb + boostDb;
+    const float targetLowCoefficient =
+        std::exp(
+            -2.0f
+            * juce::MathConstants<float>::pi
+            * (boostActive
+                ? (bassProfile ? 100.0f : 185.0f)
+                : (bassProfile ? 80.0f : 120.0f))
+            / static_cast<float>(
+                cachedSampleRate));
+    const float targetLowMix = voiceActive
+        ? (bassProfile ? 0.80f : 0.55f)
+        : (boostActive
+            ? (bassProfile ? 0.94f : 0.86f)
+            : 1.0f);
+    const float targetHighMix =
+        voiceActive
+            ? (bassProfile ? 1.18f : 1.24f)
+            : 1.0f;
+    smoothedAmpInputGain.setTargetValue(
+        juce::Decibels::decibelsToGain(totalGainDb));
+    smoothedAmpVoiceLowCoefficient
+        .setTargetValue(
+            targetLowCoefficient);
+    smoothedAmpVoiceLowMix.setTargetValue(
+        targetLowMix);
+    smoothedAmpVoiceHighMix.setTargetValue(
+        targetHighMix);
     if (! boostActive && ! voiceActive
+        && std::abs(totalGainDb) <= 0.000001f
         && ! smoothedAmpInputGain.isSmoothing()
-        && std::abs(smoothedAmpInputGain.getCurrentValue() - 1.0f) <= 0.000001f)
+        && std::abs(
+               smoothedAmpInputGain
+                   .getCurrentValue()
+               - 1.0f)
+            <= 0.000001f
+        && ! smoothedAmpVoiceLowCoefficient
+                 .isSmoothing()
+        && ! smoothedAmpVoiceLowMix.isSmoothing()
+        && ! smoothedAmpVoiceHighMix.isSmoothing()
+        && std::abs(
+               smoothedAmpVoiceLowMix
+                   .getCurrentValue()
+               - 1.0f)
+            <= 0.000001f
+        && std::abs(
+               smoothedAmpVoiceHighMix
+                   .getCurrentValue()
+               - 1.0f)
+            <= 0.000001f)
         return;
-
-    const float cutoffHz = boostActive ? 185.0f : 120.0f;
-    const float lowCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * cutoffHz / static_cast<float>(cachedSampleRate));
-    const bool tightenActive = voiceActive || boostActive;
-    const float lowMix = tightenActive ? (voiceActive ? 0.55f : 0.86f) : 1.0f;
-    const float highMix = voiceActive ? 1.24f : 1.0f;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const float gain = smoothedAmpInputGain.getNextValue();
+        const float lowCoeff =
+            smoothedAmpVoiceLowCoefficient
+                .getNextValue();
+        const float lowMix =
+            smoothedAmpVoiceLowMix.getNextValue();
+        const float highMix =
+            smoothedAmpVoiceHighMix.getNextValue();
         for (int ch = 0; ch < numChannels; ++ch)
         {
             const auto stateIndex = static_cast<size_t>(juce::jmin(ch, 1));
@@ -6837,10 +18485,12 @@ void S13NAMRack::processAmpFaceplateInputStage(juce::AudioBuffer<float>& buffer)
 void S13NAMRack::processAmpFaceplateOutputStage(juce::AudioBuffer<float>& buffer)
 {
     const float outputDb = juce::jlimit(-24.0f, 12.0f, ampOutputDb.load(std::memory_order_relaxed));
-    smoothedAmpOutputGain.setTargetValue(juce::Decibels::decibelsToGain(outputDb));
-    if (! smoothedAmpOutputGain.isSmoothing()
+    if (std::abs(outputDb) <= 0.000001f
+        && ! smoothedAmpOutputGain.isSmoothing()
         && std::abs(smoothedAmpOutputGain.getCurrentValue() - 1.0f) <= 0.000001f)
         return;
+    smoothedAmpOutputGain.setTargetValue(
+        juce::Decibels::decibelsToGain(outputDb));
 
     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
     {
@@ -6857,16 +18507,33 @@ void S13NAMRack::processAmpToneStack(juce::AudioBuffer<float>& buffer)
 {
     updateToneFiltersIfNeeded();
 
+    const bool neutral =
+        std::abs(lastBassDb) <= 0.001f
+        && std::abs(lastMidDb) <= 0.001f
+        && std::abs(lastTrebleDb) <= 0.001f
+        && std::abs(lastPresenceDb) <= 0.001f;
+    if (neutral && ! toneFilterCoefficientsSmoothing)
+        return;
+
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
     const float coefficientSmoothing = 1.0f - std::exp(-1.0f
-        / static_cast<float>(juce::jmax(1.0, cachedSampleRate * 0.025)));
+        / static_cast<float>(juce::jmax(1.0, cachedSampleRate * 0.08)));
     for (int sample = 0; sample < numSamples; ++sample)
     {
-        smoothNAMRackBiquad(lowShelfL, lowShelfR, lowShelfTarget, coefficientSmoothing);
-        smoothNAMRackBiquad(midPeakL, midPeakR, midPeakTarget, coefficientSmoothing);
-        smoothNAMRackBiquad(highShelfL, highShelfR, highShelfTarget, coefficientSmoothing);
-        smoothNAMRackBiquad(presenceShelfL, presenceShelfR, presenceShelfTarget, coefficientSmoothing);
+        if (toneFilterCoefficientsSmoothing)
+        {
+            const bool lowSmoothing = smoothNAMRackBiquad(
+                lowShelfL, lowShelfR, lowShelfTarget, coefficientSmoothing);
+            const bool midSmoothing = smoothNAMRackBiquad(
+                midPeakL, midPeakR, midPeakTarget, coefficientSmoothing);
+            const bool highSmoothing = smoothNAMRackBiquad(
+                highShelfL, highShelfR, highShelfTarget, coefficientSmoothing);
+            const bool presenceSmoothing = smoothNAMRackBiquad(
+                presenceShelfL, presenceShelfR, presenceShelfTarget, coefficientSmoothing);
+            toneFilterCoefficientsSmoothing =
+                lowSmoothing || midSmoothing || highSmoothing || presenceSmoothing;
+        }
 
         float left = buffer.getSample(0, sample);
         left = lowShelfL.processSample(left);
@@ -6891,8 +18558,29 @@ void S13NAMRack::processAmpToneStack(juce::AudioBuffer<float>& buffer)
 
 void S13NAMRack::processGraphicEQ(juce::AudioBuffer<float>& buffer)
 {
-    if (eqEnabled.load(std::memory_order_relaxed) < 0.5f)
+    const bool enabled =
+        eqEnabled.load(std::memory_order_relaxed)
+            >= 0.5f;
+    const float levelDb = juce::jlimit(
+        -12.0f,
+        12.0f,
+        eqLevelDb.load(std::memory_order_relaxed));
+    const float levelGain =
+        juce::Decibels::decibelsToGain(levelDb);
+    smoothedGraphicEqPower.setTargetValue(
+        enabled ? 1.0f : 0.0f);
+    smoothedGraphicEqLevelGain.setTargetValue(levelGain);
+    if (! enabled
+        && ! smoothedGraphicEqPower.isSmoothing()
+        && smoothedGraphicEqPower.getCurrentValue()
+            <= 0.000001f)
+    {
+        // Level belongs to the engaged EQ lane. Track edits made while the
+        // pedal is bypassed without spending callbacks on inaudible smoothing,
+        // then fade the complete shaped-and-levelled lane in on engagement.
+        smoothedGraphicEqLevelGain.setCurrentAndTargetValue(levelGain);
         return;
+    }
 
     const std::array<float, kNAMRackGraphicEqBandCount> gains {
         eq65Db.load(std::memory_order_relaxed),
@@ -6906,7 +18594,11 @@ void S13NAMRack::processGraphicEQ(juce::AudioBuffer<float>& buffer)
         eq16kDb.load(std::memory_order_relaxed)
     };
 
-    bool active = false;
+    bool active = std::abs(levelDb) > 0.001f
+        || smoothedGraphicEqLevelGain.isSmoothing()
+        || std::abs(
+               smoothedGraphicEqLevelGain.getCurrentValue()
+               - 1.0f) > 0.000001f;
     for (float gain : gains)
     {
         if (std::abs(gain) > 0.001f)
@@ -6916,11 +18608,54 @@ void S13NAMRack::processGraphicEQ(juce::AudioBuffer<float>& buffer)
         }
     }
     updateGraphicEQFiltersIfNeeded();
-    if (! active && ! graphicEqCoefficientsSmoothing)
-        return;
-
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return;
+
+    const bool crossfadePower =
+        smoothedGraphicEqPower.isSmoothing()
+        || smoothedGraphicEqPower.getCurrentValue()
+            < 0.999999f;
+    const bool hasDryCapacity =
+        graphicEqDryBuffer.getNumChannels()
+            >= numChannels
+        && graphicEqDryBuffer.getNumSamples()
+            >= numSamples;
+    if (crossfadePower && ! hasDryCapacity)
+    {
+        diagnosticAudioThreadResizeAvoidedCount.fetch_add(
+            1, std::memory_order_relaxed);
+        smoothedGraphicEqPower.skip(numSamples);
+        if (! enabled)
+        {
+            smoothedGraphicEqLevelGain.skip(numSamples);
+            return;
+        }
+    }
+    else if (crossfadePower)
+    {
+        for (int channel = 0;
+             channel < numChannels;
+             ++channel)
+        {
+            graphicEqDryBuffer.copyFrom(
+                channel,
+                0,
+                buffer,
+                channel,
+                0,
+                numSamples);
+        }
+    }
+
+    if (! active && ! graphicEqCoefficientsSmoothing)
+    {
+        if (crossfadePower)
+            smoothedGraphicEqPower.skip(numSamples);
+        return;
+    }
+
     const float coefficientSmoothing = 1.0f - std::exp(-1.0f
         / static_cast<float>(juce::jmax(1.0, cachedSampleRate * 0.025)));
     for (int sample = 0; sample < numSamples; ++sample)
@@ -6940,9 +18675,12 @@ void S13NAMRack::processGraphicEQ(juce::AudioBuffer<float>& buffer)
             graphicEqCoefficientsSmoothing = stillSmoothing;
         }
 
+        const float currentLevelGain =
+            smoothedGraphicEqLevelGain.getNextValue();
         float left = buffer.getSample(0, sample);
         for (int band = 0; band < kNAMRackGraphicEqBandCount; ++band)
             left = graphicEqL[static_cast<size_t>(band)].processSample(left);
+        left *= currentLevelGain;
         buffer.setSample(0, sample, left);
 
         if (numChannels > 1)
@@ -6950,50 +18688,199 @@ void S13NAMRack::processGraphicEQ(juce::AudioBuffer<float>& buffer)
             float right = buffer.getSample(1, sample);
             for (int band = 0; band < kNAMRackGraphicEqBandCount; ++band)
                 right = graphicEqR[static_cast<size_t>(band)].processSample(right);
+            right *= currentLevelGain;
             buffer.setSample(1, sample, right);
             for (int ch = 2; ch < numChannels; ++ch)
                 buffer.setSample(ch, sample, (left + right) * 0.5f);
+        }
+
+        if (crossfadePower && hasDryCapacity)
+        {
+            const float power =
+                smoothedGraphicEqPower
+                    .getNextValue();
+            for (int channel = 0;
+                 channel < numChannels;
+                 ++channel)
+            {
+                const float dry =
+                    graphicEqDryBuffer.getSample(
+                        channel, sample);
+                const float processed =
+                    buffer.getSample(
+                        channel, sample);
+                buffer.setSample(
+                    channel,
+                    sample,
+                    dry
+                        + (processed - dry)
+                            * power);
+            }
+        }
+    }
+}
+
+void S13NAMRack::resetCompressorToneStage(bool active) noexcept
+{
+    compressorToneLowState.fill(0.0f);
+    const float toneDb = active
+        ? juce::jlimit(
+              -6.0f,
+              6.0f,
+              compressorToneDb.load(
+                  std::memory_order_relaxed))
+        : 0.0f;
+    smoothedCompressorToneLowGain.reset(cachedSampleRate, 0.02);
+    smoothedCompressorToneHighGain.reset(cachedSampleRate, 0.02);
+    smoothedCompressorToneLowGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(-toneDb));
+    smoothedCompressorToneHighGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(toneDb));
+}
+
+void S13NAMRack::processCompressorToneStage(
+    juce::AudioBuffer<float>& buffer,
+    bool active) noexcept
+{
+    const float toneDb = active
+        ? juce::jlimit(
+              -6.0f,
+              6.0f,
+              compressorToneDb.load(
+                  std::memory_order_relaxed))
+        : 0.0f;
+    smoothedCompressorToneLowGain.setTargetValue(
+        juce::Decibels::decibelsToGain(-toneDb));
+    smoothedCompressorToneHighGain.setTargetValue(
+        juce::Decibels::decibelsToGain(toneDb));
+
+    const int numChannels = juce::jmin(2, buffer.getNumChannels());
+    const int numSamples = buffer.getNumSamples();
+    const float coefficient = juce::jlimit(
+        0.0f,
+        0.999999f,
+        compressorToneLowpassCoefficient);
+    const float feed = 1.0f - coefficient;
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const float lowGain =
+            smoothedCompressorToneLowGain.getNextValue();
+        const float highGain =
+            smoothedCompressorToneHighGain.getNextValue();
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            const float input = buffer.getSample(channel, sample);
+            float& lowState = compressorToneLowState[
+                static_cast<size_t>(channel)];
+            lowState = feed * input + coefficient * lowState;
+            const float high = input - lowState;
+            buffer.setSample(
+                channel,
+                sample,
+                lowState * lowGain + high * highGain);
         }
     }
 }
 
 void S13NAMRack::processCompressorStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    const float mix = juce::jlimit(0.0f, 1.0f, compressorMix.load(std::memory_order_relaxed));
-    const bool active = compressorEnabled.load(std::memory_order_relaxed) >= 0.5f && mix > 0.0001f;
-    if (! active)
+    const float mix = juce::jlimit(
+        0.0f,
+        1.0f,
+        compressorMix.load(std::memory_order_relaxed));
+    const bool active =
+        compressorEnabled.load(
+            std::memory_order_relaxed) >= 0.5f
+        && mix > 0.0001f;
+    if (active)
     {
-        if (compressorWasActive)
-        {
-            rackCompressor.releaseResources();
-            compressorWasActive = false;
-        }
+        compressorBypassDrainSamples =
+            juce::jmax(
+                1,
+                juce::roundToInt(
+                    static_cast<float>(
+                        juce::jmax(
+                            1.0,
+                            cachedSampleRate))
+                    * 0.025f));
+    }
+    else if (compressorBypassDrainSamples <= 0)
+    {
+        compressorWasActive = false;
         return;
     }
 
     compressorWasActive = true;
     const float comp = juce::jlimit(0.0f, 1.0f, compressorComp.load(std::memory_order_relaxed));
-    const float detail = juce::jlimit(0.0f, 1.0f, compressorDetail.load(std::memory_order_relaxed));
-    const float volumeDb = juce::jlimit(-12.0f, 12.0f, compressorVolumeDb.load(std::memory_order_relaxed));
-
-    rackCompressor.threshold.store(-6.0f - comp * 38.0f, std::memory_order_relaxed);
-    rackCompressor.ratio.store(1.2f + comp * 8.8f, std::memory_order_relaxed);
-    rackCompressor.attack.store(2.0f + (1.0f - detail) * 28.0f, std::memory_order_relaxed);
-    rackCompressor.release.store(70.0f + detail * 260.0f, std::memory_order_relaxed);
-    rackCompressor.knee.store(5.0f + (1.0f - comp) * 10.0f, std::memory_order_relaxed);
-    rackCompressor.makeupGain.store(juce::jmax(0.0f, volumeDb), std::memory_order_relaxed);
-    rackCompressor.mix.store(mix, std::memory_order_relaxed);
-    rackCompressor.style.store(1.0f, std::memory_order_relaxed);
+    const float volumeDb = juce::jlimit(
+        -18.0f,
+        18.0f,
+        compressorVolumeDb.load(std::memory_order_relaxed));
+    rackCompressor.threshold.store(
+        mapNAMRackCompressorThresholdDb(comp),
+        std::memory_order_relaxed);
+    rackCompressor.ratio.store(
+        mapNAMRackCompressorRatio(comp),
+        std::memory_order_relaxed);
+    rackCompressor.attack.store(
+        juce::jlimit(
+            0.1f,
+            50.0f,
+            compressorAttackMs.load(std::memory_order_relaxed)),
+        std::memory_order_relaxed);
+    rackCompressor.release.store(
+        juce::jlimit(
+            50.0f,
+            1000.0f,
+            compressorReleaseMs.load(std::memory_order_relaxed)),
+        std::memory_order_relaxed);
+    rackCompressor.knee.store(
+        mapNAMRackCompressorKneeDb(comp),
+        std::memory_order_relaxed);
+    rackCompressor.makeupGain.store(
+        0.0f,
+        std::memory_order_relaxed);
+    rackCompressor.mix.store(
+        active ? mix : 0.0f,
+        std::memory_order_relaxed);
+    rackCompressor.style.store(0.0f, std::memory_order_relaxed);
     rackCompressor.autoMakeup.store(0.0f, std::memory_order_relaxed);
     rackCompressor.autoRelease.store(0.0f, std::memory_order_relaxed);
-    rackCompressor.sidechainHPF.store(90.0f, std::memory_order_relaxed);
+    rackCompressor.sidechainHPF.store(
+        mapNAMRackCompressorSidechainHPF(
+            compressorSidechainHPF.load(
+                std::memory_order_relaxed)),
+        std::memory_order_relaxed);
     rackCompressor.lookaheadMs.store(0.0f, std::memory_order_relaxed);
     rackCompressor.detectorMode.store(2.0f, std::memory_order_relaxed);
     rackCompressor.stereoLink.store(1.0f, std::memory_order_relaxed);
     rackCompressor.processBlock(buffer, midi);
+    processCompressorToneStage(buffer, active);
 
-    if (volumeDb < 0.0f)
-        buffer.applyGain(juce::Decibels::decibelsToGain(volumeDb));
+    smoothedCompressorStageGain
+        .setTargetValue(
+            active
+                ? juce::Decibels::decibelsToGain(
+                      volumeDb)
+                : 1.0f);
+    applySmoothedGain(
+        buffer,
+        smoothedCompressorStageGain);
+
+    if (! active)
+    {
+        compressorBypassDrainSamples =
+            juce::jmax(
+                0,
+                compressorBypassDrainSamples
+                    - buffer.getNumSamples());
+        if (compressorBypassDrainSamples == 0)
+        {
+            rackCompressor.reset();
+            resetCompressorToneStage(false);
+            compressorWasActive = false;
+        }
+    }
 }
 
 static std::int64_t boundedNAMRackTailSamples(
@@ -7011,48 +18898,179 @@ static std::int64_t boundedNAMRackTailSamples(
         boundedSeconds * juce::jmax(1.0, sampleRate)));
 }
 
+std::int64_t S13NAMRack::getCachedReverbTailSamples(
+    float engineVersionValue,
+    int voiceIndexValue,
+    int algorithmIndexValue,
+    float roomSizeValue,
+    float wetLevelValue,
+    float earlyLevelValue,
+    bool freezeValue,
+    float preDelayMsValue,
+    float decaySecondsValue,
+    float shimmerAmountValue,
+    float shimmerRegenValue) noexcept
+{
+    const bool cacheHit =
+        reverbTailCache.valid
+        && reverbTailCache.sampleRate
+            == cachedSampleRate
+        && reverbTailCache.engineVersion
+            == engineVersionValue
+        && reverbTailCache.voiceIndex
+            == voiceIndexValue
+        && reverbTailCache.algorithmIndex
+            == algorithmIndexValue
+        && reverbTailCache.roomSize
+            == roomSizeValue
+        && reverbTailCache.wetLevel
+            == wetLevelValue
+        && reverbTailCache.earlyLevel
+            == earlyLevelValue
+        && reverbTailCache.freeze
+            == freezeValue
+        && reverbTailCache.preDelayMs
+            == preDelayMsValue
+        && reverbTailCache.decaySeconds
+            == decaySecondsValue
+        && reverbTailCache.shimmerAmount
+            == shimmerAmountValue
+        && reverbTailCache.shimmerRegen
+            == shimmerRegenValue;
+    if (cacheHit)
+        return reverbTailCache.samples;
+
+    reverbTailCache.sampleRate = cachedSampleRate;
+    reverbTailCache.engineVersion =
+        engineVersionValue;
+    reverbTailCache.voiceIndex =
+        voiceIndexValue;
+    reverbTailCache.algorithmIndex =
+        algorithmIndexValue;
+    reverbTailCache.roomSize = roomSizeValue;
+    reverbTailCache.wetLevel = wetLevelValue;
+    reverbTailCache.earlyLevel = earlyLevelValue;
+    reverbTailCache.freeze = freezeValue;
+    reverbTailCache.preDelayMs = preDelayMsValue;
+    reverbTailCache.decaySeconds =
+        decaySecondsValue;
+    reverbTailCache.shimmerAmount =
+        shimmerAmountValue;
+    reverbTailCache.shimmerRegen =
+        shimmerRegenValue;
+    reverbTailCache.samples =
+        boundedNAMRackTailSamples(
+            rackReverb.getTailLengthSeconds(),
+            cachedSampleRate);
+    reverbTailCache.valid = true;
+    reverbTailCacheMissCount.fetch_add(
+        1, std::memory_order_relaxed);
+    return reverbTailCache.samples;
+}
+
 void S13NAMRack::processTapeEchoStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    const auto publishRemainingTail = [this] () noexcept
+    {
+        const double seconds = static_cast<double>(juce::jmax<std::int64_t>(
+            0, tapeEchoTailSamplesRemaining))
+            / juce::jmax(1.0, cachedSampleRate);
+        const double boundedSeconds = juce::jlimit(0.0, 600.0, seconds);
+        float publishedSeconds = static_cast<float>(boundedSeconds);
+        if (static_cast<double>(publishedSeconds) < boundedSeconds)
+        {
+            publishedSeconds = std::nextafter(
+                publishedSeconds,
+                std::numeric_limits<float>::infinity());
+        }
+        publishedTapeEchoTailSeconds.store(
+            publishedSeconds, std::memory_order_relaxed);
+    };
     const float mix = juce::jlimit(0.0f, 1.0f, tapeEchoMix.load(std::memory_order_relaxed));
     const bool enabled =
         tapeEchoEnabled.load(std::memory_order_relaxed) >= 0.5f;
     const bool active = enabled && mix > 0.0001f;
+    const float timeMs = juce::jlimit(20.0f, 1200.0f, tapeEchoTimeMs.load(std::memory_order_relaxed));
+    const float feedbackAmount = juce::jlimit(0.0f, 0.85f, tapeEchoFeedback.load(std::memory_order_relaxed));
+    const float mod = juce::jlimit(
+        0.0f,
+        1.0f,
+        tapeEchoMod.load(std::memory_order_relaxed));
+    const float tone = juce::jlimit(0.0f, 1.0f, tapeEchoTone.load(std::memory_order_relaxed));
+    const TapeEchoTailMacroState requestedMacro {
+        timeMs,
+        juce::jlimit(
+            20.0f,
+            1200.0f,
+            timeMs * (1.01f + mod * 0.035f)),
+        feedbackAmount,
+        0.05f + mod * 0.12f,
+        mix,
+        2600.0f + tone * 11200.0f,
+        45.0f + (1.0f - tone) * 210.0f,
+        0.16f + mod * 0.46f,
+        0.82f + mod * 0.34f,
+        1.8f * (0.25f + (0.16f + mod * 0.46f) * 0.75f)
+    };
     if (! active && tapeEchoTailSamplesRemaining <= 0)
     {
+        publishedTapeEchoTailSeconds.store(0.0f, std::memory_order_relaxed);
         tapeEchoWasActive = false;
         return;
     }
-    const float timeMs = juce::jlimit(20.0f, 1200.0f, tapeEchoTimeMs.load(std::memory_order_relaxed));
-    const float feedbackAmount = juce::jlimit(0.0f, 0.85f, tapeEchoFeedback.load(std::memory_order_relaxed));
-    const float mod = juce::jlimit(0.0f, 1.0f, tapeEchoMod.load(std::memory_order_relaxed));
-    const float tone = juce::jlimit(0.0f, 1.0f, tapeEchoTone.load(std::memory_order_relaxed));
-
-    rackTapeEcho.delayTimeL.store(timeMs, std::memory_order_relaxed);
-    rackTapeEcho.delayTimeR.store(juce::jlimit(20.0f, 1200.0f, timeMs * (1.01f + mod * 0.035f)), std::memory_order_relaxed);
-    rackTapeEcho.feedback.store(feedbackAmount, std::memory_order_relaxed);
-    rackTapeEcho.crossFeed.store(0.05f + mod * 0.12f, std::memory_order_relaxed);
     if (active)
-        tapeEchoTailMix = mix;
+    {
+        tapeEchoTailMacro = requestedMacro;
+        tapeEchoTailMacroValid = true;
+    }
+    const auto& macro = active || ! tapeEchoTailMacroValid
+        ? requestedMacro
+        : tapeEchoTailMacro;
+    const bool primeFreshActiveState =
+        active
+        && ! tapeEchoWasActive
+        && tapeEchoTailSamplesRemaining <= 0;
+    rackTapeEcho.setEmbeddedModulationSmoothingSeconds(0.04);
+
+    rackTapeEcho.delayTimeL.store(macro.timeMsL, std::memory_order_relaxed);
+    rackTapeEcho.delayTimeR.store(macro.timeMsR, std::memory_order_relaxed);
+    rackTapeEcho.feedback.store(macro.feedback, std::memory_order_relaxed);
+    rackTapeEcho.crossFeed.store(macro.crossFeed, std::memory_order_relaxed);
+    if (active)
+        tapeEchoTailMix = macro.mix;
     rackTapeEcho.mix.store(
-        active ? mix : tapeEchoTailMix, std::memory_order_relaxed);
+        active ? macro.mix : tapeEchoTailMix, std::memory_order_relaxed);
     rackTapeEcho.inputSend.store(
         active ? 1.0f : 0.0f, std::memory_order_relaxed);
-    rackTapeEcho.unityDry.store(
-        active ? 0.0f : 1.0f, std::memory_order_relaxed);
+    rackTapeEcho.unityDry.store(1.0f, std::memory_order_relaxed);
     rackTapeEcho.pingPong.store(0.0f, std::memory_order_relaxed);
     rackTapeEcho.tempoSync.store(0.0f, std::memory_order_relaxed);
-    rackTapeEcho.lpfFreq.store(2600.0f + tone * 11200.0f, std::memory_order_relaxed);
-    rackTapeEcho.hpfFreq.store(45.0f + (1.0f - tone) * 210.0f, std::memory_order_relaxed);
-    rackTapeEcho.fbSaturation.store(0.16f + mod * 0.46f, std::memory_order_relaxed);
-    rackTapeEcho.stereoWidth.store(0.82f + mod * 0.34f, std::memory_order_relaxed);
+    rackTapeEcho.lpfFreq.store(macro.lowPassHz, std::memory_order_relaxed);
+    rackTapeEcho.hpfFreq.store(macro.highPassHz, std::memory_order_relaxed);
+    rackTapeEcho.fbSaturation.store(macro.saturation, std::memory_order_relaxed);
+    rackTapeEcho.stereoWidth.store(macro.stereoWidth, std::memory_order_relaxed);
     rackTapeEcho.delayMode.store(1.0f, std::memory_order_relaxed);
     rackTapeEcho.ducking.store(0.0f, std::memory_order_relaxed);
+    rackTapeEcho.wowDepthMs.store(macro.wowDepthMs, std::memory_order_relaxed);
+    rackTapeEcho.wowRateHz.store(0.37f, std::memory_order_relaxed);
+    rackTapeEcho.flutterDepthMs.store(0.0f, std::memory_order_relaxed);
+    if (primeFreshActiveState)
+        rackTapeEcho.resetTailState();
     rackTapeEcho.processBlock(buffer, midi);
 
     if (active)
     {
-        tapeEchoTailSamplesRemaining = boundedNAMRackTailSamples(
+        const auto elapsedPriorBudget = juce::jmax<std::int64_t>(
+            0,
+            tapeEchoTailSamplesRemaining
+                - static_cast<std::int64_t>(buffer.getNumSamples()));
+        const auto sendReleaseSamples = static_cast<std::int64_t>(
+            std::ceil(juce::jmax(1.0, cachedSampleRate) * 0.020));
+        const auto declaredTailSamples = boundedNAMRackTailSamples(
             rackTapeEcho.getTailLengthSeconds(), cachedSampleRate);
+        tapeEchoTailSamplesRemaining = juce::jmax(
+            elapsedPriorBudget,
+            declaredTailSamples + sendReleaseSamples);
         tapeEchoWasActive = true;
     }
     else
@@ -7065,206 +19083,40 @@ void S13NAMRack::processTapeEchoStage(juce::AudioBuffer<float>& buffer, juce::Mi
         {
             rackTapeEcho.resetTailState();
             tapeEchoTailMix = 0.0f;
+            tapeEchoTailMacroValid = false;
             tapeEchoWasActive = false;
         }
     }
+    publishRemainingTail();
 }
 
-void S13NAMRack::resetOctaverState() noexcept
-{
-    octaverDetectorDcState = 0.0f;
-    octaverDetectorLowpass1 = 0.0f;
-    octaverDetectorLowpass2 = 0.0f;
-    octaverDetectorEnvelope = 0.0f;
-    octaverDetectorGateGain = 0.0f;
-    octaverSharedSubPolarity = 1.0f;
-    octaverDetectorChannel = 0;
-    octaverDetectorArmed = false;
-    octaverDetectorGateOpen = false;
-    octaverSubSmooth.fill(0.0f);
-    octaverUpHpState.fill(0.0f);
-}
-
-void S13NAMRack::processDualOctaverStage(juce::AudioBuffer<float>& buffer)
+void S13NAMRack::processDualOctaverStage(
+    juce::AudioBuffer<float>& buffer)
 {
     const float requestedDownMix = juce::jlimit(
-        0.0f, 1.0f, octaverDownMix.load(std::memory_order_relaxed));
+        0.0f, 1.0f,
+        octaverDownMix.load(std::memory_order_relaxed));
     const float requestedUpMix = juce::jlimit(
-        0.0f, 1.0f, octaverUpMix.load(std::memory_order_relaxed));
+        0.0f, 1.0f,
+        octaverUpMix.load(std::memory_order_relaxed));
     const float requestedDirectMix = juce::jlimit(
-        0.0f, 1.25f, octaverDirectMix.load(std::memory_order_relaxed));
+        0.0f, 1.25f,
+        octaverDirectMix.load(std::memory_order_relaxed));
     const bool enabled =
         octaverEnabled.load(std::memory_order_relaxed) >= 0.5f;
-    const bool active =
-        enabled
+
+    rackPolyOctaver.setInstrumentProfile(getInstrumentProfile());
+    rackPolyOctaver.setLevels(
+        enabled ? requestedDirectMix : 1.0f,
+        enabled ? requestedDownMix : 0.0f,
+        enabled ? requestedUpMix : 0.0f);
+    rackPolyOctaver.processBlock(buffer);
+    octaverWasActive = enabled
         && (requestedDownMix > 0.0001f
             || requestedUpMix > 0.0001f
             || std::abs(requestedDirectMix - 1.0f) > 0.0001f);
-    smoothedOctaverDownMix.setTargetValue(
-        enabled ? requestedDownMix : 0.0f);
-    smoothedOctaverUpMix.setTargetValue(
-        enabled ? requestedUpMix : 0.0f);
-    smoothedOctaverDirectMix.setTargetValue(
-        enabled ? requestedDirectMix : 1.0f);
-    const bool gainsAreSmoothing =
-        smoothedOctaverDownMix.isSmoothing()
-        || smoothedOctaverUpMix.isSmoothing()
-        || smoothedOctaverDirectMix.isSmoothing();
-    if (! active && ! gainsAreSmoothing && ! octaverWasActive)
-    {
-        return;
-    }
-
-    octaverWasActive = active || gainsAreSmoothing;
-    const int numChannels = buffer.getNumChannels();
-    const int numSamples = buffer.getNumSamples();
-    if (numChannels <= 0 || numSamples <= 0)
-        return;
-
-    const float sampleRate =
-        juce::jmax(1.0f, static_cast<float>(cachedSampleRate));
-    const auto onePoleCoefficient = [sampleRate] (float frequency) noexcept
-    {
-        return 1.0f - std::exp(
-            -juce::MathConstants<float>::twoPi * frequency / sampleRate);
-    };
-    const float detectorDcCoeff = onePoleCoefficient(25.0f);
-    const float detectorLowpassCoeff = onePoleCoefficient(420.0f);
-    const float subSmoothingCoeff = onePoleCoefficient(1200.0f);
-    const float octaveUpDcCoeff = onePoleCoefficient(25.0f);
-    const float envelopeRelease =
-        std::exp(-1.0f / (sampleRate * 0.060f));
-    const float gateAttackCoeff =
-        1.0f - std::exp(-1.0f / (sampleRate * 0.002f));
-    const float gateReleaseCoeff =
-        1.0f - std::exp(-1.0f / (sampleRate * 0.030f));
-
-    for (int sample = 0; sample < numSamples; ++sample)
-    {
-        const float detectorInputs[] {
-            buffer.getSample(0, sample),
-            numChannels >= 2
-                ? buffer.getSample(1, sample)
-                : buffer.getSample(0, sample)
-        };
-        // A stereo average can erase the detector signal when a source is
-        // anti-phase. Follow one signed channel and require a meaningful
-        // magnitude advantage before switching, avoiding rapid polarity flips
-        // when the two channels are nearly equal.
-        if (numChannels >= 2)
-        {
-            const int otherChannel =
-                octaverDetectorChannel == 0 ? 1 : 0;
-            const float selectedMagnitude = std::abs(
-                detectorInputs[octaverDetectorChannel]);
-            const float otherMagnitude = std::abs(
-                detectorInputs[otherChannel]);
-            if (otherMagnitude
-                > selectedMagnitude * 1.15f + 1.0e-6f)
-            {
-                octaverDetectorChannel = otherChannel;
-            }
-        }
-        const float detectorInput =
-            detectorInputs[octaverDetectorChannel];
-        octaverDetectorDcState +=
-            (detectorInput - octaverDetectorDcState) * detectorDcCoeff;
-        const float dcFreeDetector =
-            detectorInput - octaverDetectorDcState;
-        octaverDetectorLowpass1 +=
-            (dcFreeDetector - octaverDetectorLowpass1)
-            * detectorLowpassCoeff;
-        octaverDetectorLowpass2 +=
-            (octaverDetectorLowpass1 - octaverDetectorLowpass2)
-            * detectorLowpassCoeff;
-
-        const float detectorMagnitude =
-            std::abs(octaverDetectorLowpass2);
-        octaverDetectorEnvelope = juce::jmax(
-            detectorMagnitude,
-            octaverDetectorEnvelope * envelopeRelease);
-        if (octaverDetectorGateOpen)
-        {
-            if (octaverDetectorEnvelope < 0.0005f)
-                octaverDetectorGateOpen = false;
-        }
-        else if (octaverDetectorEnvelope > 0.001f)
-        {
-            octaverDetectorGateOpen = true;
-        }
-
-        const float crossingThreshold = juce::jmax(
-            1.0e-5f, octaverDetectorEnvelope * 0.08f);
-        if (octaverDetectorGateOpen)
-        {
-            if (octaverDetectorLowpass2 < -crossingThreshold)
-                octaverDetectorArmed = true;
-            else if (octaverDetectorArmed
-                     && octaverDetectorLowpass2 > crossingThreshold)
-            {
-                octaverSharedSubPolarity =
-                    -octaverSharedSubPolarity;
-                octaverDetectorArmed = false;
-            }
-        }
-        else
-        {
-            octaverDetectorArmed = false;
-        }
-
-        const float targetGate =
-            octaverDetectorGateOpen ? 1.0f : 0.0f;
-        const float gateCoeff =
-            targetGate > octaverDetectorGateGain
-                ? gateAttackCoeff
-                : gateReleaseCoeff;
-        octaverDetectorGateGain +=
-            (targetGate - octaverDetectorGateGain) * gateCoeff;
-
-        const float downMix =
-            smoothedOctaverDownMix.getNextValue();
-        const float upMix =
-            smoothedOctaverUpMix.getNextValue();
-        const float directMix =
-            smoothedOctaverDirectMix.getNextValue();
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            const size_t stateIndex =
-                static_cast<size_t>(juce::jmin(ch, 1));
-            auto* samples = buffer.getWritePointer(ch);
-            const float dry = samples[sample];
-            const float rectified = std::abs(dry);
-            const float subTarget =
-                rectified * octaverSharedSubPolarity;
-            auto& subSmooth = octaverSubSmooth[stateIndex];
-            subSmooth +=
-                (subTarget - subSmooth) * subSmoothingCoeff;
-
-            const float octaveUpRaw = rectified * 2.0f;
-            auto& octaveUpDc = octaverUpHpState[stateIndex];
-            octaveUpDc +=
-                (octaveUpRaw - octaveUpDc) * octaveUpDcCoeff;
-            const float octaveUp = octaveUpRaw - octaveUpDc;
-            const float wet = softLimitCreativeEffect(
-                subSmooth * downMix * 0.85f
-                + octaveUp * upMix * 0.55f)
-                * octaverDetectorGateGain;
-
-            // Keep the direct branch outside the creative limiter. Direct=1
-            // is therefore sample-linear even while octave voices are active.
-            samples[sample] = dry * directMix + wet;
-        }
-    }
-
-    if (! active
-        && ! smoothedOctaverDownMix.isSmoothing()
-        && ! smoothedOctaverUpMix.isSmoothing()
-        && ! smoothedOctaverDirectMix.isSmoothing())
-    {
-        resetOctaverState();
-        octaverWasActive = false;
-    }
 }
+
 
 static bool captureEmbeddedStageDelayedDry(
     const juce::AudioBuffer<float>& input,
@@ -7317,6 +19169,211 @@ static void crossfadeEmbeddedStagePower(
     }
 }
 
+void S13NAMRack::resetChaosGateState(const bool bypassed) noexcept
+{
+    chaosGateDetectorEnvelope = 0.0f;
+    chaosGateGain = bypassed ? 1.0f : 0.0f;
+    chaosGateHoldSamplesRemaining = 0;
+    chaosGateOpen = bypassed;
+    chaosGateEnvelopeActiveForBlock = false;
+}
+
+void S13NAMRack::prepareChaosGateGainEnvelope(
+    const juce::AudioBuffer<float>& cleanIslandInput,
+    const bool distortionMayProduceOutput) noexcept
+{
+    const int numSamples = cleanIslandInput.getNumSamples();
+    const int numChannels = cleanIslandInput.getNumChannels();
+    chaosGateEnvelopeActiveForBlock = false;
+    if (numSamples <= 0 || numChannels <= 0)
+        return;
+
+    const float gateAmount = juce::jlimit(
+        0.0f, 1.0f, chaosGate.load(std::memory_order_relaxed));
+    const bool bypassed = gateAmount <= 0.0001f;
+    if (! distortionMayProduceOutput)
+    {
+        resetChaosGateState(bypassed);
+        return;
+    }
+
+    if (chaosGateGainBuffer.getNumChannels() < 1
+        || chaosGateGainBuffer.getNumSamples() < numSamples)
+    {
+        diagnosticAudioThreadResizeAvoidedCount.fetch_add(
+            1, std::memory_order_relaxed);
+        resetChaosGateState(true);
+        return;
+    }
+
+    auto* const gainEnvelope = chaosGateGainBuffer.getWritePointer(0);
+    const float embeddedSampleRate = static_cast<float>(
+        juce::jmax(1.0, cachedSampleRate * 2.0));
+    // Opening is quick enough to retain the pick transient, while bypassing a
+    // live gate setting is still dezippered. Closing is deliberately slower
+    // and follows a fixed hold so a decaying note does not chatter around the
+    // threshold. All timing is sample-domain and therefore block independent.
+    const float openingStep = 1.0f
+        / juce::jmax(1.0f, embeddedSampleRate * 0.0005f);
+
+    if (bypassed)
+    {
+        chaosGateDetectorEnvelope = 0.0f;
+        chaosGateHoldSamplesRemaining = 0;
+        chaosGateOpen = true;
+        bool anyAttenuation = false;
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            chaosGateGain = juce::jmin(
+                1.0f, chaosGateGain + openingStep);
+            if (1.0f - chaosGateGain < 1.0e-7f)
+                chaosGateGain = 1.0f;
+            gainEnvelope[sample] = chaosGateGain;
+            anyAttenuation = anyAttenuation || chaosGateGain < 1.0f;
+        }
+        chaosGateEnvelopeActiveForBlock = anyAttenuation;
+        return;
+    }
+
+    const float openThresholdDb = -84.0f + gateAmount * 48.0f;
+    const float openThreshold = juce::Decibels::decibelsToGain(
+        openThresholdDb);
+    const float closeThreshold = juce::Decibels::decibelsToGain(
+        openThresholdDb - 6.0f);
+    const float detectorRelease = std::exp(
+        -1.0f / (embeddedSampleRate * 0.015f));
+    const int holdSamples = juce::jmax(
+        1, juce::roundToInt(embeddedSampleRate * 0.035f));
+    // Once hold expires, reach -100 dB in 120 ms. An exponential close drops
+    // amplified idle fizz promptly while remaining smooth at every sample;
+    // a linear ramp would spend most of its duration near unity gain.
+    const float closingCoefficient = std::exp(
+        std::log(0.00001f)
+        / juce::jmax(1.0f, embeddedSampleRate * 0.120f));
+    const auto* const left = cleanIslandInput.getReadPointer(0);
+    const auto* const right = numChannels >= 2
+        ? cleanIslandInput.getReadPointer(1)
+        : nullptr;
+    bool anyAttenuation = false;
+
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const float inputPeak = right != nullptr
+            ? juce::jmax(std::abs(left[sample]), std::abs(right[sample]))
+            : std::abs(left[sample]);
+        chaosGateDetectorEnvelope = juce::jmax(
+            inputPeak,
+            chaosGateDetectorEnvelope * detectorRelease);
+
+        if (chaosGateOpen)
+        {
+            if (chaosGateDetectorEnvelope >= closeThreshold)
+            {
+                chaosGateHoldSamplesRemaining = holdSamples;
+            }
+            else if (chaosGateHoldSamplesRemaining > 0)
+            {
+                --chaosGateHoldSamplesRemaining;
+            }
+            else
+            {
+                chaosGateOpen = false;
+            }
+        }
+        else if (chaosGateDetectorEnvelope >= openThreshold)
+        {
+            chaosGateOpen = true;
+            chaosGateHoldSamplesRemaining = holdSamples;
+        }
+
+        if (chaosGateOpen)
+        {
+            chaosGateGain = juce::jmin(
+                1.0f, chaosGateGain + openingStep);
+            if (1.0f - chaosGateGain < 1.0e-7f)
+                chaosGateGain = 1.0f;
+        }
+        else
+        {
+            chaosGateGain *= closingCoefficient;
+            if (chaosGateGain < 1.0e-7f)
+                chaosGateGain = 0.0f;
+        }
+
+        gainEnvelope[sample] = chaosGateGain;
+        anyAttenuation = anyAttenuation || chaosGateGain < 1.0f;
+    }
+    chaosGateEnvelopeActiveForBlock = anyAttenuation;
+}
+
+void S13NAMRack::completeEmbeddedDriveOwnedFadeToBypass() noexcept
+{
+    // Once the shared island is exactly dry, neither inner smoother can
+    // remain partially wet. Reset both stages: a non-owned stage may have
+    // been toggled during the outer transition and otherwise be frozen at
+    // an intermediate value until the next pedal wakes the island.
+    smoothedPrecisionDrivePower.setCurrentAndTargetValue(0.0f);
+    precisionDriveGateEnvelope = 0.0f;
+    precisionDriveGateGain = 1.0f;
+    precisionDriveWasActive = false;
+    precisionDriveAttackLowState.fill(0.0f);
+    precisionDriveBrightLowState.fill(0.0f);
+    precisionDriveDcInputState.fill(0.0f);
+    precisionDriveDcOutputState.fill(0.0f);
+    smoothedChaosPower.setCurrentAndTargetValue(0.0f);
+    smoothedChaosWetMix.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            chaosMix.load(std::memory_order_relaxed)));
+    chaosWasActive = false;
+    chaosWeightLowState.fill(0.0f);
+    chaosCell1LowState.fill(0.0f);
+    chaosCell2LowState.fill(0.0f);
+    chaosPresenceLowState.fill(0.0f);
+    chaosDcInputState.fill(0.0f);
+    chaosDcOutputState.fill(0.0f);
+    resetChaosGateState(
+        chaosGate.load(std::memory_order_relaxed) <= 0.0001f);
+    rackChaos.resetRealtimeStateForEmbeddedBypass();
+    embeddedDriveOversamplerDrainSamplesRemaining =
+        embeddedDriveOversamplerDrainLengthSamples;
+}
+
+void S13NAMRack::drainEmbeddedDriveOversamplerState(
+    int numChannels,
+    int maximumHostSamples) noexcept
+{
+    if (embeddedDriveOversamplerDrainSamplesRemaining <= 0
+        || embeddedDriveOversampler2x == nullptr
+        || maximumHostSamples <= 0)
+    {
+        return;
+    }
+
+    const int drainChannels = juce::jlimit(1, 2, numChannels);
+    const int drainSamples = juce::jmin(
+        embeddedDriveOversamplerDrainSamplesRemaining,
+        maximumHostSamples,
+        embeddedDriveSharedDryBuffer.getNumSamples());
+    if (drainSamples <= 0
+        || embeddedDriveSharedDryBuffer.getNumChannels() < drainChannels)
+    {
+        return;
+    }
+
+    for (int channel = 0; channel < drainChannels; ++channel)
+        embeddedDriveSharedDryBuffer.clear(channel, 0, drainSamples);
+
+    auto drainBlock = juce::dsp::AudioBlock<float>(
+        embeddedDriveSharedDryBuffer)
+        .getSubsetChannelBlock(
+            0, static_cast<size_t>(drainChannels))
+        .getSubBlock(0, static_cast<size_t>(drainSamples));
+    embeddedDriveOversampler2x->processSamplesUp(drainBlock);
+    embeddedDriveOversampler2x->processSamplesDown(drainBlock);
+    embeddedDriveOversamplerDrainSamplesRemaining -= drainSamples;
+}
+
 void S13NAMRack::processEmbeddedDriveIsland(
     juce::AudioBuffer<float>& buffer,
     juce::MidiBuffer& midi)
@@ -7336,12 +19393,66 @@ void S13NAMRack::processEmbeddedDriveIsland(
             std::memory_order_relaxed) > 0.0001f;
     const bool islandActive =
         precisionActive || chaosActive;
+    const float islandPowerBeforeTarget =
+        smoothedEmbeddedDriveIslandPower.getCurrentValue();
+    const bool islandWasSmoothingBeforeTarget =
+        smoothedEmbeddedDriveIslandPower.isSmoothing();
     smoothedEmbeddedDriveIslandPower.setTargetValue(
         islandActive ? 1.0f : 0.0f);
 
     const bool islandPowerSmoothing =
         smoothedEmbeddedDriveIslandPower
             .isSmoothing();
+    // The current native-drive island always owns one latency-aligned power
+    // transition. Historical version values are migration input only; they
+    // must not select a second live pedal implementation.
+    const bool islandRising =
+        islandActive
+        && ! embeddedDriveIslandWasActive
+        && ! islandWasSmoothingBeforeTarget
+        && islandPowerBeforeTarget <= 1.0e-5f;
+    const bool islandFalling =
+        ! islandActive
+        && embeddedDriveIslandWasActive
+        && ! islandWasSmoothingBeforeTarget
+        && islandPowerBeforeTarget >= 1.0f - 1.0e-5f;
+    if (islandRising || islandFalling)
+    {
+        embeddedDriveIslandTransitionOwnsFade = true;
+        embeddedDriveIslandOwnedFadeDirection =
+            islandRising ? 1 : -1;
+        embeddedDriveIslandOwnedPrecisionWet =
+            islandRising ? precisionActive : embeddedDriveIslandWasActive
+                && precisionDriveWasActive;
+        embeddedDriveIslandOwnedChaosWet =
+            islandRising ? chaosActive : embeddedDriveIslandWasActive
+                && chaosWasActive;
+        embeddedDriveIslandOwnedChaosMix = islandRising
+            ? juce::jlimit(
+                  0.0f, 1.0f,
+                  chaosMix.load(std::memory_order_relaxed))
+            : juce::jlimit(
+                  0.0f, 1.0f,
+                  smoothedChaosWetMix.getCurrentValue());
+    }
+    else if (! islandPowerSmoothing)
+    {
+        embeddedDriveIslandTransitionOwnsFade = false;
+        embeddedDriveIslandOwnedFadeDirection = 0;
+        embeddedDriveIslandOwnedPrecisionWet = false;
+        embeddedDriveIslandOwnedChaosWet = false;
+        embeddedDriveIslandOwnedChaosMix = 1.0f;
+    }
+    embeddedDriveIslandWasActive = islandActive;
+    const bool islandSteadilyDisabled =
+        ! islandActive && ! islandPowerSmoothing;
+    if (! islandSteadilyDisabled)
+    {
+        // A very fast re-engage may arrive before the incremental bypass
+        // drain is complete. Advance at most this callback's work before the
+        // live input enters; the outer power ramp still owns the transition.
+        drainEmbeddedDriveOversamplerState(numChannels, numSamples);
+    }
     const bool writeDelayedDry =
         ! islandActive || islandPowerSmoothing;
     const bool hasDelayedDry =
@@ -7355,6 +19466,56 @@ void S13NAMRack::processEmbeddedDriveIsland(
             0,
             maximumEmbeddedDriveLatencySamples,
             embeddedDriveOversamplingLatencySamples);
+        if (islandSteadilyDisabled)
+        {
+            if (delaySamples > 0)
+            {
+                std::array<float*, 2> hostChannels {
+                    buffer.getWritePointer(0),
+                    numChannels >= 2
+                        ? buffer.getWritePointer(1)
+                        : nullptr
+                };
+                int writeIndex =
+                    embeddedDriveSharedDryWriteIndex;
+                for (int sample = 0;
+                     sample < numSamples;
+                     ++sample)
+                {
+                    for (int channel = 0;
+                         channel < numChannels;
+                         ++channel)
+                    {
+                        auto& ring =
+                            embeddedDriveSharedDryRing[
+                                static_cast<size_t>(
+                                    channel)];
+                        auto* samples =
+                            hostChannels[
+                                static_cast<size_t>(
+                                    channel)];
+                        const float input = samples[sample];
+                        samples[sample] =
+                            ring[static_cast<size_t>(
+                                writeIndex)];
+                        ring[static_cast<size_t>(
+                            writeIndex)] = input;
+                    }
+                    if (++writeIndex >= delaySamples)
+                        writeIndex = 0;
+                }
+                embeddedDriveSharedDryWriteIndex =
+                    writeIndex;
+            }
+
+            precisionDriveGateEnvelope = 0.0f;
+            precisionDriveGateGain = 1.0f;
+            precisionDriveWasActive = false;
+            chaosWasActive = false;
+            drainEmbeddedDriveOversamplerState(numChannels, numSamples);
+            return;
+        }
+
         std::array<const float*, 2> inputChannels {
             buffer.getReadPointer(0),
             numChannels >= 2
@@ -7459,6 +19620,9 @@ void S13NAMRack::processEmbeddedDriveIsland(
     }
     const bool hasHighRateCapacity =
         embeddedDriveOversampler2x != nullptr
+        && embeddedDriveOperatingGainBuffer
+                .getNumSamples() >= numSamples
+        && chaosGateGainBuffer.getNumSamples() >= numSamples * 2
         && precisionDriveBypassBuffer
                 .getNumChannels() >= numChannels
         && chaosBypassBuffer
@@ -7475,9 +19639,25 @@ void S13NAMRack::processEmbeddedDriveIsland(
             numSamples * 2);
         smoothedPrecisionDriveVolumeGain.skip(
             numSamples * 2);
+        smoothedPrecisionDriveBandGain.skip(
+            numSamples * 2);
+        smoothedPrecisionDriveAttackCoefficient.skip(
+            numSamples * 2);
+        smoothedPrecisionDriveBrightCoefficient.skip(
+            numSamples * 2);
         smoothedChaosPower.skip(numSamples * 2);
+        smoothedEmbeddedDriveOperatingGain.skip(
+            numSamples);
         smoothedEmbeddedDriveIslandPower.skip(
             numSamples);
+        const bool completedOwnedFadeToBypass =
+            ! islandActive
+            && embeddedDriveIslandOwnedFadeDirection < 0
+            && ! smoothedEmbeddedDriveIslandPower.isSmoothing()
+            && smoothedEmbeddedDriveIslandPower.getCurrentValue()
+                <= 1.0e-5f;
+        if (completedOwnedFadeToBypass)
+            completeEmbeddedDriveOwnedFadeToBypass();
         if (hasDelayedDry)
         {
             for (int channel = 0;
@@ -7496,27 +19676,29 @@ void S13NAMRack::processEmbeddedDriveIsland(
         return;
     }
 
-    if (! islandActive
-        && ! smoothedEmbeddedDriveIslandPower
-                .isSmoothing())
+    smoothedEmbeddedDriveOperatingGain.setTargetValue(
+        getNAMEmbeddedDriveOperatingGain(
+            calibrationReferenceDbu.load(
+                std::memory_order_relaxed)));
+    auto* const operatingGainEnvelope =
+        embeddedDriveOperatingGainBuffer
+            .getWritePointer(0);
+    for (int sample = 0; sample < numSamples; ++sample)
     {
+        const float operatingGain =
+            juce::jmax(
+                0.000001f,
+                smoothedEmbeddedDriveOperatingGain
+                    .getNextValue());
+        operatingGainEnvelope[sample] =
+            operatingGain;
         for (int channel = 0;
              channel < numChannels;
              ++channel)
         {
-            buffer.copyFrom(
-                channel,
-                0,
-                embeddedDriveSharedDryBuffer,
-                channel,
-                0,
-                numSamples);
+            buffer.getWritePointer(channel)[sample] *=
+                operatingGain;
         }
-        precisionDriveGateEnvelope = 0.0f;
-        precisionDriveGateGain = 1.0f;
-        precisionDriveWasActive = false;
-        chaosWasActive = false;
-        return;
     }
 
     auto hostBlock =
@@ -7541,11 +19723,39 @@ void S13NAMRack::processEmbeddedDriveIsland(
         highRateChannels.data(),
         numChannels,
         highRateSamples);
+    // The high-gain gate is keyed from the untouched, calibrated island input.
+    // This intentionally precedes Precision Drive so a stacked boost cannot
+    // hold Distortion open with noise it created itself. The resulting linked
+    // envelope is consumed after the complete Distortion circuit.
+    prepareChaosGateGainEnvelope(
+        highRateView,
+        chaosActive
+            || (embeddedDriveIslandTransitionOwnsFade
+                && embeddedDriveIslandOwnedChaosWet));
     processPrecisionDriveStage(
         highRateView, midi);
     processChaosStage(highRateView, midi);
     embeddedDriveOversampler2x
         ->processSamplesDown(hostBlock);
+
+    const auto* const inverseOperatingGainEnvelope =
+        embeddedDriveOperatingGainBuffer
+            .getReadPointer(0);
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const float outputGain =
+            1.0f
+            / juce::jmax(
+                0.000001f,
+                inverseOperatingGainEnvelope[sample]);
+        for (int channel = 0;
+             channel < numChannels;
+             ++channel)
+        {
+            buffer.getWritePointer(channel)[sample] *=
+                outputGain;
+        }
+    }
 
     if (smoothedEmbeddedDriveIslandPower.isSmoothing())
     {
@@ -7554,19 +19764,54 @@ void S13NAMRack::processEmbeddedDriveIsland(
             embeddedDriveSharedDryBuffer,
             smoothedEmbeddedDriveIslandPower);
     }
+    const bool completedOwnedFadeToBypass =
+        ! islandActive
+        && embeddedDriveIslandOwnedFadeDirection < 0
+        && ! smoothedEmbeddedDriveIslandPower.isSmoothing()
+        && smoothedEmbeddedDriveIslandPower.getCurrentValue()
+            <= 1.0e-5f;
+    if (completedOwnedFadeToBypass)
+        completeEmbeddedDriveOwnedFadeToBypass();
+    if (! smoothedEmbeddedDriveIslandPower.isSmoothing())
+    {
+        embeddedDriveIslandTransitionOwnsFade = false;
+        embeddedDriveIslandOwnedFadeDirection = 0;
+        embeddedDriveIslandOwnedPrecisionWet = false;
+        embeddedDriveIslandOwnedChaosWet = false;
+        embeddedDriveIslandOwnedChaosMix = 1.0f;
+    }
 }
 
 void S13NAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    juce::ignoreUnused(midi);
     const bool enabled = precisionDriveEnabled.load(std::memory_order_relaxed) >= 0.5f;
-    smoothedPrecisionDrivePower.setTargetValue(enabled ? 1.0f : 0.0f);
+    const bool processOwnedWet =
+        embeddedDriveIslandTransitionOwnsFade
+        && embeddedDriveIslandOwnedPrecisionWet;
+    const bool effectiveEnabled = enabled || processOwnedWet;
+    if (processOwnedWet)
+    {
+        // The shared island is already performing the latency-aligned OFF->ON
+        // transition. Pin the enabled circuit wet so two fades cannot multiply
+        // into a long, apparently bypassed attack at 8-sample callbacks.
+        smoothedPrecisionDrivePower.setCurrentAndTargetValue(1.0f);
+    }
+    else
+    {
+        smoothedPrecisionDrivePower.setTargetValue(effectiveEnabled ? 1.0f : 0.0f);
+    }
     const bool powerSmoothing =
         smoothedPrecisionDrivePower.isSmoothing();
-    if (! enabled && ! powerSmoothing)
+    if (! effectiveEnabled && ! powerSmoothing)
     {
         precisionDriveGateEnvelope = 0.0f;
         precisionDriveGateGain = 1.0f;
         precisionDriveWasActive = false;
+        precisionDriveAttackLowState.fill(0.0f);
+        precisionDriveBrightLowState.fill(0.0f);
+        precisionDriveDcInputState.fill(0.0f);
+        precisionDriveDcOutputState.fill(0.0f);
         return;
     }
     const bool canCrossfade =
@@ -7580,18 +19825,20 @@ void S13NAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buffer, ju
         diagnosticAudioThreadResizeAvoidedCount.fetch_add(
             1, std::memory_order_relaxed);
         smoothedPrecisionDrivePower.skip(buffer.getNumSamples());
-        if (! enabled)
+        if (! effectiveEnabled)
         {
             precisionDriveGateEnvelope = 0.0f;
             precisionDriveGateGain = 1.0f;
-            rackPrecisionDrive.mix.store(0.0f, std::memory_order_relaxed);
-            rackPrecisionDrive.processBlock(buffer, midi);
             precisionDriveWasActive = false;
+            precisionDriveAttackLowState.fill(0.0f);
+            precisionDriveBrightLowState.fill(0.0f);
+            precisionDriveDcInputState.fill(0.0f);
+            precisionDriveDcOutputState.fill(0.0f);
             return;
         }
     }
 
-    precisionDriveWasActive = enabled;
+    precisionDriveWasActive = effectiveEnabled;
     const float volumeDb = juce::jlimit(-12.0f, 12.0f, precisionDriveVolumeDb.load(std::memory_order_relaxed));
     const float bright = juce::jlimit(0.0f, 1.0f, precisionDriveBright.load(std::memory_order_relaxed));
     const float attack = juce::jlimit(0.0f, 1.0f, precisionDriveAttack.load(std::memory_order_relaxed));
@@ -7611,7 +19858,8 @@ void S13NAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buffer, ju
             -1.0f
             / (embeddedSampleRate
                * releaseMs * 0.001f));
-        const float closedGain = juce::jlimit(0.04f, 1.0f, 1.0f - gate * 0.92f);
+        const float closedGain = juce::jlimit(
+            0.04f, 1.0f, 1.0f - gate * 0.92f);
         auto* leftSamples =
             buffer.getWritePointer(0);
         auto* rightSamples =
@@ -7645,34 +19893,133 @@ void S13NAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buffer, ju
     else
     {
         precisionDriveGateEnvelope = 0.0f;
-        precisionDriveGateGain = 1.0f;
+        const int numSamples =
+            buffer.getNumSamples();
+        const int numChannels =
+            buffer.getNumChannels();
+        const float releaseToUnity =
+            1.0f
+            - std::exp(
+                -1.0f
+                / static_cast<float>(
+                    juce::jmax(
+                        1.0,
+                        cachedSampleRate
+                            * 2.0
+                            * 0.008)));
+        auto* leftSamples =
+            buffer.getWritePointer(0);
+        auto* rightSamples =
+            numChannels >= 2
+                ? buffer.getWritePointer(1)
+                : nullptr;
+        for (int sample = 0;
+             sample < numSamples;
+             ++sample)
+        {
+            precisionDriveGateGain +=
+                (1.0f
+                 - precisionDriveGateGain)
+                * releaseToUnity;
+            if (std::abs(
+                    1.0f
+                    - precisionDriveGateGain)
+                < 1.0e-5f)
+            {
+                precisionDriveGateGain = 1.0f;
+            }
+            leftSamples[sample] *=
+                precisionDriveGateGain;
+            if (rightSamples != nullptr)
+            {
+                rightSamples[sample] *=
+                    precisionDriveGateGain;
+            }
+        }
     }
 
-    rackPrecisionDrive.satType.store(
-        static_cast<float>(S13Saturator::SatType::Transistor),
-        std::memory_order_relaxed);
-    rackPrecisionDrive.drive.store(
-        6.0f + drive * 21.0f,
-        std::memory_order_relaxed);
-    rackPrecisionDrive.mix.store(
-        0.90f + drive * 0.10f,
-        std::memory_order_relaxed);
-    rackPrecisionDrive.toneFreq.store(2600.0f + bright * 12600.0f, std::memory_order_relaxed);
-    rackPrecisionDrive.lowCutFreq.store(70.0f + attack * attack * 760.0f, std::memory_order_relaxed);
-    rackPrecisionDrive.outputGain.store(
-        getNAMPrecisionDriveOutputGainDb(
-            false,
-            drive,
-            namEffectsDspVersion.load(
-                std::memory_order_relaxed)),
-        std::memory_order_relaxed);
-    rackPrecisionDrive.asymmetry.store(
-        0.06f + drive * 0.22f,
-        std::memory_order_relaxed);
-    rackPrecisionDrive.processBlock(buffer, midi);
+    const float embeddedSampleRate = static_cast<float>(
+        juce::jmax(1.0, cachedSampleRate * 2.0));
+    smoothedPrecisionDriveBandGain.setTargetValue(
+        getNAMPrecisionDriveBandGain(drive));
+    smoothedPrecisionDriveAttackCoefficient.setTargetValue(
+        getNAMPrecisionDriveAttackCoefficient(
+            attack,
+            embeddedSampleRate,
+            isBassInstrumentProfile()));
+    smoothedPrecisionDriveBrightCoefficient.setTargetValue(
+        getNAMPrecisionDriveBrightCoefficient(
+            bright, embeddedSampleRate));
+
+    // One-pole DC blocking follows the intentionally asymmetric cell. Its
+    // state is channel-local, as are both tone-shaping sections, so silent or
+    // unrelated stereo lanes can never cross-modulate each other.
+    const float dcCoefficient = std::exp(
+        -juce::MathConstants<float>::twoPi
+        * 18.0f / embeddedSampleRate);
+    constexpr float diodeBias = 0.025f;
+    constexpr float positiveKnee = 0.44f;
+    constexpr float negativeKnee = 0.49f;
+    // A fixed passive recovery loss leaves headroom for the current +9 dB
+    // default. It is circuit calibration, not drive-following compensation;
+    // the user Volume control still follows it as the exact final gain law.
+    constexpr float circuitOutputGain = 0.62f;
+    const float zeroResponse = positiveKnee * std::tanh(
+        diodeBias / positiveKnee);
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    std::array<float*, 2> channels {
+        buffer.getWritePointer(0),
+        numChannels >= 2
+            ? buffer.getWritePointer(1)
+            : nullptr
+    };
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const float bandGain =
+            smoothedPrecisionDriveBandGain.getNextValue();
+        const float attackCoefficient =
+            smoothedPrecisionDriveAttackCoefficient.getNextValue();
+        const float brightCoefficient =
+            smoothedPrecisionDriveBrightCoefficient.getNextValue();
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            const auto stateIndex = static_cast<size_t>(channel);
+            const float input = channels[stateIndex][sample];
+
+            auto& attackLow =
+                precisionDriveAttackLowState[stateIndex];
+            attackLow += attackCoefficient * (input - attackLow);
+            const float driven =
+                attackLow + (input - attackLow) * bandGain;
+
+            const float biased = driven + diodeBias;
+            const float knee =
+                biased >= 0.0f ? positiveKnee : negativeKnee;
+            const float clipped =
+                knee * std::tanh(biased / knee) - zeroResponse;
+
+            auto& brightLow =
+                precisionDriveBrightLowState[stateIndex];
+            brightLow += brightCoefficient * (clipped - brightLow);
+
+            const float dcOutput =
+                brightLow * circuitOutputGain
+                - precisionDriveDcInputState[stateIndex]
+                + dcCoefficient
+                    * precisionDriveDcOutputState[stateIndex];
+            precisionDriveDcInputState[stateIndex] =
+                brightLow * circuitOutputGain;
+            precisionDriveDcOutputState[stateIndex] =
+                std::isfinite(dcOutput) ? dcOutput : 0.0f;
+            channels[stateIndex][sample] =
+                precisionDriveDcOutputState[stateIndex];
+        }
+    }
 
     smoothedPrecisionDriveVolumeGain.setTargetValue(
-        juce::Decibels::decibelsToGain(volumeDb));
+        juce::Decibels::decibelsToGain(
+            volumeDb));
     applySmoothedGain(buffer, smoothedPrecisionDriveVolumeGain);
     if (powerSmoothing && canCrossfade)
         crossfadeEmbeddedStagePower(
@@ -7683,213 +20030,308 @@ void S13NAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buffer, ju
 
 void S13NAMRack::processChaosStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    const float wet = juce::jlimit(0.0f, 1.0f, chaosMix.load(std::memory_order_relaxed));
+    const float requestedWet = juce::jlimit(
+        0.0f, 1.0f, chaosMix.load(std::memory_order_relaxed));
     const float drive = juce::jlimit(0.0f, 1.0f, chaosDrive.load(std::memory_order_relaxed));
     const float tone = juce::jlimit(0.0f, 1.0f, chaosTone.load(std::memory_order_relaxed));
     const bool enabled =
         chaosEnabled.load(std::memory_order_relaxed) >= 0.5f;
-    const bool active = enabled && wet > 0.0001f;
-    smoothedChaosPower.setTargetValue(active ? 1.0f : 0.0f);
+    // Saved effect-version values are migration input only. Every restored and
+    // newly-created rack runs the one current multi-cell Distortion topology.
+    const bool processOwnedWet =
+        embeddedDriveIslandTransitionOwnsFade
+        && embeddedDriveIslandOwnedChaosWet;
+    const float wet = processOwnedWet
+        ? embeddedDriveIslandOwnedChaosMix
+        : requestedWet;
+    const bool active =
+        (enabled && requestedWet > 0.0001f) || processOwnedWet;
+    if (processOwnedWet)
+    {
+        smoothedChaosPower.setCurrentAndTargetValue(1.0f);
+    }
+    else
+    {
+        smoothedChaosPower.setTargetValue(active ? 1.0f : 0.0f);
+    }
     const bool powerSmoothing =
         smoothedChaosPower.isSmoothing();
     if (! active && ! powerSmoothing)
     {
+        chaosWeightLowState.fill(0.0f);
+        chaosCell1LowState.fill(0.0f);
+        chaosCell2LowState.fill(0.0f);
+        chaosPresenceLowState.fill(0.0f);
+        chaosBassDryLowState.fill(0.0f);
+        chaosBassWetLowState.fill(0.0f);
+        chaosDcInputState.fill(0.0f);
+        chaosDcOutputState.fill(0.0f);
         chaosWasActive = false;
         return;
     }
-    const bool canCrossfade =
-        ! powerSmoothing
+    // Capture the true stage input so Mix blends against the complete current
+    // multi-cell topology, never an already pre-emphasised intermediate.
+    const bool requiresDryCapture = true;
+    const bool hasCapturedDry =
+        ! requiresDryCapture
         || captureEmbeddedStageDelayedDry(
             buffer, chaosBypassBuffer, chaosBypassDelay);
-    if (powerSmoothing && ! canCrossfade)
+    if (requiresDryCapture && ! hasCapturedDry)
     {
         diagnosticAudioThreadResizeAvoidedCount.fetch_add(
             1, std::memory_order_relaxed);
         smoothedChaosPower.skip(buffer.getNumSamples());
+        smoothedChaosWetMix.skip(buffer.getNumSamples());
+        smoothedChaosPreGain.skip(buffer.getNumSamples());
+        smoothedChaosDensity.skip(buffer.getNumSamples());
+        smoothedChaosWeightCoefficient.skip(buffer.getNumSamples());
+        smoothedChaosInterstageLowCoefficient.skip(buffer.getNumSamples());
+        smoothedChaosPresenceCoefficient.skip(buffer.getNumSamples());
+        smoothedChaosPresenceAmount.skip(buffer.getNumSamples());
+        smoothedChaosBassLowBlend.skip(buffer.getNumSamples());
         if (! active)
         {
             rackChaos.mix.store(0.0f, std::memory_order_relaxed);
             rackChaos.processBlock(buffer, midi);
             chaosWasActive = false;
-            return;
         }
+        return;
     }
 
     chaosWasActive = active;
+    rackChaos.setLowCutBeforeSaturation(true);
+    rackChaos.setFilterSmoothingSeconds(0.080);
     rackChaos.satType.store(
         static_cast<float>(S13Saturator::SatType::DiodeClipper),
         std::memory_order_relaxed);
     rackChaos.drive.store(
-        12.0f + drive * 18.0f,
+        getNAMChaosVoice(
+            chaosMode.load(std::memory_order_relaxed), drive)
+            .diodeDriveDb,
         std::memory_order_relaxed);
-    rackChaos.mix.store(wet, std::memory_order_relaxed);
+    rackChaos.mix.store(1.0f, std::memory_order_relaxed);
     rackChaos.toneFreq.store(
-        2100.0f + tone * 12900.0f,
+        3000.0f + tone * 10500.0f,
         std::memory_order_relaxed);
-    rackChaos.lowCutFreq.store(
-        70.0f + (1.0f - tone) * 180.0f,
-        std::memory_order_relaxed);
-    rackChaos.outputGain.store(
-        -1.5f - drive * 1.5f,
-        std::memory_order_relaxed);
+    rackChaos.lowCutFreq.store(20.0f, std::memory_order_relaxed);
+    rackChaos.setZeroInputInvariantEnabled(true);
+    rackChaos.setAutomaticDriveCompensationEnabled(false);
+    rackChaos.outputGain.store(-2.5f, std::memory_order_relaxed);
     rackChaos.asymmetry.store(
         0.12f + drive * 0.24f,
         std::memory_order_relaxed);
+
+    {
+        const float embeddedSampleRate = static_cast<float>(
+            juce::jmax(1.0, cachedSampleRate * 2.0));
+        const float modeValue = juce::jlimit(
+            0.0f, 2.0f, chaosMode.load(std::memory_order_relaxed));
+        const float weight = juce::jlimit(
+            0.0f, 1.0f, chaosWeight.load(std::memory_order_relaxed));
+        const auto voice = getNAMChaosVoice(modeValue, drive);
+        const float weightCutHz =
+            isBassInstrumentProfile()
+                ? 35.0f
+                    + (1.0f - weight) * (1.0f - weight)
+                        * 165.0f
+                : 65.0f
+                    + (1.0f - weight) * (1.0f - weight)
+                        * 260.0f;
+        const float interstageLowHz = juce::jlimit(
+            3200.0f,
+            15000.0f,
+            4300.0f + tone * 7200.0f
+                + voice.presenceBias * 2400.0f);
+        smoothedChaosPreGain.setTargetValue(
+            juce::Decibels::decibelsToGain(voice.preGainDb));
+        smoothedChaosDensity.setTargetValue(voice.density);
+        smoothedChaosWeightCoefficient.setTargetValue(
+            1.0f - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * weightCutHz / embeddedSampleRate));
+        smoothedChaosInterstageLowCoefficient.setTargetValue(
+            1.0f - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * interstageLowHz / embeddedSampleRate));
+        smoothedChaosPresenceCoefficient.setTargetValue(
+            1.0f - std::exp(
+                -juce::MathConstants<float>::twoPi
+                * (1350.0f + tone * 1250.0f)
+                / embeddedSampleRate));
+        smoothedChaosPresenceAmount.setTargetValue(
+            (tone - 0.5f) * 1.15f + voice.presenceBias);
+
+        const int numSamples = buffer.getNumSamples();
+        const int numChannels = buffer.getNumChannels();
+        const float dcCoefficient = std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 18.0f / embeddedSampleRate);
+        constexpr float cell3Bias = -0.055f;
+        const float cell3BiasResponse = std::tanh(cell3Bias);
+        std::array<float*, 2> channels {
+            buffer.getWritePointer(0),
+            numChannels >= 2 ? buffer.getWritePointer(1) : nullptr
+        };
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const float preGain = smoothedChaosPreGain.getNextValue();
+            const float density = smoothedChaosDensity.getNextValue();
+            const float weightCoefficient =
+                smoothedChaosWeightCoefficient.getNextValue();
+            const float interstageLowCoefficient =
+                smoothedChaosInterstageLowCoefficient.getNextValue();
+            const float presenceCoefficient =
+                smoothedChaosPresenceCoefficient.getNextValue();
+            const float presenceAmount =
+                smoothedChaosPresenceAmount.getNextValue();
+            const float cell1Bias = 0.08f + density * 0.025f;
+            const float cell1BiasResponse = std::tanh(cell1Bias);
+            const float cell2Drive = 1.8f + density * 1.7f;
+            const float cell2LowCoefficient = juce::jlimit(
+                0.0001f, 0.2f,
+                weightCoefficient * (0.42f + density * 0.08f));
+            const float cell3Drive = 2.2f + density * 1.45f;
+            for (int channel = 0; channel < numChannels; ++channel)
+            {
+                const auto stateIndex = static_cast<size_t>(channel);
+                const float input = channels[stateIndex][sample];
+
+                // Weight is physically before the nonlinear network. A lower
+                // setting raises this HPF for a tighter response; clockwise
+                // retains progressively more low-frequency drive energy.
+                auto& weightLow = chaosWeightLowState[stateIndex];
+                weightLow += weightCoefficient * (input - weightLow);
+                const float weighted = input - weightLow;
+
+                // Cell 1: asymmetric, soft limiting. The subtraction preserves
+                // exact zero-at-zero despite its deliberate clipping bias.
+                const float cell1Input = weighted * preGain;
+                float cell1 = std::tanh(cell1Input + cell1Bias)
+                    - cell1BiasResponse;
+
+                // Filtering between nonlinear cells keeps low-frequency energy
+                // from wrapping every subsequent stage and bounds high-order
+                // content before the next clipper.
+                auto& cell1Low = chaosCell1LowState[stateIndex];
+                cell1Low += interstageLowCoefficient
+                    * (cell1 - cell1Low);
+                cell1 = cell1Low;
+
+                // Cell 2: a true hard-knee core with a finite cubic shoulder.
+                const float cell2Input = cell1 * cell2Drive;
+                const float cell2Normalised = cell2Input / 0.72f;
+                float cell2 = 0.0f;
+                if (cell2Normalised >= 1.0f)
+                    cell2 = 0.72f;
+                else if (cell2Normalised <= -1.0f)
+                    cell2 = -0.72f;
+                else
+                    cell2 = 0.72f
+                        * (1.5f * cell2Normalised
+                           - 0.5f * cell2Normalised
+                               * cell2Normalised
+                               * cell2Normalised);
+
+                // Cell 3: interstage high-pass plus asymmetric compression.
+                // It provides density independently of simply adding one more
+                // gain control in front of the existing diode kernel.
+                auto& cell2Low = chaosCell2LowState[stateIndex];
+                cell2Low += cell2LowCoefficient * (cell2 - cell2Low);
+                const float cell3Input = cell2 - cell2Low * 0.78f;
+                float cell3 = std::tanh(
+                    cell3Input * cell3Drive + cell3Bias)
+                    - cell3BiasResponse;
+
+                auto& presenceLow = chaosPresenceLowState[stateIndex];
+                presenceLow += presenceCoefficient
+                    * (cell3 - presenceLow);
+                cell3 += (cell3 - presenceLow) * presenceAmount;
+
+                // One-pole DC blocker after the deliberately asymmetric cells.
+                const float dcOutput = cell3
+                    - chaosDcInputState[stateIndex]
+                    + dcCoefficient * chaosDcOutputState[stateIndex];
+                chaosDcInputState[stateIndex] = cell3;
+                chaosDcOutputState[stateIndex] =
+                    std::isfinite(dcOutput) ? dcOutput : 0.0f;
+                channels[stateIndex][sample] =
+                    chaosDcOutputState[stateIndex];
+            }
+        }
+    }
+
     rackChaos.processBlock(buffer, midi);
+    {
+        smoothedChaosWetMix.setTargetValue(wet);
+        smoothedChaosBassLowBlend.setTargetValue(
+            isBassInstrumentProfile() ? 1.0f : 0.0f);
+        const int numSamples = buffer.getNumSamples();
+        const int numChannels = buffer.getNumChannels();
+        const float embeddedSampleRate = static_cast<float>(
+            juce::jmax(1.0, cachedSampleRate * 2.0));
+        const float bassLowCoefficient = 1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi
+            * 110.0f / embeddedSampleRate);
+        for (int sample = 0;
+             sample < numSamples;
+             ++sample)
+        {
+            const float currentWet =
+                smoothedChaosWetMix.getNextValue();
+            const float bassBlend =
+                smoothedChaosBassLowBlend.getNextValue();
+            for (int channel = 0;
+                 channel < numChannels;
+                 ++channel)
+            {
+                const auto stateIndex = static_cast<std::size_t>(channel);
+                const float clean =
+                    chaosBypassBuffer.getSample(
+                        channel, sample);
+                const float distorted =
+                    buffer.getSample(channel, sample);
+                auto& dryLow = chaosBassDryLowState[stateIndex];
+                auto& wetLow = chaosBassWetLowState[stateIndex];
+                dryLow += bassLowCoefficient * (clean - dryLow);
+                wetLow += bassLowCoefficient * (distorted - wetLow);
+                const float bassPreservedDistorted = distorted
+                    + 0.60f * (dryLow - wetLow);
+                const float profiledDistorted = distorted
+                    + (bassPreservedDistorted - distorted) * bassBlend;
+                buffer.setSample(
+                    channel,
+                    sample,
+                    clean
+                        + (profiledDistorted - clean)
+                            * currentWet);
+            }
+        }
+    }
     smoothedChaosLevelGain.setTargetValue(
         juce::Decibels::decibelsToGain(
-            juce::jlimit(-12.0f, 12.0f,
-                         chaosLevelDb.load(std::memory_order_relaxed))));
+            juce::jlimit(
+                -12.0f,
+                12.0f,
+                chaosLevelDb.load(
+                    std::memory_order_relaxed))));
     applySmoothedGain(buffer, smoothedChaosLevelGain);
-    if (powerSmoothing && canCrossfade)
+    if (chaosGateEnvelopeActiveForBlock
+        && chaosGateGainBuffer.getNumSamples() >= buffer.getNumSamples())
+    {
+        const auto* const distortionGateEnvelope =
+            chaosGateGainBuffer.getReadPointer(0);
+        const int numSamples = buffer.getNumSamples();
+        const int numChannels = buffer.getNumChannels();
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            auto* const samples = buffer.getWritePointer(channel);
+            for (int sample = 0; sample < numSamples; ++sample)
+                samples[sample] *= distortionGateEnvelope[sample];
+        }
+    }
+    if (powerSmoothing && hasCapturedDry)
         crossfadeEmbeddedStagePower(
             buffer, chaosBypassBuffer, smoothedChaosPower);
-}
-
-void S13NAMRack::resetLaserState() noexcept
-{
-    laserPhase = 0.0f;
-    laserControlPhase = 0.0f;
-    laserEnvelope = 0.0f;
-    laserFilterState.fill(0.0f);
-    laserRectifierDcState.fill(0.0f);
-}
-
-void S13NAMRack::processLaserStage(juce::AudioBuffer<float>& buffer)
-{
-    const float requestedMix = juce::jlimit(
-        0.0f, 1.0f, laserMix.load(std::memory_order_relaxed));
-    const bool active =
-        laserEnabled.load(std::memory_order_relaxed) >= 0.5f
-        && requestedMix > 0.0001f;
-    smoothedLaserMix.setTargetValue(active ? requestedMix : 0.0f);
-    if (! active
-        && ! smoothedLaserMix.isSmoothing()
-        && ! laserWasActive)
-    {
-        return;
-    }
-
-    laserWasActive = active || smoothedLaserMix.isSmoothing();
-    const int numSamples = buffer.getNumSamples();
-    const int numChannels = buffer.getNumChannels();
-    if (numSamples <= 0 || numChannels <= 0)
-        return;
-
-    const int mode = juce::jlimit(0, 5, static_cast<int>(std::round(laserMode.load(std::memory_order_relaxed))));
-    const float speedHz = juce::jlimit(0.05f, 12.0f, laserSpeedHz.load(std::memory_order_relaxed));
-    const float sensitivity = juce::jlimit(0.0f, 1.0f, laserSensitivity.load(std::memory_order_relaxed));
-    const bool envelopeMode = laserEnvelopeMode.load(std::memory_order_relaxed) >= 0.5f;
-    const bool triggerHeld = laserTrigger.load(std::memory_order_relaxed) >= 0.5f;
-    const float sampleRate = juce::jmax(1.0f, static_cast<float>(cachedSampleRate));
-    const float attackCoeff = 1.0f - std::exp(-1.0f / (sampleRate * 0.0045f));
-    const float releaseCoeff = std::exp(-1.0f / (sampleRate * (0.055f + sensitivity * 0.24f)));
-    const float lowpassCoeff = juce::jlimit(0.001f, 1.0f,
-                                           1.0f - std::exp((-2.0f * juce::MathConstants<float>::pi * (220.0f + sensitivity * 2100.0f))
-                                                          / sampleRate));
-    const float rectifierDcCoeff = juce::jlimit(
-        0.0001f,
-        1.0f,
-        1.0f
-            - std::exp(
-                (-2.0f * juce::MathConstants<float>::pi * 25.0f)
-                / sampleRate));
-    const float wetGain = 0.72f + sensitivity * 0.62f;
-
-    auto modeCarrierHz = [mode, sensitivity] (float control) noexcept
-    {
-        switch (mode)
-        {
-            case 0: return 120.0f + control * (360.0f + sensitivity * 620.0f);
-            case 1: return 42.0f + control * (140.0f + sensitivity * 280.0f);
-            case 2: return 90.0f + control * (900.0f + sensitivity * 1900.0f);
-            case 3: return 320.0f + control * (1600.0f + sensitivity * 2800.0f);
-            case 4: return 740.0f + control * (3200.0f + sensitivity * 5200.0f);
-            default: return 8.0f + control * 28.0f;
-        }
-    };
-
-    for (int sample = 0; sample < numSamples; ++sample)
-    {
-        float absPeak = 0.0f;
-        for (int ch = 0; ch < numChannels; ++ch)
-            absPeak = juce::jmax(absPeak, std::abs(buffer.getSample(ch, sample)));
-
-        if (absPeak > laserEnvelope)
-            laserEnvelope += (absPeak - laserEnvelope) * attackCoeff;
-        else
-            laserEnvelope *= releaseCoeff;
-
-        const float lfo = 0.5f
-            + 0.5f
-                * std::sin(
-                    juce::MathConstants<float>::twoPi
-                    * laserControlPhase);
-        const float envelopeControl = juce::jlimit(0.0f, 1.0f, laserEnvelope * (3.8f + sensitivity * 9.5f));
-        const float control = triggerHeld ? 1.0f : (envelopeMode ? envelopeControl : lfo);
-        laserControlPhase += speedHz / sampleRate;
-        laserControlPhase -= std::floor(laserControlPhase);
-        const float carrierHz = modeCarrierHz(control);
-        laserPhase += juce::jlimit(0.0f, 0.49f, carrierHz / sampleRate);
-        laserPhase -= std::floor(laserPhase);
-        const float carrier = std::sin(juce::MathConstants<float>::twoPi * laserPhase);
-        const float stepped = mode == 4 ? (std::round(carrier * (6.0f + sensitivity * 18.0f)) / (6.0f + sensitivity * 18.0f)) : carrier;
-        const float currentMix = smoothedLaserMix.getNextValue();
-
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            const size_t stateIndex = static_cast<size_t>(juce::jmin(ch, 1));
-            auto* samples = buffer.getWritePointer(ch);
-            const float dry = samples[sample];
-            laserFilterState[stateIndex] += (dry - laserFilterState[stateIndex]) * lowpassCoeff;
-            const float low = laserFilterState[stateIndex];
-            const float ring = dry * (mode == 4 ? stepped : carrier);
-            const float fullWave = std::abs(dry);
-            laserRectifierDcState[stateIndex] +=
-                (fullWave - laserRectifierDcState[stateIndex])
-                * rectifierDcCoeff;
-            const float rectified =
-                fullWave - laserRectifierDcState[stateIndex];
-
-            float wet = ring;
-            switch (mode)
-            {
-                case 0:
-                    wet = std::tanh(
-                        rectified
-                        * (1.5f + sensitivity * 3.2f)
-                        * (0.72f + control * 0.55f));
-                    break;
-                case 1:
-                    wet = low * (1.12f + sensitivity * 0.7f) - ring * (0.24f + control * 0.36f);
-                    break;
-                case 2:
-                    wet = ring * (0.65f + control * 0.85f) + dry * (control - 0.42f);
-                    break;
-                case 3:
-                    wet = std::tanh((ring + dry * 0.16f) * (1.5f + sensitivity * 4.6f));
-                    break;
-                case 4:
-                    wet = std::tanh(dry * (0.9f + sensitivity * 2.2f) + ring * (1.8f + control * 3.4f));
-                    break;
-                default:
-                    wet = dry * (0.62f + carrier * 0.26f) + ring * (0.22f + sensitivity * 0.24f);
-                    break;
-            }
-
-            const float limitedWet =
-                softLimitCreativeEffect(wet * wetGain);
-            samples[sample] =
-                dry * (1.0f - currentMix)
-                + limitedWet * currentMix;
-        }
-    }
-
-    if (! active && ! smoothedLaserMix.isSmoothing())
-    {
-        resetLaserState();
-        laserWasActive = false;
-    }
 }
 
 void S13NAMRack::processModulationStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -7914,44 +20356,110 @@ void S13NAMRack::processModulationStage(juce::AudioBuffer<float>& buffer, juce::
     {
         const int mode = juce::jlimit(0, 1, static_cast<int>(std::round(modulatorMode.load(std::memory_order_relaxed))));
         const float feedback = juce::jlimit(0.0f, 1.0f, modulatorFeedback.load(std::memory_order_relaxed));
-        const float autoRandom = juce::jlimit(0.0f, 1.0f, modulatorAutoRandom.load(std::memory_order_relaxed));
+        smoothedModulatorModeBlend.setTargetValue(
+            mode == 1 ? 1.0f : 0.0f);
+        const float flangerModeBlend =
+            smoothedModulatorModeBlend.skip(
+                buffer.getNumSamples());
+        smoothedModulatorAutoRandom.setTargetValue(
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                modulatorAutoRandom.load(
+                    std::memory_order_relaxed)));
+        const float autoRandom =
+            smoothedModulatorAutoRandom.skip(
+                buffer.getNumSamples());
         const float autoSpeed = juce::jlimit(0.0f, 1.0f, modulatorAutoSpeed.load(std::memory_order_relaxed));
-        const bool autoMode = modulatorPedalMode.load(std::memory_order_relaxed) >= 0.5f;
+        smoothedModulatorPedalMode.setTargetValue(
+            modulatorPedalMode.load(std::memory_order_relaxed) >= 0.5f
+                ? 1.0f
+                : 0.0f);
+        const float autoModeBlend =
+            smoothedModulatorPedalMode.skip(
+                buffer.getNumSamples());
         const float pedalPosition = juce::jlimit(0.0f, 1.0f, modulatorPedalPosition.load(std::memory_order_relaxed));
-        const float sweep = autoMode ? autoRandom : pedalPosition * 0.5f;
-        const float rateScale = autoMode ? (0.72f + autoSpeed * 1.55f) : (0.55f + pedalPosition * 1.65f);
+        const float pedalSweep = pedalPosition * 0.5f;
+        const float autoSweep =
+            autoRandom * (0.65f + autoSpeed * 0.35f);
+        const float sweep =
+            pedalSweep
+            + (autoSweep - pedalSweep) * autoModeBlend;
         const float depth = juce::jlimit(0.0f, 1.0f, chorusDepth.load(std::memory_order_relaxed));
-        const float effectiveDepth = autoMode
-            ? juce::jlimit(0.0f, 1.0f, depth + autoRandom * 0.12f)
-            : juce::jlimit(0.0f, 1.0f, depth * (0.35f + pedalPosition * 0.9f));
-        const float effectiveFeedback = autoMode
-            ? feedback
-            : juce::jlimit(0.0f, 1.0f, feedback * (0.45f + pedalPosition * 1.1f));
+        const float pedalDepth = juce::jlimit(
+            0.0f,
+            1.0f,
+            depth * (0.35f + pedalPosition * 0.9f));
+        const float autoDepth = juce::jlimit(
+            0.0f,
+            1.0f,
+            depth + autoRandom * 0.12f);
+        const float effectiveDepth =
+            pedalDepth
+            + (autoDepth - pedalDepth) * autoModeBlend;
+        const float pedalFeedback = juce::jlimit(
+            0.0f,
+            1.0f,
+            feedback * (0.45f + pedalPosition * 1.1f));
+        const float effectiveFeedback =
+            pedalFeedback
+            + (feedback - pedalFeedback) * autoModeBlend;
+        const float chorusFeedback =
+            effectiveFeedback * 0.16f;
+        const float flangerFeedback =
+            0.08f + effectiveFeedback * 0.72f;
+        const float chorusSpread =
+            0.72f + sweep * 0.18f;
         rackChorus.mode.store(static_cast<float>(mode), std::memory_order_relaxed);
-        rackChorus.rate.store(juce::jlimit(0.05f, 8.0f, chorusRateHz.load(std::memory_order_relaxed) * rateScale), std::memory_order_relaxed);
+        rackChorus.rate.store(
+            juce::jlimit(
+                0.01f, 8.0f,
+                chorusRateHz.load(std::memory_order_relaxed)),
+            std::memory_order_relaxed);
         rackChorus.depth.store(effectiveDepth, std::memory_order_relaxed);
         rackChorus.mix.store(active ? chMix : 0.0f, std::memory_order_relaxed);
         rackChorus.inputSend.store(active ? 1.0f : 0.0f, std::memory_order_relaxed);
-        rackChorus.fbAmount.store(mode == 1 ? (0.08f + effectiveFeedback * 0.72f) : (effectiveFeedback * 0.16f), std::memory_order_relaxed);
-        rackChorus.voices.store(mode == 1 ? 2.0f : 5.0f, std::memory_order_relaxed);
+        rackChorus.fbAmount.store(
+            chorusFeedback
+                + (flangerFeedback - chorusFeedback)
+                    * flangerModeBlend,
+            std::memory_order_relaxed);
+        rackChorus.voices.store(
+            5.0f + (2.0f - 5.0f) * flangerModeBlend,
+            std::memory_order_relaxed);
         rackChorus.lfoShape.store(0.0f, std::memory_order_relaxed);
-        rackChorus.randomBlend.store(autoMode ? autoRandom : 0.0f, std::memory_order_relaxed);
-        rackChorus.spread.store(mode == 1 ? 0.58f : 0.72f + sweep * 0.18f, std::memory_order_relaxed);
-        rackChorus.highCut.store(mode == 1 ? 9200.0f : 12000.0f, std::memory_order_relaxed);
-        rackChorus.lowCut.store(mode == 1 ? 120.0f : 90.0f, std::memory_order_relaxed);
+        rackChorus.randomBlend.store(
+            autoRandom * autoModeBlend,
+            std::memory_order_relaxed);
+        rackChorus.randomSlewMs.store(
+            12.0f
+                + ((120.0f - autoSpeed * 112.0f) - 12.0f)
+                    * autoModeBlend,
+            std::memory_order_relaxed);
+        rackChorus.spread.store(
+            chorusSpread
+                + (0.58f - chorusSpread)
+                    * flangerModeBlend,
+            std::memory_order_relaxed);
+        rackChorus.highCut.store(
+            12000.0f
+                + (9200.0f - 12000.0f)
+                    * flangerModeBlend,
+            std::memory_order_relaxed);
+        rackChorus.lowCut.store(
+            90.0f + (120.0f - 90.0f) * flangerModeBlend,
+            std::memory_order_relaxed);
         rackChorus.characterMode.store(
             static_cast<float>(juce::jlimit(
                 0,
-                2,
+                1,
                 static_cast<int>(std::round(
                     chorusCharacter.load(
                         std::memory_order_relaxed))))),
             std::memory_order_relaxed);
-        rackChorus.mixLaw.store(
-            namEffectsDspVersion.load(
-                std::memory_order_relaxed) >= 2
-                ? 1.0f
-                : 0.0f,
+        rackChorus.mixLaw.store(1.0f, std::memory_order_relaxed);
+        rackChorus.unityDry.store(
+            isBassInstrumentProfile() ? 1.0f : 0.0f,
             std::memory_order_relaxed);
         rackChorus.processBlock(buffer, midi);
     }
@@ -7970,44 +20478,116 @@ void S13NAMRack::processModulationStage(juce::AudioBuffer<float>& buffer, juce::
 
 void S13NAMRack::processDelayStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    const auto publishRemainingTail = [this] () noexcept
+    {
+        const double sampleRate = juce::jmax(1.0, cachedSampleRate);
+        const double seconds = static_cast<double>(juce::jmax<std::int64_t>(
+            0, delayTailSamplesRemaining)) / sampleRate;
+        const double boundedSeconds = juce::jlimit(0.0, 600.0, seconds);
+        float publishedSeconds = static_cast<float>(boundedSeconds);
+        if (static_cast<double>(publishedSeconds) < boundedSeconds)
+        {
+            publishedSeconds = std::nextafter(
+                publishedSeconds,
+                std::numeric_limits<float>::infinity());
+        }
+        publishedDelayTailSeconds.store(
+            publishedSeconds, std::memory_order_relaxed);
+    };
     const bool enabled = delayEnabled.load(std::memory_order_relaxed) >= 0.5f;
-    const float dMix = juce::jlimit(0.0f, 1.0f, delayMix.load(std::memory_order_relaxed));
-    const bool active = enabled && dMix > 0.0001f;
+    const auto requestedDelayMacro = resolveDelayMacroState(
+        delayTimeMs.load(std::memory_order_relaxed),
+        delayFeedback.load(std::memory_order_relaxed),
+        delayMix.load(std::memory_order_relaxed),
+        delayMod.load(std::memory_order_relaxed),
+        delayDucker.load(std::memory_order_relaxed),
+        delayMode.load(std::memory_order_relaxed),
+        delayPingPong.load(std::memory_order_relaxed),
+        delayTempoSync.load(std::memory_order_relaxed),
+        getInstrumentProfile());
+    const bool active = enabled && requestedDelayMacro.mix > 0.0001f;
     if (! active && delayTailSamplesRemaining <= 0)
     {
+        publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
         delayWasActive = false;
         return;
     }
+    if (active)
     {
-        const float timeMs = juce::jlimit(1.0f, 2000.0f, delayTimeMs.load(std::memory_order_relaxed));
-        const float mod = juce::jlimit(0.0f, 1.0f, delayMod.load(std::memory_order_relaxed));
-        const float ducker = juce::jlimit(0.0f, 1.0f, delayDucker.load(std::memory_order_relaxed));
-        const int mode = juce::jlimit(0, 2, static_cast<int>(std::round(delayMode.load(std::memory_order_relaxed))));
-        const bool pingPong = delayPingPong.load(std::memory_order_relaxed) >= 0.5f;
-        const bool tempoSync = delayTempoSync.load(std::memory_order_relaxed) >= 0.5f;
-        rackDelay.delayTimeL.store(timeMs, std::memory_order_relaxed);
-        rackDelay.delayTimeR.store(juce::jlimit(1.0f, 2000.0f, timeMs * (pingPong ? 1.18f : 1.0f)), std::memory_order_relaxed);
-        rackDelay.feedback.store(juce::jlimit(0.0f, 0.85f, delayFeedback.load(std::memory_order_relaxed)), std::memory_order_relaxed);
-        rackDelay.crossFeed.store(pingPong ? 0.12f + mod * 0.16f : 0.02f, std::memory_order_relaxed);
+        // Freeze the complete topology that generated the tail. Editing Time,
+        // Feedback, Mode, Instrument, or routing after bypass must not replace
+        // the draining recursion while its countdown still describes the old
+        // topology.
+        delayTailMacro = requestedDelayMacro;
+        delayTailMacroValid = true;
+    }
+    const auto& delayMacro = active || ! delayTailMacroValid
+        ? requestedDelayMacro
+        : delayTailMacro;
+    const bool primeFreshActiveState =
+        active
+        && ! delayWasActive
+        && delayTailSamplesRemaining <= 0;
+    {
+        rackDelay.delayTimeL.store(delayMacro.timeMsL, std::memory_order_relaxed);
+        rackDelay.delayTimeR.store(delayMacro.timeMsR, std::memory_order_relaxed);
+        rackDelay.feedback.store(delayMacro.feedbackGain, std::memory_order_relaxed);
+        rackDelay.crossFeed.store(delayMacro.crossFeed, std::memory_order_relaxed);
         if (active)
-            delayTailMix = dMix;
+            delayTailMix = delayMacro.mix;
         rackDelay.mix.store(
-            active ? dMix : delayTailMix, std::memory_order_relaxed);
+            active ? delayMacro.mix : delayTailMix, std::memory_order_relaxed);
         rackDelay.inputSend.store(
             active ? 1.0f : 0.0f, std::memory_order_relaxed);
         rackDelay.unityDry.store(
-            active ? 0.0f : 1.0f, std::memory_order_relaxed);
-        rackDelay.pingPong.store(pingPong ? 1.0f : 0.0f, std::memory_order_relaxed);
-        rackDelay.tempoSync.store(tempoSync ? 1.0f : 0.0f, std::memory_order_relaxed);
-        rackDelay.syncNoteL.store(juce::jlimit(0.0f, 8.0f, 2.0f + mod * 2.0f), std::memory_order_relaxed);
-        rackDelay.syncNoteR.store(juce::jlimit(0.0f, 8.0f, pingPong ? 3.0f + mod * 2.0f : 2.0f + mod * 2.0f), std::memory_order_relaxed);
-        rackDelay.lpfFreq.store(mode == 0 ? 12000.0f : (4300.0f + (1.0f - mod) * 4200.0f), std::memory_order_relaxed);
-        rackDelay.hpfFreq.store(70.0f + mod * 110.0f, std::memory_order_relaxed);
-        rackDelay.fbSaturation.store(0.08f + mod * 0.55f, std::memory_order_relaxed);
-        rackDelay.stereoWidth.store(pingPong ? 1.15f + mod * 0.18f : 0.92f, std::memory_order_relaxed);
-        rackDelay.delayMode.store(static_cast<float>(mode), std::memory_order_relaxed);
+            active && delayMacro.dryGain < 1.0f
+                ? 0.0f
+                : 1.0f,
+            std::memory_order_relaxed);
+        rackDelay.pingPong.store(delayMacro.pingPong ? 1.0f : 0.0f, std::memory_order_relaxed);
+        rackDelay.tempoSync.store(delayMacro.tempoSync ? 1.0f : 0.0f, std::memory_order_relaxed);
+        rackDelay.syncNoteL.store(static_cast<float>(delayMacro.sync.leftNoteIndex), std::memory_order_relaxed);
+        rackDelay.syncNoteR.store(static_cast<float>(delayMacro.sync.rightNoteIndex), std::memory_order_relaxed);
+        rackDelay.lpfFreq.store(delayMacro.lowPassHz, std::memory_order_relaxed);
+        rackDelay.hpfFreq.store(delayMacro.highPassHz, std::memory_order_relaxed);
+        rackDelay.fbSaturation.store(delayMacro.saturation, std::memory_order_relaxed);
+        rackDelay.stereoWidth.store(delayMacro.stereoWidth, std::memory_order_relaxed);
+        rackDelay.delayMode.store(static_cast<float>(delayMacro.mode), std::memory_order_relaxed);
         rackDelay.ducking.store(
-            active ? ducker : 0.0f, std::memory_order_relaxed);
+            active ? delayMacro.duckAmount : 0.0f, std::memory_order_relaxed);
+        rackDelay.wowDepthMs.store(delayMacro.wowDepthMs, std::memory_order_relaxed);
+        rackDelay.wowRateHz.store(delayMacro.wowRateHz, std::memory_order_relaxed);
+        rackDelay.flutterDepthMs.store(delayMacro.flutterDepthMs, std::memory_order_relaxed);
+        rackDelay.flutterRateHz.store(delayMacro.flutterRateHz, std::memory_order_relaxed);
+        rackDelay.duckAttackMs.store(delayMacro.duckAttackMs, std::memory_order_relaxed);
+        rackDelay.duckReleaseMs.store(delayMacro.duckReleaseMs, std::memory_order_relaxed);
+        rackDelay.duckMaxReduction.store(delayMacro.duckMaxReduction, std::memory_order_relaxed);
+        rackDelay.topologyControl.store(delayMacro.topologyControl, std::memory_order_relaxed);
+        rackDelay.multiFeedback.store(delayMacro.multiFeedbackGain, std::memory_order_relaxed);
+        rackDelay.dualTimeRatio.store(delayMacro.dualTimeRatio, std::memory_order_relaxed);
+        rackDelay.dualFeedback.store(delayMacro.dualFeedbackGain, std::memory_order_relaxed);
+        rackDelay.dualLowPassHz.store(delayMacro.dualLowPassHz, std::memory_order_relaxed);
+        rackDelay.dualHighPassHz.store(delayMacro.dualHighPassHz, std::memory_order_relaxed);
+        rackDelay.dualSaturation.store(delayMacro.dualSaturation, std::memory_order_relaxed);
+        rackDelay.dualModDepthMs.store(delayMacro.dualModDepthMs, std::memory_order_relaxed);
+        rackDelay.dualModRateHz.store(delayMacro.dualModRateHz, std::memory_order_relaxed);
+        if (primeFreshActiveState)
+        {
+            // Histories are logically empty after tail completion. Snap all
+            // read heads, topology/character smoothers, and derived macros to
+            // the newly selected faceplate state before accepting fresh input;
+            // otherwise an off-state Time/Mode edit could emit an obsolete
+            // early repeat while the empty engine morphs from old settings.
+            rackDelay.resetTailState();
+            const float callbackBpm = publishedTempoBpm.load(
+                std::memory_order_relaxed);
+            if (std::isfinite(callbackBpm)
+                && callbackBpm >= 10.0f)
+            {
+                rackDelay.publishTempoBpmFromAudioCallback(
+                    static_cast<double>(callbackBpm));
+            }
+        }
         rackDelay.processBlock(buffer, midi);
     }
 
@@ -8015,10 +20595,23 @@ void S13NAMRack::processDelayStage(juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         const auto dryCrossfadeSamples = static_cast<std::int64_t>(
             std::ceil(juce::jmax(1.0, cachedSampleRate) * 0.025));
-        delayTailSamplesRemaining = juce::jmax(
+        // inputSend fades with a 2 ms exponential after bypass. Its residual
+        // can still enter the delay for about 13.8 ms above -60 dB, and that
+        // final injected sample then needs the complete declared delay tail.
+        // Keep a rounded 20 ms additive horizon; max(dry fade, delay tail)
+        // alone would truncate a 2 s/no-feedback echo at exactly 2 s.
+        const auto sendReleaseSamples = static_cast<std::int64_t>(
+            std::ceil(juce::jmax(1.0, cachedSampleRate) * 0.020));
+        const auto elapsedPriorBudget = juce::jmax<std::int64_t>(
+            0,
+            delayTailSamplesRemaining
+                - static_cast<std::int64_t>(buffer.getNumSamples()));
+        const auto declaredTailSamples = boundedNAMRackTailSamples(
+            rackDelay.getTailLengthSeconds(), cachedSampleRate);
+        delayTailSamplesRemaining = std::max({
+            elapsedPriorBudget,
             dryCrossfadeSamples,
-            boundedNAMRackTailSamples(
-                rackDelay.getTailLengthSeconds(), cachedSampleRate));
+            declaredTailSamples + sendReleaseSamples });
         delayWasActive = true;
     }
     else
@@ -8031,9 +20624,11 @@ void S13NAMRack::processDelayStage(juce::AudioBuffer<float>& buffer, juce::MidiB
         {
             rackDelay.resetTailState();
             delayTailMix = 0.0f;
+            delayTailMacroValid = false;
             delayWasActive = false;
         }
     }
+    publishRemainingTail();
 }
 
 void S13NAMRack::processReverbStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -8046,62 +20641,76 @@ void S13NAMRack::processReverbStage(juce::AudioBuffer<float>& buffer, juce::Midi
         reverbWasActive = false;
         return;
     }
+    std::int64_t activeTailSamples =
+        reverbTailSamplesRemaining;
     {
-        const float tone = juce::jlimit(0.0f, 1.0f, reverbTone.load(std::memory_order_relaxed));
-        const float decaySec = juce::jlimit(0.2f, 12.0f, reverbDecaySec.load(std::memory_order_relaxed));
-        const float preDelayMs = juce::jlimit(0.0f, 500.0f, reverbPreDelayMs.load(std::memory_order_relaxed));
-        const float shimmer = juce::jlimit(
-            0.0f, 1.0f,
-            reverbShimmer.load(std::memory_order_relaxed));
-        const float wetGain = std::sin(
-            rMix * juce::MathConstants<float>::halfPi);
-        const float dryGain = std::cos(
-            rMix * juce::MathConstants<float>::halfPi);
-        rackReverb.algorithm.store(2.0f, std::memory_order_relaxed);
-        rackReverb.roomSize.store(juce::jlimit(0.18f, 0.92f, decaySec / 8.0f), std::memory_order_relaxed);
-        rackReverb.damping.store(1.0f - tone * 0.82f, std::memory_order_relaxed);
+        constexpr float rackReverbEngineVersion =
+            static_cast<float>(currentReverbEngineVersion);
+        const auto reverbMacro = resolveReverbMacroState(
+            reverbVoice.load(std::memory_order_relaxed),
+            rMix,
+            reverbDecaySec.load(std::memory_order_relaxed),
+            reverbTone.load(std::memory_order_relaxed),
+            reverbPreDelayMs.load(std::memory_order_relaxed),
+            reverbLowCutHz.load(std::memory_order_relaxed),
+            reverbShimmer.load(std::memory_order_relaxed),
+            getInstrumentProfile());
+        if (std::abs(rMix - cachedReverbMixForGains)
+                > 0.000001f
+            || ! cachedReverbUsesV3MixLaw
+            || ! cachedReverbUsesV4WetLaw)
+        {
+            cachedReverbMixForGains = rMix;
+            cachedReverbUsesV3MixLaw = true;
+            cachedReverbUsesV4WetLaw = true;
+            cachedReverbWetGain = reverbMacro.wetGain;
+            cachedReverbDryGain = reverbMacro.dryGain;
+        }
+        const float wetGain = cachedReverbWetGain;
+        const float dryGain = cachedReverbDryGain;
+        const float rackReverbWetLevel =
+            active
+                ? wetGain
+                : reverbTailWet;
+        const float rackReverbEarlyLevel =
+            active
+                ? wetGain
+                : reverbTailEarly;
         if (active)
         {
             reverbTailWet = wetGain;
-            reverbTailEarly = wetGain * 0.36f;
+            reverbTailEarly = wetGain;
         }
-        rackReverb.wetLevel.store(
-            active ? rMix : reverbTailWet, std::memory_order_relaxed);
-        rackReverb.dryLevel.store(
+        applyNAMRackReverbMacro(
+            rackReverb,
+            reverbMacro,
+            rackReverbWetLevel,
             active ? dryGain : 1.0f,
-            std::memory_order_relaxed);
-        rackReverb.width.store(1.0f, std::memory_order_relaxed);
-        rackReverb.freezeMode.store(0.0f, std::memory_order_relaxed);
-        rackReverb.preDelay.store(preDelayMs, std::memory_order_relaxed);
-        rackReverb.diffusion.store(
-            0.78f + shimmer * 0.18f,
-            std::memory_order_relaxed);
-        rackReverb.lowCut.store(
-            juce::jlimit(
-                20.0f,
-                500.0f,
-                reverbLowCutHz.load(
-                    std::memory_order_relaxed)),
-            std::memory_order_relaxed);
-        rackReverb.highCut.store(juce::jlimit(
-            2800.0f, 18000.0f, 3800.0f + tone * 9200.0f),
-            std::memory_order_relaxed);
-        rackReverb.earlyLevel.store(
-            active ? wetGain * 0.36f : reverbTailEarly,
-                                    std::memory_order_relaxed);
-        rackReverb.decayTime.store(decaySec, std::memory_order_relaxed);
-        rackReverb.shimmerAmount.store(
-            shimmer,
-            std::memory_order_relaxed);
-        rackReverb.inputSend.store(
-            active ? 1.0f : 0.0f, std::memory_order_relaxed);
+            rackReverbEarlyLevel,
+            active);
+        if (active)
+        {
+            activeTailSamples =
+                getCachedReverbTailSamples(
+                    rackReverbEngineVersion,
+                    reverbMacro.voice,
+                    reverbMacro.algorithmIndex,
+                    reverbMacro.roomSize,
+                    rackReverbWetLevel,
+                    rackReverbEarlyLevel,
+                    false,
+                    reverbMacro.preDelayMs,
+                    reverbMacro.decaySeconds,
+                    reverbMacro.shimmerAmount,
+                    reverbMacro.shimmerRegen);
+        }
         rackReverb.processBlock(buffer, midi);
     }
 
     if (active)
     {
-        reverbTailSamplesRemaining = boundedNAMRackTailSamples(
-            rackReverb.getTailLengthSeconds(), cachedSampleRate);
+        reverbTailSamplesRemaining =
+            activeTailSamples;
         reverbWasActive = true;
     }
     else
@@ -8110,6 +20719,10 @@ void S13NAMRack::processReverbStage(juce::AudioBuffer<float>& buffer, juce::Midi
             0,
             reverbTailSamplesRemaining
                 - static_cast<std::int64_t>(buffer.getNumSamples()));
+        if (rackReverb.isTailSilent())
+        {
+            reverbTailSamplesRemaining = 0;
+        }
         if (reverbTailSamplesRemaining == 0)
         {
             rackReverb.resetTailState();
@@ -8122,12 +20735,70 @@ void S13NAMRack::processReverbStage(juce::AudioBuffer<float>& buffer, juce::Midi
 
 void S13NAMRack::processPostFX(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    const int order[namRackPostCabModuleCount] = {
-        postCabOrder0.load(std::memory_order_relaxed),
-        postCabOrder1.load(std::memory_order_relaxed),
-        postCabOrder2.load(std::memory_order_relaxed),
-        postCabOrder3.load(std::memory_order_relaxed)
-    };
+    const auto requestedOrder =
+        sanitizeNAMRackPostCabOrder(
+            requestedPostCabOrderPacked.load(
+                std::memory_order_acquire));
+    if (postCabOrderTransitionStage == 0)
+    {
+        if (requestedOrder
+            != activePostCabOrderPacked)
+        {
+            pendingPostCabOrderPacked =
+                requestedOrder;
+            smoothedPostCabProcessedMix
+                .setTargetValue(0.0f);
+            postCabOrderTransitionStage = 1;
+        }
+    }
+    else if (postCabOrderTransitionStage == 1)
+    {
+        if (requestedOrder
+            == activePostCabOrderPacked)
+        {
+            // A drag that returns to the active permutation can reverse the
+            // fade without committing a redundant topology change.
+            smoothedPostCabProcessedMix
+                .setTargetValue(1.0f);
+            postCabOrderTransitionStage = 2;
+        }
+        else
+        {
+            // Coalesce rapid drag/drop publications. Only the latest complete
+            // permutation is committed after the output has reached dry.
+            pendingPostCabOrderPacked =
+                requestedOrder;
+        }
+    }
+    else if (requestedOrder
+             != activePostCabOrderPacked)
+    {
+        pendingPostCabOrderPacked =
+            requestedOrder;
+        smoothedPostCabProcessedMix
+            .setTargetValue(0.0f);
+        postCabOrderTransitionStage = 1;
+    }
+
+    const bool transitionActive =
+        postCabOrderTransitionStage != 0;
+    const bool hasDryBuffer =
+        postCabDryBuffer.getNumChannels()
+            >= buffer.getNumChannels()
+        && postCabDryBuffer.getNumSamples()
+            >= buffer.getNumSamples();
+    if (transitionActive && hasDryBuffer)
+    {
+        for (int channel = 0;
+             channel < buffer.getNumChannels();
+             ++channel)
+        {
+            postCabDryBuffer.copyFrom(
+                channel, 0, buffer, channel, 0,
+                buffer.getNumSamples());
+        }
+    }
+
     bool seen[namRackPostCabModuleCount] = {};
 
     auto processModule = [&] (int moduleId)
@@ -8155,13 +20826,78 @@ void S13NAMRack::processPostFX(juce::AudioBuffer<float>& buffer, juce::MidiBuffe
         }
     };
 
-    for (int moduleId : order)
-        processModule(moduleId);
+    for (int position = 0;
+         position < namRackPostCabModuleCount;
+         ++position)
+    {
+        processModule(
+            unpackNAMRackPostCabModule(
+                activePostCabOrderPacked,
+                position));
+    }
 
     processModule(namRackPostCabEQ);
     processModule(namRackPostCabMod);
     processModule(namRackPostCabDelay);
     processModule(namRackPostCabReverb);
+
+    if (! transitionActive || ! hasDryBuffer)
+        return;
+
+    for (int sample = 0;
+         sample < buffer.getNumSamples();
+         ++sample)
+    {
+        const float processedMix =
+            smoothedPostCabProcessedMix
+                .getNextValue();
+        const float dryMix =
+            1.0f - processedMix;
+        for (int channel = 0;
+             channel < buffer.getNumChannels();
+             ++channel)
+        {
+            buffer.setSample(
+                channel,
+                sample,
+                postCabDryBuffer.getSample(
+                    channel, sample)
+                    * dryMix
+                + buffer.getSample(
+                    channel, sample)
+                    * processedMix);
+        }
+    }
+
+    if (postCabOrderTransitionStage == 1
+        && ! smoothedPostCabProcessedMix
+                .isSmoothing()
+        && smoothedPostCabProcessedMix
+               .getCurrentValue()
+            <= 0.000001f)
+    {
+        // Re-read only at the dry point so a rapid drag commits the newest
+        // coherent permutation exactly once, never an intermediate torn order.
+        pendingPostCabOrderPacked =
+            sanitizeNAMRackPostCabOrder(
+                requestedPostCabOrderPacked.load(
+                    std::memory_order_acquire));
+        activePostCabOrderPacked =
+            pendingPostCabOrderPacked;
+        smoothedPostCabProcessedMix
+            .setTargetValue(1.0f);
+        postCabOrderTransitionStage = 2;
+    }
+    else if (
+        postCabOrderTransitionStage == 2
+        && ! smoothedPostCabProcessedMix
+                .isSmoothing()
+        && smoothedPostCabProcessedMix
+               .getCurrentValue()
+            >= 0.999999f)
+    {
+        postCabOrderTransitionStage = 0;
+    }
 }
 
 bool S13NAMRack::renderAuditionSourceIfNeeded(juce::AudioBuffer<float>& buffer, float inputPeak)
@@ -8172,20 +20908,20 @@ bool S13NAMRack::renderAuditionSourceIfNeeded(juce::AudioBuffer<float>& buffer, 
         return false;
 
     const bool sourceEnabled = auditionSource.load(std::memory_order_relaxed) >= 0.5f;
-    if (! sourceEnabled)
-    {
-        auditionSourceSample += static_cast<uint64_t>(numSamples);
-        return false;
-    }
-
     constexpr float liveInputThreshold = 0.001f; // about -60 dBFS peak
-    if (inputPeak > liveInputThreshold)
+    const bool sourceRequested =
+        sourceEnabled && inputPeak <= liveInputThreshold;
+    smoothedAuditionSourceMix.setTargetValue(
+        sourceRequested ? 1.0f : 0.0f);
+    const bool sourceTransitionAudible =
+        sourceRequested
+        || smoothedAuditionSourceMix.isSmoothing()
+        || smoothedAuditionSourceMix.getCurrentValue() > 1.0e-6f;
+    if (! sourceTransitionAudible)
     {
         auditionSourceSample += static_cast<uint64_t>(numSamples);
         return false;
     }
-
-    buffer.clear();
 
     constexpr std::array<int, 16> notes { 40, 45, 52, 57, 59, 57, 52, 45, 43, 47, 52, 55, 59, 55, 52, 47 };
     constexpr std::array<float, 16> velocities { 0.72f, 0.62f, 0.68f, 0.58f, 0.74f, 0.55f, 0.64f, 0.52f,
@@ -8202,37 +20938,50 @@ bool S13NAMRack::renderAuditionSourceIfNeeded(juce::AudioBuffer<float>& buffer, 
         const double phraseTime = std::fmod(time, phraseSec);
         const int step = juce::jlimit(0, static_cast<int>(notes.size()) - 1, static_cast<int>(phraseTime / stepSec));
         const double age = phraseTime - static_cast<double>(step) * stepSec;
-        if (age > stepSec * 0.86)
-            continue;
-
-        const int note = notes[static_cast<size_t>(step)];
-        const float freq = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(note));
-        const float phase = static_cast<float>(std::fmod(time * static_cast<double>(freq), 1.0));
-        const float noteBright = juce::jlimit(0.65f, 1.3f, 0.82f + (static_cast<float>(note) - 48.0f) * 0.01f);
-        const float attack = age < 0.006 ? static_cast<float>(age / 0.006) : 1.0f;
-        const float decay = std::exp(static_cast<float>(-age / (0.34 + 0.04 * (step % 3))));
-        const float release = age > stepSec * 0.68 ? juce::jlimit(0.0f, 1.0f, static_cast<float>((stepSec * 0.86 - age) / (stepSec * 0.18))) : 1.0f;
-        const float envelope = attack * decay * release;
-        const float fundamental = std::sin(twoPi * phase) * 0.68f;
-        const float partial2 = std::sin(twoPi * (phase * 2.01f + 0.08f)) * 0.26f * nyquistFade(freq * 2.01f, static_cast<float>(sr));
-        const float partial3 = std::sin(twoPi * (phase * 3.02f + 0.27f)) * 0.13f * nyquistFade(freq * 3.02f, static_cast<float>(sr));
-        const float pick = builtinNoise(static_cast<int>(absoluteSample & 0x7fffffff), note + 19)
-            * std::exp(static_cast<float>(-age / 0.014)) * 0.045f;
-        const float voice = (fundamental + partial2 + partial3 + pick) * envelope * velocities[static_cast<size_t>(step)] * noteBright * 0.115f;
-        const float pan = juce::jlimit(-0.42f, 0.42f, (static_cast<float>((step % 6)) - 2.5f) * 0.105f);
-        const float leftGain = std::sqrt(0.5f * (1.0f - pan));
-        const float rightGain = std::sqrt(0.5f * (1.0f + pan));
-
-        if (numChannels == 1)
+        float voice = 0.0f;
+        float leftGain = 0.707f;
+        float rightGain = 0.707f;
+        if (age <= stepSec * 0.86)
         {
-            buffer.addSample(0, sample, voice * 0.707f);
+            const int note = notes[static_cast<size_t>(step)];
+            const float freq = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(note));
+            const float phase = static_cast<float>(std::fmod(time * static_cast<double>(freq), 1.0));
+            const float noteBright = juce::jlimit(0.65f, 1.3f, 0.82f + (static_cast<float>(note) - 48.0f) * 0.01f);
+            const float attack = age < 0.006 ? static_cast<float>(age / 0.006) : 1.0f;
+            const float decay = std::exp(static_cast<float>(-age / (0.34 + 0.04 * (step % 3))));
+            const float release = age > stepSec * 0.68 ? juce::jlimit(0.0f, 1.0f, static_cast<float>((stepSec * 0.86 - age) / (stepSec * 0.18))) : 1.0f;
+            const float envelope = attack * decay * release;
+            const float fundamental = std::sin(twoPi * phase) * 0.68f;
+            const float partial2 = std::sin(twoPi * (phase * 2.01f + 0.08f)) * 0.26f * nyquistFade(freq * 2.01f, static_cast<float>(sr));
+            const float partial3 = std::sin(twoPi * (phase * 3.02f + 0.27f)) * 0.13f * nyquistFade(freq * 3.02f, static_cast<float>(sr));
+            const float pick = builtinNoise(static_cast<int>(absoluteSample & 0x7fffffff), note + 19)
+                * std::exp(static_cast<float>(-age / 0.014)) * 0.045f;
+            voice = (fundamental + partial2 + partial3 + pick) * envelope * velocities[static_cast<size_t>(step)] * noteBright * 0.115f;
+            const float pan = juce::jlimit(-0.42f, 0.42f, (static_cast<float>((step % 6)) - 2.5f) * 0.105f);
+            leftGain = std::sqrt(0.5f * (1.0f - pan));
+            rightGain = std::sqrt(0.5f * (1.0f + pan));
         }
-        else
+
+        const float sourceMix =
+            smoothedAuditionSourceMix.getNextValue();
+        for (int channel = 0; channel < numChannels; ++channel)
         {
-            buffer.addSample(0, sample, voice * leftGain);
-            buffer.addSample(1, sample, voice * rightGain);
-            for (int ch = 2; ch < numChannels; ++ch)
-                buffer.addSample(ch, sample, voice * 0.5f);
+            const float sourceSample =
+                numChannels == 1
+                    ? voice * 0.707f
+                    : channel == 0
+                        ? voice * leftGain
+                        : channel == 1
+                            ? voice * rightGain
+                            : voice * 0.5f;
+            const float liveSample =
+                buffer.getSample(channel, sample);
+            buffer.setSample(
+                channel,
+                sample,
+                liveSample
+                    + (sourceSample - liveSample)
+                        * sourceMix);
         }
     }
 
@@ -8240,25 +20989,323 @@ bool S13NAMRack::renderAuditionSourceIfNeeded(juce::AudioBuffer<float>& buffer, 
     return true;
 }
 
-void S13NAMRack::processNAMModelCore(juce::AudioBuffer<float>& buffer,
-                                     LoadedNAMModel* const model,
-                                     const float* const mixEnvelope,
-                                     bool pedalSlot)
+S13NAMRack::NAMOutputSafetyGuardResult
+S13NAMRack::applyNAMOutputSafetyGuard(
+    juce::AudioBuffer<float>& modelOutput,
+    int modelOutputChannels,
+    int numSamplesToProcess,
+    std::array<float, 2>& previousRawOutput,
+    std::array<bool, 2>& hasPreviousRawOutput) noexcept
 {
-    if (model == nullptr || model->dsp == nullptr)
-        return;
-    if (model->processFaulted.load(std::memory_order_relaxed))
+    NAMOutputSafetyGuardResult result;
+    const int numSamples = juce::jlimit(
+        0,
+        modelOutput.getNumSamples(),
+        numSamplesToProcess);
+    const int numChannels = juce::jlimit(
+        0,
+        2,
+        juce::jmin(
+            modelOutputChannels,
+            modelOutput.getNumChannels()));
+    if (numSamples <= 0 || numChannels <= 0)
+        return result;
+
+    auto* const left = modelOutput.getWritePointer(0);
+    auto* const right =
+        numChannels > 1
+            ? modelOutput.getWritePointer(1)
+            : nullptr;
+    constexpr float kneeToCeiling =
+        namOutputSafetyCeiling
+        - namOutputSafetyKnee;
+    constexpr float kneeToCeilingSquared =
+        kneeToCeiling * kneeToCeiling;
+
+    for (int sample = 0; sample < numSamples; ++sample)
     {
-        processModelDryDelay(buffer, *model);
+        const float rawLeft = left[sample];
+        const bool leftIsFinite =
+            std::isfinite(rawLeft);
+        const float finiteLeft =
+            leftIsFinite ? rawLeft : 0.0f;
+        float finiteRight = 0.0f;
+        bool rightIsFinite = true;
+        if (right != nullptr)
+        {
+            const float rawRight = right[sample];
+            rightIsFinite = std::isfinite(rawRight);
+            finiteRight =
+                rightIsFinite ? rawRight : 0.0f;
+        }
+
+        const float linkedMagnitude =
+            right != nullptr
+                ? juce::jmax(
+                      std::abs(finiteLeft),
+                      std::abs(finiteRight))
+                : std::abs(finiteLeft);
+        result.maximumRawPeak =
+            juce::jmax(
+                result.maximumRawPeak,
+                linkedMagnitude);
+
+        if (hasPreviousRawOutput[0])
+        {
+            result.maximumRawDelta =
+                juce::jmax(
+                    result.maximumRawDelta,
+                    std::abs(
+                        finiteLeft
+                        - previousRawOutput[0]));
+        }
+        previousRawOutput[0] = finiteLeft;
+        hasPreviousRawOutput[0] = true;
+
+        if (right != nullptr)
+        {
+            if (hasPreviousRawOutput[1])
+            {
+                result.maximumRawDelta =
+                    juce::jmax(
+                        result.maximumRawDelta,
+                        std::abs(
+                            finiteRight
+                            - previousRawOutput[1]));
+            }
+            previousRawOutput[1] = finiteRight;
+            hasPreviousRawOutput[1] = true;
+        }
+
+        const bool invalidSampleFrame =
+            ! leftIsFinite || ! rightIsFinite;
+        if (! invalidSampleFrame
+            && linkedMagnitude
+                <= namOutputSafetyKnee)
+        {
+            continue;
+        }
+
+        float linkedGain = 1.0f;
+        if (linkedMagnitude
+            > namOutputSafetyKnee)
+        {
+            const float excess =
+                linkedMagnitude
+                - namOutputSafetyKnee;
+            const float protectedMagnitude =
+                namOutputSafetyCeiling
+                - kneeToCeilingSquared
+                    / (kneeToCeiling + excess);
+            linkedGain =
+                protectedMagnitude
+                / linkedMagnitude;
+        }
+        else if (linkedMagnitude <= 0.0f)
+        {
+            linkedGain = 0.0f;
+        }
+
+        left[sample] = finiteLeft * linkedGain;
+        if (right != nullptr)
+            right[sample] = finiteRight * linkedGain;
+        ++result.guardedSampleFrameCount;
+    }
+
+    return result;
+}
+
+void S13NAMRack::processNAMModelCore(
+    juce::AudioBuffer<float>& buffer,
+    LoadedNAMModel* const model,
+    const float* const mixEnvelope,
+    bool pedalSlot,
+    int serialMonoDryChannel)
+{
+    if (model == nullptr)
+        return;
+
+    const int routingMode = activeInputRoutingMode;
+    const int numSamples = buffer.getNumSamples();
+    const bool useDualMono =
+        routingMode == 2
+        && buffer.getNumChannels() >= 2
+        && numSamples > 0
+        && model->inputChannels == 1
+        && model->outputChannels == 1
+        && model->dualMonoLane != nullptr;
+    if (! useDualMono)
+    {
+        processNAMModelLaneCore(
+            buffer,
+            model,
+            mixEnvelope,
+            pedalSlot,
+            serialMonoDryChannel);
         return;
     }
 
+    auto& rightLane = *model->dualMonoLane;
+    const bool pairFaulted =
+        model->dsp == nullptr
+        || rightLane.dsp == nullptr
+        || model->processFaulted.load(
+               std::memory_order_relaxed)
+        || rightLane.processFaulted.load(
+            std::memory_order_relaxed);
+    const auto processPairDry = [&] (
+        juce::AudioBuffer<float>& target) noexcept
+    {
+        for (int channel = 0; channel < 2; ++channel)
+        {
+            float* channelPointer =
+                target.getWritePointer(channel);
+            juce::AudioBuffer<float> laneView(
+                &channelPointer, 1, numSamples);
+            auto& lane = channel == 0
+                ? *model
+                : rightLane;
+            processModelDryDelay(
+                laneView, lane, numSamples);
+        }
+    };
+    if (pairFaulted)
+    {
+        // A dual owner is one audible unit. Once either lane is unusable, keep
+        // both flags coherent and advance both latency-matched dry paths once.
+        model->processFaulted.store(
+            true, std::memory_order_relaxed);
+        rightLane.processFaulted.store(
+            true, std::memory_order_relaxed);
+        processPairDry(buffer);
+        return;
+    }
+
+    const bool stagingAvailable =
+        dualNAMStagingBuffer.getNumChannels() >= 2
+        && dualNAMStagingBuffer.getNumSamples() >= numSamples
+        && dualNAMDelayedDryBuffer.getNumChannels() >= 2
+        && dualNAMDelayedDryBuffer.getNumSamples() >= numSamples;
+    if (! stagingAvailable)
+    {
+        // Prepared capacity is a configuration invariant. Never allocate in
+        // the callback just to preserve it; fall back to the coherent pair dry
+        // path and let the existing diagnostics expose the host mismatch.
+        diagnosticAudioThreadResizeAvoidedCount.fetch_add(
+            1, std::memory_order_relaxed);
+        diagnosticOversizeBypassCount.fetch_add(
+            1, std::memory_order_relaxed);
+        processPairDry(buffer);
+        return;
+    }
+
+    dualNAMStagingBuffer.copyFrom(
+        0, 0, buffer, 0, 0, numSamples);
+    dualNAMStagingBuffer.copyFrom(
+        1, 0, buffer, 1, 0, numSamples);
+
+    // NAM DSP objects are stateful. Evaluate both separately constructed
+    // owners against staged host lanes while reusing the Rack's prepared NAM
+    // scratch. Nothing reaches the host buffer until the pair has completed.
+    float* leftPointer =
+        dualNAMStagingBuffer.getWritePointer(0);
+    juce::AudioBuffer<float> leftView(
+        &leftPointer, 1, numSamples);
+    processNAMModelLaneCore(
+        leftView,
+        model,
+        mixEnvelope,
+        pedalSlot,
+        -1,
+        dualNAMDelayedDryBuffer.getWritePointer(0));
+
+    if (model->processFaulted.load(
+            std::memory_order_relaxed))
+    {
+        rightLane.processFaulted.store(
+            true, std::memory_order_relaxed);
+        float* rightPointer =
+            dualNAMStagingBuffer.getWritePointer(1);
+        juce::AudioBuffer<float> rightView(
+            &rightPointer, 1, numSamples);
+        processModelDryDelay(
+            rightView, rightLane, numSamples);
+        dualNAMDelayedDryBuffer.copyFrom(
+            1, 0, rightView, 0, 0, numSamples);
+    }
+    else
+    {
+        float* rightPointer =
+            dualNAMStagingBuffer.getWritePointer(1);
+        juce::AudioBuffer<float> rightView(
+            &rightPointer, 1, numSamples);
+        processNAMModelLaneCore(
+            rightView,
+            &rightLane,
+            mixEnvelope,
+            pedalSlot,
+            -1,
+            dualNAMDelayedDryBuffer.getWritePointer(1));
+    }
+
+    const bool pairFaultedAfterProcessing =
+        model->processFaulted.load(
+            std::memory_order_relaxed)
+        || rightLane.processFaulted.load(
+            std::memory_order_relaxed);
+    if (pairFaultedAfterProcessing)
+    {
+        model->processFaulted.store(
+            true, std::memory_order_relaxed);
+        rightLane.processFaulted.store(
+            true, std::memory_order_relaxed);
+        dualNAMStagingBuffer.copyFrom(
+            0, 0, dualNAMDelayedDryBuffer, 0, 0, numSamples);
+        dualNAMStagingBuffer.copyFrom(
+            1, 0, dualNAMDelayedDryBuffer, 1, 0, numSamples);
+    }
+
+    buffer.copyFrom(
+        0, 0, dualNAMStagingBuffer, 0, 0, numSamples);
+    buffer.copyFrom(
+        1, 0, dualNAMStagingBuffer, 1, 0, numSamples);
+}
+
+void S13NAMRack::processNAMModelLaneCore(juce::AudioBuffer<float>& buffer,
+                                         LoadedNAMModel* const model,
+                                         const float* const mixEnvelope,
+                                         bool pedalSlot,
+                                         int serialMonoDryChannel,
+                                         float* const delayedDryCapture)
+{
+    if (model == nullptr || model->dsp == nullptr)
+        return;
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
-    const int inChannels = juce::jlimit(1, 2, model->inputChannels);
-    const int outChannels = juce::jlimit(1, 2, model->outputChannels);
     if (numSamples <= 0 || numChannels <= 0)
         return;
+    const auto captureDelayedDry = [&] (
+        const juce::AudioBuffer<float>& source) noexcept
+    {
+        if (delayedDryCapture != nullptr
+            && source.getNumChannels() > 0
+            && source.getNumSamples() >= numSamples)
+        {
+            juce::FloatVectorOperations::copy(
+                delayedDryCapture,
+                source.getReadPointer(0),
+                numSamples);
+        }
+    };
+    if (model->processFaulted.load(std::memory_order_relaxed))
+    {
+        processModelDryDelay(buffer, *model, numSamples);
+        captureDelayedDry(buffer);
+        return;
+    }
+
+    const int inChannels = juce::jlimit(1, 2, model->inputChannels);
+    const int outChannels = juce::jlimit(1, 2, model->outputChannels);
     const double modelSampleRate = model->expectedSampleRate > 1000.0 ? model->expectedSampleRate : cachedSampleRate;
     const bool needsResampling = std::abs(modelSampleRate - cachedSampleRate) > 1.0;
     constexpr int resamplerGuardSamples = 8;
@@ -8288,7 +21335,8 @@ void S13NAMRack::processNAMModelCore(juce::AudioBuffer<float>& buffer,
     {
         diagnosticAudioThreadResizeAvoidedCount.fetch_add(1, std::memory_order_relaxed);
         diagnosticOversizeBypassCount.fetch_add(1, std::memory_order_relaxed);
-        processModelDryDelay(buffer, *model);
+        processModelDryDelay(buffer, *model, numSamples);
+        captureDelayedDry(buffer);
         return;
     }
 
@@ -8308,20 +21356,76 @@ void S13NAMRack::processNAMModelCore(juce::AudioBuffer<float>& buffer,
         ? (pedalSlot ? pedalOverrideOutputLevelDbu.load(std::memory_order_relaxed)
                      : ampOverrideOutputLevelDbu.load(std::memory_order_relaxed))
         : static_cast<float>(model->outputLevelDbu);
-    const float targetInputGain = juce::Decibels::decibelsToGain(juce::jlimit(
-        -36.0f, 36.0f, applyInputCalibration ? referenceDbu - effectiveInputDbu : 0.0f));
-    const float targetOutputGain = juce::Decibels::decibelsToGain(juce::jlimit(
-        -36.0f, 36.0f, applyOutputCalibration ? effectiveOutputDbu - referenceDbu : 0.0f));
-    const float smoothingAmount = 1.0f - std::exp(-static_cast<float>(numSamples)
-        / static_cast<float>(juce::jmax(1.0, cachedSampleRate * 0.02)));
-    const float inputGainStart = model->currentInputCalibrationGain;
-    const float inputGainEnd = inputGainStart + (targetInputGain - inputGainStart) * smoothingAmount;
-    const float outputGainStart = model->currentOutputCalibrationGain;
-    const float outputGainEnd = outputGainStart + (targetOutputGain - outputGainStart) * smoothingAmount;
+    const float inputCalibrationDb = juce::jlimit(
+        -36.0f, 36.0f,
+        applyInputCalibration ? referenceDbu - effectiveInputDbu : 0.0f);
+    const float outputCalibrationDb = juce::jlimit(
+        -36.0f, 36.0f,
+        applyOutputCalibration ? effectiveOutputDbu - referenceDbu : 0.0f);
+    const float targetInputGain = std::abs(inputCalibrationDb) <= 0.000001f
+        ? 1.0f
+        : juce::Decibels::decibelsToGain(inputCalibrationDb);
+    const float targetOutputGain = std::abs(outputCalibrationDb) <= 0.000001f
+        ? 1.0f
+        : juce::Decibels::decibelsToGain(outputCalibrationDb);
+    float inputGainStart =
+        model->currentInputCalibrationGain;
+    float outputGainStart =
+        model->currentOutputCalibrationGain;
+    if (! model->calibrationInitialised)
+    {
+        // A prepared graph has not emitted audible audio yet. Start at the
+        // selected capture calibration instead of ramping from arbitrary unity
+        // gain during the model-load handoff; later live calibration changes
+        // retain the normal dezippered transition.
+        inputGainStart = targetInputGain;
+        outputGainStart = targetOutputGain;
+        model->currentInputCalibrationGain =
+            targetInputGain;
+        model->currentOutputCalibrationGain =
+            targetOutputGain;
+        model->calibrationInitialised = true;
+    }
+    const bool calibrationSmoothing =
+        std::abs(targetInputGain - inputGainStart) > 0.000001f
+        || std::abs(targetOutputGain - outputGainStart) > 0.000001f;
+    const float smoothingAmount = calibrationSmoothing
+        ? 1.0f - std::exp(-static_cast<float>(numSamples)
+            / static_cast<float>(juce::jmax(1.0, cachedSampleRate * 0.06)))
+        : 1.0f;
+    const float inputGainEnd =
+        inputGainStart + (targetInputGain - inputGainStart) * smoothingAmount;
+    const float outputGainEnd =
+        outputGainStart + (targetOutputGain - outputGainStart) * smoothingAmount;
 
     for (int ch = 0; ch < numChannels; ++ch)
         workBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
-    processModelDryDelay(workBuffer, *model);
+    processModelDryDelay(workBuffer, *model, numSamples);
+    if (pedalSlot
+        && serialMonoDryChannel >= 0
+        && serialMonoDryChannel < numChannels)
+    {
+        // A mono Pedal NAM returns its wet signal to both host channels. When
+        // the routed guitar exists on only one side, a partial Pedal mix would
+        // otherwise put the dry component on one side only. The following mono
+        // Amp NAM would then halve just that dry component while retaining the
+        // full wet level. Mirror only the delayed dry source used by the mix;
+        // keep independent stereo Pedal-NAM wet outputs intact.
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            if (channel != serialMonoDryChannel)
+            {
+                workBuffer.copyFrom(
+                    channel,
+                    0,
+                    workBuffer,
+                    serialMonoDryChannel,
+                    0,
+                    numSamples);
+            }
+        }
+    }
+    captureDelayedDry(workBuffer);
     const auto restoreDelayedDry = [&] ()
     {
         for (int ch = 0; ch < numChannels; ++ch)
@@ -8382,6 +21486,9 @@ void S13NAMRack::processNAMModelCore(juce::AudioBuffer<float>& buffer,
     model->currentInputCalibrationGain = inputGainEnd;
 
     diagnosticLastDspFrames.store(dspSamples, std::memory_order_relaxed);
+    (pedalSlot ? diagnosticLastPedalDspFrames
+               : diagnosticLastAmpDspFrames)
+        .store(dspSamples, std::memory_order_relaxed);
     diagnosticMaxDspFrames.store(juce::jmax(diagnosticMaxDspFrames.load(std::memory_order_relaxed), dspSamples),
                                  std::memory_order_relaxed);
 
@@ -8447,7 +21554,7 @@ void S13NAMRack::processNAMModelCore(juce::AudioBuffer<float>& buffer,
             for (int ch = 0; ch < outChannels; ++ch)
             {
                 model->resampledHostFifo[static_cast<size_t>(ch)][static_cast<size_t>(fifoIndex)] =
-                    finiteNAMSample(namOutputBuffer.getSample(ch, sample));
+                    namOutputBuffer.getSample(ch, sample);
             }
         }
         model->resampledHostFifoSize += hostSamplesProduced;
@@ -8482,8 +21589,81 @@ void S13NAMRack::processNAMModelCore(juce::AudioBuffer<float>& buffer,
         namOutputBuffer.applyGainRamp(ch, 0, numSamples, outputGainStart, outputGainEnd);
     model->currentOutputCalibrationGain = outputGainEnd;
 
-    mixNAMOutputForHostEnvelope(
-        buffer, workBuffer, namOutputBuffer, outChannels, mixEnvelope);
+    auto& maximumRawOutputPeak =
+        pedalSlot
+            ? diagnosticPedalNAMMaximumRawOutputPeakLinear
+            : diagnosticAmpNAMMaximumRawOutputPeakLinear;
+    auto& maximumRawOutputDelta =
+        pedalSlot
+            ? diagnosticPedalNAMMaximumRawOutputDeltaLinear
+            : diagnosticAmpNAMMaximumRawOutputDeltaLinear;
+
+    float modelMaximumRawPeak = 0.0f;
+    float modelMaximumRawDelta = 0.0f;
+    for (int channel = 0; channel < outChannels; ++channel)
+    {
+        auto* const output =
+            namOutputBuffer.getWritePointer(channel);
+        const auto channelIndex =
+            static_cast<size_t>(juce::jmin(channel, 1));
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const float rawSample = output[sample];
+            const float finiteSample =
+                std::isfinite(rawSample)
+                    ? rawSample
+                    : 0.0f;
+            modelMaximumRawPeak =
+                juce::jmax(
+                    modelMaximumRawPeak,
+                    std::abs(finiteSample));
+            if (model->hasPreviousRawOutput[channelIndex])
+            {
+                modelMaximumRawDelta =
+                    juce::jmax(
+                        modelMaximumRawDelta,
+                        std::abs(
+                            finiteSample
+                            - model->previousRawOutput[channelIndex]));
+            }
+            model->previousRawOutput[channelIndex] =
+                finiteSample;
+            model->hasPreviousRawOutput[channelIndex] =
+                true;
+            output[sample] = finiteSample;
+        }
+    }
+    updateAtomicMaximum(
+        maximumRawOutputPeak,
+        modelMaximumRawPeak);
+    updateAtomicMaximum(
+        maximumRawOutputDelta,
+        modelMaximumRawDelta);
+
+    if (mixEnvelope != nullptr)
+    {
+        mixNAMOutputForHostEnvelope(
+            buffer, workBuffer, namOutputBuffer, outChannels, mixEnvelope);
+    }
+    else
+    {
+        // Oversize fallback blocks cannot use the preallocated per-sample
+        // envelope, but must still honour the slot's current mix instead of
+        // silently turning the model into a delayed dry bypass.
+        const float fallbackMix = juce::jlimit(
+            0.0f,
+            1.0f,
+            pedalSlot
+                ? pedalMix.load(std::memory_order_relaxed)
+                : ampMix.load(std::memory_order_relaxed));
+        mixNAMOutputForHost(
+            buffer,
+            workBuffer,
+            namOutputBuffer,
+            outChannels,
+            fallbackMix,
+            fallbackMix);
+    }
 }
 
 void S13NAMRack::mixNAMOutputForHost(juce::AudioBuffer<float>& hostBuffer,
@@ -8684,7 +21864,8 @@ void S13NAMRack::applySmoothedGain(
 void S13NAMRack::processNAMSlot(juce::AudioBuffer<float>& buffer,
                                 LoadedNAMModel* const model,
                                 const float* const mixEnvelope,
-                                bool pedalSlot)
+                                bool pedalSlot,
+                                int serialMonoDryChannel)
 {
     if (model == nullptr)
         return;
@@ -8693,7 +21874,12 @@ void S13NAMRack::processNAMSlot(juce::AudioBuffer<float>& buffer,
     const int numSamples = buffer.getNumSamples();
     if (transitionRemaining <= 0 || model->transitionSamplesTotal <= 0 || numSamples <= 0)
     {
-        processNAMModelCore(buffer, model, mixEnvelope, pedalSlot);
+        processNAMModelCore(
+            buffer,
+            model,
+            mixEnvelope,
+            pedalSlot,
+            serialMonoDryChannel);
         return;
     }
 
@@ -8702,7 +21888,12 @@ void S13NAMRack::processNAMSlot(juce::AudioBuffer<float>& buffer,
     {
         diagnosticAudioThreadResizeAvoidedCount.fetch_add(1, std::memory_order_relaxed);
         model->transitionSamplesRemaining.store(0, std::memory_order_release);
-        processNAMModelCore(buffer, model, mixEnvelope, pedalSlot);
+        processNAMModelCore(
+            buffer,
+            model,
+            mixEnvelope,
+            pedalSlot,
+            serialMonoDryChannel);
         return;
     }
 
@@ -8718,9 +21909,18 @@ void S13NAMRack::processNAMSlot(juce::AudioBuffer<float>& buffer,
             buffer.getNumChannels(),
             numSamples);
         processNAMModelCore(
-            transitionView, model->transitionFrom, mixEnvelope, pedalSlot);
+            transitionView,
+            model->transitionFrom,
+            mixEnvelope,
+            pedalSlot,
+            serialMonoDryChannel);
     }
-    processNAMModelCore(buffer, model, mixEnvelope, pedalSlot);
+    processNAMModelCore(
+        buffer,
+        model,
+        mixEnvelope,
+        pedalSlot,
+        serialMonoDryChannel);
 
     const int alreadyProcessed = model->transitionSamplesTotal - transitionRemaining;
     for (int sample = 0; sample < numSamples; ++sample)
@@ -8744,8 +21944,19 @@ void S13NAMRack::processNAMSlot(juce::AudioBuffer<float>& buffer,
 
 void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    // Development-era selectors are accepted only as migration metadata. Pin
+    // the runtime identity at the callback boundary so no internal caller can
+    // accidentally revive a retired embedded branch between state changes.
+    namEffectsDspVersion.store(
+        currentNAMEffectsDspVersion, std::memory_order_relaxed);
+    reverbEngineVersion.store(
+        static_cast<float>(currentReverbEngineVersion),
+        std::memory_order_relaxed);
     ScopedNAMModelReader modelReadGuard(modelReaders);
-    auto* const ampModelForBlock = activeAmpModel.load(std::memory_order_seq_cst);
+    auto* const pedalModelForBlock =
+        activePedalModel.load(std::memory_order_seq_cst);
+    auto* ampModelForBlock =
+        activeAmpModel.load(std::memory_order_seq_cst);
     auto* const cabIRForBlock = activeCabIR.load(std::memory_order_seq_cst);
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
@@ -8753,10 +21964,110 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
     const int numChannels = buffer.getNumChannels();
     if (numSamples <= 0 || numChannels <= 0)
         return;
+
+    // Query the host transport only inside this callback. The embedded Delay
+    // receives the value, never the playhead pointer, so neither processor can
+    // dereference host state from prepare/reset/tail-reporting threads.
+    if (auto* ph = getPlayHead())
+    {
+        const auto position = ph->getPosition();
+        if (position.hasValue())
+        {
+            if (const auto positionBpm = position->getBpm())
+            {
+                if (std::isfinite(*positionBpm) && *positionBpm > 0.0)
+                {
+                    const double bpm = juce::jlimit(
+                        10.0, 300.0, *positionBpm);
+                    publishedTempoBpm.store(
+                        static_cast<float>(bpm),
+                        std::memory_order_relaxed);
+                    rackDelay.publishTempoBpmFromAudioCallback(bpm);
+                }
+            }
+        }
+    }
+
+    // JUCE presents a mono-input/stereo-output processor with two buffer
+    // channels, but only channel 0 contains valid input. Channel 1 is an
+    // output-only destination and must not be read before the processor has
+    // written it. Seed it from the mono source so the complete rack retains a
+    // centred direct signal and stereo-capable stages (Cabinet Space,
+    // modulation, delay and reverb) can generate a real L/R field. This is a
+    // bounded vector copy: no callback allocation, locking or channel-state
+    // aliasing is introduced. Stereo-input and mono-output layouts are left
+    // unchanged.
+    const int inputChannels = juce::jmin(
+        getTotalNumInputChannels(), numChannels);
+    const int outputChannels = juce::jmin(
+        getTotalNumOutputChannels(), numChannels);
+    if (inputChannels == 1 && outputChannels >= 2)
+    {
+        for (int channel = 1; channel < outputChannels; ++channel)
+            buffer.copyFrom(channel, 0, buffer, 0, 0, numSamples);
+    }
+
+    const bool hasLiveTransitionCapacity =
+        liveTransitionBuffer.getNumChannels() >= 5
+        && liveTransitionBuffer.getNumSamples()
+            >= numSamples;
+    float* ampHandoffGainEnvelope = nullptr;
+    float* inputRoutingGainEnvelope = nullptr;
+    bool ampHandoffActive = false;
+    bool inputRoutingHandoffActive = false;
+    const auto supportsStereoRouting = [] (
+        const LoadedNAMModel* model) noexcept
+    {
+        return model == nullptr
+            || model->dualMonoLane != nullptr
+            || (model->inputChannels == 2
+                && model->outputChannels == 2);
+    };
+    if (hasLiveTransitionCapacity)
+    {
+        ampHandoffGainEnvelope =
+            liveTransitionBuffer.getWritePointer(3);
+        ampModelForBlock =
+            beginAmpModelHandoffBlock(
+                ampHandoffGainEnvelope,
+                numSamples);
+        ampHandoffActive =
+            ampModelHandoff.phase
+                    != AmpModelHandoffPhase::steady
+            || ampModelHandoff.currentGain
+                    < 0.999999f;
+        const bool hasActiveNAMModel =
+            pedalModelForBlock != nullptr
+            || ampModelForBlock != nullptr;
+        const bool stereoRoutingCapable =
+            supportsStereoRouting(pedalModelForBlock)
+            && supportsStereoRouting(ampModelForBlock);
+        inputRoutingGainEnvelope =
+            liveTransitionBuffer.getWritePointer(4);
+        beginInputRoutingHandoffBlock(
+            inputRoutingGainEnvelope,
+            numSamples,
+            hasActiveNAMModel,
+            stereoRoutingCapable);
+        inputRoutingHandoffActive =
+            inputRoutingHandoff.phase
+                    != InputRoutingHandoffPhase::steady
+            || inputRoutingHandoff.currentGain
+                    < 0.999999f;
+    }
+    else
+    {
+        // Oversize blocks cannot use the preallocated transition envelope.
+        // Preserve processing without allocating; the existing oversize
+        // diagnostic records that this callback could not be dezippered.
+        resetInputRoutingHandoff();
+    }
+
     diagnosticProcessedBlockCount.fetch_add(1, std::memory_order_relaxed);
     diagnosticLastBlockSize.store(numSamples, std::memory_order_relaxed);
     diagnosticMaxBlockSize.store(juce::jmax(diagnosticMaxBlockSize.load(std::memory_order_relaxed), numSamples), std::memory_order_relaxed);
-    const bool hasNAMModel = ampModelForBlock != nullptr;
+    const bool hasNAMModel =
+        pedalModelForBlock != nullptr || ampModelForBlock != nullptr;
     const bool tightNAMBlock =
         hasNAMModel && numSamples < kNAMRackTightBlockTelemetryThreshold;
     diagnosticObservedTightBlockSize.store(
@@ -8767,7 +22078,15 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
     // up; block size alone never changes the rack's signal path.
     diagnosticRealtimeDSPBlocked.store(false, std::memory_order_relaxed);
 
-    const float rawInputPeak = bufferPeakLinear(buffer);
+    std::uint64_t inputNonFiniteSampleCount = 0;
+    const float rawInputPeak = sanitizeAndGetBufferPeakLinear(
+        buffer, inputNonFiniteSampleCount);
+    if (inputNonFiniteSampleCount > 0)
+    {
+        diagnosticInputNonFiniteSampleCount.fetch_add(
+            inputNonFiniteSampleCount,
+            std::memory_order_relaxed);
+    }
     const bool auditionSourceRendered = renderAuditionSourceIfNeeded(buffer, rawInputPeak);
     const float rawInputDb = juce::jlimit(
         -90.0f,
@@ -8786,27 +22105,83 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
                         numSamples,
                         cachedSampleRate,
                         inputMeterHoldSamplesRemaining);
-    smoothedInputGain.setTargetValue(juce::Decibels::decibelsToGain(
-        juce::jlimit(
-            -24.0f, 24.0f, inputTrimDb.load(std::memory_order_relaxed))));
+    const float inputTrimForBlock = juce::jlimit(
+        -24.0f, 24.0f, inputTrimDb.load(std::memory_order_relaxed));
+    if (std::abs(inputTrimForBlock) > 0.000001f
+        || smoothedInputGain.isSmoothing()
+        || std::abs(smoothedInputGain.getCurrentValue() - 1.0f) > 0.000001f)
+    {
+        smoothedInputGain.setTargetValue(
+            juce::Decibels::decibelsToGain(inputTrimForBlock));
+    }
     applySmoothedGain(buffer, smoothedInputGain);
-    if (inputMode.load(std::memory_order_relaxed) >= 0.5f && numChannels >= 2)
+    const int inputRoutingMode =
+        activeInputRoutingMode;
+    const float inputMonoTarget =
+        inputRoutingMode == 1
+            ? 1.0f
+            : 0.0f;
+    if (inputMonoTarget
+        != smoothedInputMonoMix.getTargetValue())
+    {
+        smoothedInputMonoMix.setTargetValue(
+            inputMonoTarget);
+    }
+    if (numChannels >= 2
+        && (smoothedInputMonoMix.isSmoothing()
+            || smoothedInputMonoMix
+                   .getCurrentValue()
+                > 0.000001f))
     {
         // Mono mode means the rack's routed input (channel 0), not an L/R mix.
         // Single-channel hardware routes arrive as L + silent R, so averaging
-        // here would attenuate the guitar by 6.02 dB before NAM calibration.
+        // would attenuate guitar by 6.02 dB. Crossfade every other channel to
+        // routed channel 0 so switching modes cannot replace R at a block edge.
         for (int sample = 0; sample < numSamples; ++sample)
         {
+            const float monoMix =
+                smoothedInputMonoMix.getNextValue();
             const float routedMono = buffer.getSample(0, sample);
             for (int ch = 1; ch < numChannels; ++ch)
-                buffer.setSample(ch, sample, routedMono);
+            {
+                const float routedStereo =
+                    buffer.getSample(ch, sample);
+                buffer.setSample(
+                    ch,
+                    sample,
+                    routedStereo
+                        + (routedMono - routedStereo)
+                            * monoMix);
+            }
         }
+    }
+    else
+    {
+        smoothedInputMonoMix.skip(numSamples);
     }
     const float thresholdDb = juce::jlimit(-100.0f, 0.0f, gateThresholdDb.load(std::memory_order_relaxed));
     if (thresholdDb > -99.0f)
     {
-        const float threshold = juce::Decibels::decibelsToGain(thresholdDb);
-        const float releaseCoeff = std::exp(-1.0f / (static_cast<float>(cachedSampleRate) * juce::jmax(5.0f, gateReleaseMs.load(std::memory_order_relaxed)) * 0.001f));
+        const float releaseMs = juce::jmax(
+            5.0f,
+            gateReleaseMs.load(std::memory_order_relaxed));
+        if (thresholdDb != cachedGateThresholdDb
+            || releaseMs != cachedGateReleaseMs
+            || cachedSampleRate != cachedGateSampleRate)
+        {
+            cachedGateThresholdDb = thresholdDb;
+            cachedGateReleaseMs = releaseMs;
+            cachedGateSampleRate = cachedSampleRate;
+            cachedGateThresholdLinear =
+                juce::Decibels::decibelsToGain(thresholdDb);
+            cachedGateReleaseCoefficient = std::exp(
+                -1.0f
+                / (static_cast<float>(cachedSampleRate)
+                   * releaseMs * 0.001f));
+        }
+        const float threshold = cachedGateThresholdLinear;
+        const float releaseCoeff =
+            cachedGateReleaseCoefficient;
         for (int sample = 0; sample < numSamples; ++sample)
         {
             float absPeak = 0.0f;
@@ -8820,12 +22195,59 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
                 buffer.setSample(ch, sample, buffer.getSample(ch, sample) * gateGain);
         }
     }
+    else if (gateGain < 0.999999f)
+    {
+        const float gateOffSlew =
+            1.0f
+            - std::exp(
+                -1.0f
+                / static_cast<float>(
+                    juce::jmax(
+                        1.0,
+                        cachedSampleRate
+                            * 0.008)));
+        for (int sample = 0;
+             sample < numSamples;
+             ++sample)
+        {
+            gateGain +=
+                (1.0f - gateGain)
+                * gateOffSlew;
+            if (gateGain > 0.999999f)
+                gateGain = 1.0f;
+            for (int channel = 0;
+                 channel < numChannels;
+                 ++channel)
+            {
+                buffer.setSample(
+                    channel,
+                    sample,
+                    buffer.getSample(
+                        channel, sample)
+                        * gateGain);
+            }
+        }
+        if (gateGain >= 0.999999f)
+        {
+            gateGain = 1.0f;
+            gateEnvelope = 0.0f;
+        }
+    }
+    else
+    {
+        gateGain = 1.0f;
+        gateEnvelope = 0.0f;
+    }
 
     processCompressorStage(buffer, midi);
     processTapeEchoStage(buffer, midi);
     processDualOctaverStage(buffer);
     processEmbeddedDriveIsland(buffer, midi);
-    processLaserStage(buffer);
+    smoothedPedalMix.setTargetValue(
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            pedalMix.load(std::memory_order_relaxed)));
     smoothedAmpMix.setTargetValue(
         juce::jlimit(0.0f, 1.0f, ampMix.load(std::memory_order_relaxed)));
     smoothedAmpPowerMix.setTargetValue(
@@ -8833,21 +22255,36 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
                 && ampEnabled.load(std::memory_order_relaxed) >= 0.5f
             ? 1.0f
             : 0.0f);
+    const bool serialMonoAmpConsumesThisBlock =
+        inputRoutingMode != 2
+        && pedalModelForBlock != nullptr
+        && pedalModelForBlock->inputChannels == 1
+        && ampModelForBlock != nullptr
+        && ampModelForBlock->inputChannels == 1
+        && numChannels >= 2
+        && (smoothedAmpPowerMix.getCurrentValue() > 0.000001f
+            || smoothedAmpPowerMix.getTargetValue() > 0.000001f
+            || smoothedAmpPowerMix.isSmoothing());
+    const int serialMonoDryChannel = serialMonoAmpConsumesThisBlock
+        ? findSingleActiveNAMInputChannel(
+              buffer, numSamples)
+        : -1;
 
-    const bool hasLiveTransitionCapacity =
-        liveTransitionBuffer.getNumChannels() >= 3
-        && liveTransitionBuffer.getNumSamples() >= numSamples;
+    const float* pedalMixEnvelope = nullptr;
     const float* ampMixEnvelope = nullptr;
     const float* ampPowerEnvelope = nullptr;
     if (hasLiveTransitionCapacity)
     {
+        auto* const pedalValues = liveTransitionBuffer.getWritePointer(0);
         auto* const ampValues = liveTransitionBuffer.getWritePointer(1);
         auto* const ampPowerValues = liveTransitionBuffer.getWritePointer(2);
         for (int sample = 0; sample < numSamples; ++sample)
         {
+            pedalValues[sample] = smoothedPedalMix.getNextValue();
             ampValues[sample] = smoothedAmpMix.getNextValue();
             ampPowerValues[sample] = smoothedAmpPowerMix.getNextValue();
         }
+        pedalMixEnvelope = pedalValues;
         ampMixEnvelope = ampValues;
         ampPowerEnvelope = ampPowerValues;
     }
@@ -8855,9 +22292,21 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
     {
         diagnosticAudioThreadResizeAvoidedCount.fetch_add(
             1, std::memory_order_relaxed);
+        smoothedPedalMix.skip(numSamples);
         smoothedAmpMix.skip(numSamples);
         smoothedAmpPowerMix.skip(numSamples);
     }
+
+    // The NAM slots are serial by design: a drive/preamp capture in the Pedal
+    // slot feeds the Amp capture. V3 additionally corrects the partial-mix dry
+    // balance for a routed one-sided input before a following mono Amp NAM.
+    if (pedalModelForBlock != nullptr)
+        processNAMSlot(
+            buffer,
+            pedalModelForBlock,
+            pedalMixEnvelope,
+            true,
+            serialMonoDryChannel);
 
     const bool canCrossfadeAmp =
         ampModelForBlock != nullptr
@@ -8869,7 +22318,8 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         for (int channel = 0; channel < numChannels; ++channel)
             ampBypassBuffer.copyFrom(
                 channel, 0, buffer, channel, 0, numSamples);
-        processAmpBypassDryDelay(ampBypassBuffer, *ampModelForBlock);
+        processAmpBypassDryDelayForRouting(
+            ampBypassBuffer, *ampModelForBlock, numSamples);
 
         processAmpFaceplateInputStage(buffer);
         processNAMSlot(buffer, ampModelForBlock, ampMixEnvelope, false);
@@ -8895,17 +22345,124 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         resetAmpFaceplateState();
     }
     processCabStage(buffer, cabIRForBlock);
+
+    // Presentation is intentionally outside processCabStage(): full-rig NAM
+    // captures with an embedded cabinet still need the same room/doubler, and
+    // an unloaded external IR must not suppress it. It precedes the routing
+    // and model-handoff envelopes so live topology changes remain dezippered,
+    // while the existing post delay/reverb tails remain downstream.
+    rackCabPresentation.setParameters({
+        cabRoomEnabled.load(std::memory_order_relaxed) >= 0.5f
+            ? juce::jlimit(0.0f, 1.0f,
+                           cabRoomAmount.load(std::memory_order_relaxed))
+            : 0.0f,
+        juce::jlimit(0.0f, 1.0f,
+                     cabRoomWidth.load(std::memory_order_relaxed)),
+        cabDoublerEnabled.load(std::memory_order_relaxed) >= 0.5f
+                && activeInputRoutingMode != 2
+            ? juce::jlimit(0.0f, 1.0f,
+                           cabDoublerMix.load(std::memory_order_relaxed))
+            : 0.0f,
+        juce::jlimit(0.0f, 1.0f,
+                     cabDoublerSpread.load(std::memory_order_relaxed))
+    });
+    rackCabPresentation.process(buffer);
+
+    if (inputRoutingHandoffActive
+        && inputRoutingGainEnvelope != nullptr)
+    {
+        for (int channel = 0;
+             channel < numChannels;
+             ++channel)
+        {
+            auto* const samples =
+                buffer.getWritePointer(channel);
+            for (int sample = 0;
+                 sample < numSamples;
+                 ++sample)
+            {
+                samples[sample] *=
+                    inputRoutingGainEnvelope[sample];
+            }
+        }
+    }
+
+    // Switch Amp graphs only behind a zero-gain boundary. This envelope sits
+    // before post effects so existing delay and reverb tails continue naturally
+    // while the new model's resampler/history is primed in silence.
+    if (ampHandoffActive
+        && ampHandoffGainEnvelope != nullptr)
+    {
+        for (int channel = 0;
+             channel < numChannels;
+             ++channel)
+        {
+            auto* const samples =
+                buffer.getWritePointer(channel);
+            for (int sample = 0;
+                 sample < numSamples;
+                 ++sample)
+            {
+                samples[sample] *=
+                    ampHandoffGainEnvelope[sample];
+            }
+        }
+    }
+    if (hasLiveTransitionCapacity)
+    {
+        finishAmpModelHandoffBlock(numSamples);
+        finishInputRoutingHandoffBlock(numSamples);
+    }
+
     processPostFX(buffer, midi);
-    smoothedOutputGain.setTargetValue(juce::Decibels::decibelsToGain(
-        juce::jlimit(
-            -24.0f, 24.0f, outputTrimDb.load(std::memory_order_relaxed))));
+    const float outputTrimForBlock = juce::jlimit(
+        -24.0f, 24.0f, outputTrimDb.load(std::memory_order_relaxed));
+    if (std::abs(outputTrimForBlock) > 0.000001f
+        || smoothedOutputGain.isSmoothing()
+        || std::abs(smoothedOutputGain.getCurrentValue() - 1.0f) > 0.000001f)
+    {
+        smoothedOutputGain.setTargetValue(
+            juce::Decibels::decibelsToGain(outputTrimForBlock));
+    }
     applySmoothedGain(buffer, smoothedOutputGain);
-    // Floating-point audio may legitimately exceed 0 dBFS between processors.
-    // Only remove invalid DSP values here; clipping belongs at an explicitly
-    // selected output stage, not on the always-on NAM rack bus.
-    clearNonFiniteSamples(buffer);
-    const float outputDb = getBufferPeakDb(buffer);
+
+    // Protect the complete rack exactly once, after the models, amp faceplate,
+    // cab, stereo delay/reverb/shimmer, and output trim. The guard is
+    // memoryless and stereo-linked: it has no detector, gate, hold, release,
+    // or block-size-dependent state, and samples at or below the knee remain
+    // bit-for-bit unchanged.
+    const auto rackOutputSafety =
+        applyNAMOutputSafetyGuard(
+            buffer,
+            numChannels,
+            numSamples,
+            previousRackRawOutput,
+            hasPreviousRackRawOutput);
+    updateAtomicMaximum(
+        diagnosticRackMaximumRawOutputPeakLinear,
+        rackOutputSafety.maximumRawPeak);
+    updateAtomicMaximum(
+        diagnosticRackMaximumRawOutputDeltaLinear,
+        rackOutputSafety.maximumRawDelta);
+    if (rackOutputSafety.guardedSampleFrameCount > 0)
+    {
+        diagnosticRackOutputSafetyGuardHitCount.fetch_add(
+            rackOutputSafety.guardedSampleFrameCount,
+            std::memory_order_relaxed);
+    }
+
+    float outputPeakLinear = 0.0f;
+    const float outputDb =
+        sanitizeAndGetBufferPeakDb(
+            buffer,
+            &outputPeakLinear);
     diagnosticLastOutputPeakDb.store(outputDb, std::memory_order_relaxed);
+    diagnosticLastOutputPeakLinear.store(
+        outputPeakLinear,
+        std::memory_order_relaxed);
+    updateAtomicMaximum(
+        diagnosticMaximumOutputPeakLinear,
+        outputPeakLinear);
     updateNAMMeterLevel(outputLevelDb,
                         outputDb,
                         numSamples,
@@ -8918,11 +22475,13 @@ void S13NAMRack::getStateInformation(juce::MemoryBlock& destData)
     juce::ValueTree tree("S13NAMRack");
     tree.setProperty(
         "namEffectsDspVersion",
-        namEffectsDspVersion.load(
-            std::memory_order_relaxed),
+        currentNAMEffectsDspVersion,
+        nullptr);
+    tree.setProperty(
+        "instrumentProfile",
+        static_cast<double>(getInstrumentProfile()),
         nullptr);
     tree.setProperty("inputTrimDb", static_cast<double>(inputTrimDb.load()), nullptr);
-    tree.setProperty("inputMode", static_cast<double>(inputMode.load()), nullptr);
     tree.setProperty("calibrationStateVersion", 1, nullptr);
     tree.setProperty("calibrationReferenceDbu", static_cast<double>(calibrationReferenceDbu.load()), nullptr);
     tree.setProperty("pedalCalibrationMode", static_cast<double>(pedalCalibrationMode.load()), nullptr);
@@ -8934,7 +22493,10 @@ void S13NAMRack::getStateInformation(juce::MemoryBlock& destData)
     tree.setProperty("gateThresholdDb", static_cast<double>(gateThresholdDb.load()), nullptr);
     tree.setProperty("gateReleaseMs", static_cast<double>(gateReleaseMs.load()), nullptr);
     tree.setProperty("compressorEnabled", static_cast<double>(compressorEnabled.load()), nullptr);
-    tree.setProperty("compressorDetail", static_cast<double>(compressorDetail.load()), nullptr);
+    tree.setProperty("compressorAttackMs", static_cast<double>(compressorAttackMs.load()), nullptr);
+    tree.setProperty("compressorReleaseMs", static_cast<double>(compressorReleaseMs.load()), nullptr);
+    tree.setProperty("compressorToneDb", static_cast<double>(compressorToneDb.load()), nullptr);
+    tree.setProperty("compressorSidechainHPF", static_cast<double>(compressorSidechainHPF.load()), nullptr);
     tree.setProperty("compressorMix", static_cast<double>(compressorMix.load()), nullptr);
     tree.setProperty("compressorVolumeDb", static_cast<double>(compressorVolumeDb.load()), nullptr);
     tree.setProperty("compressorComp", static_cast<double>(compressorComp.load()), nullptr);
@@ -8954,22 +22516,32 @@ void S13NAMRack::getStateInformation(juce::MemoryBlock& destData)
     tree.setProperty("precisionDriveAttack", static_cast<double>(precisionDriveAttack.load()), nullptr);
     tree.setProperty("precisionDriveGate", static_cast<double>(precisionDriveGate.load()), nullptr);
     tree.setProperty("precisionDriveDrive", static_cast<double>(precisionDriveDrive.load()), nullptr);
-    tree.setProperty("precisionDriveMode", static_cast<double>(precisionDriveMode.load()), nullptr);
     tree.setProperty("chaosEnabled", static_cast<double>(chaosEnabled.load()), nullptr);
-    // Preserve the legacy property at Distortion mode for old project readers.
-    tree.setProperty("chaosMode", 0.0, nullptr);
+    tree.setProperty(
+        "chaosMode",
+        static_cast<double>(chaosMode.load()),
+        nullptr);
+    tree.setProperty(
+        "chaosWeight",
+        static_cast<double>(chaosWeight.load()),
+        nullptr);
     tree.setProperty("chaosDrive", static_cast<double>(chaosDrive.load()), nullptr);
     tree.setProperty("chaosTone", static_cast<double>(chaosTone.load()), nullptr);
+    tree.setProperty("chaosGate", static_cast<double>(chaosGate.load()), nullptr);
     tree.setProperty("chaosMix", static_cast<double>(chaosMix.load()), nullptr);
     tree.setProperty("chaosLevelDb", static_cast<double>(chaosLevelDb.load()), nullptr);
-    tree.setProperty("laserEnabled", static_cast<double>(laserEnabled.load()), nullptr);
-    tree.setProperty("laserMode", static_cast<double>(laserMode.load()), nullptr);
-    tree.setProperty("laserMix", static_cast<double>(laserMix.load()), nullptr);
-    tree.setProperty("laserSpeedHz", static_cast<double>(laserSpeedHz.load()), nullptr);
-    tree.setProperty("laserSensitivity", static_cast<double>(laserSensitivity.load()), nullptr);
-    tree.setProperty("laserEnvelopeMode", static_cast<double>(laserEnvelopeMode.load()), nullptr);
-    tree.setProperty("laserTrigger", static_cast<double>(laserTrigger.load()), nullptr);
     tree.setProperty("pedalMix", static_cast<double>(pedalMix.load()), nullptr);
+    tree.setProperty("namModelSizeStateVersion", 2, nullptr);
+    tree.setProperty(
+        "pedalModelSize",
+        static_cast<double>(
+            pedalModelSize.load()),
+        nullptr);
+    tree.setProperty(
+        "ampModelSize",
+        static_cast<double>(
+            ampModelSize.load()),
+        nullptr);
     tree.setProperty("ampEnabled", static_cast<double>(ampEnabled.load()), nullptr);
     tree.setProperty("ampGainDb", static_cast<double>(ampGainDb.load()), nullptr);
     tree.setProperty("ampBoost", static_cast<double>(ampBoost.load()), nullptr);
@@ -8989,6 +22561,7 @@ void S13NAMRack::getStateInformation(juce::MemoryBlock& destData)
     tree.setProperty("eq4kDb", static_cast<double>(eq4kDb.load()), nullptr);
     tree.setProperty("eq8kDb", static_cast<double>(eq8kDb.load()), nullptr);
     tree.setProperty("eq16kDb", static_cast<double>(eq16kDb.load()), nullptr);
+    tree.setProperty("eqLevelDb", static_cast<double>(eqLevelDb.load()), nullptr);
     tree.setProperty("cabRequestedEnabled", isCabRequestedEnabled(), nullptr);
     tree.setProperty("cabEnabled", static_cast<double>(cabEnabled.load()), nullptr);
     tree.setProperty("cabLevelDb", static_cast<double>(cabLevelDb.load()), nullptr);
@@ -8999,6 +22572,12 @@ void S13NAMRack::getStateInformation(juce::MemoryBlock& destData)
     tree.setProperty("cabMicDistance", static_cast<double>(cabMicDistance.load()), nullptr);
     tree.setProperty("cabMicBlend", static_cast<double>(cabMicBlend.load()), nullptr);
     tree.setProperty("cabRoomSend", static_cast<double>(cabRoomSend.load()), nullptr);
+    tree.setProperty("cabRoomEnabled", static_cast<double>(cabRoomEnabled.load()), nullptr);
+    tree.setProperty("cabRoomAmount", static_cast<double>(cabRoomAmount.load()), nullptr);
+    tree.setProperty("cabRoomWidth", static_cast<double>(cabRoomWidth.load()), nullptr);
+    tree.setProperty("cabDoublerEnabled", static_cast<double>(cabDoublerEnabled.load()), nullptr);
+    tree.setProperty("cabDoublerMix", static_cast<double>(cabDoublerMix.load()), nullptr);
+    tree.setProperty("cabDoublerSpread", static_cast<double>(cabDoublerSpread.load()), nullptr);
     tree.setProperty("cabPan", static_cast<double>(cabPan.load()), nullptr);
     tree.setProperty("eqEnabled", static_cast<double>(eqEnabled.load()), nullptr);
     tree.setProperty("chorusMix", static_cast<double>(chorusMix.load()), nullptr);
@@ -9012,31 +22591,88 @@ void S13NAMRack::getStateInformation(juce::MemoryBlock& destData)
     tree.setProperty("modulatorEnabled", static_cast<double>(modulatorEnabled.load()), nullptr);
     tree.setProperty("modulatorPedalMode", static_cast<double>(modulatorPedalMode.load()), nullptr);
     tree.setProperty("modulatorPedalPosition", static_cast<double>(modulatorPedalPosition.load()), nullptr);
-    tree.setProperty("delayMix", static_cast<double>(delayMix.load()), nullptr);
-    tree.setProperty("delayTimeMs", static_cast<double>(delayTimeMs.load()), nullptr);
-    tree.setProperty("delayFeedback", static_cast<double>(delayFeedback.load()), nullptr);
-    tree.setProperty("delayMod", static_cast<double>(delayMod.load()), nullptr);
-    tree.setProperty("delayDucker", static_cast<double>(delayDucker.load()), nullptr);
-    tree.setProperty("delayMode", static_cast<double>(delayMode.load()), nullptr);
-    tree.setProperty("delayPingPong", static_cast<double>(delayPingPong.load()), nullptr);
-    tree.setProperty("delayTempoSync", static_cast<double>(delayTempoSync.load()), nullptr);
-    tree.setProperty("delayEnabled", static_cast<double>(delayEnabled.load()), nullptr);
+    tree.setProperty("delayMix", sanitizeNAMRackDelayContinuous(
+        juce::var(static_cast<double>(delayMix.load())), 0.22, 0.0, 1.0), nullptr);
+    tree.setProperty("delayTimeMs", sanitizeNAMRackDelayContinuous(
+        juce::var(static_cast<double>(delayTimeMs.load())), 360.0, 1.0, 2000.0), nullptr);
+    tree.setProperty("delayFeedback", sanitizeNAMRackDelayContinuous(
+        juce::var(static_cast<double>(delayFeedback.load())), 0.22, 0.0, 0.85), nullptr);
+    tree.setProperty("delayMod", sanitizeNAMRackDelayContinuous(
+        juce::var(static_cast<double>(delayMod.load())), 0.18, 0.0, 1.0), nullptr);
+    tree.setProperty("delayDucker", sanitizeNAMRackDelayContinuous(
+        juce::var(static_cast<double>(delayDucker.load())), 0.12, 0.0, 1.0), nullptr);
+    tree.setProperty("delayMode", sanitizeNAMRackDelayMode(
+        juce::var(static_cast<double>(delayMode.load())), dualDelayMode), nullptr);
+    tree.setProperty("delayPingPong", sanitizeNAMRackDelayToggle(
+        juce::var(static_cast<double>(delayPingPong.load())), true), nullptr);
+    tree.setProperty("delayTempoSync", sanitizeNAMRackDelayToggle(
+        juce::var(static_cast<double>(delayTempoSync.load())), false), nullptr);
+    tree.setProperty("delayEnabled", sanitizeNAMRackDelayToggle(
+        juce::var(static_cast<double>(delayEnabled.load())), false), nullptr);
     tree.setProperty("reverbMix", static_cast<double>(reverbMix.load()), nullptr);
     tree.setProperty("reverbDecaySec", static_cast<double>(reverbDecaySec.load()), nullptr);
     tree.setProperty("reverbTone", static_cast<double>(reverbTone.load()), nullptr);
     tree.setProperty("reverbPreDelayMs", static_cast<double>(reverbPreDelayMs.load()), nullptr);
     tree.setProperty("reverbLowCutHz", static_cast<double>(reverbLowCutHz.load()), nullptr);
     tree.setProperty("reverbShimmer", static_cast<double>(reverbShimmer.load()), nullptr);
-    tree.setProperty("reverbShimmerDspVersion", 1, nullptr);
+    tree.setProperty(
+        "reverbVoice",
+        static_cast<double>(sanitizeReverbVoice(
+            reverbVoice.load(std::memory_order_relaxed))),
+        nullptr);
+    tree.setProperty("reverbEngineVersion", currentReverbEngineVersion, nullptr);
+    tree.setProperty("reverbDspVersion", currentReverbEngineVersion, nullptr);
+    tree.setProperty("reverbShimmerDspVersion", currentReverbEngineVersion, nullptr);
     tree.setProperty("reverbEnabled", static_cast<double>(reverbEnabled.load()), nullptr);
     tree.setProperty("outputTrimDb", static_cast<double>(outputTrimDb.load()), nullptr);
-    tree.setProperty("auditionSource", static_cast<double>(auditionSource.load()), nullptr);
-    tree.setProperty("pedalModelPath", getPedalModelPath(), nullptr);
-    tree.setProperty("ampModelPath", getAmpModelPath(), nullptr);
-    tree.setProperty("pedalDeclaredCaptureType", getPedalDeclaredCaptureType(), nullptr);
-    tree.setProperty("ampDeclaredCaptureType", getAmpDeclaredCaptureType(), nullptr);
+    juce::String statePedalModelPath;
+    juce::String stateAmpModelPath;
+    juce::String statePedalCaptureType;
+    juce::String stateAmpCaptureType;
+    {
+        // Capture the path/declaration tuples in one publication snapshot so
+        // an autosave cannot pair a new model path with the old declaration.
+        const juce::ScopedLock lock(modelSwapLock);
+        statePedalModelPath =
+            pedalModel != nullptr
+                ? pedalModel->path
+                : pedalModelPath;
+        stateAmpModelPath =
+            ampModel != nullptr
+                ? ampModel->path
+                : ampModelPath;
+        statePedalCaptureType =
+            pedalModel != nullptr
+                ? pedalModel->declaredCaptureType
+                : pedalDeclaredCaptureType;
+        stateAmpCaptureType =
+            ampModel != nullptr
+                ? ampModel->declaredCaptureType
+                : ampDeclaredCaptureType;
+    }
+    tree.setProperty("pedalModelPath", statePedalModelPath, nullptr);
+    tree.setProperty("ampModelPath", stateAmpModelPath, nullptr);
+    tree.setProperty("pedalDeclaredCaptureType", statePedalCaptureType, nullptr);
+    tree.setProperty("ampDeclaredCaptureType", stateAmpCaptureType, nullptr);
     tree.setProperty("cabIRPath", getCabIRPath(), nullptr);
-    tree.setProperty("uiStateJSON", getUiStateJSON(), nullptr);
+    auto stateUiValue = juce::JSON::parse(getUiStateJSON());
+    if (! stateUiValue.isVoid())
+    {
+        removeJSONPropertyRecursively(
+            stateUiValue,
+            juce::Identifier("auditionSource"));
+        removeJSONPropertyRecursively(
+            stateUiValue,
+            juce::Identifier("inputMode"));
+        tree.setProperty(
+            "uiStateJSON",
+            juce::JSON::toString(stateUiValue, false),
+            nullptr);
+    }
+    else
+    {
+        tree.setProperty("uiStateJSON", getUiStateJSON(), nullptr);
+    }
 
     juce::MemoryOutputStream stream(destData, false);
     tree.writeToStream(stream);
@@ -9054,7 +22690,6 @@ void S13NAMRack::getTonePresetStateInformation(juce::MemoryBlock& destData)
     // metadata/override choices remain tone state.
     tree.removeProperty("calibrationReferenceDbu", nullptr);
     tree.removeProperty("auditionSource", nullptr);
-    tree.removeProperty("laserTrigger", nullptr);
     const auto savedUiStateJSON = tree.getProperty("uiStateJSON", {}).toString();
     if (savedUiStateJSON.isNotEmpty())
     {
@@ -9063,7 +22698,6 @@ void S13NAMRack::getTonePresetStateInformation(juce::MemoryBlock& destData)
         {
             removeJSONPropertyRecursively(uiState, juce::Identifier("calibrationReferenceDbu"));
             removeJSONPropertyRecursively(uiState, juce::Identifier("auditionSource"));
-            removeJSONPropertyRecursively(uiState, juce::Identifier("laserTrigger"));
             tree.setProperty("uiStateJSON", juce::JSON::toString(uiState, false), nullptr);
         }
     }
@@ -9071,6 +22705,41 @@ void S13NAMRack::getTonePresetStateInformation(juce::MemoryBlock& destData)
     destData.setSize(0);
     juce::MemoryOutputStream stream(destData, false);
     tree.writeToStream(stream);
+}
+
+bool S13NAMRack::migratePresetStateToCurrent(
+    juce::MemoryBlock& stateData,
+    bool& wasMigrated)
+{
+    wasMigrated = false;
+    auto tree = loadParamsFromMemory(
+        stateData.getData(),
+        static_cast<int>(stateData.getSize()),
+        "S13NAMRack");
+    if (! tree.isValid())
+        return false;
+
+    wasMigrated = canonicalizeNAMRackPresetTree(tree);
+    if (wasMigrated)
+    {
+        stateData.setSize(0);
+        juce::MemoryOutputStream stream(stateData, false);
+        tree.writeToStream(stream);
+    }
+    return true;
+}
+
+bool S13NAMRack::migrateUiStateToCurrent(
+    juce::var& uiState,
+    int sourceEffectsVersion)
+{
+    return canonicalizeNAMRackUiStateVar(
+        uiState,
+        sourceEffectsVersion >= 1
+                && sourceEffectsVersion
+                    <= currentNAMEffectsDspVersion
+            ? sourceEffectsVersion
+            : 0);
 }
 
 void S13NAMRack::setStateInformation(const void* data, int sizeInBytes)
@@ -9117,6 +22786,38 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     auto tree = loadParamsFromMemory(data, sizeInBytes, "S13NAMRack");
     if (!tree.isValid())
         return false;
+    (void) canonicalizeNAMRackPresetTree(tree);
+
+    const bool hasLegacyNAMModelSize =
+        tree.hasProperty("namModelSize");
+    const float legacyNAMModelSize =
+        juce::jlimit(
+            0.0f,
+            1.0f,
+            static_cast<float>(
+                static_cast<double>(
+                    tree.getProperty(
+                        "namModelSize", 1.0))));
+    const auto restoredSlotModelSize =
+        [&] (const juce::Identifier& property)
+    {
+        const double fallback =
+            hasLegacyNAMModelSize
+                ? static_cast<double>(
+                      legacyNAMModelSize)
+                : 1.0;
+        return juce::jlimit(
+            0.0f,
+            1.0f,
+            static_cast<float>(
+                static_cast<double>(
+                    tree.getProperty(
+                        property, fallback))));
+    };
+    const float restoredPedalModelSize =
+        restoredSlotModelSize("pedalModelSize");
+    const float restoredAmpModelSize =
+        restoredSlotModelSize("ampModelSize");
 
     const bool pedalPathSpecified = tree.hasProperty("pedalModelPath");
     const bool ampPathSpecified = tree.hasProperty("ampModelPath");
@@ -9135,15 +22836,15 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     const auto publishState = [&]
     {
     namEffectsDspVersion.store(
-        juce::jlimit(
-            1,
-            2,
-            static_cast<int>(
-                tree.getProperty(
-                    "namEffectsDspVersion", 1))),
+        currentNAMEffectsDspVersion,
+        std::memory_order_relaxed);
+    instrumentProfile.store(
+        static_cast<float>(sanitizeNAMRackInstrumentProfile(
+            tree.getProperty(
+                "instrumentProfile",
+                guitarInstrumentProfile))),
         std::memory_order_relaxed);
     inputTrimDb = static_cast<float>((double)tree.getProperty("inputTrimDb", 0.0));
-    inputMode = static_cast<float>((double)tree.getProperty("inputMode", 0.0));
     const bool hasCalibrationState = static_cast<int>(tree.getProperty("calibrationStateVersion", 0)) >= 1;
     if (restoreHardwareCalibration)
         calibrationReferenceDbu = juce::jlimit(-20.0f, 30.0f, static_cast<float>((double)tree.getProperty("calibrationReferenceDbu", 12.0)));
@@ -9159,11 +22860,49 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     ampOverrideOutputLevelDbu = juce::jlimit(-20.0f, 30.0f, static_cast<float>((double)tree.getProperty("ampOverrideOutputLevelDbu", 12.0)));
     gateThresholdDb = static_cast<float>((double)tree.getProperty("gateThresholdDb", -80.0));
     gateReleaseMs = static_cast<float>((double)tree.getProperty("gateReleaseMs", 80.0));
-    compressorEnabled = static_cast<float>((double)tree.getProperty("compressorEnabled", 0.0));
-    compressorDetail = static_cast<float>((double)tree.getProperty("compressorDetail", 0.55));
-    compressorMix = static_cast<float>((double)tree.getProperty("compressorMix", 0.65));
-    compressorVolumeDb = static_cast<float>((double)tree.getProperty("compressorVolumeDb", 0.0));
-    compressorComp = static_cast<float>((double)tree.getProperty("compressorComp", 0.35));
+    compressorEnabled = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorEnabled", 0.0)));
+    compressorAttackMs = juce::jlimit(
+        0.1f,
+        50.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorAttackMs",
+            kDefaultNAMRackCompressorAttackMs)));
+    compressorReleaseMs = juce::jlimit(
+        50.0f,
+        1000.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorReleaseMs",
+            kDefaultNAMRackCompressorReleaseMs)));
+    compressorToneDb = juce::jlimit(
+        -6.0f,
+        6.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorToneDb", 0.0)));
+    compressorSidechainHPF = static_cast<float>(
+        juce::jlimit(
+            0,
+            2,
+            juce::roundToInt(static_cast<float>((double)tree.getProperty(
+                "compressorSidechainHPF", 1.0)))));
+    compressorMix = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorMix", 0.65)));
+    compressorVolumeDb = juce::jlimit(
+        -18.0f,
+        18.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorVolumeDb", 0.0)));
+    compressorComp = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>((double)tree.getProperty(
+            "compressorComp", 0.35)));
     tapeEchoEnabled = static_cast<float>((double)tree.getProperty("tapeEchoEnabled", 0.0));
     tapeEchoMix = static_cast<float>((double)tree.getProperty("tapeEchoMix", 0.28));
     tapeEchoTimeMs = static_cast<float>((double)tree.getProperty("tapeEchoTimeMs", 360.0));
@@ -9175,7 +22914,7 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     octaverUpMix = static_cast<float>((double)tree.getProperty("octaverUpMix", 0.18));
     octaverDirectMix = static_cast<float>((double)tree.getProperty("octaverDirectMix", 1.0));
     precisionDriveEnabled = static_cast<float>((double)tree.getProperty("precisionDriveEnabled", 0.0));
-    precisionDriveVolumeDb = static_cast<float>((double)tree.getProperty("precisionDriveVolumeDb", 0.0));
+    precisionDriveVolumeDb = static_cast<float>((double)tree.getProperty("precisionDriveVolumeDb", 9.0));
     precisionDriveBright = static_cast<float>((double)tree.getProperty("precisionDriveBright", 0.55));
     precisionDriveAttack = static_cast<float>((double)tree.getProperty("precisionDriveAttack", 0.50));
     precisionDriveGate = static_cast<float>((double)tree.getProperty("precisionDriveGate", 0.0));
@@ -9191,9 +22930,18 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
         || tree.hasProperty("chaosTone")
         || tree.hasProperty("chaosLevelDb");
     chaosEnabled = static_cast<float>((double)tree.getProperty("chaosEnabled", 0.0));
-    // Chaos was retired; old snapshots migrate to the single diode Distortion
-    // circuit regardless of their former mode selection.
-    chaosMode = 0.0f;
+    chaosMode = juce::jlimit(
+        0.0f,
+        2.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty("chaosMode", 0.0))));
+    chaosWeight = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty("chaosWeight", 0.50))));
     chaosDrive = juce::jlimit(
         0.0f, 1.0f,
         static_cast<float>((double)tree.getProperty(
@@ -9202,10 +22950,13 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     chaosTone = juce::jlimit(
         0.0f, 1.0f,
         static_cast<float>((double)tree.getProperty("chaosTone", 0.55)));
+    chaosGate = juce::jlimit(
+        0.0f, 1.0f,
+        static_cast<float>((double)tree.getProperty("chaosGate", 0.22)));
     chaosMix = juce::jlimit(
         0.0f, 1.0f,
         static_cast<float>((double)tree.getProperty(
-            "chaosMix", hasDedicatedDistortionState ? 1.0 : 0.22)));
+            "chaosMix", 1.0)));
     chaosLevelDb = juce::jlimit(
         -12.0f, 12.0f,
         static_cast<float>((double)tree.getProperty("chaosLevelDb", 0.0)));
@@ -9224,13 +22975,6 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
         precisionDriveEnabled = 0.0f;
     }
     precisionDriveMode = 0.0f;
-    laserEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("laserEnabled", 0.0)));
-    laserMode = juce::jlimit(0.0f, 5.0f, static_cast<float>((double)tree.getProperty("laserMode", 0.0)));
-    laserMix = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("laserMix", 0.35)));
-    laserSpeedHz = juce::jlimit(0.05f, 12.0f, static_cast<float>((double)tree.getProperty("laserSpeedHz", 1.2)));
-    laserSensitivity = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("laserSensitivity", 0.45)));
-    laserEnvelopeMode = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("laserEnvelopeMode", 0.0)));
-    laserTrigger = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("laserTrigger", 0.0)));
     pedalMix = static_cast<float>((double)tree.getProperty("pedalMix", 1.0));
     ampEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("ampEnabled", 1.0)));
     ampGainDb = juce::jlimit(-24.0f, 24.0f, static_cast<float>((double)tree.getProperty("ampGainDb", 0.0)));
@@ -9251,13 +22995,20 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     eq4kDb = static_cast<float>((double)tree.getProperty("eq4kDb", 0.0));
     eq8kDb = static_cast<float>((double)tree.getProperty("eq8kDb", 0.0));
     eq16kDb = static_cast<float>((double)tree.getProperty("eq16kDb", 0.0));
+    eqLevelDb = juce::jlimit(
+        -12.0f,
+        12.0f,
+        static_cast<float>((double)tree.getProperty("eqLevelDb", 0.0)));
     const float recalledCabEnabled = juce::jlimit(0.0f, 1.0f,
         static_cast<float>((double)tree.getProperty("cabEnabled", 0.0)));
     const bool recalledCabRequested = tree.hasProperty("cabRequestedEnabled")
         ? static_cast<bool>(tree.getProperty("cabRequestedEnabled"))
         : recalledCabEnabled >= 0.5f;
     cabRequestedEnabled.store(recalledCabRequested, std::memory_order_relaxed);
-    cabEnabled.store(recalledCabRequested && ! ampModelIncludesCab() ? 1.0f : 0.0f,
+    const bool activeModelIncludesCab =
+        activeAmpModelIncludesCab.load(
+            std::memory_order_acquire);
+    cabEnabled.store(recalledCabRequested && ! activeModelIncludesCab ? 1.0f : 0.0f,
                      std::memory_order_relaxed);
     cabLevelDb = static_cast<float>((double)tree.getProperty("cabLevelDb", 0.0));
     cabHPFHz = static_cast<float>((double)tree.getProperty("cabHPFHz", 80.0));
@@ -9267,14 +23018,24 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     cabMicDistance = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabMicDistance", 0.0)));
     cabMicBlend = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabMicBlend", 0.5)));
     cabRoomSend = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabRoomSend", 0.0)));
+    cabRoomEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabRoomEnabled", 0.0)));
+    cabRoomAmount = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabRoomAmount", 0.22)));
+    cabRoomWidth = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabRoomWidth", 0.65)));
+    cabDoublerEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabDoublerEnabled", 0.0)));
+    cabDoublerMix = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabDoublerMix", 0.12)));
+    cabDoublerSpread = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabDoublerSpread", 0.65)));
     cabPan = juce::jlimit(-1.0f, 1.0f, static_cast<float>((double)tree.getProperty("cabPan", 0.0)));
     eqEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("eqEnabled", 0.0)));
     chorusMix = static_cast<float>((double)tree.getProperty("chorusMix", 0.30));
-    chorusRateHz = static_cast<float>((double)tree.getProperty("chorusRateHz", 0.75));
+    chorusRateHz = juce::jlimit(
+        0.01f,
+        8.0f,
+        static_cast<float>(
+            (double)tree.getProperty("chorusRateHz", 0.75)));
     chorusDepth = static_cast<float>((double)tree.getProperty("chorusDepth", 0.32));
     chorusCharacter = juce::jlimit(
         0.0f,
-        2.0f,
+        1.0f,
         static_cast<float>(
             static_cast<double>(
                 tree.getProperty(
@@ -9287,15 +23048,24 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
     modulatorEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("modulatorEnabled", 0.0)));
     modulatorPedalMode = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("modulatorPedalMode", 1.0)));
     modulatorPedalPosition = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("modulatorPedalPosition", 0.5)));
-    delayMix = static_cast<float>((double)tree.getProperty("delayMix", 0.22));
-    delayTimeMs = static_cast<float>((double)tree.getProperty("delayTimeMs", 360.0));
-    delayFeedback = static_cast<float>((double)tree.getProperty("delayFeedback", 0.22));
-    delayMod = static_cast<float>((double)tree.getProperty("delayMod", 0.18));
-    delayDucker = static_cast<float>((double)tree.getProperty("delayDucker", 0.12));
-    delayMode = static_cast<float>((double)tree.getProperty("delayMode", 1.0));
-    delayPingPong = static_cast<float>((double)tree.getProperty("delayPingPong", 1.0));
-    delayTempoSync = static_cast<float>((double)tree.getProperty("delayTempoSync", 0.0));
-    delayEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("delayEnabled", 0.0)));
+    delayMix = static_cast<float>(sanitizeNAMRackDelayContinuous(
+        tree.getProperty("delayMix", 0.22), 0.22, 0.0, 1.0));
+    delayTimeMs = static_cast<float>(sanitizeNAMRackDelayContinuous(
+        tree.getProperty("delayTimeMs", 360.0), 360.0, 1.0, 2000.0));
+    delayFeedback = static_cast<float>(sanitizeNAMRackDelayContinuous(
+        tree.getProperty("delayFeedback", 0.22), 0.22, 0.0, 0.85));
+    delayMod = static_cast<float>(sanitizeNAMRackDelayContinuous(
+        tree.getProperty("delayMod", 0.18), 0.18, 0.0, 1.0));
+    delayDucker = static_cast<float>(sanitizeNAMRackDelayContinuous(
+        tree.getProperty("delayDucker", 0.12), 0.12, 0.0, 1.0));
+    delayMode = static_cast<float>(sanitizeNAMRackDelayMode(
+        tree.getProperty("delayMode", 1.0)));
+    delayPingPong = static_cast<float>(sanitizeNAMRackDelayToggle(
+        tree.getProperty("delayPingPong", 1.0), true));
+    delayTempoSync = static_cast<float>(sanitizeNAMRackDelayToggle(
+        tree.getProperty("delayTempoSync", 0.0), false));
+    delayEnabled = static_cast<float>(sanitizeNAMRackDelayToggle(
+        tree.getProperty("delayEnabled", 0.0), false));
     reverbMix = static_cast<float>((double)tree.getProperty("reverbMix", 0.28));
     reverbDecaySec = static_cast<float>((double)tree.getProperty("reverbDecaySec", 2.2));
     reverbTone = static_cast<float>((double)tree.getProperty("reverbTone", 0.62));
@@ -9307,29 +23077,112 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
             static_cast<double>(
                 tree.getProperty(
                     "reverbLowCutHz", 120.0))));
-    // Legacy snapshots may contain the former pseudo-shimmer toggle. Only
-    // snapshots explicitly written after the native pitch-feedback DSP shipped
-    // may restore that field as an audible amount.
-    const int reverbShimmerDspVersion =
-        static_cast<int>(
+    reverbVoice = static_cast<float>(
+        sanitizeNAMRackReverbVoice(
             tree.getProperty(
-                "reverbShimmerDspVersion", 0));
-    reverbShimmer =
-        reverbShimmerDspVersion >= 1
-            ? juce::jlimit(
-                  0.0f,
-                  1.0f,
-                  static_cast<float>(
-                      static_cast<double>(
-                          tree.getProperty(
-                              "reverbShimmer",
-                              0.0))))
-            : 0.0f;
+                "reverbVoice", studioReverbVoice)));
+    reverbCharacter = juce::jlimit(
+        0.0f,
+        2.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbCharacter", 1.0))));
+    reverbWidth = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbWidth", 0.82))));
+    reverbDucking = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbDucking", 0.12))));
+    reverbBassDecay = juce::jlimit(
+        0.40f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbBassDecay", 0.70))));
+    reverbMovement = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbMovement", 0.35))));
+    reverbEarlyLate = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbEarlyLate", 0.42))));
+    reverbDiffusion = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbDiffusion", 0.84))));
+    reverbShimmerRegen = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbShimmerRegen", 0.55))));
+    reverbFreeze = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty(
+                    "reverbFreeze", 0.0))));
+    reverbEngineVersion = static_cast<float>(currentReverbEngineVersion);
+    reverbCharacter = 1.0f;
+    reverbWidth = 0.88f;
+    reverbDucking = 0.0f;
+    reverbBassDecay = 0.82f;
+    reverbMovement = 0.25f;
+    reverbEarlyLate = 0.55f;
+    reverbDiffusion = 0.82f;
+    reverbShimmerRegen = 0.55f;
+    reverbFreeze = 0.0f;
+    reverbShimmer = juce::jlimit(
+        0.0f,
+        1.0f,
+        static_cast<float>(
+            static_cast<double>(
+                tree.getProperty("reverbShimmer", 0.0))));
     reverbEnabled = juce::jlimit(0.0f, 1.0f, static_cast<float>((double)tree.getProperty("reverbEnabled", 0.0)));
     outputTrimDb = static_cast<float>((double)tree.getProperty("outputTrimDb", 0.0));
-    auditionSource = static_cast<float>((double)tree.getProperty("auditionSource", 0.0));
+    // The internal demo is a transient monitor source, never project tone.
+    auditionSource = 0.0f;
 
-    setUiStateJSON(tree.getProperty("uiStateJSON", {}).toString());
+    auto restoredUiValue = juce::JSON::parse(
+        stripRetiredNAMRackUIState(
+            tree.getProperty("uiStateJSON", {}).toString()));
+    if (! restoredUiValue.isVoid())
+    {
+        removeJSONPropertyRecursively(
+            restoredUiValue,
+            juce::Identifier("auditionSource"));
+        removeJSONPropertyRecursively(
+            restoredUiValue,
+            juce::Identifier("inputMode"));
+        setUiStateJSON(
+            juce::JSON::toString(restoredUiValue, false));
+    }
+    else
+    {
+        setUiStateJSON(juce::String());
+    }
     };
 
     if (! restoreResources)
@@ -9348,11 +23201,15 @@ bool S13NAMRack::restoreStateInformationInternal(const void* data,
                                                               allowMissingResources,
                                                               pedalDeclaredCaptureTypeSpecified,
                                                               restoredPedalDeclaredCaptureType,
-                                                              ampDeclaredCaptureTypeSpecified,
-                                                              restoredAmpDeclaredCaptureType,
-                                                              publishState,
-                                                              publicationLeaseFactory,
-                                                              retainedPublicationLease);
+                                                               ampDeclaredCaptureTypeSpecified,
+                                                               restoredAmpDeclaredCaptureType,
+                                                               publishState,
+                                                               publicationLeaseFactory,
+                                                               retainedPublicationLease,
+                                                               true,
+                                                               restoredPedalModelSize,
+                                                               true,
+                                                               restoredAmpModelSize);
     // Project recovery deliberately publishes all usable state and remembers
     // missing resource paths for relinking. That is a usable restore, not a
     // hard deserialisation failure; lastLoadError carries the degraded detail.
@@ -9363,9 +23220,17 @@ bool S13NAMRack::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     const auto& mainIn = layouts.getMainInputChannelSet();
     const auto& mainOut = layouts.getMainOutputChannelSet();
-    const bool inputOk = mainIn == juce::AudioChannelSet::mono() || mainIn == juce::AudioChannelSet::stereo();
-    const bool outputOk = mainOut == juce::AudioChannelSet::mono() || mainOut == juce::AudioChannelSet::stereo();
-    return inputOk && outputOk && mainIn.size() == mainOut.size();
+    const bool monoInput = mainIn == juce::AudioChannelSet::mono();
+    const bool stereoInput = mainIn == juce::AudioChannelSet::stereo();
+    const bool monoOutput = mainOut == juce::AudioChannelSet::mono();
+    const bool stereoOutput = mainOut == juce::AudioChannelSet::stereo();
+
+    // Guitar tracks may enter as mono and still need a stereo destination for
+    // Cabinet Space and the post effects. A stereo input is intentionally not
+    // collapsed implicitly into a mono output; callers must choose an explicit
+    // downmix stage for that topology.
+    return (monoInput && (monoOutput || stereoOutput))
+        || (stereoInput && stereoOutput);
 }
 
 // ============================================================================

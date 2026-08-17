@@ -193,9 +193,22 @@ private:
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
     juce::ThreadPool mediaPreviewPool { 2 };
+    juce::ThreadPool pluginScanPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
+    std::atomic<bool> pluginScanRunning { false };
     // Keeps this window's jobs alive and sequenced. A process-wide gate in
     // MainComponent.cpp serialises NAM mutations across every editor window.
-    juce::ThreadPool builtInStateMutationPool { 1 };
+    // Model/IR parsing and prewarming can be CPU- and memory-intensive. Keep
+    // this single mutation worker below the audio callback's scheduling class
+    // so a model load cannot steal a 16-sample deadline.
+    juce::ThreadPool builtInStateMutationPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
     juce::CriticalSection pitchCorrectionJobLock;
     juce::String activePreviewRequestGroup;
     juce::String activeNoteRenderRequestGroup;
@@ -214,6 +227,8 @@ private:
     StartupRepairAction startupRepairAction = StartupRepairAction::none;
     juce::String lastAiToolsStatusDigest;
     double lastAiToolsStatusEmitMs = 0.0;
+    double lastAiToolsStatusPollMs = 0.0;
+    bool lastAiToolsInstallInProgress = false;
     juce::File pitchRegressionJobFile;
     juce::var pitchRegressionJob;
     bool pitchRegressionJobConsumed = false;

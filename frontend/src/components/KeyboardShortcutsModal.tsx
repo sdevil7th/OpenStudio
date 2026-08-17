@@ -1,11 +1,18 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { Search, Printer } from "lucide-react";
 import { useShallow } from "zustand/shallow";
 import { getActionShortcutScopeLabel, getRegisteredActions } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
-import { formatShortcut, keyEventToCanonicalShortcut } from "../utils/platform";
+import { formatShortcut } from "../utils/platform";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+  shortcutExactlyMatches,
+  toPressedShortcut,
+} from "../utils/shortcutContext";
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
@@ -25,7 +32,6 @@ export function KeyboardShortcutsModal({
     null
   );
   const [capturedShortcut, setCapturedShortcut] = useState<string>("");
-  const listeningRef = useRef<string | null>(null);
 
   const { customShortcuts, setCustomShortcut, resetCustomShortcuts } =
     useDAWStore(
@@ -72,41 +78,32 @@ export function KeyboardShortcutsModal({
     return groups;
   }, [filtered]);
 
-  // Keep ref in sync with state for the event listener
-  useEffect(() => {
-    listeningRef.current = listeningActionId;
-  }, [listeningActionId]);
-
-  // Listen for key events when in rebinding mode
+  // Rebinding temporarily owns the shared shortcut router, so capturing a new
+  // binding cannot also execute the action currently assigned to that key.
   useEffect(() => {
     if (!listeningActionId) return;
+    const previousContext = getActiveShortcutContext();
+    const unregister = registerShortcutSurface(
+      { kind: "application" },
+      (event) => {
+        if (shortcutExactlyMatches(event, "Esc")) {
+          setListeningActionId(null);
+          setCapturedShortcut("");
+          return "handled";
+        }
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      // Escape cancels rebinding
-      if (e.key === "Escape") {
+        const shortcut = toPressedShortcut(event);
+        if (!shortcut) return "claimed_noop";
+        setCapturedShortcut(shortcut);
+        setCustomShortcut(listeningActionId, shortcut);
         setListeningActionId(null);
         setCapturedShortcut("");
-        return;
-      }
-
-      const shortcut = keyEventToCanonicalShortcut(e);
-      if (!shortcut) return; // Ignore standalone modifier keys
-
-      setCapturedShortcut(shortcut);
-
-      // Save the shortcut
-      if (listeningRef.current) {
-        setCustomShortcut(listeningRef.current, shortcut);
-      }
-      setListeningActionId(null);
-      setCapturedShortcut("");
-    };
-
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
+        return "handled";
+      },
+      previousContext,
+    );
+    activateShortcutContext({ kind: "application" });
+    return unregister;
   }, [listeningActionId, setCustomShortcut]);
 
   // Cancel listening when modal closes

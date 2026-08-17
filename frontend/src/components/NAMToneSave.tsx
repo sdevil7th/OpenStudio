@@ -22,6 +22,10 @@ import {
   type NAMCaptureType,
 } from "../utils/namCaptureType";
 import { buildNAMRackRollbackPatch } from "../utils/namRackPresetTransactions";
+import {
+  isNAMNonPortableStateKey,
+  sanitizeNAMRackDspState,
+} from "../utils/namPortableState";
 
 export type NAMToneSaveDraft = NAMToneSaveMetadata & { tagsText: string };
 
@@ -47,7 +51,6 @@ export type NAMPreviewBaseline = {
   pedalMix: number;
   ampEnabled: number;
   ampMix: number;
-  auditionSource: number;
   pedalCalibrationMode?: number;
   pedalOverrideInputLevelDbu?: number;
   pedalOverrideOutputLevelDbu?: number;
@@ -147,16 +150,15 @@ function valuesFromState(state: unknown, fallback: BuiltInPluginSchema) {
   const rawValues = asRecord(stateRecord.values);
   const values: Record<string, number> = {};
   for (const [key, value] of Object.entries(rawValues)) {
-    if (key === "calibrationReferenceDbu") continue;
+    if (isNAMNonPortableStateKey(key)) continue;
     const number = Number(value);
     if (Number.isFinite(number)) values[key] = number;
   }
   if (Object.keys(values).length === 0) {
     for (const param of fallback.parameters) {
-      if (param.id !== "calibrationReferenceDbu") values[param.id] = param.value;
+      if (!isNAMNonPortableStateKey(param.id)) values[param.id] = param.value;
     }
   }
-  values.auditionSource = 0;
   return values;
 }
 
@@ -315,7 +317,6 @@ export function normalizeNAMActivePreview(raw: unknown): NAMActivePreviewState |
       pedalMix: Number(baselineRecord.pedalMix ?? 0),
       ampEnabled: Number(baselineRecord.ampEnabled ?? 1),
       ampMix: Number(baselineRecord.ampMix ?? 1),
-      auditionSource: Number(baselineRecord.auditionSource ?? 0),
       pedalCalibrationMode: optionalBaselineNumber("pedalCalibrationMode"),
       pedalOverrideInputLevelDbu: optionalBaselineNumber("pedalOverrideInputLevelDbu"),
       pedalOverrideOutputLevelDbu: optionalBaselineNumber("pedalOverrideOutputLevelDbu"),
@@ -434,7 +435,7 @@ export async function saveNAMTone(options: SaveNAMToneOptions): Promise<SaveNAMT
 
   try {
     rackMutationStarted = true;
-    const liveInputRestored = await nativeBridge.setBuiltInPluginParam(options.address, "auditionSource", 0);
+    const liveInputRestored = await nativeBridge.setNAMRackInternalAuditionSource(options.address, false);
     if (!liveInputRestored) {
       return await failWithRollback("Live guitar input could not be restored, so the Preset was not saved.");
     }
@@ -452,6 +453,7 @@ export async function saveNAMTone(options: SaveNAMToneOptions): Promise<SaveNAMT
     const slot = activePreview?.slot ?? options.slotHint ?? slotForRecord(selectedRecord, "amp");
     const values = valuesFromState(state, options.schema);
     const modelState = modelStateFromState(state, options.schema);
+    const dspState = sanitizeNAMRackDspState(asRecord(state).dspState);
     const initialIdentity = resolveNAMToneIdentity({
       activePreview,
       installedRecord: selectedRecord,
@@ -464,6 +466,7 @@ export async function saveNAMTone(options: SaveNAMToneOptions): Promise<SaveNAMT
     const rackState = {
       values,
       modelState,
+      ...(Object.keys(dspState).length > 0 ? { dspState } : {}),
       slotOrder: asRecord(uiState.namRackSlots).order,
       sourceIds: {
         toneId: firstNumber(options.sourceIds?.toneId, activePreview?.toneId, selectedRecord?.toneId),
@@ -573,11 +576,17 @@ export async function saveNAMTone(options: SaveNAMToneOptions): Promise<SaveNAMT
     };
 
     const statePatch: Record<string, unknown> = {
-      values: { auditionSource: 0 },
       uiState: {
         ...uiState,
         namActivePreview: null,
         namSavedTone: savedTone,
+        // Preset identity and its dirty baseline describe the live editor
+        // session, not the tone itself. Clear any stale marker before the
+        // native binary snapshot; the caller rebuilds a verified baseline from
+        // the post-save processor state.
+        namPresetDirty: false,
+        namActivePresetName: null,
+        namPresetBaseline: null,
       },
     };
     if (shouldPatchModelState) {

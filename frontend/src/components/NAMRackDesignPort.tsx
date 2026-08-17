@@ -43,8 +43,10 @@ import {
 import type { BuiltInParamDescriptor } from "../services/NativeBridge";
 import {
   clampNumber,
+  denormalizeParamValue,
   formatParamValue,
   normalizeParam,
+  offsetParamValue,
   quantizeParamValue,
   stepForParam,
 } from "../utils/builtInParamValue";
@@ -53,6 +55,8 @@ import type { RackSectionId } from "./NAMRackNeuralSkinRegistry";
 import type { NAMRackCabMode } from "./NAMCabPresentation";
 import type { NAMRackAdvancedStageId } from "./NAMRackMixer";
 import { namMeterFraction } from "../utils/namMeterLevel";
+import { observeTONE3000AppendSentinel } from "../utils/tone3000InfiniteAppend";
+import { NAMRackControlTooltip } from "./NAMRackControlTooltip";
 
 type DesignBoardId =
   | "03-pre-fx-section"
@@ -74,9 +78,9 @@ export type NAMSourceFlowDesignActionId =
   | "query"
   | "search"
   | "retry"
-  | "previous-page"
-  | "next-page"
   | "load-more"
+  | "auto-load-more"
+  | "scroll"
   | "tab"
   | "filter"
   | "sort"
@@ -134,10 +138,22 @@ export type NAMSourceFlowDesignConfig = {
   query: string;
   tabs: string[];
   activeTab: number;
-  filters: Array<{ id: string; label: string; active?: boolean; attr?: string }>;
+  filters: Array<{
+    id: string;
+    label: string;
+    active?: boolean;
+    attr?: string;
+  }>;
   sortValue: string;
   sortOptions: Array<{ value: string; label: string }>;
-  targets: Array<{ id: string; label: string; model: string; meta: string; active?: boolean; preview?: boolean }>;
+  targets: Array<{
+    id: string;
+    label: string;
+    model: string;
+    meta: string;
+    active?: boolean;
+    preview?: boolean;
+  }>;
   localTitle: string;
   localDetail: string;
   feedTitle: string;
@@ -145,6 +161,7 @@ export type NAMSourceFlowDesignConfig = {
   viewLabel: string;
   results: NAMSourceFlowDesignResult[];
   pagination?: {
+    requestKey: string;
     page: number;
     totalPages: number;
     totalResults: number;
@@ -166,16 +183,27 @@ export type NAMSourceFlowDesignConfig = {
   controlAssetIds: string[];
   previewText: string;
   brand?: string;
-  actions: Array<{ id: NAMSourceFlowDesignActionId; label: string; primary?: boolean; disabled?: boolean }>;
+  actions: Array<{
+    id: NAMSourceFlowDesignActionId;
+    label: string;
+    primary?: boolean;
+    disabled?: boolean;
+  }>;
   statusTitle: string;
   route: string;
   statusDetail: string;
   resultCount: number;
   resultTotal?: number;
   busy: boolean;
+  sessionKey?: string;
+  initialScrollTop?: number;
   emptyTitle: string;
   emptyBody: string;
-  emptyAction?: { id: NAMSourceFlowDesignActionId; label: string; primary?: boolean };
+  emptyAction?: {
+    id: NAMSourceFlowDesignActionId;
+    label: string;
+    primary?: boolean;
+  };
 };
 
 export type NAMSourceFlowDesignPortMessage = {
@@ -186,7 +214,10 @@ export type NAMSourceFlowDesignPortMessage = {
   rowId?: string;
 };
 
-type DesignSectionId = Extract<RackSectionId, "pre" | "amp" | "cab" | "eq" | "post">;
+type DesignSectionId = Extract<
+  RackSectionId,
+  "pre" | "amp" | "cab" | "eq" | "post"
+>;
 type DesignBox = { x: number; y: number; w: number; h: number };
 type NativeStyle = CSSProperties & Record<`--${string}`, string | number>;
 
@@ -198,7 +229,10 @@ const SECTION_TO_BOARD: Record<DesignSectionId, DesignBoardId> = {
   post: "07-post-fx-section",
 };
 
-const SOURCE_FLOW_TO_BOARD: Record<NAMSourceFlowDesignMode, NAMSourceFlowDesignBoardId> = {
+const SOURCE_FLOW_TO_BOARD: Record<
+  NAMSourceFlowDesignMode,
+  NAMSourceFlowDesignBoardId
+> = {
   amp: "11-tone-library-amp-flow",
   pedal: "12-tone-library-pedal-flow",
   ir: "13-ir-source-flow",
@@ -231,6 +265,261 @@ const MODULE_NAME_TO_ID: Record<string, RackModuleId> = {
   reverb: "reverb",
 };
 
+// Shared physical hardware is specified in artboard pixels, never ad-hoc
+// percentages. Pedal contracts also expose the equivalent local percentages
+// for geometry calculations, while AssetControl uses these fixed values as the
+// final rendering authority on every device faceplate (Pre, Amp, Cab, EQ,
+// Post, and header utility controls).
+export const NAM_PEDAL_HARDWARE_STANDARD_PX = {
+  knob: 28,
+  footswitch: 25,
+  toggle: 24,
+  led: 12,
+} as const;
+
+export type NAMPedalHardwareKind = keyof typeof NAM_PEDAL_HARDWARE_STANDARD_PX;
+
+// These rotaries are deliberately not pedal hardware. The Cab IR Shaper uses
+// balanced console controls, Cabinet Space uses large studio-console "hero"
+// controls, and the amp tone rail needs enough visual weight on a wide host.
+// Keeping the exceptions named and finite stops an ordinary pedal knob from
+// drifting away from the shared 28 px contract.
+export const NAM_PANEL_ROTARY_VARIANT_PX = {
+  cabPanel: 42,
+  roomHero: 68,
+  ampPanel: 44,
+} as const;
+
+export type NAMPanelRotaryVariant = keyof typeof NAM_PANEL_ROTARY_VARIANT_PX;
+
+export function namPedalHardwareSizePercent(
+  moduleWidth: number,
+  kind: NAMPedalHardwareKind,
+) {
+  return (NAM_PEDAL_HARDWARE_STANDARD_PX[kind] / moduleWidth) * 100;
+}
+
+export const NAM_PRE_SIGNAL_LAYOUT = {
+  // The two six-control pedals use matching wide enclosures and faceplate
+  // rhythm. Ten artboard pixels between every sibling keep the full row
+  // centred while preserving the same physical hardware size contract.
+  compressor: { x: 5, y: 42, w: 156, h: 232 },
+  tapeEcho: { x: 171, y: 42, w: 156, h: 232 },
+  octaver: { x: 337, y: 42, w: 120, h: 232 },
+  precisionDrive: { x: 467, y: 42, w: 120, h: 232 },
+  distortion: { x: 597, y: 42, w: 156, h: 232 },
+} as const satisfies Record<string, DesignBox>;
+
+export const NAM_PRE_FX_HARDWARE_LAYOUT = {
+  compressor: {
+    knobSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.compressor.w,
+      "knob",
+    ),
+    footSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.compressor.w,
+      "footswitch",
+    ),
+    toggleSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.compressor.w,
+      "toggle",
+    ),
+    ledSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.compressor.w,
+      "led",
+    ),
+  },
+  tapeEcho: {
+    knobSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
+      "knob",
+    ),
+    footSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
+      "footswitch",
+    ),
+    toggleSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
+      "toggle",
+    ),
+    ledSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
+      "led",
+    ),
+  },
+  octaver: {
+    knobSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.octaver.w,
+      "knob",
+    ),
+    footSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.octaver.w,
+      "footswitch",
+    ),
+    toggleSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.octaver.w,
+      "toggle",
+    ),
+    ledSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.octaver.w,
+      "led",
+    ),
+  },
+  precisionDrive: {
+    knobSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w,
+      "knob",
+    ),
+    footSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w,
+      "footswitch",
+    ),
+    toggleSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w,
+      "toggle",
+    ),
+    ledSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w,
+      "led",
+    ),
+  },
+  distortion: {
+    knobSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.distortion.w,
+      "knob",
+    ),
+    footSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.distortion.w,
+      "footswitch",
+    ),
+    toggleSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.distortion.w,
+      "toggle",
+    ),
+    ledSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.distortion.w,
+      "led",
+    ),
+  },
+} as const;
+
+// Mode selectors are a distinct, compact hardware type: both PRE pedals use
+// the same blue three-detent rotary, while ordinary parameter knobs retain the
+// global 28 px contract.
+export const NAM_THREE_POSITION_SELECTOR_PX = 20;
+
+// Post FX uses three sibling faceplates with the same vertical rhythm.  These
+// boxes intentionally describe the taller artwork variants: keeping the
+// geometry in one exported contract prevents a replacement body from silently
+// letterboxing back to the old, cramped title/bottom clearances.
+export const NAM_POST_FX_FACEPLATE_LAYOUT = {
+  group: { x: 25, y: 24, w: 723, h: 200 },
+  modules: {
+    modulator: { box: { x: 25, y: 40, w: 220, h: 175 }, titleY: 9.8 },
+    delay: { box: { x: 254, y: 24, w: 260, h: 200 }, titleY: 9.8 },
+    reverb: { box: { x: 528, y: 29, w: 220, h: 195 }, titleY: 9.8 },
+  },
+  modulator: {
+    // Displays use a top edge while asset controls use centre coordinates.
+    // Keeping both values explicit guarantees one optical header centreline.
+    headerDisplayY: 16,
+    headerDisplayH: 9.5,
+    headerCenterY: 20.75,
+    headerToggleSize: namPedalHardwareSizePercent(220, "toggle"),
+    topRowY: 33.714286,
+    topKnobSize: namPedalHardwareSizePercent(220, "knob"),
+    topLabelOffset: 10.914286,
+    lowerRowY: 56.342857,
+    lowerKnobSize: namPedalHardwareSizePercent(220, "knob"),
+    lowerLabelOffset: 10.914286,
+    primaryX: 36,
+    secondaryX: 74,
+    // Every Post footswitch shares the global 25 design-pixel diameter and
+    // one global hardware baseline. Percentages differ because
+    // the photographed enclosures have different widths and top offsets.
+    ledY: 73.028571,
+    ledSize: namPedalHardwareSizePercent(220, "led"),
+    stateLabelY: 79.371429,
+    footY: 89.4,
+    footSize: namPedalHardwareSizePercent(220, "footswitch"),
+    footerToggleSize: namPedalHardwareSizePercent(220, "toggle"),
+  },
+  delay: {
+    headerDisplayY: 16,
+    headerDisplayH: 9,
+    topRowY: 37.5,
+    topKnobSize: namPedalHardwareSizePercent(260, "knob"),
+    topLabelOffset: 9.55,
+    lowerRowY: 57.4,
+    lowerKnobSize: namPedalHardwareSizePercent(260, "knob"),
+    lowerLabelOffset: 9.55,
+    secondaryX: 34,
+    primaryX: 66,
+    ledY: 71.9,
+    ledSize: namPedalHardwareSizePercent(260, "led"),
+    secondaryLedSize: namPedalHardwareSizePercent(260, "led"),
+    stateLabelY: 77.45,
+    footY: 86.225,
+    // ON/OFF and SYNC use the exact same global pedal hardware diameter.
+    footSize: namPedalHardwareSizePercent(260, "footswitch"),
+    secondaryFootSize: namPedalHardwareSizePercent(260, "footswitch"),
+  },
+  reverb: {
+    voiceDisplay: { x: 11, y: 15.5, w: 55, h: 10 },
+    voiceSelector: {
+      x: 76,
+      y: 15.5 + 10 - ((NAM_PEDAL_HARDWARE_STANDARD_PX.toggle / 195) * 100) / 2,
+      size: (NAM_PEDAL_HARDWARE_STANDARD_PX.toggle / 220) * 100,
+    },
+    topRowY: 35.897436,
+    topKnobSize: namPedalHardwareSizePercent(220, "knob"),
+    topLabelOffset: 9.794872,
+    lowerRowY: 56.307692,
+    lowerKnobSize: namPedalHardwareSizePercent(220, "knob"),
+    lowerLabelOffset: 9.794872,
+    primaryX: 50,
+    ledY: 71.179487,
+    ledSize: namPedalHardwareSizePercent(220, "led"),
+    stateLabelY: 76.871795,
+    footY: 85.871795,
+    footSize: namPedalHardwareSizePercent(220, "footswitch"),
+  },
+} as const;
+
+// All ten Graphic EQ gain stages share one recessed fader bay.  Output Level
+// is deliberately the final lane rather than a rotary mounted on the rack
+// cheek: this keeps the control type, +/-12 dB scale, hit target, and visual
+// baseline consistent at every responsive stage scale.
+export const NAM_GRAPHIC_EQ_FACEPLATE_LAYOUT = {
+  // The power stack is a separate fixed rail.  The recessed plotting bay is
+  // centred on the chassis, so its ten equal cells and both scale columns must
+  // share that same optical centre instead of inheriting a second right shift.
+  contentCenterX: 50,
+  title: { x: 50, y: 8.5 },
+  grid: { x: 14.44, y: 20, w: 71.12, h: 61 },
+  laneXs: [18, 25.11, 32.22, 39.33, 46.44, 53.56, 60.67, 67.78, 74.89, 82],
+  valueY: 20.8,
+  faderY: 52,
+  faderH: 46,
+  labelY: 80.5,
+  scaleXs: { left: 11.9, right: 88.1 },
+  scaleYs: { high: 25, unity: 52, low: 78 },
+  levelSeparatorX: 78.45,
+  powerStackX: 5.5,
+} as const;
+
+export const NAM_CAB_ROOM_CONSOLE_LAYOUT = {
+  // The approved Cab view is a single console.  Keeping the decorative speaker
+  // beside it made the actual control surface much smaller and wider than the
+  // reference, especially on compact hosts.
+  group: { x: 54, y: -30, w: 660, h: 402 },
+  console: { x: 54, y: -30, w: 660, h: 402 },
+  topKnobXs: [9.8, 22.9, 36, 49.1, 62.2, 75.3, 88.4],
+  topKnobY: 35.4,
+  utilityY: 51.5,
+  roomBayTop: 60.5,
+} as const;
+
 // Native plugin windows have more vertical room than the 768x341 HTML boards.
 // Preserve the board x composition, but give the active hardware modules taller
 // local boxes so bodies, knobs, and labels use that room together.
@@ -246,25 +535,24 @@ const LAYOUT = {
     head: { x: 24, y: -2, w: 720, h: 345 },
   },
   cab: {
-    cabinet: { x: 24, y: 74, w: 284, h: 190 },
-    micPanel: { x: 328, y: 74, w: 416, h: 192 },
+    micPanel: NAM_CAB_ROOM_CONSOLE_LAYOUT.console,
   },
   eq: {
     rack: { x: 24, y: 20, w: 720, h: 300 },
   },
   post: {
-    modulator: { x: 25, y: 44, w: 220, h: 157 },
-    delay: { x: 254, y: 32, w: 260, h: 182 },
-    reverb: { x: 528, y: 34, w: 220, h: 177 },
+    modulator: NAM_POST_FX_FACEPLATE_LAYOUT.modules.modulator.box,
+    delay: NAM_POST_FX_FACEPLATE_LAYOUT.modules.delay.box,
+    reverb: NAM_POST_FX_FACEPLATE_LAYOUT.modules.reverb.box,
   },
 } as const;
 
 const SECTION_GROUP_BOX: Record<DesignSectionId, DesignBox> = {
-  pre: { x: 40, y: 3, w: 688, h: 271 },
+  pre: { x: 5, y: 3, w: 748, h: 271 },
   amp: { x: 24, y: -2, w: 720, h: 345 },
-  cab: { x: 24, y: 74, w: 720, h: 192 },
+  cab: NAM_CAB_ROOM_CONSOLE_LAYOUT.group,
   eq: { x: 24, y: 20, w: 720, h: 300 },
-  post: { x: 25, y: -13, w: 723, h: 227 },
+  post: NAM_POST_FX_FACEPLATE_LAYOUT.group,
 };
 
 const LABEL_OFFSET = {
@@ -272,7 +560,174 @@ const LABEL_OFFSET = {
   below: 11.2,
 };
 
-type DesignParamChangeHandler = (param: BuiltInParamDescriptor, value: number) => void;
+// Follow the wide Tape Echo's visual hierarchy: a dedicated hardware header,
+// two control rows, then an isolated title/footer zone.  Displays use a top/
+// left anchor while hardware controls use their centre. The selector's visible
+// lower edge shares the display baseline rather than merely sharing its top.
+export const NAM_DISTORTION_FACEPLATE_LAYOUT = {
+  columns: [22, 50, 78],
+  modeDisplay: { x: 7, y: 10.5, w: 55, h: 10 },
+  modeSelector: {
+    x: 72,
+    y: 16.189655,
+    size:
+      (NAM_THREE_POSITION_SELECTOR_PX / NAM_PRE_SIGNAL_LAYOUT.distortion.w) *
+      100,
+  },
+  topY: 32.5,
+  lowerY: 52.5,
+  topKnobSize: NAM_PRE_FX_HARDWARE_LAYOUT.distortion.knobSize,
+  gateKnobSize: NAM_PRE_FX_HARDWARE_LAYOUT.distortion.knobSize,
+  lowerKnobSize: NAM_PRE_FX_HARDWARE_LAYOUT.distortion.knobSize,
+  topLabelOffset: 11,
+  lowerLabelOffset: 10.5,
+  titleY: 70,
+  led: { x: 50, y: 76.5, size: NAM_PRE_FX_HARDWARE_LAYOUT.distortion.ledSize },
+  stateLabelY: 82,
+  foot: {
+    x: 50,
+    y: 90.75,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.distortion.footSize,
+    hitSize: 18.5,
+  },
+} as const;
+
+export const NAM_COMPRESSOR_FACEPLATE_LAYOUT = {
+  // Match Distortion's wide, scan-friendly hierarchy: telemetry and selector
+  // first, then two clean three-control rows, then an isolated footer.
+  columns: [22, 50, 78],
+  meter: { x: 7, y: 10.5, w: 55, h: 10 },
+  // The selector and display share a lower baseline. The compact state plate
+  // remains inside the enclosure's 6% painted safety rim.
+  hpfSelector: {
+    x: 72,
+    y: 16.189655,
+    size:
+      (NAM_THREE_POSITION_SELECTOR_PX / NAM_PRE_SIGNAL_LAYOUT.compressor.w) *
+      100,
+  },
+  hpfReadout: { x: 82, y: 9.2, w: 11, h: 10.8 },
+  topY: 32.5,
+  lowerY: 52.5,
+  knobSize: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.knobSize,
+  topLabelOffset: 11,
+  lowerLabelOffset: 10.5,
+  titleY: 70,
+  led: { x: 50, y: 76.5, size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.ledSize },
+  stateLabelY: 82,
+  foot: {
+    x: 50,
+    y: 90.75,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.footSize,
+    hitSize: 18.5,
+  },
+} as const;
+
+export const NAM_THREE_POSITION_SELECTOR_ROTATIONS = [-52, 0, 52] as const;
+export const NAM_THREE_POSITION_SELECTOR_DETENT_RADIUS_PERCENT = 45.3;
+export const NAM_REVERB_VOICE_SELECTOR_ROTATIONS = [-60, -20, 20, 60] as const;
+export const NAM_REVERB_VOICE_SELECTOR_PX =
+  NAM_PEDAL_HARDWARE_STANDARD_PX.toggle;
+export const NAM_REVERB_VOICE_LABELS = [
+  "STUDIO",
+  "PLATE",
+  "HALL",
+  "ROOM",
+] as const;
+export const NAM_REVERB_VOICE_CONTROL_LABELS = [
+  {
+    preDelay: "PRE DLY",
+    decay: "DECAY",
+    mix: "MIX",
+    lowCut: "LOW CUT",
+    tone: "TONE",
+    texture: "AIR",
+  },
+  {
+    preDelay: "PRE DLY",
+    decay: "DECAY",
+    mix: "MIX",
+    lowCut: "LOW CUT",
+    tone: "DAMP",
+    texture: "SHIMMER",
+  },
+  {
+    preDelay: "PRE DLY",
+    decay: "DECAY",
+    mix: "MIX",
+    lowCut: "LOW CUT",
+    tone: "DAMP",
+    texture: "MOTION",
+  },
+  {
+    preDelay: "PRE DLY",
+    decay: "SIZE",
+    mix: "MIX",
+    lowCut: "LOW CUT",
+    tone: "TONE",
+    texture: "EARLY",
+  },
+] as const;
+
+export function namThreePositionSelectorDetentPlacement(rotation: number) {
+  const radians = (rotation * Math.PI) / 180;
+  return {
+    x:
+      50 +
+      NAM_THREE_POSITION_SELECTOR_DETENT_RADIUS_PERCENT * Math.sin(radians),
+    y:
+      50 -
+      NAM_THREE_POSITION_SELECTOR_DETENT_RADIUS_PERCENT * Math.cos(radians),
+    rotation,
+  };
+}
+
+export function namReverbVoiceSelectorDetentPlacement(rotation: number) {
+  const radians = (rotation * Math.PI) / 180;
+  return {
+    x:
+      50 +
+      NAM_THREE_POSITION_SELECTOR_DETENT_RADIUS_PERCENT * Math.sin(radians),
+    y:
+      50 -
+      NAM_THREE_POSITION_SELECTOR_DETENT_RADIUS_PERCENT * Math.cos(radians),
+    rotation,
+  };
+}
+
+export function reverbVoiceDisplayLabel(value: number, min = 0) {
+  const index = clamp(
+    Math.round((Number.isFinite(value) ? value : min) - min),
+    0,
+    NAM_REVERB_VOICE_LABELS.length - 1,
+  );
+  return NAM_REVERB_VOICE_LABELS[index];
+}
+
+export function reverbVoiceControlLabels(value: number, min = 0) {
+  const index = clamp(
+    Math.round((Number.isFinite(value) ? value : min) - min),
+    0,
+    NAM_REVERB_VOICE_CONTROL_LABELS.length - 1,
+  );
+  return NAM_REVERB_VOICE_CONTROL_LABELS[index];
+}
+
+const COMPRESSOR_HPF_DISPLAY_LABELS = ["OFF", "120", "240"] as const;
+
+export function compressorHpfDisplayLabel(value: number, min = 0) {
+  const index = clamp(
+    Math.round((Number.isFinite(value) ? value : min) - min),
+    0,
+    COMPRESSOR_HPF_DISPLAY_LABELS.length - 1,
+  );
+  return COMPRESSOR_HPF_DISPLAY_LABELS[index];
+}
+
+type DesignParamChangeHandler = (
+  param: BuiltInParamDescriptor,
+  value: number,
+) => void;
 
 type DesignParamContextValue = {
   paramsById: Map<string, BuiltInParamDescriptor>;
@@ -319,8 +774,13 @@ export type NAMRotaryDragState = {
   mode: "pending" | "angular" | "vertical";
 };
 
-export function namRotaryPointerAngle(clientX: number, clientY: number, centerX: number, centerY: number) {
-  return Math.atan2(clientY - centerY, clientX - centerX) * 180 / Math.PI;
+export function namRotaryPointerAngle(
+  clientX: number,
+  clientY: number,
+  centerX: number,
+  centerY: number,
+) {
+  return (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI;
 }
 
 export function namRotaryAngleDelta(previousAngle: number, nextAngle: number) {
@@ -337,14 +797,24 @@ export function namRotaryValueFromDrag(
   clientY: number,
   fine = false,
 ) {
-  const span = Math.max(param.max - param.min, 0.0001);
-  const distanceFromCenter = Math.hypot(clientX - drag.centerX, clientY - drag.centerY);
-  const mostlyVerticalDrag = Math.abs(clientX - drag.startX) < 10 && Math.abs(clientY - drag.startY) > 3;
+  const distanceFromCenter = Math.hypot(
+    clientX - drag.centerX,
+    clientY - drag.centerY,
+  );
+  const mostlyVerticalDrag =
+    Math.abs(clientX - drag.startX) < 10 && Math.abs(clientY - drag.startY) > 3;
   const angularDeadZone = 14;
 
-  if (drag.mode === "vertical" || (drag.mode === "pending" && mostlyVerticalDrag)) {
+  if (
+    drag.mode === "vertical" ||
+    (drag.mode === "pending" && mostlyVerticalDrag)
+  ) {
     return {
-      value: clampNumber(verticalRotaryValueFromDrag(param, drag, clientY, fine), param.min, param.max),
+      value: clampNumber(
+        verticalRotaryValueFromDrag(param, drag, clientY, fine),
+        param.min,
+        param.max,
+      ),
       lastAngle: drag.lastAngle,
       accumulatedAngle: drag.accumulatedAngle,
       mode: "vertical" as const,
@@ -352,15 +822,22 @@ export function namRotaryValueFromDrag(
   }
 
   if (drag.mode === "angular" || distanceFromCenter >= angularDeadZone) {
-    const nextAngle = namRotaryPointerAngle(clientX, clientY, drag.centerX, drag.centerY);
+    const nextAngle = namRotaryPointerAngle(
+      clientX,
+      clientY,
+      drag.centerX,
+      drag.centerY,
+    );
     const angleDelta = namRotaryAngleDelta(drag.lastAngle, nextAngle);
-    const nextAccumulatedAngle = Math.abs(angleDelta) >= 0.25
-      ? drag.accumulatedAngle + angleDelta
-      : drag.accumulatedAngle;
+    const nextAccumulatedAngle =
+      Math.abs(angleDelta) >= 0.25
+        ? drag.accumulatedAngle + angleDelta
+        : drag.accumulatedAngle;
     const fineScale = fine ? 0.35 : 1;
-    const nextNormalized = drag.startNormalized + (nextAccumulatedAngle / 270) * fineScale;
+    const nextNormalized =
+      drag.startNormalized + (nextAccumulatedAngle / 270) * fineScale;
     return {
-      value: param.min + clampNumber(nextNormalized, 0, 1) * span,
+      value: denormalizeParamValue(param, nextNormalized),
       lastAngle: Math.abs(angleDelta) >= 0.25 ? nextAngle : drag.lastAngle,
       accumulatedAngle: nextAccumulatedAngle,
       mode: "angular" as const,
@@ -368,7 +845,11 @@ export function namRotaryValueFromDrag(
   }
 
   return {
-    value: clampNumber(verticalRotaryValueFromDrag(param, drag, clientY, fine), param.min, param.max),
+    value: clampNumber(
+      verticalRotaryValueFromDrag(param, drag, clientY, fine),
+      param.min,
+      param.max,
+    ),
     lastAngle: drag.lastAngle,
     accumulatedAngle: drag.accumulatedAngle,
     mode: "pending" as const,
@@ -386,12 +867,69 @@ export function toggleNAMContinuousBypassValue(
       rememberedValue: param.value,
     };
   }
-  const defaultOnValue = param.defaultValue > activeThreshold ? param.defaultValue : param.max;
-  const restoredValue = rememberedValue > activeThreshold ? rememberedValue : defaultOnValue;
+  const defaultOnValue =
+    param.defaultValue > activeThreshold ? param.defaultValue : param.max;
+  const restoredValue =
+    rememberedValue > activeThreshold ? rememberedValue : defaultOnValue;
   return {
     nextValue: clampNumber(restoredValue, param.min, param.max),
     rememberedValue: clampNumber(restoredValue, param.min, param.max),
   };
+}
+
+export function cycleNAMDesignEnumValue(
+  param: BuiltInParamDescriptor,
+  direction = 1,
+) {
+  const optionValues = (param.enumOptions ?? [])
+    .map((option) => option.value)
+    .filter((value) => Number.isFinite(value));
+  const values =
+    optionValues.length > 0
+      ? optionValues
+      : Array.from(
+          { length: Math.max(1, Math.round(param.max - param.min) + 1) },
+          (_, index) => param.min + index,
+        );
+  const currentIndex = values.findIndex((value) => value === param.value);
+  const startIndex = currentIndex >= 0 ? currentIndex : 0;
+  const offset = direction >= 0 ? 1 : -1;
+  return values[(startIndex + offset + values.length) % values.length];
+}
+
+export function snapNAMDesignEnumValue(
+  param: BuiltInParamDescriptor,
+  candidate: number,
+) {
+  const optionValues = (param.enumOptions ?? [])
+    .map((option) => option.value)
+    .filter((value) => Number.isFinite(value));
+  const values =
+    optionValues.length > 0
+      ? optionValues
+      : Array.from(
+          { length: Math.max(1, Math.round(param.max - param.min) + 1) },
+          (_, index) => param.min + index,
+        );
+  const safeCandidate = Number.isFinite(candidate) ? candidate : param.value;
+  return values.reduce(
+    (nearest, value) =>
+      Math.abs(value - safeCandidate) < Math.abs(nearest - safeCandidate)
+        ? value
+        : nearest,
+    values[0] ?? param.min,
+  );
+}
+
+const DISTORTION_MODE_DISPLAY_LABELS = ["HEAVY", "XTREME", "CRUNCH"] as const;
+
+export function distortionModeDisplayLabel(value: number, min = 0) {
+  const index = clamp(
+    Math.round((Number.isFinite(value) ? value : min) - min),
+    0,
+    DISTORTION_MODE_DISPLAY_LABELS.length - 1,
+  );
+  return DISTORTION_MODE_DISPLAY_LABELS[index];
 }
 
 function verticalRotaryValueFromDrag(
@@ -400,26 +938,34 @@ function verticalRotaryValueFromDrag(
   clientY: number,
   fine = false,
 ) {
-  const span = Math.max(param.max - param.min, 0.0001);
   const fineScale = fine ? 0.25 : 1;
-  return drag.startValue + (drag.startY - clientY) * (span / 150) * fineScale;
+  return denormalizeParamValue(
+    param,
+    drag.startNormalized + ((drag.startY - clientY) / 150) * fineScale,
+  );
 }
 
 const BODIES = {
   amp: "amp-head-body",
   cab: "cabinet-body",
+  cabRoomIntegrated: "cab-room-integrated-body",
   irShaper: "ir-shaper-panel-body",
   mic: "mic-panel-body",
   eq: "rack-unit-body-deep",
   blue: "stompbox-body-blue",
+  blueWide: "stompbox-body-blue-wide",
   dark: "stompbox-body-dark",
   darkWide: "stompbox-body-dark-wide",
   olive: "stompbox-body-olive",
   red: "stompbox-body-red",
+  redWide: "stompbox-body-red-wide",
   stone: "stompbox-body-stone",
   copperWide: "wide-pedal-body-copper-deep",
+  copperTall: "wide-pedal-body-copper-tall",
   darkWidePedal: "wide-pedal-body-dark-deep",
+  darkTallPedal: "wide-pedal-body-dark-tall",
   blueWidePedal: "wide-pedal-body-navy-deep",
+  blueTallPedal: "wide-pedal-body-navy-tall",
 } as const satisfies Record<string, NAMDesignBodyAssetId>;
 
 const CONTROLS = {
@@ -428,19 +974,22 @@ const CONTROLS = {
   footOn: "footswitch-chrome-on-top",
   footPressed: "footswitch-chrome-pressed-top",
   knobBlack: "knob-black-top",
+  knobBlueSteel: "knob-blue-steel-top",
   knobCream: "knob-cream-top",
   knobMetal: "knob-metal-top",
   ledOff: "led-amber-off-top",
   ledOn: "led-amber-on-top",
   mic57: "mic-dynamic-57",
   mic121: "mic-ribbon-121",
-  screw: "screw-phillips-top",
   slider: "slider-metal-top",
   toggle: "toggle-chrome-top",
   washer: "washer-chrome-top",
 } as const satisfies Record<string, NAMDesignControlAssetId>;
 
-const STUDIO_BACKDROP_URL = new URL("../assets/nam/rack-studio-backdrop-v2.webp", import.meta.url).href;
+const STUDIO_BACKDROP_URL = new URL(
+  "../assets/nam/rack-studio-backdrop-v2.webp",
+  import.meta.url,
+).href;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -455,12 +1004,15 @@ function pxBox(box: DesignBox): CSSProperties {
   };
 }
 
-function assetFrameStyle(box: DesignBox, body: NAMDesignBodyAssetId): CSSProperties {
+function assetFrameStyle(
+  box: DesignBox,
+  body: NAMDesignBodyAssetId,
+): CSSProperties {
   const asset = getNAMDesignAsset(body);
   const assetAspect = asset.width / Math.max(asset.height, 1);
   const boxAspect = box.w / Math.max(box.h, 1);
   if (boxAspect > assetAspect) {
-    const widthPct = (box.h * assetAspect / Math.max(box.w, 1)) * 100;
+    const widthPct = ((box.h * assetAspect) / Math.max(box.w, 1)) * 100;
     return {
       left: "50%",
       top: "50%",
@@ -480,30 +1032,54 @@ function assetFrameStyle(box: DesignBox, body: NAMDesignBodyAssetId): CSSPropert
 }
 
 function percentStyle(vars: Record<string, string | number>): NativeStyle {
-  return Object.fromEntries(Object.entries(vars).map(([key, value]) => [`--${key}`, value])) as NativeStyle;
+  return Object.fromEntries(
+    Object.entries(vars).map(([key, value]) => [`--${key}`, value]),
+  ) as NativeStyle;
 }
 
 function shellBoardForSection(sectionId: RackSectionId): DesignBoardId {
-  if (sectionId === "pre" || sectionId === "amp" || sectionId === "cab" || sectionId === "eq" || sectionId === "post") {
+  if (
+    sectionId === "pre" ||
+    sectionId === "amp" ||
+    sectionId === "cab" ||
+    sectionId === "eq" ||
+    sectionId === "post"
+  ) {
     return SECTION_TO_BOARD[sectionId];
   }
   return "04-amp-section";
 }
 
 function designSectionFor(sectionId: RackSectionId): DesignSectionId {
-  return sectionId === "pre" || sectionId === "amp" || sectionId === "cab" || sectionId === "eq" || sectionId === "post"
+  return sectionId === "pre" ||
+    sectionId === "amp" ||
+    sectionId === "cab" ||
+    sectionId === "eq" ||
+    sectionId === "post"
     ? sectionId
     : "amp";
 }
 
-export function sourceFlowDesignBoardForMode(mode: NAMSourceFlowDesignMode): NAMSourceFlowDesignBoardId {
+export function sourceFlowDesignBoardForMode(
+  mode: NAMSourceFlowDesignMode,
+): NAMSourceFlowDesignBoardId {
   return SOURCE_FLOW_TO_BOARD[mode];
 }
 
 export function sourceFlowResourceTerms(mode: NAMSourceFlowDesignMode) {
-  if (mode === "ir") return { label: "IR", title: "IR", library: "IR Library" } as const;
-  if (mode === "fx") return { label: "effect preset", title: "Effect Preset", library: "Effect Preset Library" } as const;
-  return { label: "capture", title: "Capture", library: "Capture Library" } as const;
+  if (mode === "ir")
+    return { label: "IR", title: "IR", library: "IR Library" } as const;
+  if (mode === "fx")
+    return {
+      label: "effect preset",
+      title: "Effect Preset",
+      library: "Effect Preset Library",
+    } as const;
+  return {
+    label: "capture",
+    title: "Capture",
+    library: "Capture Library",
+  } as const;
 }
 
 function useElementSize<T extends HTMLElement>() {
@@ -533,7 +1109,7 @@ function useElementSize<T extends HTMLElement>() {
   return [ref, size] as const;
 }
 
-function computePremiumStagePlacement(
+export function computePremiumStagePlacement(
   viewport: { width: number; height: number },
   group: DesignBox,
   rackSizePercent: number,
@@ -545,17 +1121,20 @@ function computePremiumStagePlacement(
     Math.max(0.1, (viewport.height - marginY * 2) / group.h),
   );
   // These are semantic stage-size presets rather than literal browser zoom.
-  // Keep every preset usable without panning, but make each step visually
-  // meaningful instead of presenting a 220% label for a six-percent change.
-  const requestedScale = rackSizePercent >= 220
-    ? 1.24
-    : rackSizePercent >= 180
-      ? 1.12
-      : rackSizePercent >= 140
-        ? 1
-        : rackSizePercent >= 100
-          ? 0.91
-          : 0.82;
+  // Max fills the usable canvas, including its safety margins; every smaller
+  // preset is a distinct fraction of that fitted size. Multipliers above one
+  // used to push the outer pedals underneath the adjacent library drawer on
+  // wide/high-DPI hosts even though the stage itself correctly clipped them.
+  const requestedScale =
+    rackSizePercent >= 220
+      ? 1
+      : rackSizePercent >= 180
+        ? 0.94
+        : rackSizePercent >= 140
+          ? 0.88
+          : rackSizePercent >= 100
+            ? 0.82
+            : 0.76;
   const scale = Math.max(0.1, fitScale * requestedScale);
 
   return {
@@ -609,6 +1188,11 @@ export type NAMRackDesignRuntimeStatus = {
   outputLevelDb?: number;
 };
 
+export type NAMRackDesignUtilityControls = {
+  instrumentProfile: 0 | 1;
+  effectiveInputMode: number;
+};
+
 export type NAMRackDesignRecovery = {
   slot: "pedal" | "amp" | "cab";
   slotLabel: string;
@@ -625,6 +1209,7 @@ export type NAMRackDesignRecovery = {
 
 type NAMRackDesignTunerSummary = {
   signalPresent: boolean;
+  pitchLocked: boolean;
   noteLabel: string;
   statusLabel: string;
   centsPct: number;
@@ -639,12 +1224,14 @@ function DesignAssetImage({
   style,
   alt = "",
   draggable = false,
+  qa,
 }: {
   assetId: NAMDesignBodyAssetId | NAMDesignControlAssetId;
   className?: string;
   style?: CSSProperties;
   alt?: string;
   draggable?: boolean;
+  qa?: Record<`data-${string}`, string | number | undefined>;
 }) {
   const asset: NAMDesignAsset = getNAMDesignAsset(assetId);
   return (
@@ -660,6 +1247,7 @@ function DesignAssetImage({
       data-rack-design-asset-file={asset.fileName}
       data-rack-design-natural-width={asset.width}
       data-rack-design-natural-height={asset.height}
+      {...qa}
     />
   );
 }
@@ -676,7 +1264,10 @@ function Label({
   className?: string;
 }) {
   return (
-    <div className={`label ${className}`.trim()} style={{ left: `${x}%`, top: `${y}%` }}>
+    <div
+      className={`label ${className}`.trim()}
+      style={{ left: `${x}%`, top: `${y}%` }}
+    >
       {children}
     </div>
   );
@@ -720,6 +1311,7 @@ function AssetControl({
   paramId,
   interaction = "knob",
   labelText,
+  semanticLabel,
   labelOffset = 8.2,
   labelClass = "",
   value = "",
@@ -728,7 +1320,10 @@ function AssetControl({
   visuallyDisabled,
   disabledReason,
   onButtonClick,
+  enableButtonDrag = false,
   stateRotations,
+  hardwareKind,
+  panelRotaryVariant,
 }: {
   assetId: NAMDesignControlAssetId;
   className: string;
@@ -739,6 +1334,7 @@ function AssetControl({
   paramId?: string;
   interaction?: DesignControlInteraction;
   labelText?: string;
+  semanticLabel?: string;
   labelOffset?: number;
   labelClass?: string;
   value?: string;
@@ -746,14 +1342,22 @@ function AssetControl({
   allowInteraction?: boolean;
   visuallyDisabled?: boolean;
   disabledReason?: string;
-  onButtonClick?: (param: BuiltInParamDescriptor, commitValue: (value: number) => void) => void;
+  onButtonClick?: (
+    param: BuiltInParamDescriptor,
+    commitValue: (value: number) => void,
+  ) => void;
+  enableButtonDrag?: boolean;
   stateRotations?: readonly number[];
+  hardwareKind?: NAMPedalHardwareKind;
+  panelRotaryVariant?: NAMPanelRotaryVariant;
 }) {
   const param = useBoundDesignParam(paramId);
   const context = useContext(DesignParamContext);
   const commitParamValue = useDesignParamCommit(param);
   const hitRef = useRef<HTMLSpanElement | null>(null);
   const dragRef = useRef<NAMRotaryDragState | null>(null);
+  const buttonDragMovedRef = useRef(false);
+  const suppressNextButtonClickRef = useRef(false);
   const feedbackTimerRef = useRef<number | null>(null);
   const pointerInitiatedFocusRef = useRef(false);
   const feedbackActivityRef = useRef<Record<ControlFeedbackActivity, boolean>>({
@@ -762,40 +1366,58 @@ function AssetControl({
     dragging: false,
   });
   const [feedbackVisible, setFeedbackVisible] = useState(false);
-  const interactive = Boolean(allowInteraction && param && context?.onParamChange);
+  const interactive = Boolean(
+    allowInteraction && param && context?.onParamChange,
+  );
   const controlVisuallyDisabled = visuallyDisabled ?? !allowInteraction;
   const valueLabel = param ? formatParamValue(param) : value;
   const isEnum = param?.type === "enum";
   const isEnumButton = Boolean(param && isEnum && interaction === "button");
-  const isToggleButton = Boolean(param && !isEnum && (interaction === "button" || param.type === "toggle"));
+  const isToggleButton = Boolean(
+    param && !isEnum && (interaction === "button" || param.type === "toggle"),
+  );
   const isButtonLike = Boolean(isEnumButton || isToggleButton);
-  const isToggleArtwork = className.split(/\s+/).includes("toggle");
-  const isSwitchControl = Boolean(param && !isEnum && isToggleArtwork && isButtonLike);
-  const toggleActive = Boolean(param && param.value >= (param.min + param.max) / 2);
+  const controlClasses = className.split(/\s+/);
+  const isToggleArtwork = controlClasses.includes("toggle");
+  const isSwitchControl = Boolean(
+    param && !isEnum && isToggleArtwork && isButtonLike,
+  );
+  const toggleActive = Boolean(
+    param && param.value >= (param.min + param.max) / 2,
+  );
   const pct = param ? normalizeParam(param) : 0;
-  const stateRotation = param && stateRotations?.length
-    ? stateRotations[
-        clamp(
-          Math.round(param.value - param.min),
-          0,
-          stateRotations.length - 1,
-        )
-      ]
-    : undefined;
-  const visualRot = stateRotation !== undefined
-    ? stateRotation
-    : isToggleArtwork && param
-    ? toggleActive ? 0 : 180
-    : param && !isButtonLike
-      ? -135 + pct * 270
-      : rot;
-  const title = param ? `${param.label}: ${valueLabel}` : valueLabel;
-  const showsLiveFeedback = Boolean(interactive && !isButtonLike);
+  const stateRotationIndex =
+    param && stateRotations?.length
+      ? clamp(Math.round(param.value - param.min), 0, stateRotations.length - 1)
+      : undefined;
+  const stateRotation =
+    stateRotationIndex !== undefined && stateRotations
+      ? stateRotations[stateRotationIndex]
+      : undefined;
+  const visualRot =
+    stateRotation !== undefined
+      ? stateRotation
+      : isToggleArtwork && param
+        ? toggleActive
+          ? 0
+          : 180
+        : param && !isButtonLike
+          ? -135 + pct * 270
+          : rot;
+  const visualSize = panelRotaryVariant
+    ? `${NAM_PANEL_ROTARY_VARIANT_PX[panelRotaryVariant]}px`
+    : hardwareKind
+      ? `${NAM_PEDAL_HARDWARE_STANDARD_PX[hardwareKind]}px`
+      : `${size}%`;
+  const resolvedControlLabel =
+    semanticLabel ?? param?.label ?? labelText ?? "Control";
+  const title = param ? `${resolvedControlLabel}: ${valueLabel}` : valueLabel;
+  const showsLiveFeedback = Boolean(
+    interactive && (!isButtonLike || enableButtonDrag),
+  );
   const showsDisabledFeedback = Boolean(!allowInteraction && disabledReason);
   const showsControlFeedback = showsLiveFeedback || showsDisabledFeedback;
   const feedbackValue = showsDisabledFeedback ? disabledReason : valueLabel;
-  const feedbackPlacement = y < 18 ? "below" : "above";
-  const feedbackAlign = x <= 22 ? "start" : x >= 78 ? "end" : "center";
 
   const clearFeedbackTimer = useCallback(() => {
     if (feedbackTimerRef.current !== null) {
@@ -835,16 +1457,19 @@ function AssetControl({
   const stepParam = useCallback(
     (direction: number, multiplier = 1) => {
       if (!param) return;
-      if (interaction === "button" || param.type === "toggle") {
-        commitParamValue(param.value >= (param.min + param.max) / 2 ? param.min : param.max);
-        return;
-      }
       if (param.type === "enum") {
-        const next = Math.round(param.value) + direction;
-        commitParamValue(next > param.max ? param.min : next < param.min ? param.max : next);
+        commitParamValue(cycleNAMDesignEnumValue(param, direction));
         return;
       }
-      commitParamValue(param.value + stepForParam(param) * direction * multiplier);
+      if (interaction === "button" || param.type === "toggle") {
+        commitParamValue(
+          param.value >= (param.min + param.max) / 2 ? param.min : param.max,
+        );
+        return;
+      }
+      commitParamValue(
+        offsetParamValue(param, param.value, direction * multiplier),
+      );
     },
     [commitParamValue, interaction, param],
   );
@@ -854,16 +1479,38 @@ function AssetControl({
       const drag = dragRef.current;
       if (!drag || !param || drag.pointerId !== event.pointerId) return;
       const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 0.25 : 1;
-      const next = namRotaryValueFromDrag(param, drag, event.clientX, event.clientY, fine < 1);
+      const next = namRotaryValueFromDrag(
+        param,
+        drag,
+        event.clientX,
+        event.clientY,
+        fine < 1,
+      );
+      const nextValue =
+        enableButtonDrag && param.type === "enum"
+          ? snapNAMDesignEnumValue(param, next.value)
+          : next.value;
+      if (enableButtonDrag) {
+        const pointerTravel = Math.hypot(
+          event.clientX - drag.startX,
+          event.clientY - drag.startY,
+        );
+        if (
+          pointerTravel >= 4 ||
+          Math.abs(nextValue - drag.startValue) > 0.000001
+        ) {
+          buttonDragMovedRef.current = true;
+        }
+      }
       dragRef.current = {
         ...drag,
         lastAngle: next.lastAngle,
         accumulatedAngle: next.accumulatedAngle,
         mode: next.mode,
       };
-      commitParamValue(next.value);
+      commitParamValue(nextValue);
     },
-    [commitParamValue, param],
+    [commitParamValue, enableButtonDrag, param],
   );
 
   const handlePointerDown = useCallback(
@@ -873,7 +1520,9 @@ function AssetControl({
       event.stopPropagation();
       pointerInitiatedFocusRef.current = true;
       event.currentTarget.focus();
-      if (isButtonLike) return;
+      if (isButtonLike && !enableButtonDrag) return;
+      buttonDragMovedRef.current = false;
+      suppressNextButtonClickRef.current = false;
       setFeedbackActivity("dragging", true);
       const rect = event.currentTarget.getBoundingClientRect();
       const centerX = rect.left + rect.width / 2;
@@ -886,13 +1535,18 @@ function AssetControl({
         startY: event.clientY,
         startValue: param.value,
         startNormalized: normalizeParam(param),
-        lastAngle: namRotaryPointerAngle(event.clientX, event.clientY, centerX, centerY),
+        lastAngle: namRotaryPointerAngle(
+          event.clientX,
+          event.clientY,
+          centerX,
+          centerY,
+        ),
         accumulatedAngle: 0,
         mode: "pending",
       };
       event.currentTarget.setPointerCapture(event.pointerId);
     },
-    [interactive, isButtonLike, param, setFeedbackActivity],
+    [enableButtonDrag, interactive, isButtonLike, param, setFeedbackActivity],
   );
 
   const handlePointerMove = useCallback(
@@ -909,6 +1563,12 @@ function AssetControl({
       if (dragRef.current?.pointerId === event.pointerId) {
         dragToValue(event);
         dragRef.current = null;
+        suppressNextButtonClickRef.current = Boolean(
+          enableButtonDrag &&
+          buttonDragMovedRef.current &&
+          event.type === "pointerup",
+        );
+        buttonDragMovedRef.current = false;
         setFeedbackActivity("dragging", false);
       }
       pointerInitiatedFocusRef.current = false;
@@ -916,7 +1576,7 @@ function AssetControl({
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
     },
-    [dragToValue, setFeedbackActivity],
+    [dragToValue, enableButtonDrag, setFeedbackActivity],
   );
 
   const handleClick = useCallback(
@@ -924,24 +1584,42 @@ function AssetControl({
       if (!interactive || !param) return;
       event.preventDefault();
       event.stopPropagation();
+      if (suppressNextButtonClickRef.current) {
+        suppressNextButtonClickRef.current = false;
+        return;
+      }
       if (isButtonLike) {
         if (onButtonClick) onButtonClick(param, commitParamValue);
         else stepParam(1);
       }
     },
-    [commitParamValue, interactive, isButtonLike, onButtonClick, param, stepParam],
+    [
+      commitParamValue,
+      interactive,
+      isButtonLike,
+      onButtonClick,
+      param,
+      stepParam,
+    ],
   );
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLElement>) => {
-      if (!interactive || !param || isButtonLike) return;
+      if (!interactive || !param || (isButtonLike && !enableButtonDrag)) return;
       event.preventDefault();
       event.stopPropagation();
       showFeedbackNow();
       const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
       stepParam(event.deltaY > 0 ? -1 : 1, fine);
     },
-    [interactive, isButtonLike, param, showFeedbackNow, stepParam],
+    [
+      enableButtonDrag,
+      interactive,
+      isButtonLike,
+      param,
+      showFeedbackNow,
+      stepParam,
+    ],
   );
 
   const handleDoubleClick = useCallback(
@@ -959,7 +1637,8 @@ function AssetControl({
     (event: KeyboardEvent<HTMLElement>) => {
       if (!interactive || !param) return;
       showFeedbackNow();
-      const arrowMultiplier = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
+      const arrowMultiplier =
+        event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
       if ((event.key === "Enter" || event.key === " ") && isButtonLike) {
         event.preventDefault();
         event.stopPropagation();
@@ -991,35 +1670,94 @@ function AssetControl({
         commitParamValue(param.max);
       }
     },
-    [commitParamValue, interactive, isButtonLike, isToggleButton, onButtonClick, param, showFeedbackNow, stepParam],
+    [
+      commitParamValue,
+      interactive,
+      isButtonLike,
+      isToggleButton,
+      onButtonClick,
+      param,
+      showFeedbackNow,
+      stepParam,
+    ],
   );
 
   return (
     <>
-      {(interactive || (allowInteraction && value) || showsDisabledFeedback) && (
+      {(interactive ||
+        (allowInteraction && value) ||
+        showsDisabledFeedback) && (
         <span
           ref={hitRef}
-          className={`control-hit ${interactive ? "interactive" : ""} ${showsDisabledFeedback ? "disabled-feedback" : ""}`.trim()}
+          className={`control-hit ${interactive ? "interactive" : ""} ${pointerInitiatedFocusRef.current ? "pointer-focused" : ""} ${showsDisabledFeedback ? "disabled-feedback" : ""}`.trim()}
           data-value={valueLabel}
           data-param-id={param?.id}
           data-param-value={param?.value}
-          data-control-interaction={isButtonLike ? "button" : "knob"}
+          data-control-interaction={
+            enableButtonDrag && isButtonLike
+              ? "hybrid"
+              : isButtonLike
+                ? "button"
+                : "knob"
+          }
           title={isButtonLike && interactive ? title : undefined}
-          style={percentStyle({ x: `${x}%`, y: `${y}%`, hit: `${hitSize ?? Math.max(size + 2, size * 1.25)}%` })}
-          role={interactive ? (isSwitchControl ? "switch" : isEnum ? "spinbutton" : isToggleButton ? "button" : "slider") : showsDisabledFeedback ? "note" : undefined}
+          style={percentStyle({
+            x: `${x}%`,
+            y: `${y}%`,
+            hit: `${hitSize ?? Math.max(size + 2, size * 1.25)}%`,
+          })}
+          role={
+            interactive
+              ? isSwitchControl
+                ? "switch"
+                : isEnum
+                  ? "spinbutton"
+                  : isToggleButton
+                    ? "button"
+                    : "slider"
+              : showsDisabledFeedback
+                ? "note"
+                : undefined
+          }
           tabIndex={interactive || showsDisabledFeedback ? 0 : undefined}
-          aria-label={showsDisabledFeedback
-            ? `${param?.label ?? labelText ?? "Control"} unavailable. ${disabledReason}`
-            : param
-              ? isSwitchControl ? `${param.label}: ${valueLabel}` : param.label
-              : undefined}
+          aria-label={
+            showsDisabledFeedback
+              ? `${resolvedControlLabel} unavailable. ${disabledReason}`
+              : param
+                ? isSwitchControl || isEnumButton
+                  ? `${resolvedControlLabel}: ${valueLabel}`
+                  : resolvedControlLabel
+                : undefined
+          }
           aria-disabled={showsDisabledFeedback || undefined}
-          aria-checked={interactive && isSwitchControl && param ? toggleActive : undefined}
-          aria-pressed={interactive && !isSwitchControl && isToggleButton && param ? toggleActive : undefined}
-          aria-valuemin={interactive && !isSwitchControl && !isToggleButton ? param?.min : undefined}
-          aria-valuemax={interactive && !isSwitchControl && !isToggleButton ? param?.max : undefined}
-          aria-valuenow={interactive && !isSwitchControl && !isToggleButton ? param?.value : undefined}
-          aria-valuetext={interactive && !isSwitchControl && !isToggleButton ? valueLabel : undefined}
+          aria-checked={
+            interactive && isSwitchControl && param ? toggleActive : undefined
+          }
+          aria-pressed={
+            interactive && !isSwitchControl && isToggleButton && param
+              ? toggleActive
+              : undefined
+          }
+          aria-valuemin={
+            interactive && !isSwitchControl && !isToggleButton
+              ? param?.min
+              : undefined
+          }
+          aria-valuemax={
+            interactive && !isSwitchControl && !isToggleButton
+              ? param?.max
+              : undefined
+          }
+          aria-valuenow={
+            interactive && !isSwitchControl && !isToggleButton
+              ? param?.value
+              : undefined
+          }
+          aria-valuetext={
+            interactive && !isSwitchControl && !isToggleButton
+              ? valueLabel
+              : undefined
+          }
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={finishPointerDrag}
@@ -1045,33 +1783,62 @@ function AssetControl({
           onKeyDown={handleKeyDown}
         />
       )}
-      {showsControlFeedback && (
-        <span
-          className="control-value-popover"
-          data-visible={feedbackVisible}
-          data-kind={showsDisabledFeedback ? "reason" : "value"}
-          data-placement={feedbackPlacement}
-          data-align={feedbackAlign}
-          style={percentStyle({ x: `${x}%`, y: `${y}%` })}
-          aria-hidden="true"
-        >
-          <small>{param?.label}</small>
-          <strong>{feedbackValue}</strong>
-        </span>
-      )}
+      {showsControlFeedback ? (
+        <NAMRackControlTooltip
+          anchor={hitRef.current}
+          open={feedbackVisible}
+          label={semanticLabel ?? param?.label}
+          value={feedbackValue}
+          kind={showsDisabledFeedback ? "reason" : "value"}
+        />
+      ) : null}
       <DesignAssetImage
         assetId={assetId}
-        className={`asset-control ${className} ${controlVisuallyDisabled ? "control-disabled" : ""} ${isToggleArtwork ? toggleActive ? "control-on" : "control-off" : ""}`.trim()}
-        style={percentStyle({ x: `${x}%`, y: `${y}%`, size: `${size}%`, rot: `${visualRot}deg` })}
+        className={`asset-control ${className} ${controlVisuallyDisabled ? "control-disabled" : ""} ${isToggleArtwork ? (toggleActive ? "control-on" : "control-off") : ""} ${stateRotationIndex !== undefined ? `control-state-${stateRotationIndex}` : ""}`.trim()}
+        style={percentStyle({
+          x: `${x}%`,
+          y: `${y}%`,
+          size: visualSize,
+          rot: `${visualRot}deg`,
+        })}
+        qa={
+          panelRotaryVariant
+            ? {
+                "data-nam-panel-rotary-variant": panelRotaryVariant,
+                "data-nam-panel-rotary-px":
+                  NAM_PANEL_ROTARY_VARIANT_PX[panelRotaryVariant],
+              }
+            : hardwareKind
+              ? {
+                  "data-nam-hardware-kind": hardwareKind,
+                  "data-nam-hardware-standard-px":
+                    NAM_PEDAL_HARDWARE_STANDARD_PX[hardwareKind],
+                }
+              : undefined
+        }
       />
-      {className.split(/\s+/).includes("knob") && (
-        <span
-          className="knob-position-indicator"
-          aria-hidden="true"
-          style={percentStyle({ x: `${x}%`, y: `${y}%`, size: `${size}%`, rot: `${visualRot}deg` })}
-        />
+      {controlClasses.includes("knob") &&
+        !controlClasses.includes("enum-position-rotary") && (
+          <span
+            className="knob-position-indicator"
+            aria-hidden="true"
+            style={percentStyle({
+              x: `${x}%`,
+              y: `${y}%`,
+              size: visualSize,
+              rot: `${visualRot}deg`,
+            })}
+          />
+        )}
+      {labelText && (
+        <Label
+          x={x}
+          y={y + labelOffset}
+          className={`control-label ${labelClass} ${controlVisuallyDisabled ? "control-disabled" : ""}`.trim()}
+        >
+          {labelText}
+        </Label>
       )}
-      {labelText && <Label x={x} y={y + labelOffset} className={`control-label ${labelClass} ${controlVisuallyDisabled ? "control-disabled" : ""}`.trim()}>{labelText}</Label>}
     </>
   );
 }
@@ -1084,29 +1851,60 @@ function Knob({
   rot,
   paramId,
   labelText,
+  semanticLabel,
   labelOffset,
   labelClass,
   value,
   hitSize,
   allowInteraction = true,
   disabledReason,
+  panelRotaryVariant,
 }: {
-  kind: "black" | "cream" | "metal";
+  kind: "black" | "blue-steel" | "cream" | "metal";
   x: number;
   y: number;
   size: number;
   rot: number;
   paramId?: string;
   labelText?: string;
+  semanticLabel?: string;
   labelOffset?: number;
   labelClass?: string;
   value?: string;
   hitSize?: number;
   allowInteraction?: boolean;
   disabledReason?: string;
+  panelRotaryVariant?: NAMPanelRotaryVariant;
 }) {
-  const assetId = kind === "metal" ? CONTROLS.knobMetal : kind === "cream" ? CONTROLS.knobCream : CONTROLS.knobBlack;
-  return <AssetControl assetId={assetId} className={`knob ${kind}`} x={x} y={y} size={size} rot={rot} paramId={paramId} labelText={labelText} labelOffset={labelOffset} labelClass={labelClass} value={value} hitSize={hitSize} allowInteraction={allowInteraction} disabledReason={disabledReason} />;
+  const assetId =
+    kind === "metal"
+      ? CONTROLS.knobMetal
+      : kind === "cream"
+        ? CONTROLS.knobCream
+        : kind === "blue-steel"
+          ? CONTROLS.knobBlueSteel
+          : CONTROLS.knobBlack;
+  return (
+    <AssetControl
+      assetId={assetId}
+      className={`knob ${kind}`}
+      x={x}
+      y={y}
+      size={size}
+      rot={rot}
+      paramId={paramId}
+      labelText={labelText}
+      semanticLabel={semanticLabel}
+      labelOffset={labelOffset}
+      labelClass={labelClass}
+      value={value}
+      hitSize={hitSize}
+      allowInteraction={allowInteraction}
+      disabledReason={disabledReason}
+      hardwareKind="knob"
+      panelRotaryVariant={panelRotaryVariant}
+    />
+  );
 }
 
 function Foot({
@@ -1141,16 +1939,21 @@ function Foot({
   stateLabelY?: number;
 }) {
   const param = useBoundDesignParam(paramId);
-  const threshold = activeThreshold ?? (param ? (param.min + param.max) / 2 : 0.5);
+  const threshold =
+    activeThreshold ?? (param ? (param.min + param.max) / 2 : 0.5);
   const active = Boolean(param && param.value > threshold);
   const rememberedActiveValue = useRef(param && active ? param.value : 1);
   useEffect(() => {
-    if (param && param.value > threshold) rememberedActiveValue.current = param.value;
+    if (param && param.value > threshold)
+      rememberedActiveValue.current = param.value;
   }, [param, threshold]);
-  const resolvedState = param
-    ? (active ? "on" : "off")
-    : state;
-  const assetId = resolvedState === "pressed" ? CONTROLS.footPressed : resolvedState === "on" ? CONTROLS.footOn : CONTROLS.footOff;
+  const resolvedState = param ? (active ? "on" : "off") : state;
+  const assetId =
+    resolvedState === "pressed"
+      ? CONTROLS.footPressed
+      : resolvedState === "on"
+        ? CONTROLS.footOn
+        : CONTROLS.footOff;
   return (
     <>
       <AssetControl
@@ -1166,20 +1969,29 @@ function Foot({
         hitSize={hitSize}
         allowInteraction={allowInteraction}
         disabledReason={disabledReason}
-        onButtonClick={preserveContinuousValue
-          ? (boundParam, commitValue) => {
-              const toggled = toggleNAMContinuousBypassValue(boundParam, rememberedActiveValue.current, threshold);
-              rememberedActiveValue.current = toggled.rememberedValue;
-              commitValue(toggled.nextValue);
-            }
-          : undefined}
+        hardwareKind="footswitch"
+        onButtonClick={
+          preserveContinuousValue
+            ? (boundParam, commitValue) => {
+                const toggled = toggleNAMContinuousBypassValue(
+                  boundParam,
+                  rememberedActiveValue.current,
+                  threshold,
+                );
+                rememberedActiveValue.current = toggled.rememberedValue;
+                commitValue(toggled.nextValue);
+              }
+            : undefined
+        }
       />
       {showStateLabel ? (
         <FootActionLabel
           x={x}
           y={stateLabelY ?? y - Math.max(8, size * 0.62)}
           className={`primary-foot-state ${allowInteraction ? "" : "control-disabled"}`}
-          state={resolvedState === "on" || resolvedState === "pressed" ? "on" : "off"}
+          state={
+            resolvedState === "on" || resolvedState === "pressed" ? "on" : "off"
+          }
         >
           ON / OFF
         </FootActionLabel>
@@ -1210,78 +2022,353 @@ function Led({
   activeThreshold?: number;
 }) {
   const param = useBoundDesignParam(paramId);
-  const active = param ? param.value > (activeThreshold ?? (param.min + param.max) / 2) : on;
-  return <AssetControl assetId={active ? CONTROLS.ledOn : CONTROLS.ledOff} className={`led ${active ? "on" : "off"}`} x={x} y={y} size={size} paramId={paramId} interaction="button" value={value} hitSize={hitSize} allowInteraction={interactive} visuallyDisabled={false} />;
+  const active = param
+    ? param.value > (activeThreshold ?? (param.min + param.max) / 2)
+    : on;
+  return (
+    <AssetControl
+      assetId={active ? CONTROLS.ledOn : CONTROLS.ledOff}
+      className={`led ${active ? "on" : "off"}`}
+      x={x}
+      y={y}
+      size={size}
+      paramId={paramId}
+      interaction="button"
+      value={value}
+      hitSize={hitSize}
+      allowInteraction={interactive}
+      visuallyDisabled={false}
+      hardwareKind="led"
+    />
+  );
 }
 
-function Toggle({ x, y, size, paramId, labelText, labelOffset, labelClass, allowInteraction = true, disabledReason }: { x: number; y: number; size: number; paramId?: string; labelText?: string; labelOffset?: number; labelClass?: string; allowInteraction?: boolean; disabledReason?: string }) {
-  return <AssetControl assetId={CONTROLS.toggle} className="toggle" x={x} y={y} size={size} paramId={paramId} interaction="button" labelText={labelText} labelOffset={labelOffset} labelClass={labelClass} allowInteraction={allowInteraction} disabledReason={disabledReason} />;
-}
-
-function ThreeWayToggle({
+function Toggle({
   x,
   y,
   size,
-  labelY,
   paramId,
-  labels,
+  labelText,
+  labelOffset,
+  labelClass,
+  allowInteraction = true,
+  disabledReason,
 }: {
   x: number;
   y: number;
   size: number;
-  labelY: number;
+  paramId?: string;
+  labelText?: string;
+  labelOffset?: number;
+  labelClass?: string;
+  allowInteraction?: boolean;
+  disabledReason?: string;
+}) {
+  return (
+    <AssetControl
+      assetId={CONTROLS.toggle}
+      className="toggle"
+      x={x}
+      y={y}
+      size={size}
+      paramId={paramId}
+      interaction="button"
+      labelText={labelText}
+      labelOffset={labelOffset}
+      labelClass={labelClass}
+      allowInteraction={allowInteraction}
+      disabledReason={disabledReason}
+      hardwareKind="toggle"
+    />
+  );
+}
+
+function ThreePositionRotarySelector({
+  x,
+  y,
+  size,
+  paramId,
+}: {
+  x: number;
+  y: number;
+  size: number;
   paramId: string;
-  labels: readonly [string, string, string];
 }) {
   const param = useBoundDesignParam(paramId);
-  const current = clamp(
-    Math.round((param?.value ?? 0) - (param?.min ?? 0)),
-    0,
-    2,
-  );
+  const stateIndex = param
+    ? clamp(
+        Math.round(param.value - param.min),
+        0,
+        NAM_THREE_POSITION_SELECTOR_ROTATIONS.length - 1,
+      )
+    : 0;
   return (
     <>
-      <div
-        className="three-way-toggle-labels"
-        style={{ left: `${x}%`, top: `${labelY}%` }}
+      <span
+        className="three-position-selector-detents"
+        style={{
+          left: `${x}%`,
+          top: `${y}%`,
+          width: `${size * 1.28}%`,
+        }}
+        data-nam-three-position-selector-px={NAM_THREE_POSITION_SELECTOR_PX}
+        data-selector-state={stateIndex}
         aria-hidden="true"
       >
-        {labels.map((label, index) => (
-          <span key={label} data-active={index === current}>{label}</span>
-        ))}
-      </div>
+        {NAM_THREE_POSITION_SELECTOR_ROTATIONS.map((rotation, index) => {
+          const detent = namThreePositionSelectorDetentPlacement(rotation);
+          return (
+            <i
+              key={rotation}
+              data-active={index === stateIndex}
+              style={{
+                left: `${detent.x}%`,
+                top: `${detent.y}%`,
+                transform: `translate(-50%, -50%) rotate(${detent.rotation}deg)`,
+              }}
+            />
+          );
+        })}
+      </span>
       <AssetControl
-        assetId={CONTROLS.toggle}
-        className="toggle three-way-toggle"
+        assetId={CONTROLS.knobBlueSteel}
+        className="knob blue-steel three-position-rotary enum-position-rotary"
         x={x}
         y={y}
         size={size}
         paramId={paramId}
         interaction="button"
-        hitSize={size * 1.45}
-        stateRotations={[-38, 0, 38]}
-        onButtonClick={(boundParam, commitValue) => {
-          const next = Math.round(boundParam.value) + 1;
-          commitValue(next > boundParam.max ? boundParam.min : next);
+        hitSize={size * 1.28}
+        enableButtonDrag
+        stateRotations={NAM_THREE_POSITION_SELECTOR_ROTATIONS}
+        onButtonClick={(param, commitValue) => {
+          commitValue(cycleNAMDesignEnumValue(param));
         }}
       />
     </>
   );
 }
 
-function Washer({ x, y, size, labelText, labelOffset, labelClass }: { x: number; y: number; size: number; labelText?: string; labelOffset?: number; labelClass?: string }) {
-  return <AssetControl assetId={CONTROLS.washer} className="washer" x={x} y={y} size={size} labelText={labelText} labelOffset={labelOffset} labelClass={labelClass} />;
+function FourPositionRotarySelector({
+  x,
+  y,
+  size,
+  paramId,
+}: {
+  x: number;
+  y: number;
+  size: number;
+  paramId: string;
+}) {
+  const param = useBoundDesignParam(paramId);
+  const stateIndex = param
+    ? clamp(
+        Math.round(param.value - param.min),
+        0,
+        NAM_REVERB_VOICE_SELECTOR_ROTATIONS.length - 1,
+      )
+    : 0;
+  return (
+    <>
+      <span
+        className="four-position-selector-detents"
+        style={{ left: `${x}%`, top: `${y}%`, width: `${size * 1.42}%` }}
+        data-nam-four-position-selector-px={NAM_REVERB_VOICE_SELECTOR_PX}
+        data-selector-state={stateIndex}
+        aria-hidden="true"
+      >
+        {NAM_REVERB_VOICE_SELECTOR_ROTATIONS.map((rotation, index) => {
+          const detent = namReverbVoiceSelectorDetentPlacement(rotation);
+          return (
+            <i
+              key={rotation}
+              data-active={index === stateIndex}
+              style={{
+                left: `${detent.x}%`,
+                top: `${detent.y}%`,
+                transform: `translate(-50%, -50%) rotate(${detent.rotation}deg)`,
+              }}
+            />
+          );
+        })}
+      </span>
+      <AssetControl
+        assetId={CONTROLS.knobBlueSteel}
+        className="knob blue-steel enum-position-rotary four-position-rotary"
+        x={x}
+        y={y}
+        size={size}
+        paramId={paramId}
+        interaction="button"
+        hitSize={size * 1.5}
+        enableButtonDrag
+        stateRotations={NAM_REVERB_VOICE_SELECTOR_ROTATIONS}
+        hardwareKind="toggle"
+        onButtonClick={(boundParam, commitValue) => {
+          commitValue(cycleNAMDesignEnumValue(boundParam));
+        }}
+      />
+    </>
+  );
 }
 
-function Screw({ x, y, size = 3.8 }: { x: number; y: number; size?: number }) {
-  return <AssetControl assetId={CONTROLS.screw} className="screw" x={x} y={y} size={size} />;
+function ReverbVoiceDisplay({ paramId }: { paramId: string }) {
+  const param = useBoundDesignParam(paramId);
+  return (
+    <span aria-hidden="true">
+      {reverbVoiceDisplayLabel(param?.value ?? 0, param?.min ?? 0)}
+    </span>
+  );
 }
 
-function Display({ children, x, y, w, h, className = "" }: { children: ReactNode; x: number; y: number; w: number; h: number; className?: string }) {
-  return <div className={`module-display ${className}`.trim()} style={{ left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%` }}>{children}</div>;
+function CompressorHPFReadout({
+  x,
+  y,
+  w,
+  h,
+  paramId,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  paramId: string;
+}) {
+  const param = useBoundDesignParam(paramId);
+  const valueLabel = compressorHpfDisplayLabel(
+    param?.value ?? 0,
+    param?.min ?? 0,
+  );
+  return (
+    <div
+      className="compressor-hpf-readout"
+      style={{ left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%` }}
+      data-param-id={paramId}
+      data-param-value={param?.value ?? 0}
+      aria-label={`HPF ${param ? formatParamValue(param) : valueLabel}`}
+    >
+      <span>HPF</span>
+      <strong>{valueLabel}</strong>
+    </div>
+  );
 }
 
-export function ButtonPlate({ children, x, y, w, h, hot = false, paramId }: { children?: ReactNode; x: number; y: number; w: number; h: number; hot?: boolean; paramId?: string }) {
+function Washer({
+  x,
+  y,
+  size,
+  labelText,
+  labelOffset,
+  labelClass,
+}: {
+  x: number;
+  y: number;
+  size: number;
+  labelText?: string;
+  labelOffset?: number;
+  labelClass?: string;
+}) {
+  return (
+    <AssetControl
+      assetId={CONTROLS.washer}
+      className="washer"
+      x={x}
+      y={y}
+      size={size}
+      labelText={labelText}
+      labelOffset={labelOffset}
+      labelClass={labelClass}
+    />
+  );
+}
+
+function Display({
+  children,
+  x,
+  y,
+  w,
+  h,
+  className = "",
+}: {
+  children: ReactNode;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`module-display ${className}`.trim()}
+      style={{ left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%` }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function CompressorGainReductionMeter({
+  x,
+  y,
+  w,
+  h,
+  gainReductionDb,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  gainReductionDb: number;
+}) {
+  const safeDb = clamp(
+    Number.isFinite(gainReductionDb) ? gainReductionDb : 0,
+    -36,
+    0,
+  );
+  const reduction = Math.abs(safeDb);
+  const thresholds = [1, 3, 6, 10, 15, 20] as const;
+  return (
+    <div
+      className="compressor-gr-meter"
+      style={{ left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%` }}
+      data-gain-reduction-db={safeDb.toFixed(1)}
+      title={`Gain reduction: ${reduction.toFixed(1)} dB`}
+      role="meter"
+      aria-label="Compressor gain reduction"
+      aria-valuemin={0}
+      aria-valuemax={36}
+      aria-valuenow={Number(reduction.toFixed(1))}
+    >
+      <span className="compressor-gr-label">GR</span>
+      <span className="compressor-gr-segments" aria-hidden="true">
+        {thresholds.map((threshold) => (
+          <i key={threshold} data-active={reduction >= threshold} />
+        ))}
+      </span>
+      <strong>{reduction.toFixed(1)}</strong>
+    </div>
+  );
+}
+
+export function ButtonPlate({
+  children,
+  x,
+  y,
+  w,
+  h,
+  hot = false,
+  paramId,
+  className = "",
+}: {
+  children?: ReactNode;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  hot?: boolean;
+  paramId?: string;
+  className?: string;
+}) {
   const param = useBoundDesignParam(paramId);
   const commitParamValue = useDesignParamCommit(param);
   const active = param ? param.value >= (param.min + param.max) / 2 : hot;
@@ -1290,7 +2377,7 @@ export function ButtonPlate({ children, x, y, w, h, hot = false, paramId }: { ch
   return (
     <button
       type="button"
-      className={`asset-button ${active ? "hot" : ""}`.trim()}
+      className={`asset-button ${className} ${active ? "hot" : ""}`.trim()}
       style={percentStyle({ x: `${x}%`, y: `${y}%`, w: `${w}%`, h: `${h}%` })}
       data-param-id={param?.id}
       data-param-value={param?.value}
@@ -1298,10 +2385,22 @@ export function ButtonPlate({ children, x, y, w, h, hot = false, paramId }: { ch
       onClick={(event) => {
         event.stopPropagation();
         if (!param) return;
-        commitParamValue(param.value >= (param.min + param.max) / 2 ? param.min : param.max);
+        commitParamValue(
+          isEnum
+            ? cycleNAMDesignEnumValue(param)
+            : param.value >= (param.min + param.max) / 2
+              ? param.min
+              : param.max,
+        );
       }}
       title={param ? `${param.label}: ${valueLabel}` : undefined}
-      aria-label={param ? (isEnum ? `${param.label}: ${valueLabel}` : param.label) : undefined}
+      aria-label={
+        param
+          ? isEnum
+            ? `${param.label}: ${valueLabel}`
+            : param.label
+          : undefined
+      }
       aria-pressed={param && !isEnum ? active : undefined}
     >
       <DesignAssetImage assetId={CONTROLS.button} />
@@ -1310,7 +2409,23 @@ export function ButtonPlate({ children, x, y, w, h, hot = false, paramId }: { ch
   );
 }
 
-function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x: number; y: number; h: number; paramId?: string; labelText?: string; value?: number; className?: string }) {
+function Fader({
+  x,
+  y,
+  h,
+  paramId,
+  labelText,
+  value = 52,
+  className = "",
+}: {
+  x: number;
+  y: number;
+  h: number;
+  paramId?: string;
+  labelText?: string;
+  value?: number;
+  className?: string;
+}) {
   const param = useBoundDesignParam(paramId);
   const context = useContext(DesignParamContext);
   const commitParamValue = useDesignParamCommit(param);
@@ -1323,15 +2438,22 @@ function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x:
   const pointerToValue = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
       if (!param) return;
-      const rect = faderRef.current?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
-      const nextPct = clampNumber(1 - ((event.clientY - rect.top) / Math.max(rect.height, 1)), 0, 1);
-      commitParamValue(param.min + nextPct * Math.max(param.max - param.min, 0.0001));
+      const rect =
+        faderRef.current?.getBoundingClientRect() ??
+        event.currentTarget.getBoundingClientRect();
+      const nextPct = clampNumber(
+        1 - (event.clientY - rect.top) / Math.max(rect.height, 1),
+        0,
+        1,
+      );
+      commitParamValue(denormalizeParamValue(param, nextPct));
     },
     [commitParamValue, param],
   );
   const dragToValue = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
+      if (!dragRef.current || dragRef.current.pointerId !== event.pointerId)
+        return;
       pointerToValue(event);
     },
     [pointerToValue],
@@ -1340,7 +2462,12 @@ function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x:
     <>
       <div
         className={`fader ${className} ${interactive ? "interactive" : ""}`.trim()}
-        style={percentStyle({ x: `${x}%`, y: `${y}%`, h: `${h}%`, value: `${visualValue}%` })}
+        style={percentStyle({
+          x: `${x}%`,
+          y: `${y}%`,
+          h: `${h}%`,
+          value: `${visualValue}%`,
+        })}
         data-param-id={param?.id}
         data-param-value={param?.value}
         role={interactive ? "slider" : undefined}
@@ -1375,7 +2502,8 @@ function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x:
           }
         }}
         onPointerCancel={(event) => {
-          if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+          if (dragRef.current?.pointerId === event.pointerId)
+            dragRef.current = null;
           if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
           }
@@ -1385,7 +2513,13 @@ function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x:
           event.preventDefault();
           event.stopPropagation();
           const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-          commitParamValue(param.value + stepForParam(param) * fine * (event.deltaY > 0 ? -1 : 1));
+          commitParamValue(
+            offsetParamValue(
+              param,
+              param.value,
+              fine * (event.deltaY > 0 ? -1 : 1),
+            ),
+          );
         }}
         onDoubleClick={(event) => {
           if (!interactive || !param) return;
@@ -1398,16 +2532,16 @@ function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x:
           const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
           if (event.key === "ArrowUp" || event.key === "ArrowRight") {
             event.preventDefault();
-            commitParamValue(param.value + stepForParam(param) * fine);
+            commitParamValue(offsetParamValue(param, param.value, fine));
           } else if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
             event.preventDefault();
-            commitParamValue(param.value - stepForParam(param) * fine);
+            commitParamValue(offsetParamValue(param, param.value, -fine));
           } else if (event.key === "PageUp") {
             event.preventDefault();
-            commitParamValue(param.value + stepForParam(param) * 8);
+            commitParamValue(offsetParamValue(param, param.value, 8));
           } else if (event.key === "PageDown") {
             event.preventDefault();
-            commitParamValue(param.value - stepForParam(param) * 8);
+            commitParamValue(offsetParamValue(param, param.value, -8));
           } else if (event.key === "Home") {
             event.preventDefault();
             commitParamValue(param.min);
@@ -1420,7 +2554,15 @@ function Fader({ x, y, h, paramId, labelText, value = 52, className = "" }: { x:
         <div className="fader-track" />
         <DesignAssetImage assetId={CONTROLS.slider} className="fader-cap" />
       </div>
-      {labelText && <Label x={x} y={y + h / 2 + 8} className={`control-label dark ${className ? `${className}-label` : ""}`.trim()}>{labelText}</Label>}
+      {labelText && (
+        <Label
+          x={x}
+          y={y + h / 2 + 8}
+          className={`control-label dark ${className ? `${className}-label` : ""}`.trim()}
+        >
+          {labelText}
+        </Label>
+      )}
     </>
   );
 }
@@ -1458,10 +2600,28 @@ function Module({
       aria-label={`${accessibleName} module`}
       style={pxBox(box)}
     >
-      <div className="module-frame" style={frameMode === "asset" && bodyFit !== "fill" ? assetFrameStyle(box, body) : { inset: 0 }}>
-        <DesignAssetImage assetId={body} className="module-skin" style={{ objectFit: bodyFit }} />
+      <div
+        className="module-frame"
+        style={
+          frameMode === "asset" && bodyFit !== "fill"
+            ? assetFrameStyle(box, body)
+            : { inset: 0 }
+        }
+      >
+        <DesignAssetImage
+          assetId={body}
+          className="module-skin"
+          style={{ objectFit: bodyFit }}
+        />
         {children}
-        {title && <div className="module-title" style={titleY ? { top: `${titleY}%` } : undefined}>{title}</div>}
+        {title && (
+          <div
+            className="module-title"
+            style={titleY ? { top: `${titleY}%` } : undefined}
+          >
+            {title}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1487,7 +2647,15 @@ function Stompbox({
   children: ReactNode;
 }) {
   return (
-    <Module box={box} name={name} body={body ?? BODIES[tone ?? "dark"]} bodyFit={bodyFit} className="stompbox" title={title} titleY={titleY}>
+    <Module
+      box={box}
+      name={name}
+      body={body ?? BODIES[tone ?? "dark"]}
+      bodyFit={bodyFit}
+      className="stompbox"
+      title={title}
+      titleY={titleY}
+    >
       {children}
     </Module>
   );
@@ -1511,11 +2679,15 @@ function WidePedal({
   children: ReactNode;
 }) {
   return (
-    <Module box={box} name={name} body={body} className={`wide-pedal ${className}`.trim()} bodyFit="contain" title={title} titleY={titleY}>
-      <Screw x={7} y={11} size={4} />
-      <Screw x={93} y={11} size={4} />
-      <Screw x={7} y={88} size={4} />
-      <Screw x={93} y={88} size={4} />
+    <Module
+      box={box}
+      name={name}
+      body={body}
+      className={`wide-pedal ${className}`.trim()}
+      bodyFit="contain"
+      title={title}
+      titleY={titleY}
+    >
       {children}
     </Module>
   );
@@ -1538,10 +2710,13 @@ function TopShell({
   onOpenLibrary,
   onPreviousPreset,
   onNextPreset,
+  previousPresetLabel,
+  nextPresetLabel,
   onSaveTone,
   onOpenPresetManager,
   onRecallCompare,
   onOpenCalibration,
+  utilityControls,
 }: {
   active: string;
   libraryActive?: boolean;
@@ -1559,18 +2734,41 @@ function TopShell({
   onOpenLibrary?: () => void;
   onPreviousPreset?: () => void;
   onNextPreset?: () => void;
+  previousPresetLabel?: string;
+  nextPresetLabel?: string;
   onSaveTone?: () => void;
   onOpenPresetManager?: () => void;
   onRecallCompare?: (slot: "A" | "B") => void;
   onOpenCalibration?: () => void;
+  utilityControls?: NAMRackDesignUtilityControls;
 }) {
   const displayPresetName = presetName.replace(/^Current Capture\s*·\s*/i, "");
-  const sections: Array<{ label: string; shortLabel: string; id: DesignSectionId; icon: ReactNode }> = [
-    { label: "PEDALS", shortLabel: "PEDALS", id: "pre", icon: <PedalStageIcon /> },
+  const sections: Array<{
+    label: string;
+    shortLabel: string;
+    id: DesignSectionId;
+    icon: ReactNode;
+  }> = [
+    {
+      label: "PEDALS",
+      shortLabel: "PEDALS",
+      id: "pre",
+      icon: <PedalStageIcon />,
+    },
     { label: "AMP", shortLabel: "AMP", id: "amp", icon: <AmpStageIcon /> },
     { label: "CAB", shortLabel: "CAB", id: "cab", icon: <CabStageIcon /> },
-    { label: "EQ", shortLabel: "EQ", id: "eq", icon: <SlidersHorizontal aria-hidden="true" /> },
-    { label: "POST FX", shortLabel: "POST", id: "post", icon: <Gauge aria-hidden="true" /> },
+    {
+      label: "EQ",
+      shortLabel: "EQ",
+      id: "eq",
+      icon: <SlidersHorizontal aria-hidden="true" />,
+    },
+    {
+      label: "POST FX",
+      shortLabel: "POST",
+      id: "post",
+      icon: <Gauge aria-hidden="true" />,
+    },
   ];
   return (
     <>
@@ -1579,34 +2777,64 @@ function TopShell({
           <span>OpenStudio</span>
           <strong>NAM RACK</strong>
           <em>Neural guitar suite</em>
-          {onOpenCalibration && (
-            <button
-              type="button"
-              className="premium-calibration-launch"
-              data-qa="nam-premium-calibration"
-              data-status={calibrationStatus}
-              data-active={calibrationOpen}
-              onClick={onOpenCalibration}
-              title="Open NAM capture level calibration"
-              aria-controls="nam-calibration-dialog"
-              aria-expanded={calibrationOpen}
-              aria-haspopup="dialog"
-            >
-              <Gauge aria-hidden="true" />
-              <span>CAL</span>
-              <strong>{calibrationLabel}</strong>
-            </button>
-          )}
         </div>
-        <div className="global-block left">
-          <CompactLevelMeter label="Pre-trim input level" levelDb={inputLevelDb} />
-          <MiniParam name="INPUT TRIM" value="0.0 dB" kind="black" rot={32} paramId="inputTrimDb" />
-          <MiniParam name="GATE" value="-78 dB" kind="black" rot={-14} paramId="gateThresholdDb" />
+        {onOpenCalibration && (
+          <button
+            type="button"
+            className="premium-calibration-launch"
+            data-qa="nam-premium-calibration"
+            data-status={calibrationStatus}
+            data-active={calibrationOpen}
+            onClick={onOpenCalibration}
+            title="Open NAM capture level calibration"
+            aria-controls="nam-calibration-dialog"
+            aria-expanded={calibrationOpen}
+            aria-haspopup="dialog"
+          >
+            <Gauge aria-hidden="true" />
+            <span>CAL</span>
+            <strong>{calibrationLabel}</strong>
+          </button>
+        )}
+        <div className="global-block left" data-qa="nam-input-control-bay">
+          <CompactLevelMeter
+            meterId="input"
+            label="Pre-trim input level"
+            levelDb={inputLevelDb}
+          />
+          <MiniParam
+            name="INPUT TRIM"
+            value="0.0 dB"
+            kind="black"
+            rot={32}
+            paramId="inputTrimDb"
+          />
+          <MiniParam
+            name="GATE"
+            value="-78 dB"
+            kind="black"
+            rot={-14}
+            paramId="gateThresholdDb"
+          />
         </div>
         <div className="preset-area">
-          <div className="preset-context"><i />{previewText}</div>
+          {utilityControls ? (
+            <PremiumHeaderUtility controls={utilityControls} />
+          ) : null}
+          <div className="preset-context">
+            <i />
+            {previewText}
+          </div>
           <div className="preset-console">
-            <button type="button" className="preset-arrow" onClick={onPreviousPreset} disabled={!onPreviousPreset} title="Previous preset" aria-label="Previous preset">
+            <button
+              type="button"
+              className="preset-arrow"
+              data-qa="nam-preset-previous"
+              onClick={onPreviousPreset}
+              disabled={!onPreviousPreset}
+              title={previousPresetLabel ?? "Previous preset unavailable"}
+              aria-label={previousPresetLabel ?? "Previous preset unavailable"}
+            >
               <ArrowLeft aria-hidden="true" />
             </button>
             {onOpenPresetManager ? (
@@ -1621,22 +2849,47 @@ function TopShell({
                 aria-haspopup="dialog"
               >
                 <small>{presetEyebrow}</small>
-                <b>{displayPresetName}{presetDirty ? " · edited" : ""}</b>
+                <b>
+                  {displayPresetName}
+                  {presetDirty ? " · edited" : ""}
+                </b>
               </button>
             ) : (
               <div className="preset-title" title={presetName}>
                 <small>{presetEyebrow}</small>
-                <b>{displayPresetName}{presetDirty ? " · edited" : ""}</b>
+                <b>
+                  {displayPresetName}
+                  {presetDirty ? " · edited" : ""}
+                </b>
               </div>
             )}
-            <button type="button" className="preset-arrow" onClick={onNextPreset} disabled={!onNextPreset} title="Next preset" aria-label="Next preset">
+            <button
+              type="button"
+              className="preset-arrow"
+              data-qa="nam-preset-next"
+              onClick={onNextPreset}
+              disabled={!onNextPreset}
+              title={nextPresetLabel ?? "Next preset unavailable"}
+              aria-label={nextPresetLabel ?? "Next preset unavailable"}
+            >
               <ArrowRight aria-hidden="true" />
             </button>
-            <button type="button" className="preset-save" onClick={onSaveTone} disabled={!onSaveTone} title="Save Preset" aria-label="Save Preset">
+            <button
+              type="button"
+              className="preset-save"
+              onClick={onSaveTone}
+              disabled={!onSaveTone}
+              title="Save Preset"
+              aria-label="Save Preset"
+            >
               <Save aria-hidden="true" />
               <span>Save Preset</span>
             </button>
-            <div className="premium-compare" role="group" aria-label="Compare slots">
+            <div
+              className="premium-compare"
+              role="group"
+              aria-label="Compare slots"
+            >
               {(["A", "B"] as const).map((slot) => (
                 <button
                   key={slot}
@@ -1666,9 +2919,19 @@ function TopShell({
             {libraryActive ? "Library open" : "Browse captures"}
           </button>
         </div>
-        <div className="global-block right">
-          <MiniParam name="OUTPUT" value="-1.3 dB" kind="black" rot={35} paramId="outputTrimDb" />
-          <CompactLevelMeter label="Output level" levelDb={outputLevelDb} />
+        <div className="global-block right" data-qa="nam-output-control-bay">
+          <MiniParam
+            name="OUTPUT"
+            value="-1.3 dB"
+            kind="black"
+            rot={35}
+            paramId="outputTrimDb"
+          />
+          <CompactLevelMeter
+            meterId="output"
+            label="Output level"
+            levelDb={outputLevelDb}
+          />
         </div>
       </div>
       <div className="top-nav" aria-label="Signal chain sections">
@@ -1687,7 +2950,9 @@ function TopShell({
               <b>{section.shortLabel}</b>
               <i aria-hidden="true" />
             </button>
-            {index < sections.length - 1 && <ChevronRight className="nav-flow-chevron" aria-hidden="true" />}
+            {index < sections.length - 1 && (
+              <ChevronRight className="nav-flow-chevron" aria-hidden="true" />
+            )}
           </span>
         ))}
       </div>
@@ -1697,7 +2962,15 @@ function TopShell({
 
 function PedalStageIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.55"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <path d="M7.2 3.5h9.6l1.3 17H5.9l1.3-17Z" />
       <circle cx="10" cy="7.2" r="1.15" />
       <circle cx="14" cy="7.2" r="1.15" />
@@ -1709,7 +2982,15 @@ function PedalStageIcon() {
 
 function AmpStageIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.55"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <path d="M7.5 6V4.2h9V6M3 7h18v12H3z" />
       <path d="M5 9h14v5H5zM5.5 16.5h.01M9 16.5h.01M12.5 16.5h.01M16 16.5h.01M19 16.5h.01" />
     </svg>
@@ -1718,7 +2999,15 @@ function AmpStageIcon() {
 
 function CabStageIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.55"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <rect x="4" y="3" width="16" height="18" rx="1.5" />
       <rect x="6.5" y="5.5" width="11" height="13" rx=".8" />
       <path d="m7.5 7 9 9M11 6.5l6 6M7 11l6 6M7.5 18.5h9" opacity=".68" />
@@ -1726,30 +3015,54 @@ function CabStageIcon() {
   );
 }
 
-function CompactLevelMeter({ label, levelDb }: { label: string; levelDb: number }) {
+function CompactLevelMeter({
+  meterId,
+  label,
+  levelDb,
+}: {
+  meterId: "input" | "output";
+  label: string;
+  levelDb: number;
+}) {
   const safeDb = Number.isFinite(levelDb) ? clamp(levelDb, -90, 6) : -90;
   const levelRatio = namMeterFraction(safeDb);
   return (
     <div
       className="premium-level-meter"
+      data-qa={`nam-${meterId}-peak-meter`}
+      data-meter-id={meterId}
       data-clip={safeDb >= 0}
       data-meter-mode="linked-peak"
-      style={{
-        "--premium-meter-ratio": levelRatio,
-        "--premium-meter-pct": `${levelRatio * 100}%`,
-        "--premium-meter-inset": `${(1 - levelRatio) * 100}%`,
-      } as NativeStyle}
+      style={
+        {
+          "--premium-meter-ratio": levelRatio,
+          "--premium-meter-pct": `${levelRatio * 100}%`,
+          "--premium-meter-inset": `${(1 - levelRatio) * 100}%`,
+        } as NativeStyle
+      }
       title={`${label}: linked peak ${safeDb.toFixed(1)} dBFS`}
       aria-label={`${label}: linked peak ${safeDb.toFixed(1)} dBFS`}
     >
       <span />
       <i />
-      <strong>{safeDb <= -71.9 ? "-∞" : safeDb.toFixed(1)}</strong>
+      <strong>{safeDb <= -71.9 ? "\u2212\u221e" : safeDb.toFixed(1)}</strong>
     </div>
   );
 }
 
-function MiniParam({ name, value, kind, rot, paramId }: { name: string; value: string; kind: "black" | "metal"; rot: number; paramId?: string }) {
+function MiniParam({
+  name,
+  value,
+  kind,
+  rot,
+  paramId,
+}: {
+  name: string;
+  value: string;
+  kind: "black" | "metal";
+  rot: number;
+  paramId?: string;
+}) {
   const param = useBoundDesignParam(paramId);
   const context = useContext(DesignParamContext);
   const readOnly = Boolean(param && !context?.onParamChange);
@@ -1759,33 +3072,278 @@ function MiniParam({ name, value, kind, rot, paramId }: { name: string; value: s
       data-param-id={paramId}
       data-read-only={readOnly || undefined}
       aria-disabled={readOnly || undefined}
-      title={readOnly ? `${param?.label ?? name} is read-only while the library is open. Return to the rack to edit it.` : undefined}
+      title={
+        readOnly
+          ? `${param?.label ?? name} is read-only while the library is open. Return to the rack to edit it.`
+          : undefined
+      }
     >
-      <Label x={50} y={7} className="dark center global-label">{name}</Label>
+      <Label x={50} y={7} className="dark center global-label">
+        {name}
+      </Label>
       <Knob kind={kind} x={50} y={47} size={54} rot={rot} paramId={paramId} />
       <strong>{param ? formatParamValue(param) : value}</strong>
     </div>
   );
 }
 
-function BoundParamValue({ paramId, fallback }: { paramId: string; fallback: string }) {
+function BoundParamValue({
+  paramId,
+  fallback,
+}: {
+  paramId: string;
+  fallback: string;
+}) {
   const param = useBoundDesignParam(paramId);
   return <>{param ? formatParamValue(param) : fallback}</>;
 }
 
-function BoundParamChoice({ paramId, offLabel, onLabel }: { paramId: string; offLabel: string; onLabel: string }) {
+function BoundCabRoomPercent({
+  paramId,
+  fallback,
+}: {
+  paramId: string;
+  fallback: string;
+}) {
+  const param = useBoundDesignParam(paramId);
+  return (
+    <>{param ? `${Math.round(normalizeParam(param) * 100)}%` : fallback}</>
+  );
+}
+
+function BoundCabFilterValue({
+  paramId,
+  fallback,
+}: {
+  paramId: "cabHPFHz" | "cabLPFHz";
+  fallback: string;
+}) {
+  const param = useBoundDesignParam(paramId);
+  if (!param) return <>{fallback}</>;
+  const hz = Math.max(0, param.value);
+  return (
+    <>
+      {paramId === "cabLPFHz" && hz >= 1000
+        ? `${(hz / 1000).toFixed(1)} kHz`
+        : `${Math.round(hz)}Hz`}
+    </>
+  );
+}
+
+function CabRoomPowerSwitch() {
+  const param = useBoundDesignParam("cabRoomEnabled");
+  const commit = useDesignParamCommit(param);
+  const active = Boolean(param && param.value >= (param.min + param.max) / 2);
+
+  return (
+    <button
+      type="button"
+      className="cab-room-power-switch"
+      data-param-id="cabRoomEnabled"
+      data-active={active}
+      aria-label={active ? "Disable Room ambience" : "Enable Room ambience"}
+      aria-pressed={active}
+      disabled={!param}
+      onClick={() => commit(active ? 0 : 1)}
+    >
+      <i aria-hidden="true" />
+      <span
+        className="cab-room-status-led"
+        data-active={active}
+        aria-hidden="true"
+      />
+    </button>
+  );
+}
+
+function PremiumHeaderUtility({
+  controls,
+}: {
+  controls: NAMRackDesignUtilityControls;
+}) {
+  const instrumentProfileParam = useBoundDesignParam("instrumentProfile");
+  const doublerEnabledParam = useBoundDesignParam("cabDoublerEnabled");
+  const doublerMixParam = useBoundDesignParam("cabDoublerMix");
+  const doublerSpreadParam = useBoundDesignParam("cabDoublerSpread");
+  const commitInstrumentProfile = useDesignParamCommit(instrumentProfileParam);
+  const commitDoublerEnabled = useDesignParamCommit(doublerEnabledParam);
+  const doublerActive = Boolean(
+    doublerEnabledParam &&
+    doublerEnabledParam.value >=
+      (doublerEnabledParam.min + doublerEnabledParam.max) / 2,
+  );
+  const doublerPaused = controls.effectiveInputMode === 2 && doublerActive;
+  const doublerMixLabel = doublerMixParam
+    ? `${Math.round(normalizeParam(doublerMixParam) * 100)}%`
+    : "--";
+  const doublerSpreadLabel = doublerSpreadParam
+    ? `${Math.round(normalizeParam(doublerSpreadParam) * 100)}%`
+    : "--";
+  const pausedReason =
+    "Doubler is paused while the DAW track route is stereo. Its Mix and Spread are preserved.";
+
+  return (
+    <div
+      className="premium-routing-utility"
+      data-qa="nam-header-utility"
+      aria-label="Instrument profile and mono widening"
+    >
+      <section
+        className="premium-instrument-choice"
+        data-param-id="instrumentProfile"
+        data-qa="nam-instrument-profile"
+        aria-label="Instrument profile"
+      >
+        <span className="premium-utility-heading" aria-hidden="true">
+          <span className="instrument-heading-long">Instrument</span>
+          <span className="instrument-heading-short">Instr</span>
+        </span>
+        <div role="group" aria-label="Instrument profile selection">
+          {([0, 1] as const).map((profile) => {
+            const label = profile === 0 ? "Guitar" : "Bass";
+            const active =
+              (instrumentProfileParam?.value ?? controls.instrumentProfile) >=
+              0.5
+                ? profile === 1
+                : profile === 0;
+            return (
+              <button
+                key={profile}
+                type="button"
+                data-active={active}
+                aria-pressed={active}
+                aria-label={`${label} instrument profile. Changes component voicing, library filtering, and starting points.`}
+                disabled={!instrumentProfileParam}
+                title={`${label} component voicing and library profile`}
+                onClick={() => commitInstrumentProfile(profile)}
+              >
+                <span className="instrument-label-long" aria-hidden="true">
+                  {label}
+                </span>
+                <span className="instrument-label-short" aria-hidden="true">
+                  {profile === 0 ? "GTR" : "BASS"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <small>Component voicing, library &amp; starting points</small>
+      </section>
+      <section
+        className="premium-doubler-utility"
+        data-active={doublerActive}
+        data-audible={doublerActive && !doublerPaused}
+        data-paused={doublerPaused}
+        aria-label="Doubler"
+      >
+        <span className="premium-utility-heading">Doubler</span>
+        <button
+          type="button"
+          className="premium-doubler-power"
+          data-active={doublerActive}
+          aria-pressed={doublerActive}
+          disabled={!doublerEnabledParam}
+          title={
+            doublerPaused
+              ? "Doubler is enabled but paused while the DAW track route is stereo. Its Mix is preserved."
+              : doublerActive
+                ? "Bypass Doubler"
+                : "Enable Doubler"
+          }
+          onClick={() =>
+            doublerEnabledParam && commitDoublerEnabled(doublerActive ? 0 : 1)
+          }
+        >
+          <Power aria-hidden="true" />
+          <strong>
+            {doublerPaused ? "Paused" : doublerActive ? "On" : "Off"}
+          </strong>
+        </button>
+        <div className="premium-utility-rotary" data-utility-rotary="mix">
+          <span>Mix</span>
+          <div className="premium-utility-knob-well">
+            <Knob
+              kind="black"
+              x={50}
+              y={50}
+              size={92}
+              rot={-102}
+              paramId="cabDoublerMix"
+              hitSize={96}
+              allowInteraction={!doublerPaused}
+              disabledReason={doublerPaused ? pausedReason : undefined}
+            />
+          </div>
+          <strong>{doublerMixLabel}</strong>
+        </div>
+        <div
+          className="premium-utility-rotary premium-utility-rotary-spread"
+          data-utility-rotary="spread"
+        >
+          <div className="premium-utility-knob-well">
+            <Knob
+              kind="black"
+              x={50}
+              y={50}
+              size={92}
+              rot={42}
+              paramId="cabDoublerSpread"
+              hitSize={96}
+              allowInteraction={!doublerPaused}
+              disabledReason={doublerPaused ? pausedReason : undefined}
+            />
+          </div>
+          <strong>{doublerSpreadLabel}</strong>
+          <span>Spread</span>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BoundDistortionModeDisplay() {
+  const param = useBoundDesignParam("chaosMode");
+  return <>{distortionModeDisplayLabel(param?.value ?? 0, param?.min ?? 0)}</>;
+}
+
+function BoundParamChoice({
+  paramId,
+  offLabel,
+  onLabel,
+}: {
+  paramId: string;
+  offLabel: string;
+  onLabel: string;
+}) {
   const param = useBoundDesignParam(paramId);
   if (!param) return <>{offLabel}</>;
   return <>{param.value >= (param.min + param.max) / 2 ? onLabel : offLabel}</>;
 }
 
-const DELAY_SYNC_LABELS = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/4D", "1/8D"] as const;
+const DELAY_SYNC_LABELS = ["1/4", "1/8", "1/16"] as const;
+export const NAM_DELAY_MODE_DISPLAY_LABELS = [
+  "Digital",
+  "Tape",
+  "Analog",
+  "Multi",
+  "Dual",
+] as const;
+
+export function delayModeDisplayLabel(value: unknown) {
+  const numeric = Number(value);
+  const index = Number.isFinite(numeric)
+    ? clamp(Math.round(numeric), 0, NAM_DELAY_MODE_DISPLAY_LABELS.length - 1)
+    : 1;
+  return NAM_DELAY_MODE_DISPLAY_LABELS[index];
+}
 
 export function delaySyncDisplay(modulation: number, pingPong: boolean) {
-  const leftIndex = Math.trunc(clamp(2 + clamp(modulation, 0, 1) * 2, 0, DELAY_SYNC_LABELS.length - 1));
-  const rightIndex = Math.trunc(clamp((pingPong ? 3 : 2) + clamp(modulation, 0, 1) * 2, 0, DELAY_SYNC_LABELS.length - 1));
-  const left = DELAY_SYNC_LABELS[leftIndex];
-  const right = DELAY_SYNC_LABELS[rightIndex];
+  // The visible Mod control resolves to three deterministic tempo divisions.
+  // Keep the 1.0 endpoint in the final 1/16 detent instead of overflowing
+  // into the next entry of the native delay note table.
+  const step = Math.min(2, Math.floor(clamp(modulation, 0, 1) * 2));
+  const left = DELAY_SYNC_LABELS[step];
+  const right = DELAY_SYNC_LABELS[pingPong ? Math.min(2, step + 1) : step];
   return left === right ? left : `${left} / ${right}`;
 }
 
@@ -1796,13 +3354,19 @@ function BoundDelayTimeDisplay() {
   const pingPong = useBoundDesignParam("delayPingPong");
   if ((sync?.value ?? 0) < 0.5)
     return <>{time ? formatParamValue(time) : "360 ms"}</>;
-  return <>{delaySyncDisplay(modulation?.value ?? 0, (pingPong?.value ?? 0) >= 0.5)}</>;
+  return (
+    <>
+      {delaySyncDisplay(modulation?.value ?? 0, (pingPong?.value ?? 0) >= 0.5)}
+    </>
+  );
 }
 
 function BoundDelayModeDisplay() {
   const mode = useBoundDesignParam("delayMode");
-  const option = mode?.enumOptions?.find((entry) => entry.value === Math.round(mode.value));
-  return <>{option?.label ?? ["Digital", "Tape", "Analog"][Math.round(mode?.value ?? 0)] ?? "Digital"}</>;
+  const option = mode?.enumOptions?.find(
+    (entry) => entry.value === Math.round(mode.value),
+  );
+  return <>{option?.label ?? delayModeDisplayLabel(mode?.value)}</>;
 }
 
 function Footer({
@@ -1844,57 +3408,106 @@ function Footer({
   onCycleSize?: () => void;
   onMaxSize?: () => void;
 }) {
-  const rackSizeLabel = rackSizePercent >= 220
-    ? "Max"
-    : rackSizePercent >= 180
-      ? "Large"
-      : rackSizePercent >= 140
-        ? "Fit"
-        : rackSizePercent >= 100
-          ? "Small"
-          : "Compact";
+  const rackSizeLabel =
+    rackSizePercent >= 220
+      ? "Max"
+      : rackSizePercent >= 180
+        ? "Large"
+        : rackSizePercent >= 140
+          ? "Fit"
+          : rackSizePercent >= 100
+            ? "Small"
+            : "Compact";
   return (
     <div className="footer">
-      <b><Zap aria-hidden="true" /> NAM RACK</b>
+      <b>
+        <Zap aria-hidden="true" /> NAM RACK
+      </b>
       {onOpenTuner ? (
-        <button type="button" data-qa="nam-premium-tuner" data-active={tunerOpen} aria-pressed={Boolean(tunerOpen)} onClick={onOpenTuner}>
+        <button
+          type="button"
+          data-qa="nam-premium-tuner"
+          data-active={tunerOpen}
+          aria-pressed={Boolean(tunerOpen)}
+          onClick={onOpenTuner}
+        >
           <Gauge aria-hidden="true" /> Tuner
         </button>
-      ) : <span className="footer-control-spacer" aria-hidden="true" />}
+      ) : (
+        <span className="footer-control-spacer" aria-hidden="true" />
+      )}
       {onOpenPedalboard ? (
-        <button type="button" data-qa="nam-premium-signal-chain" data-active={signalChainOpen} aria-pressed={signalChainOpen} onClick={onOpenPedalboard} title="Open the signal chain overview and supported ordering">
+        <button
+          type="button"
+          data-qa="nam-premium-signal-chain"
+          data-active={signalChainOpen}
+          aria-pressed={signalChainOpen}
+          onClick={onOpenPedalboard}
+          title="Open the signal chain overview and supported ordering"
+        >
           <Cable aria-hidden="true" /> Signal chain
         </button>
-      ) : <span className="footer-control-spacer" aria-hidden="true" />}
+      ) : (
+        <span className="footer-control-spacer" aria-hidden="true" />
+      )}
       {onOpenSettings ? (
-        <button type="button" data-qa="nam-premium-settings" onClick={onOpenSettings} title="Open OpenStudio app audio and device settings">
+        <button
+          type="button"
+          data-qa="nam-premium-settings"
+          onClick={onOpenSettings}
+          title="Open OpenStudio app audio and device settings"
+        >
           <Settings aria-hidden="true" /> App Audio
         </button>
-      ) : <span className="footer-control-spacer" aria-hidden="true" />}
+      ) : (
+        <span className="footer-control-spacer" aria-hidden="true" />
+      )}
       {onOpenAdvanced ? (
-        <button type="button" data-qa="nam-premium-advanced" onClick={onOpenAdvanced} title="Open focused controls for the current device">
+        <button
+          type="button"
+          data-qa="nam-premium-advanced"
+          onClick={onOpenAdvanced}
+          title="Open focused controls for the current device"
+        >
           <SlidersHorizontal aria-hidden="true" /> Device controls
         </button>
-      ) : <span className="footer-control-spacer" aria-hidden="true" />}
+      ) : (
+        <span className="footer-control-spacer" aria-hidden="true" />
+      )}
       <i />
-      <span className="footer-tempo" data-qa="nam-premium-tempo">Tempo <strong>{Number.isFinite(tempo) ? tempo.toFixed(1) : "--"} BPM</strong></span>
+      <span className="footer-tempo" data-qa="nam-premium-tempo">
+        Tempo{" "}
+        <strong>{Number.isFinite(tempo) ? tempo.toFixed(1) : "--"} BPM</strong>
+      </span>
       <span>{timeSignatureLabel}</span>
       <i />
       <span className="footer-runtime">
         {sampleRateLabel !== "--" && <strong>{sampleRateLabel}</strong>}
         {bufferLabel !== "--" && <strong>{bufferLabel}</strong>}
         {latencyLabel !== "--" && <strong>{latencyLabel}</strong>}
-        {cpuLabel !== "--" && <strong data-alert={cpuAlert}>CPU {cpuLabel}</strong>}
-        {dspLabel !== "--" && <strong data-alert={dspAlert}>DSP {dspLabel}</strong>}
+        {cpuLabel !== "--" && (
+          <strong data-alert={cpuAlert}>CPU {cpuLabel}</strong>
+        )}
+        {dspLabel !== "--" && (
+          <strong data-alert={dspAlert}>DSP {dspLabel}</strong>
+        )}
       </span>
       <em>
         {onCycleSize && (
-          <button type="button" onClick={onCycleSize} title="Cycle rack display size">
+          <button
+            type="button"
+            onClick={onCycleSize}
+            title="Cycle rack display size"
+          >
             Size <strong>{rackSizeLabel}</strong>
           </button>
         )}
         {onMaxSize && (
-          <button type="button" onClick={onMaxSize} title="Maximum rack display size">
+          <button
+            type="button"
+            onClick={onMaxSize}
+            title="Maximum rack display size"
+          >
             <Maximize2 aria-hidden="true" />
           </button>
         )}
@@ -1902,14 +3515,6 @@ function Footer({
     </div>
   );
 }
-
-const PRE_SIGNAL_LAYOUT = {
-  compressor: { x: 40, y: 42, w: 120, h: 232 },
-  tapeEcho: { x: 173, y: 42, w: 156, h: 232 },
-  octaver: { x: 342, y: 42, w: 120, h: 232 },
-  precisionDrive: { x: 475, y: 42, w: 120, h: 232 },
-  distortion: { x: 608, y: 42, w: 120, h: 232 },
-} as const satisfies Record<string, DesignBox>;
 
 function AmpCaptureSelector({
   ampLabel,
@@ -1929,11 +3534,14 @@ function AmpCaptureSelector({
   recovery?: NAMRackDesignRecovery;
 }) {
   const libraryActionLabel = hasCapture || missing ? "Replace" : "Library";
-  const displayLabel = hasCapture || missing ? ampLabel : "No amp capture loaded";
+  const displayLabel =
+    hasCapture || missing ? ampLabel : "No amp capture loaded";
   const stateLabel = missing
     ? "File missing"
     : hasCapture
-      ? includesCab ? "Full-rig · cab embedded" : "Amp capture"
+      ? includesCab
+        ? "Full-rig · cab embedded"
+        : "Amp capture"
       : "Empty capture slot";
   return (
     <div
@@ -1944,9 +3552,17 @@ function AmpCaptureSelector({
       role="group"
       aria-label={`${stateLabel}. Current: ${displayLabel}`}
     >
-      <span className="amp-capture-state"><i aria-hidden="true" />{stateLabel}</span>
-      <strong className="amp-capture-model" title={displayLabel}>{displayLabel}</strong>
-      <span className="amp-capture-actions" aria-label="Amp capture source actions">
+      <span className="amp-capture-state">
+        <i aria-hidden="true" />
+        {stateLabel}
+      </span>
+      <strong className="amp-capture-model" title={displayLabel}>
+        {displayLabel}
+      </strong>
+      <span
+        className="amp-capture-actions"
+        aria-label="Amp capture source actions"
+      >
         {recovery ? (
           <>
             <button
@@ -2030,49 +3646,398 @@ function AmpCaptureSelector({
   );
 }
 
-function PreFxStage() {
+function PreFxStage({
+  compressorGainReductionDb = 0,
+}: {
+  compressorGainReductionDb?: number;
+}) {
+  const octaverParam = useBoundDesignParam("octaverEnabled");
+  const octaverLabel = octaverParam?.label ?? "Octaver";
+  const octaverHardwareTitle =
+    octaverLabel === "Stereo Poly Octaver" ? "POLY OCTAVER" : "OCTAVER";
   return (
     <>
-      <Stompbox box={PRE_SIGNAL_LAYOUT.compressor} name="compressor" tone="blue" title="COMPRESSOR" titleY={66.8}>
-        <Knob kind="black" x={30} y={22.5} size={22.5} rot={-24} paramId="compressorComp" labelText="COMP" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={70} y={22.5} size={22.5} rot={24} paramId="compressorDetail" labelText="DETAIL" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={30} y={43.5} size={21.5} rot={-8} paramId="compressorMix" labelText="MIX" labelOffset={LABEL_OFFSET.below} />
-        <Knob kind="black" x={70} y={43.5} size={21.5} rot={18} paramId="compressorVolumeDb" labelText="LEVEL" labelOffset={LABEL_OFFSET.below} />
-        <Led x={50} y={73.2} on size={8.8} paramId="compressorEnabled" />
-        <Foot x={50} y={88.3} size={20.8} paramId="compressorEnabled" hitSize={23} showStateLabel stateLabelY={79.4} value="Compressor on / off" />
+      <Stompbox
+        box={NAM_PRE_SIGNAL_LAYOUT.compressor}
+        name="compressor"
+        body={BODIES.blueWide}
+        bodyFit="fill"
+        title="COMPRESSOR"
+        titleY={NAM_COMPRESSOR_FACEPLATE_LAYOUT.titleY}
+      >
+        <Knob
+          kind="black"
+          x={NAM_COMPRESSOR_FACEPLATE_LAYOUT.columns[0]}
+          y={NAM_COMPRESSOR_FACEPLATE_LAYOUT.topY}
+          size={NAM_COMPRESSOR_FACEPLATE_LAYOUT.knobSize}
+          rot={-24}
+          paramId="compressorComp"
+          labelText="COMP"
+          labelOffset={NAM_COMPRESSOR_FACEPLATE_LAYOUT.topLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_COMPRESSOR_FACEPLATE_LAYOUT.columns[1]}
+          y={NAM_COMPRESSOR_FACEPLATE_LAYOUT.topY}
+          size={NAM_COMPRESSOR_FACEPLATE_LAYOUT.knobSize}
+          rot={0}
+          paramId="compressorAttackMs"
+          labelText="ATTACK"
+          labelOffset={NAM_COMPRESSOR_FACEPLATE_LAYOUT.topLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_COMPRESSOR_FACEPLATE_LAYOUT.columns[2]}
+          y={NAM_COMPRESSOR_FACEPLATE_LAYOUT.topY}
+          size={NAM_COMPRESSOR_FACEPLATE_LAYOUT.knobSize}
+          rot={24}
+          paramId="compressorReleaseMs"
+          labelText="RELEASE"
+          labelOffset={NAM_COMPRESSOR_FACEPLATE_LAYOUT.topLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_COMPRESSOR_FACEPLATE_LAYOUT.columns[0]}
+          y={NAM_COMPRESSOR_FACEPLATE_LAYOUT.lowerY}
+          size={NAM_COMPRESSOR_FACEPLATE_LAYOUT.knobSize}
+          rot={-18}
+          paramId="compressorToneDb"
+          labelText="TONE"
+          labelOffset={NAM_COMPRESSOR_FACEPLATE_LAYOUT.lowerLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_COMPRESSOR_FACEPLATE_LAYOUT.columns[1]}
+          y={NAM_COMPRESSOR_FACEPLATE_LAYOUT.lowerY}
+          size={NAM_COMPRESSOR_FACEPLATE_LAYOUT.knobSize}
+          rot={4}
+          paramId="compressorMix"
+          labelText="MIX"
+          labelOffset={NAM_COMPRESSOR_FACEPLATE_LAYOUT.lowerLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_COMPRESSOR_FACEPLATE_LAYOUT.columns[2]}
+          y={NAM_COMPRESSOR_FACEPLATE_LAYOUT.lowerY}
+          size={NAM_COMPRESSOR_FACEPLATE_LAYOUT.knobSize}
+          rot={18}
+          paramId="compressorVolumeDb"
+          labelText="LEVEL"
+          labelOffset={NAM_COMPRESSOR_FACEPLATE_LAYOUT.lowerLabelOffset}
+        />
+        <ThreePositionRotarySelector
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.hpfSelector}
+          paramId="compressorSidechainHPF"
+        />
+        <CompressorHPFReadout
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.hpfReadout}
+          paramId="compressorSidechainHPF"
+        />
+        <CompressorGainReductionMeter
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.meter}
+          gainReductionDb={compressorGainReductionDb}
+        />
+        <Led
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.led}
+          on
+          paramId="compressorEnabled"
+        />
+        <Foot
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.foot}
+          paramId="compressorEnabled"
+          showStateLabel
+          stateLabelY={NAM_COMPRESSOR_FACEPLATE_LAYOUT.stateLabelY}
+          value="Compressor on / off"
+        />
       </Stompbox>
-      <Stompbox box={PRE_SIGNAL_LAYOUT.tapeEcho} name="tape-echo" body={BODIES.darkWide} title="TAPE ECHO" titleY={68.5}>
-        <Display x={23} y={11.5} w={54} h={8.8} className="tone-display"><BoundParamValue paramId="tapeEchoTimeMs" fallback="360 ms" /></Display>
-        <Knob kind="black" x={23} y={31.5} size={19.5} rot={-30} paramId="tapeEchoTimeMs" labelText="TIME" labelOffset={11.8} />
-        <Knob kind="black" x={50} y={31.5} size={19.5} rot={0} paramId="tapeEchoFeedback" labelText="FDBK" labelOffset={11.8} />
-        <Knob kind="black" x={77} y={31.5} size={19.5} rot={30} paramId="tapeEchoMix" labelText="MIX" labelOffset={11.8} />
-        <Knob kind="black" x={34} y={52.5} size={18} rot={-12} paramId="tapeEchoMod" labelText="MOD" labelOffset={10.2} />
-        <Knob kind="black" x={66} y={52.5} size={18} rot={16} paramId="tapeEchoTone" labelText="TONE" labelOffset={10.2} />
-        <Led x={50} y={74.3} on size={7.8} paramId="tapeEchoEnabled" />
-        <Foot x={50} y={88.5} size={16} paramId="tapeEchoEnabled" hitSize={19} showStateLabel stateLabelY={79.8} value="Tape Echo on / off" />
+      <Stompbox
+        box={NAM_PRE_SIGNAL_LAYOUT.tapeEcho}
+        name="tape-echo"
+        body={BODIES.darkWide}
+        title="TAPE ECHO"
+        titleY={68.5}
+      >
+        <Display x={23} y={11.5} w={54} h={8.8} className="tone-display">
+          <BoundParamValue paramId="tapeEchoTimeMs" fallback="360 ms" />
+        </Display>
+        <Knob
+          kind="black"
+          x={23}
+          y={31.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
+          rot={-30}
+          paramId="tapeEchoTimeMs"
+          labelText="TIME"
+          labelOffset={11.8}
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={31.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
+          rot={0}
+          paramId="tapeEchoFeedback"
+          labelText="FDBK"
+          labelOffset={11.8}
+        />
+        <Knob
+          kind="black"
+          x={77}
+          y={31.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
+          rot={30}
+          paramId="tapeEchoMix"
+          labelText="LEVEL"
+          labelOffset={11.8}
+        />
+        <Knob
+          kind="black"
+          x={34}
+          y={52.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
+          rot={-12}
+          paramId="tapeEchoMod"
+          labelText="MOD"
+          labelOffset={10.2}
+        />
+        <Knob
+          kind="black"
+          x={66}
+          y={52.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
+          rot={16}
+          paramId="tapeEchoTone"
+          labelText="TONE"
+          labelOffset={10.2}
+        />
+        <Led
+          x={50}
+          y={74.3}
+          on
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.ledSize}
+          paramId="tapeEchoEnabled"
+        />
+        <Foot
+          x={50}
+          y={88.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.footSize}
+          paramId="tapeEchoEnabled"
+          hitSize={20}
+          showStateLabel
+          stateLabelY={79.8}
+          value="Tape Echo on / off"
+        />
       </Stompbox>
-      <Stompbox box={PRE_SIGNAL_LAYOUT.octaver} name="octaver" tone="olive" title="MONO OCTAVER" titleY={67.5}>
-        <Knob kind="black" x={28} y={26} size={23} rot={-30} paramId="octaverDownMix" labelText="DOWN" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={72} y={26} size={23} rot={30} paramId="octaverUpMix" labelText="UP" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={50} y={45.5} size={22} rot={0} paramId="octaverDirectMix" labelText="DIRECT" labelOffset={11.5} />
-        <Led x={50} y={74} on size={8.8} paramId="octaverEnabled" />
-        <Foot x={50} y={88.3} size={20.8} paramId="octaverEnabled" hitSize={23} showStateLabel stateLabelY={79.5} value="Mono Octaver on / off" />
+      <Stompbox
+        box={NAM_PRE_SIGNAL_LAYOUT.octaver}
+        name="octaver"
+        tone="olive"
+        title={octaverHardwareTitle}
+        titleY={67.5}
+      >
+        <Knob
+          kind="black"
+          x={28}
+          y={26}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize}
+          rot={-30}
+          paramId="octaverDownMix"
+          labelText="DOWN"
+          labelOffset={LABEL_OFFSET.above}
+        />
+        <Knob
+          kind="black"
+          x={72}
+          y={26}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize}
+          rot={30}
+          paramId="octaverUpMix"
+          labelText="UP"
+          labelOffset={LABEL_OFFSET.above}
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={45.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize}
+          rot={0}
+          paramId="octaverDirectMix"
+          labelText="DIRECT"
+          labelOffset={11.5}
+        />
+        <Led
+          x={50}
+          y={74}
+          on
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.ledSize}
+          paramId="octaverEnabled"
+        />
+        <Foot
+          x={50}
+          y={88.3}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.footSize}
+          paramId="octaverEnabled"
+          hitSize={23}
+          showStateLabel
+          stateLabelY={79.5}
+          value={`${octaverLabel} on / off`}
+        />
       </Stompbox>
-      <Stompbox box={PRE_SIGNAL_LAYOUT.precisionDrive} name="precision-drive" tone="stone" title="PRECISION DRIVE" titleY={66.8}>
-        <Knob kind="black" x={30} y={22.5} size={22.5} rot={-22} paramId="precisionDriveDrive" labelText="DRIVE" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={70} y={22.5} size={22.5} rot={22} paramId="precisionDriveVolumeDb" labelText="LEVEL" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={30} y={43.5} size={21.5} rot={-10} paramId="precisionDriveBright" labelText="BRIGHT" labelOffset={LABEL_OFFSET.below} />
-        <Knob kind="black" x={70} y={43.5} size={21.5} rot={16} paramId="precisionDriveAttack" labelText="ATTACK" labelOffset={LABEL_OFFSET.below} />
-        <Led x={50} y={73.2} on size={8.8} paramId="precisionDriveEnabled" />
-        <Foot x={50} y={88.3} size={20.8} paramId="precisionDriveEnabled" hitSize={23} showStateLabel stateLabelY={79.4} value="Precision Drive on / off" />
+      <Stompbox
+        box={NAM_PRE_SIGNAL_LAYOUT.precisionDrive}
+        name="precision-drive"
+        tone="stone"
+        title="PRECISION DRIVE"
+        titleY={66.8}
+      >
+        <Knob
+          kind="black"
+          x={30}
+          y={22.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          rot={-22}
+          paramId="precisionDriveDrive"
+          labelText="DRIVE"
+          labelOffset={LABEL_OFFSET.above}
+        />
+        <Knob
+          kind="black"
+          x={70}
+          y={22.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          rot={22}
+          paramId="precisionDriveVolumeDb"
+          labelText="LEVEL"
+          labelOffset={LABEL_OFFSET.above}
+        />
+        <Knob
+          kind="black"
+          x={30}
+          y={43.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          rot={-10}
+          paramId="precisionDriveBright"
+          labelText="BRIGHT"
+          labelOffset={LABEL_OFFSET.below}
+        />
+        <Knob
+          kind="black"
+          x={70}
+          y={43.5}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          rot={16}
+          paramId="precisionDriveAttack"
+          labelText="ATTACK"
+          labelOffset={LABEL_OFFSET.below}
+        />
+        <Led
+          x={50}
+          y={73.2}
+          on
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.ledSize}
+          paramId="precisionDriveEnabled"
+        />
+        <Foot
+          x={50}
+          y={88.3}
+          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.footSize}
+          paramId="precisionDriveEnabled"
+          hitSize={23}
+          showStateLabel
+          stateLabelY={79.4}
+          value="Precision Drive on / off"
+        />
       </Stompbox>
-      <Stompbox box={PRE_SIGNAL_LAYOUT.distortion} name="distortion" tone="red" title="DISTORTION" titleY={65.8}>
-        <Knob kind="black" x={30} y={22.5} size={22.5} rot={22} paramId="chaosDrive" labelText="DRIVE" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={70} y={22.5} size={22.5} rot={4} paramId="chaosTone" labelText="TONE" labelOffset={LABEL_OFFSET.above} />
-        <Knob kind="black" x={30} y={43.5} size={21.5} rot={18} paramId="chaosMix" labelText="MIX" labelOffset={LABEL_OFFSET.below} />
-        <Knob kind="black" x={70} y={43.5} size={21.5} rot={0} paramId="chaosLevelDb" labelText="LEVEL" labelOffset={LABEL_OFFSET.below} />
-        <Led x={50} y={74.2} on size={8.8} paramId="chaosEnabled" />
-        <Foot x={50} y={88.5} size={20.8} paramId="chaosEnabled" hitSize={23} showStateLabel stateLabelY={80.1} value="Distortion on / off" />
+      <Stompbox
+        box={NAM_PRE_SIGNAL_LAYOUT.distortion}
+        name="distortion"
+        body={BODIES.redWide}
+        bodyFit="fill"
+        title="DISTORTION"
+        titleY={NAM_DISTORTION_FACEPLATE_LAYOUT.titleY}
+      >
+        <Knob
+          kind="black"
+          x={NAM_DISTORTION_FACEPLATE_LAYOUT.columns[0]}
+          y={NAM_DISTORTION_FACEPLATE_LAYOUT.topY}
+          size={NAM_DISTORTION_FACEPLATE_LAYOUT.topKnobSize}
+          rot={22}
+          paramId="chaosDrive"
+          labelText="DRIVE"
+          labelOffset={NAM_DISTORTION_FACEPLATE_LAYOUT.topLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_DISTORTION_FACEPLATE_LAYOUT.columns[1]}
+          y={NAM_DISTORTION_FACEPLATE_LAYOUT.topY}
+          size={NAM_DISTORTION_FACEPLATE_LAYOUT.gateKnobSize}
+          rot={-8}
+          paramId="chaosGate"
+          labelText="GATE"
+          labelOffset={NAM_DISTORTION_FACEPLATE_LAYOUT.topLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_DISTORTION_FACEPLATE_LAYOUT.columns[2]}
+          y={NAM_DISTORTION_FACEPLATE_LAYOUT.topY}
+          size={NAM_DISTORTION_FACEPLATE_LAYOUT.topKnobSize}
+          rot={4}
+          paramId="chaosTone"
+          labelText="TONE"
+          labelOffset={NAM_DISTORTION_FACEPLATE_LAYOUT.topLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_DISTORTION_FACEPLATE_LAYOUT.columns[0]}
+          y={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerY}
+          size={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerKnobSize}
+          rot={-12}
+          paramId="chaosWeight"
+          labelText="WGHT"
+          labelOffset={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_DISTORTION_FACEPLATE_LAYOUT.columns[1]}
+          y={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerY}
+          size={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerKnobSize}
+          rot={18}
+          paramId="chaosMix"
+          labelText="MIX"
+          labelOffset={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerLabelOffset}
+        />
+        <Knob
+          kind="black"
+          x={NAM_DISTORTION_FACEPLATE_LAYOUT.columns[2]}
+          y={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerY}
+          size={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerKnobSize}
+          rot={0}
+          paramId="chaosLevelDb"
+          labelText="LVL"
+          labelOffset={NAM_DISTORTION_FACEPLATE_LAYOUT.lowerLabelOffset}
+        />
+        <Display
+          {...NAM_DISTORTION_FACEPLATE_LAYOUT.modeDisplay}
+          className="distortion-mode-display"
+        >
+          <BoundDistortionModeDisplay />
+        </Display>
+        <ThreePositionRotarySelector
+          {...NAM_DISTORTION_FACEPLATE_LAYOUT.modeSelector}
+          paramId="chaosMode"
+        />
+        <Led
+          {...NAM_DISTORTION_FACEPLATE_LAYOUT.led}
+          on
+          paramId="chaosEnabled"
+        />
+        <Foot
+          {...NAM_DISTORTION_FACEPLATE_LAYOUT.foot}
+          paramId="chaosEnabled"
+          showStateLabel
+          stateLabelY={NAM_DISTORTION_FACEPLATE_LAYOUT.stateLabelY}
+          value="Distortion on / off"
+        />
       </Stompbox>
     </>
   );
@@ -2096,29 +4061,97 @@ function AmpStage({
   recovery?: NAMRackDesignRecovery;
 }) {
   const names = ["GAIN", "BASS", "MID", "TREBLE", "PRESENCE", "LEVEL"];
-  const paramIds = ["ampGainDb", "bassDb", "midDb", "trebleDb", "presenceDb", "ampOutputDb"];
+  const paramIds = [
+    "ampGainDb",
+    "bassDb",
+    "midDb",
+    "trebleDb",
+    "presenceDb",
+    "ampOutputDb",
+  ];
   const railY = 71.5;
   const labelBaseline = 79.2;
   const labelOffsetPx = labelBaseline - railY;
   return (
-    <Module box={LAYOUT.amp.head} name="amp-head" body={BODIES.amp} className={`amp-head ${hasAmpCapture ? "" : "amp-capture-unavailable"}`} bodyFit="fill" controlsName="Amp">
-      <div className="amp-brand">OpenStudio <small>NAM WRAPPER</small></div>
-      <AmpCaptureSelector ampLabel={ampLabel} hasCapture={hasAmpCapture} includesCab={ampIncludesCab} missing={ampCaptureMissing} onBrowse={onBrowseAmpCapture} onBrowseLocal={onBrowseLocalAmpCapture} recovery={recovery} />
+    <Module
+      box={LAYOUT.amp.head}
+      name="amp-head"
+      body={BODIES.amp}
+      className={`amp-head ${hasAmpCapture ? "" : "amp-capture-unavailable"}`}
+      bodyFit="fill"
+      controlsName="Amp"
+    >
+      <div className="amp-brand">
+        OpenStudio <small>NAM WRAPPER</small>
+      </div>
+      <AmpCaptureSelector
+        ampLabel={ampLabel}
+        hasCapture={hasAmpCapture}
+        includesCab={ampIncludesCab}
+        missing={ampCaptureMissing}
+        onBrowse={onBrowseAmpCapture}
+        onBrowseLocal={onBrowseLocalAmpCapture}
+        recovery={recovery}
+      />
       <div
         className="amp-control-rail"
         data-disabled={!hasAmpCapture}
         aria-disabled={!hasAmpCapture}
         role="group"
-        aria-label={!hasAmpCapture ? "Amp controls unavailable. Load an Amp NAM capture." : "Amp controls"}
+        aria-label={
+          !hasAmpCapture
+            ? "Amp controls unavailable. Load an Amp NAM capture."
+            : "Amp controls"
+        }
       >
-        <Toggle x={8.8} y={railY} size={4.8} paramId="ampEnabled" labelText="POWER" labelOffset={labelOffsetPx} labelClass="amp-label amp-rail-label" allowInteraction={hasAmpCapture} disabledReason={!hasAmpCapture ? "Load an Amp capture." : undefined} />
-        <Led x={13.4} y={railY} on={false} paramId={hasAmpCapture ? "ampEnabled" : undefined} size={4.1} value="Amp power engaged" hitSize={5.2} />
-        <Washer x={19.2} y={railY} size={5.1} labelText="INPUT" labelOffset={labelOffsetPx} labelClass="amp-label amp-rail-label" />
+        <Toggle
+          x={8.8}
+          y={railY}
+          size={4.8}
+          paramId="ampEnabled"
+          labelText="POWER"
+          labelOffset={labelOffsetPx}
+          labelClass="amp-label amp-rail-label"
+          allowInteraction={hasAmpCapture}
+          disabledReason={!hasAmpCapture ? "Load an Amp capture." : undefined}
+        />
+        <Led
+          x={13.4}
+          y={railY}
+          on={false}
+          paramId={hasAmpCapture ? "ampEnabled" : undefined}
+          size={4.1}
+          value="Amp power engaged"
+          hitSize={5.2}
+        />
+        <Washer
+          x={19.2}
+          y={railY}
+          size={5.1}
+          labelText="INPUT"
+          labelOffset={labelOffsetPx}
+          labelClass="amp-label amp-rail-label"
+        />
         {names.map((name, index) => {
           const x = 30.4 + index * 11.9;
           return (
             <span key={name} className="amp-control-cluster">
-              <Knob kind="black" x={x} y={railY} size={7.7} rot={index * 18 - 38} paramId={paramIds[index]} labelText={name} labelOffset={labelOffsetPx} labelClass="amp-label amp-rail-label" allowInteraction={hasAmpCapture} disabledReason={!hasAmpCapture ? "Load an Amp capture." : undefined} />
+              <Knob
+                kind="black"
+                x={x}
+                y={railY}
+                size={7.7}
+                rot={index * 18 - 38}
+                paramId={paramIds[index]}
+                labelText={name}
+                labelOffset={labelOffsetPx}
+                labelClass="amp-label amp-rail-label"
+                allowInteraction={hasAmpCapture}
+                disabledReason={
+                  !hasAmpCapture ? "Load an Amp capture." : undefined
+                }
+                panelRotaryVariant="ampPanel"
+              />
             </span>
           );
         })}
@@ -2162,7 +4195,8 @@ function CabSourceSelector({
       : cabMode === "loaded"
         ? "REPLACE"
         : "CHOOSE IR";
-  const action = embedded || cabMode === "empty" ? onBrowseAmpOnlyCapture : onBrowseCabIR;
+  const action =
+    embedded || cabMode === "empty" ? onBrowseAmpOnlyCapture : onBrowseCabIR;
   return (
     <div
       className="cab-source-selector"
@@ -2184,9 +4218,17 @@ function CabSourceSelector({
           }}
           disabled={!action}
           aria-label={`${actionLabel}. Current: ${cabLabel}`}
-          title={embedded ? "Choose an amp-only Capture before using an external IR" : actionLabel}
+          title={
+            embedded
+              ? "Choose an amp-only Capture before using an external IR"
+              : actionLabel
+          }
         >
-          {embedded || cabMode === "empty" ? <Library aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}
+          {embedded || cabMode === "empty" ? (
+            <Library aria-hidden="true" />
+          ) : (
+            <FolderOpen aria-hidden="true" />
+          )}
           {actionLabel}
         </button>
         {!embedded && onBrowseLocalCabIR ? (
@@ -2222,82 +4264,362 @@ function CabStage({
   onBrowseAmpOnlyCapture?: () => void;
 }) {
   const controlsLocked = cabMode !== "loaded";
-  const controlsLockedReason = cabMode === "embedded"
-    ? "Choose an amp-only capture."
-    : cabMode === "required"
-      ? "Load a cabinet IR."
-      : "Load an amp capture.";
+  const controlsLockedReason =
+    cabMode === "embedded"
+      ? "Choose an amp-only capture."
+      : cabMode === "required"
+        ? "Load a cabinet IR."
+        : "Load an amp capture.";
   const designParamContext = useContext(DesignParamContext);
-  const cabParamContext = controlsLocked && designParamContext
-    ? { ...designParamContext, onParamChange: undefined }
-    : designParamContext;
+  const cabParamContext =
+    controlsLocked && designParamContext
+      ? { ...designParamContext, onParamChange: undefined }
+      : designParamContext;
   return (
-    <>
-      <Module box={LAYOUT.cab.cabinet} name="cabinet" body={BODIES.cab} className={`cabinet cab-mode-${cabMode}`} bodyFit="contain" controlsName="Cab / IR" />
-      <DesignParamContext.Provider value={cabParamContext}>
-      <Module box={LAYOUT.cab.micPanel} name="mic-panel" body={BODIES.irShaper} className={`ir-shaper-panel cab-mode-${cabMode}${controlsLocked ? " cab-controls-locked" : ""}`} bodyFit="contain" controlsName="Cab / IR">
-        <Screw x={2.2} y={6.5} size={2.4} />
-        <Screw x={97.8} y={6.5} size={2.4} />
-        <Screw x={2.2} y={94.3} size={2.4} />
-        <Screw x={97.8} y={94.3} size={2.4} />
-        <CabSourceSelector
-          cabLabel={cabLabel}
-          cabMode={cabMode}
-          onBrowseCabIR={onBrowseCabIR}
-          onBrowseLocalCabIR={onBrowseLocalCabIR}
-          onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
-        />
-        <div className="cab-control-deck" data-locked={controlsLocked ? "true" : "false"}>
-          <Knob kind="black" x={10.5} y={47} size={8.8} rot={-22} paramId="cabMicPosition" labelText="EDGE" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Knob kind="black" x={23.7} y={47} size={8.8} rot={-8} paramId="cabMicDistance" labelText="DAMP" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Knob kind="black" x={36.8} y={47} size={8.8} rot={12} paramId="cabMicBlend" labelText="BLEND" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Knob kind="black" x={50} y={47} size={8.8} rot={10} paramId="cabRoomSend" labelText="BLOOM" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Knob kind="black" x={63.2} y={47} size={8.8} rot={-26} paramId="cabHPFHz" labelText="HPF" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Knob kind="black" x={76.3} y={47} size={8.8} rot={18} paramId="cabLPFHz" labelText="LPF" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Knob kind="black" x={89.5} y={47} size={8.8} rot={24} paramId="cabLevelDb" labelText="LEVEL" labelOffset={-15} labelClass="ir-primary-label" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
+    <Module
+      box={LAYOUT.cab.micPanel}
+      name="mic-panel"
+      body={BODIES.cabRoomIntegrated}
+      className={`ir-shaper-panel cab-room-console cab-mode-${cabMode}${controlsLocked ? " cab-controls-locked" : ""}`}
+      bodyFit="fill"
+      controlsName="Cab / IR and Room"
+    >
+      <CabSourceSelector
+        cabLabel={cabLabel}
+        cabMode={cabMode}
+        onBrowseCabIR={onBrowseCabIR}
+        onBrowseLocalCabIR={onBrowseLocalCabIR}
+        onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+      />
+      <div
+        className="cab-control-deck"
+        data-locked={controlsLocked ? "true" : "false"}
+      >
+        <DesignParamContext.Provider value={cabParamContext}>
+          <div className="cab-ir-primary-controls">
+            <Knob
+              kind="black"
+              x={9.8}
+              y={35.4}
+              size={10}
+              rot={-22}
+              paramId="cabMicPosition"
+              labelText="EDGE"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
+            <Knob
+              kind="black"
+              x={22.9}
+              y={35.4}
+              size={10}
+              rot={-8}
+              paramId="cabMicDistance"
+              labelText="DAMP"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
+            <Knob
+              kind="black"
+              x={36}
+              y={35.4}
+              size={10}
+              rot={12}
+              paramId="cabMicBlend"
+              labelText="BLEND"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
+            <Knob
+              kind="black"
+              x={49.1}
+              y={35.4}
+              size={10}
+              rot={10}
+              paramId="cabRoomSend"
+              labelText="LOW BLOOM"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
+            <Knob
+              kind="black"
+              x={62.2}
+              y={35.4}
+              size={10}
+              rot={-26}
+              paramId="cabHPFHz"
+              labelText="HPF"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
+            <Knob
+              kind="black"
+              x={75.3}
+              y={35.4}
+              size={10}
+              rot={18}
+              paramId="cabLPFHz"
+              labelText="LPF"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
+            <Knob
+              kind="black"
+              x={88.4}
+              y={35.4}
+              size={10}
+              rot={24}
+              paramId="cabLevelDb"
+              labelText="LEVEL"
+              labelOffset={-11.7}
+              labelClass="ir-primary-label"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+              panelRotaryVariant="cabPanel"
+            />
 
-          <Toggle x={10.6} y={70.8} size={4.8} paramId="cabEnabled" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Led x={16.2} y={70.8} on size={3.6} paramId="cabEnabled" value="Cabinet stage enabled" />
-          <Label x={13.4} y={85.4} className="ir-utility-label">CAB</Label>
+            <Toggle
+              x={9.8}
+              y={51.5}
+              size={4.1}
+              paramId="cabEnabled"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+            />
+            <Led
+              x={15.5}
+              y={51.5}
+              on
+              size={3.1}
+              paramId="cabEnabled"
+              value="Cabinet stage enabled"
+            />
+            <Knob
+              kind="black"
+              x={49.1}
+              y={51.5}
+              size={5.8}
+              rot={0}
+              paramId="cabPan"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+            />
+            <Label x={62.2} y={51.5} className="ir-filter-value">
+              <BoundCabFilterValue paramId="cabHPFHz" fallback="80Hz" />
+            </Label>
+            <Label x={75.3} y={51.5} className="ir-filter-value">
+              <BoundCabFilterValue paramId="cabLPFHz" fallback="8.0 kHz" />
+            </Label>
+            <Toggle
+              x={88.4}
+              y={51.5}
+              size={4.1}
+              paramId="cabPhaseInvert"
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+            />
+          </div>
+        </DesignParamContext.Provider>
 
-          <Knob kind="black" x={50} y={70.3} size={6.2} rot={0} paramId="cabPan" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Label x={50} y={85.4} className="ir-utility-label">PAN</Label>
-
-          <Toggle x={83.8} y={70.8} size={4.8} paramId="cabPhaseInvert" allowInteraction={!controlsLocked} disabledReason={controlsLockedReason} />
-          <Led x={89.4} y={70.8} on size={3.6} paramId="cabPhaseInvert" value="Cabinet polarity inverted" />
-          <Label x={86.6} y={85.4} className="ir-utility-label">PHASE</Label>
+        <div className="cab-room-bay" data-qa="nam-cab-room-bay">
+          <div className="cab-room-power-zone">
+            <span className="cab-room-title">ROOM</span>
+            <div className="cab-room-switch-row">
+              <CabRoomPowerSwitch />
+            </div>
+            <span className="cab-room-state-labels">
+              <i>ON</i>
+              <i>OFF</i>
+            </span>
+          </div>
+          <div className="cab-room-control cab-room-amount">
+            <strong>AMOUNT</strong>
+            <Knob
+              kind="blue-steel"
+              x={50}
+              y={52}
+              size={53}
+              rot={-42}
+              paramId="cabRoomAmount"
+              hitSize={62}
+              panelRotaryVariant="roomHero"
+            />
+            <span className="cab-room-value">
+              <BoundCabRoomPercent paramId="cabRoomAmount" fallback="22%" />
+            </span>
+          </div>
+          <div className="cab-room-control cab-room-width">
+            <strong>WIDTH</strong>
+            <Knob
+              kind="blue-steel"
+              x={50}
+              y={52}
+              size={53}
+              rot={42}
+              paramId="cabRoomWidth"
+              hitSize={62}
+              panelRotaryVariant="roomHero"
+            />
+            <span className="cab-room-value">
+              <BoundCabRoomPercent paramId="cabRoomWidth" fallback="65%" />
+            </span>
+          </div>
+          <div className="cab-room-purpose">POST-CAB AMBIENCE</div>
         </div>
-      </Module>
-      </DesignParamContext.Provider>
-    </>
+      </div>
+    </Module>
   );
 }
 
 function EqStage() {
-  const bands = ["65", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"];
-  const values = [51, 58, 47, 52, 58, 48, 53, 59, 45];
-  const bandParamIds = ["eq65Db", "eq125Db", "eq250Db", "eq500Db", "eq1kDb", "eq2kDb", "eq4kDb", "eq8kDb", "eq16kDb"] as const;
-  const powerStackX = 5.5;
+  const lanes = [
+    { label: "65", paramId: "eq65Db", fallback: 51, output: false },
+    { label: "125", paramId: "eq125Db", fallback: 58, output: false },
+    { label: "250", paramId: "eq250Db", fallback: 47, output: false },
+    { label: "500", paramId: "eq500Db", fallback: 52, output: false },
+    { label: "1K", paramId: "eq1kDb", fallback: 58, output: false },
+    { label: "2K", paramId: "eq2kDb", fallback: 48, output: false },
+    { label: "4K", paramId: "eq4kDb", fallback: 53, output: false },
+    { label: "8K", paramId: "eq8kDb", fallback: 59, output: false },
+    { label: "16K", paramId: "eq16kDb", fallback: 45, output: false },
+    { label: "LEVEL", paramId: "eqLevelDb", fallback: 50, output: true },
+  ] as const;
+  const layout = NAM_GRAPHIC_EQ_FACEPLATE_LAYOUT;
   return (
-    <Module box={LAYOUT.eq.rack} name="eq-rack" body={BODIES.eq} bodyFit="fill" className="rack-unit eq-rack" controlsName="Graphic EQ">
-      <Label x={50} y={8.5} className="rack-big eq-rack-title">POST-CAB GRAPHIC EQ</Label>
-      <div className="eq-scale-grid" />
-      <Label x={17.2} y={25} className="eq-scale">+12</Label>
-      <Label x={17.2} y={52} className="eq-scale">0</Label>
-      <Label x={17.2} y={78} className="eq-scale">-12</Label>
-      <Label x={84.2} y={25} className="eq-scale">+12</Label>
-      <Label x={84.2} y={52} className="eq-scale">0</Label>
-      <Label x={84.2} y={78} className="eq-scale">-12</Label>
-      <Label x={powerStackX} y={49} className="rack-big">EQ ON</Label>
-      <Led x={powerStackX} y={58.5} on size={4.3} paramId="eqEnabled" />
-      <Toggle x={powerStackX} y={73.2} size={4.3} paramId="eqEnabled" labelText="BYPASS" labelOffset={9.2} labelClass="rack-small" />
-      {bands.map((band, index) => {
-        const x = 22.5 + index * 7.35;
+    <Module
+      box={LAYOUT.eq.rack}
+      name="eq-rack"
+      body={BODIES.eq}
+      bodyFit="fill"
+      className="rack-unit eq-rack"
+      controlsName="Graphic EQ"
+    >
+      <Label
+        x={layout.title.x}
+        y={layout.title.y}
+        className="rack-big eq-rack-title"
+      >
+        POST-CAB GRAPHIC EQ
+      </Label>
+      <div
+        className="eq-scale-grid"
+        style={{
+          left: `${layout.grid.x}%`,
+          top: `${layout.grid.y}%`,
+          width: `${layout.grid.w}%`,
+          height: `${layout.grid.h}%`,
+        }}
+      />
+      {layout.laneXs.map((x) => (
+        <span
+          key={`eq-gridline-${x}`}
+          className="eq-lane-gridline"
+          style={{
+            left: `${x}%`,
+            top: `${layout.grid.y}%`,
+            height: `${layout.grid.h}%`,
+          }}
+          aria-hidden="true"
+        />
+      ))}
+      <div
+        className="eq-level-separator"
+        style={{ left: `${layout.levelSeparatorX}%` }}
+      />
+      <Label
+        x={layout.scaleXs.left}
+        y={layout.scaleYs.high}
+        className="eq-scale"
+      >
+        +12
+      </Label>
+      <Label
+        x={layout.scaleXs.left}
+        y={layout.scaleYs.unity}
+        className="eq-scale"
+      >
+        0
+      </Label>
+      <Label
+        x={layout.scaleXs.left}
+        y={layout.scaleYs.low}
+        className="eq-scale"
+      >
+        -12
+      </Label>
+      <Label
+        x={layout.scaleXs.right}
+        y={layout.scaleYs.high}
+        className="eq-scale"
+      >
+        +12
+      </Label>
+      <Label
+        x={layout.scaleXs.right}
+        y={layout.scaleYs.unity}
+        className="eq-scale"
+      >
+        0
+      </Label>
+      <Label
+        x={layout.scaleXs.right}
+        y={layout.scaleYs.low}
+        className="eq-scale"
+      >
+        -12
+      </Label>
+      <Label x={layout.powerStackX} y={49} className="rack-big">
+        EQ ON
+      </Label>
+      <Led x={layout.powerStackX} y={58.5} on size={4.3} paramId="eqEnabled" />
+      <Toggle
+        x={layout.powerStackX}
+        y={73.2}
+        size={4.3}
+        paramId="eqEnabled"
+        labelText="BYPASS"
+        labelOffset={9.2}
+        labelClass="rack-small"
+      />
+      {lanes.map((lane, index) => {
+        const x = layout.laneXs[index];
         return (
-          <span key={band} className="eq-band">
-            <Label x={x} y={20.8} className="eq-band-value"><BoundParamValue paramId={bandParamIds[index]} fallback="0.0 dB" /></Label>
-            <Fader x={x} y={52} h={46} paramId={bandParamIds[index]} value={values[index]} className="eq-fader" />
-            <Label x={x} y={80.5} className="eq-frequency">{band}</Label>
+          <span
+            key={lane.paramId}
+            className={`eq-band${lane.output ? " eq-level-lane" : ""}`}
+          >
+            <Label x={x} y={layout.valueY} className="eq-band-value">
+              <BoundParamValue paramId={lane.paramId} fallback="0.0 dB" />
+            </Label>
+            <Fader
+              x={x}
+              y={layout.faderY}
+              h={layout.faderH}
+              paramId={lane.paramId}
+              value={lane.fallback}
+              className="eq-fader"
+            />
+            <Label x={x} y={layout.labelY} className="eq-frequency">
+              {lane.label}
+            </Label>
           </span>
         );
       })}
@@ -2308,52 +4630,433 @@ function EqStage() {
 function PostFxStage() {
   const modulatorPedalMode = useBoundDesignParam("modulatorPedalMode");
   const delayTempoSync = useBoundDesignParam("delayTempoSync");
+  const reverbVoice = useBoundDesignParam("reverbVoice");
   const modulatorAuto = (modulatorPedalMode?.value ?? 1) >= 0.5;
   const delaySynced = (delayTempoSync?.value ?? 0) >= 0.5;
+  const reverbLabels = reverbVoiceControlLabels(
+    reverbVoice?.value ?? 0,
+    reverbVoice?.min ?? 0,
+  );
+  const postLayout = NAM_POST_FX_FACEPLATE_LAYOUT;
   return (
     <>
-      <WidePedal box={LAYOUT.post.modulator} name="modulator" body={BODIES.copperWide} className={modulatorAuto ? "modulator-auto" : ""} title="MODULATOR" titleY={7}>
-        <Display x={7} y={14} w={28} h={9.5}><BoundParamChoice paramId="modulatorMode" offLabel="CHORUS" onLabel="FLANGER" /></Display>
-        <Toggle x={40} y={19} size={7.5} paramId="modulatorMode" />
-        <Label x={49} y={19} className="mod-switch-label">MODE</Label>
-        <Toggle x={68} y={19} size={7.5} paramId="modulatorPedalMode" />
-        <Label x={81} y={19} className="mod-switch-label mod-switch-state">
-          <BoundParamChoice paramId="modulatorPedalMode" offLabel="PEDAL" onLabel="AUTO" />
-        </Label>
-        <Knob kind="black" x={20} y={32.8} size={11.2} rot={-25} paramId="chorusRateHz" labelText="RATE" labelOffset={10.8} labelClass="post-label" value="Rate: 1.25 Hz" />
-        <Knob kind="black" x={50} y={32.5} size={11.5} rot={10} paramId="modulatorPedalPosition" labelText="POSITION" labelOffset={10.8} labelClass="post-label" value="Position: 50%" allowInteraction={!modulatorAuto} disabledReason={modulatorAuto ? "Select PEDAL mode." : undefined} />
-        <Knob kind="black" x={80} y={32.8} size={11.2} rot={26} paramId="chorusDepth" labelText="DEPTH" labelOffset={10.8} labelClass="post-label" value="Depth: 41%" />
-        <Knob kind="black" x={20} y={54.4} size={10.8} rot={-5} paramId="modulatorFeedback" labelText="FEEDBACK" labelOffset={10.2} labelClass="post-label" value="Feedback: 10%" />
-        <Knob kind="black" x={80} y={54.4} size={10.8} rot={30} paramId="chorusMix" labelText="MIX" labelOffset={10.2} labelClass="post-label" value="Mix: 30%" />
-        <Led x={40} y={72.8} on size={6} paramId="modulatorEnabled" value="Modulator on" hitSize={8.2} />
-        <Foot x={40} y={88.4} size={11.35} state="on" paramId="modulatorEnabled" value="Modulator on / off" hitSize={14.5} showStateLabel stateLabelY={79.5} />
-        <ThreeWayToggle x={75} y={87.4} size={9.2} labelY={79.3} paramId="chorusCharacter" labels={["CLEAN", "ENS", "BBD"]} />
-      </WidePedal>
-      <WidePedal box={LAYOUT.post.delay} name="delay" body={BODIES.darkWidePedal} className={`delay-rack${delaySynced ? " delay-synced" : ""}`} title="STEREO DELAY" titleY={7}>
-        <Display x={27} y={13.5} w={46} h={9} className="delay-display">
-          <span><BoundDelayTimeDisplay /><i aria-hidden="true">&nbsp;&middot;&nbsp;</i><BoundDelayModeDisplay /></span>
+      <WidePedal
+        box={LAYOUT.post.modulator}
+        name="modulator"
+        body={BODIES.copperTall}
+        className={modulatorAuto ? "modulator-auto" : ""}
+        title="MODULATOR"
+        titleY={postLayout.modules.modulator.titleY}
+      >
+        <Display
+          x={7}
+          y={postLayout.modulator.headerDisplayY}
+          w={28}
+          h={postLayout.modulator.headerDisplayH}
+        >
+          <BoundParamChoice
+            paramId="modulatorMode"
+            offLabel="CHORUS"
+            onLabel="FLANGER"
+          />
         </Display>
-        <Knob kind="black" x={18} y={32.5} size={12.5} rot={-15} paramId="delayTimeMs" labelText={delaySynced ? "SYNCED" : "TIME"} labelOffset={9.8} labelClass="post-label" value="Time: 360 ms" allowInteraction={!delaySynced} disabledReason={delaySynced ? "Turn SYNC off to set milliseconds." : undefined} />
-        <Knob kind="black" x={50} y={32.5} size={12.5} rot={12} paramId="delayFeedback" labelText="FEEDBACK" labelOffset={9.8} labelClass="post-label" value="Feedback: 28%" />
-        <Knob kind="black" x={82} y={32.5} size={12.5} rot={24} paramId="delayMix" labelText="MIX" labelOffset={9.8} labelClass="post-label" value="Mix: 25%" />
-        <Knob kind="black" x={20} y={53.5} size={11.8} rot={-25} paramId="delayMod" labelText={delaySynced ? "DIV / MOD" : "MOD"} labelOffset={8.7} labelClass="post-label" value="Modulation: 18%" />
-        <Knob kind="black" x={50} y={53.5} size={11.8} rot={5} paramId="delayMode" labelText="MODE" labelOffset={8.7} labelClass="post-label" value="Delay mode" />
-        <Knob kind="black" x={80} y={53.5} size={11.8} rot={24} paramId="delayDucker" labelText="DUCKER" labelOffset={8.7} labelClass="post-label" value="Ducker: 12%" />
-        <Led x={34} y={72} on size={6} paramId="delayTempoSync" value="Delay sync" hitSize={8.2} />
-        <Led x={66} y={72} on size={6} paramId="delayEnabled" value="Delay on" hitSize={8.2} />
-        <Foot x={34} y={88.4} size={9.6} state="on" paramId="delayTempoSync" value="Tempo sync" hitSize={12.3} />
-        <Foot x={66} y={88.4} size={9.6} state="on" paramId="delayEnabled" value="Delay on / off" hitSize={12.3} showStateLabel stateLabelY={79.2} />
-        <FootActionLabel x={34} y={79.2}>SYNC</FootActionLabel>
+        <Toggle
+          x={40}
+          y={postLayout.modulator.headerCenterY}
+          size={postLayout.modulator.headerToggleSize}
+          paramId="modulatorMode"
+        />
+        <Label
+          x={49}
+          y={postLayout.modulator.headerCenterY}
+          className="mod-switch-label"
+        >
+          MODE
+        </Label>
+        <Toggle
+          x={68}
+          y={postLayout.modulator.headerCenterY}
+          size={postLayout.modulator.headerToggleSize}
+          paramId="modulatorPedalMode"
+        />
+        <Label
+          x={81}
+          y={postLayout.modulator.headerCenterY}
+          className="mod-switch-label mod-switch-state"
+        >
+          <BoundParamChoice
+            paramId="modulatorPedalMode"
+            offLabel="PEDAL"
+            onLabel="AUTO"
+          />
+        </Label>
+        <Knob
+          kind="black"
+          x={20}
+          y={postLayout.modulator.topRowY}
+          size={postLayout.modulator.topKnobSize}
+          rot={-25}
+          paramId="chorusRateHz"
+          labelText="RATE"
+          labelOffset={postLayout.modulator.topLabelOffset}
+          labelClass="post-label"
+          value="Rate: 1.25 Hz"
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={postLayout.modulator.topRowY}
+          size={postLayout.modulator.topKnobSize}
+          rot={10}
+          paramId="modulatorPedalPosition"
+          labelText="POSITION"
+          labelOffset={postLayout.modulator.topLabelOffset}
+          labelClass="post-label"
+          value="Position: 50%"
+          allowInteraction={!modulatorAuto}
+          disabledReason={modulatorAuto ? "Select PEDAL mode." : undefined}
+        />
+        <Knob
+          kind="black"
+          x={80}
+          y={postLayout.modulator.topRowY}
+          size={postLayout.modulator.topKnobSize}
+          rot={26}
+          paramId="chorusDepth"
+          labelText="DEPTH"
+          labelOffset={postLayout.modulator.topLabelOffset}
+          labelClass="post-label"
+          value="Depth: 41%"
+        />
+        <Knob
+          kind="black"
+          x={20}
+          y={postLayout.modulator.lowerRowY}
+          size={postLayout.modulator.lowerKnobSize}
+          rot={-5}
+          paramId="modulatorFeedback"
+          labelText="FEEDBACK"
+          labelOffset={postLayout.modulator.lowerLabelOffset}
+          labelClass="post-label"
+          value="Feedback: 10%"
+        />
+        <Knob
+          kind="black"
+          x={80}
+          y={postLayout.modulator.lowerRowY}
+          size={postLayout.modulator.lowerKnobSize}
+          rot={30}
+          paramId="chorusMix"
+          labelText="MIX"
+          labelOffset={postLayout.modulator.lowerLabelOffset}
+          labelClass="post-label"
+          value="Mix: 30%"
+        />
+        <Led
+          x={postLayout.modulator.primaryX}
+          y={postLayout.modulator.ledY}
+          on
+          size={postLayout.modulator.ledSize}
+          paramId="modulatorEnabled"
+          value="Modulator on"
+          hitSize={8.2}
+        />
+        <Foot
+          x={postLayout.modulator.primaryX}
+          y={postLayout.modulator.footY}
+          size={postLayout.modulator.footSize}
+          state="on"
+          paramId="modulatorEnabled"
+          value="Modulator on / off"
+          hitSize={14.5}
+          showStateLabel
+          stateLabelY={postLayout.modulator.stateLabelY}
+        />
+        <Label
+          x={postLayout.modulator.secondaryX}
+          y={postLayout.modulator.stateLabelY}
+          className="mod-switch-label mod-switch-state"
+        >
+          <BoundParamChoice
+            paramId="chorusCharacter"
+            offLabel="CLEAN"
+            onLabel="ENS"
+          />
+        </Label>
+        <Toggle
+          x={postLayout.modulator.secondaryX}
+          y={postLayout.modulator.footY}
+          size={postLayout.modulator.footerToggleSize}
+          paramId="chorusCharacter"
+        />
       </WidePedal>
-      <WidePedal box={LAYOUT.post.reverb} name="reverb" body={BODIES.blueWidePedal} className="reverb-wide" title="REVERB" titleY={7}>
-        <Knob kind="black" x={24} y={30} size={14} rot={-24} paramId="reverbPreDelayMs" labelText="PRE DELAY" labelOffset={10.8} labelClass="post-label" value="Pre delay: 35 ms" />
-        <Knob kind="black" x={50} y={30} size={14} rot={8} paramId="reverbDecaySec" labelText="DECAY" labelOffset={10.8} labelClass="post-label" value="Decay: 2.4 s" />
-        <Knob kind="black" x={76} y={30} size={14} rot={30} paramId="reverbMix" labelText="MIX" labelOffset={10.8} labelClass="post-label" value="Mix: 53%" />
-        <Knob kind="black" x={24} y={51.5} size={12} rot={-22} paramId="reverbLowCutHz" labelText="LOW CUT" labelOffset={9.6} labelClass="post-label" value="Low cut: 120 Hz" />
-        <Knob kind="black" x={50} y={51.5} size={12} rot={-10} paramId="reverbTone" labelText="TONE" labelOffset={9.6} labelClass="post-label" value="Reverb tone" />
-        <Knob kind="black" x={76} y={51.5} size={12} rot={-135} paramId="reverbShimmer" labelText="SHIMMER" labelOffset={9.6} labelClass="post-label" value="Shimmer: 0%" />
-        <Led x={50} y={72} on size={6.2} paramId="reverbEnabled" value="Reverb on" hitSize={8.2} />
-        <Foot x={50} y={88.4} size={11.35} state="on" paramId="reverbEnabled" value="Reverb on / off" hitSize={14.5} showStateLabel stateLabelY={79.2} />
+      <WidePedal
+        box={LAYOUT.post.delay}
+        name="delay"
+        body={BODIES.darkTallPedal}
+        className={`delay-rack${delaySynced ? " delay-synced" : ""}`}
+        title="STEREO DELAY"
+        titleY={postLayout.modules.delay.titleY}
+      >
+        <Display
+          x={27}
+          y={postLayout.delay.headerDisplayY}
+          w={46}
+          h={postLayout.delay.headerDisplayH}
+          className="delay-display"
+        >
+          <span>
+            <BoundDelayTimeDisplay />
+            <i aria-hidden="true">&nbsp;&middot;&nbsp;</i>
+            <BoundDelayModeDisplay />
+          </span>
+        </Display>
+        <Knob
+          kind="black"
+          x={18}
+          y={postLayout.delay.topRowY}
+          size={postLayout.delay.topKnobSize}
+          rot={-15}
+          paramId="delayTimeMs"
+          labelText={delaySynced ? "SYNCED" : "TIME"}
+          labelOffset={postLayout.delay.topLabelOffset}
+          labelClass="post-label"
+          value="Time: 360 ms"
+          allowInteraction={!delaySynced}
+          disabledReason={
+            delaySynced ? "Turn SYNC off to set milliseconds." : undefined
+          }
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={postLayout.delay.topRowY}
+          size={postLayout.delay.topKnobSize}
+          rot={12}
+          paramId="delayFeedback"
+          labelText="FEEDBACK"
+          labelOffset={postLayout.delay.topLabelOffset}
+          labelClass="post-label"
+          value="Feedback: 28%"
+        />
+        <Knob
+          kind="black"
+          x={82}
+          y={postLayout.delay.topRowY}
+          size={postLayout.delay.topKnobSize}
+          rot={24}
+          paramId="delayMix"
+          labelText="MIX"
+          labelOffset={postLayout.delay.topLabelOffset}
+          labelClass="post-label"
+          value="Mix: 25%"
+        />
+        <Knob
+          kind="black"
+          x={20}
+          y={postLayout.delay.lowerRowY}
+          size={postLayout.delay.lowerKnobSize}
+          rot={-25}
+          paramId="delayMod"
+          labelText={delaySynced ? "DIV / MOD" : "MOD"}
+          labelOffset={postLayout.delay.lowerLabelOffset}
+          labelClass="post-label"
+          value="Modulation: 18%"
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={postLayout.delay.lowerRowY}
+          size={postLayout.delay.lowerKnobSize}
+          rot={5}
+          paramId="delayMode"
+          labelText="MODE"
+          semanticLabel="Delay Voice"
+          labelOffset={postLayout.delay.lowerLabelOffset}
+          labelClass="post-label"
+          value="Delay voice"
+        />
+        <Knob
+          kind="black"
+          x={80}
+          y={postLayout.delay.lowerRowY}
+          size={postLayout.delay.lowerKnobSize}
+          rot={24}
+          paramId="delayDucker"
+          labelText="DUCKER"
+          labelOffset={postLayout.delay.lowerLabelOffset}
+          labelClass="post-label"
+          value="Ducker: 12%"
+        />
+        <Led
+          x={postLayout.delay.secondaryX}
+          y={postLayout.delay.ledY}
+          on
+          size={postLayout.delay.secondaryLedSize}
+          paramId="delayTempoSync"
+          value="Delay sync"
+          hitSize={8.2}
+        />
+        <Led
+          x={postLayout.delay.primaryX}
+          y={postLayout.delay.ledY}
+          on
+          size={postLayout.delay.ledSize}
+          paramId="delayEnabled"
+          value="Delay on"
+          hitSize={8.2}
+        />
+        <Foot
+          x={postLayout.delay.secondaryX}
+          y={postLayout.delay.footY}
+          size={postLayout.delay.secondaryFootSize}
+          state="on"
+          paramId="delayTempoSync"
+          value="Tempo sync"
+          hitSize={12.3}
+        />
+        <Foot
+          x={postLayout.delay.primaryX}
+          y={postLayout.delay.footY}
+          size={postLayout.delay.footSize}
+          state="on"
+          paramId="delayEnabled"
+          value="Delay on / off"
+          hitSize={14.5}
+          showStateLabel
+          stateLabelY={postLayout.delay.stateLabelY}
+        />
+        <FootActionLabel
+          x={postLayout.delay.secondaryX}
+          y={postLayout.delay.stateLabelY}
+        >
+          SYNC
+        </FootActionLabel>
+      </WidePedal>
+      <WidePedal
+        box={LAYOUT.post.reverb}
+        name="reverb"
+        body={BODIES.blueTallPedal}
+        className="reverb-wide"
+        title="REVERB"
+        titleY={postLayout.modules.reverb.titleY}
+      >
+        <Display
+          {...postLayout.reverb.voiceDisplay}
+          className="reverb-voice-display"
+        >
+          <ReverbVoiceDisplay paramId="reverbVoice" />
+        </Display>
+        <FourPositionRotarySelector
+          {...postLayout.reverb.voiceSelector}
+          paramId="reverbVoice"
+        />
+        <Knob
+          kind="black"
+          x={24}
+          y={postLayout.reverb.topRowY}
+          size={postLayout.reverb.topKnobSize}
+          rot={-24}
+          paramId="reverbPreDelayMs"
+          labelText={reverbLabels.preDelay}
+          semanticLabel="Pre Delay"
+          labelOffset={postLayout.reverb.topLabelOffset}
+          labelClass="post-label"
+          value="Pre delay: 35 ms"
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={postLayout.reverb.topRowY}
+          size={postLayout.reverb.topKnobSize}
+          rot={8}
+          paramId="reverbDecaySec"
+          labelText={reverbLabels.decay}
+          semanticLabel={reverbLabels.decay === "SIZE" ? "Room Size" : "Decay"}
+          labelOffset={postLayout.reverb.topLabelOffset}
+          labelClass="post-label"
+          value={reverbLabels.decay === "SIZE" ? "Room size" : "Decay: 2.4 s"}
+        />
+        <Knob
+          kind="black"
+          x={76}
+          y={postLayout.reverb.topRowY}
+          size={postLayout.reverb.topKnobSize}
+          rot={30}
+          paramId="reverbMix"
+          labelText={reverbLabels.mix}
+          semanticLabel="Mix"
+          labelOffset={postLayout.reverb.topLabelOffset}
+          labelClass="post-label"
+          value="Mix: 53%"
+        />
+        <Knob
+          kind="black"
+          x={24}
+          y={postLayout.reverb.lowerRowY}
+          size={postLayout.reverb.lowerKnobSize}
+          rot={-22}
+          paramId="reverbLowCutHz"
+          labelText={reverbLabels.lowCut}
+          semanticLabel="Low Cut"
+          labelOffset={postLayout.reverb.lowerLabelOffset}
+          labelClass="post-label"
+          value="Low cut: 120 Hz"
+        />
+        <Knob
+          kind="black"
+          x={50}
+          y={postLayout.reverb.lowerRowY}
+          size={postLayout.reverb.lowerKnobSize}
+          rot={-10}
+          paramId="reverbTone"
+          labelText={reverbLabels.tone}
+          semanticLabel={reverbLabels.tone === "DAMP" ? "Damping" : "Tone"}
+          labelOffset={postLayout.reverb.lowerLabelOffset}
+          labelClass="post-label"
+          value={reverbLabels.tone === "DAMP" ? "Damping" : "Reverb tone"}
+        />
+        <Knob
+          kind="black"
+          x={76}
+          y={postLayout.reverb.lowerRowY}
+          size={postLayout.reverb.lowerKnobSize}
+          rot={-135}
+          paramId="reverbShimmer"
+          labelText={reverbLabels.texture}
+          semanticLabel={
+            reverbLabels.texture === "AIR"
+              ? "Air"
+              : reverbLabels.texture === "MOTION"
+                ? "Motion"
+                : reverbLabels.texture === "EARLY"
+                  ? "Early Reflections"
+                  : "Shimmer"
+          }
+          labelOffset={postLayout.reverb.lowerLabelOffset}
+          labelClass="post-label"
+          value={`${reverbLabels.texture}: 0%`}
+        />
+        <Led
+          x={postLayout.reverb.primaryX}
+          y={postLayout.reverb.ledY}
+          on
+          size={postLayout.reverb.ledSize}
+          paramId="reverbEnabled"
+          value="Reverb on"
+          hitSize={8.2}
+        />
+        <Foot
+          x={postLayout.reverb.primaryX}
+          y={postLayout.reverb.footY}
+          size={postLayout.reverb.footSize}
+          state="on"
+          paramId="reverbEnabled"
+          value="Reverb on / off"
+          hitSize={14.5}
+          showStateLabel
+          stateLabelY={postLayout.reverb.stateLabelY}
+        />
       </WidePedal>
     </>
   );
@@ -2361,6 +5064,7 @@ function PostFxStage() {
 
 function SectionStage({
   sectionId,
+  compressorGainReductionDb,
   onBrowseAmpCapture,
   onBrowseLocalAmpCapture,
   onBrowseAmpOnlyCapture,
@@ -2370,6 +5074,7 @@ function SectionStage({
   recovery,
 }: {
   sectionId: DesignSectionId;
+  compressorGainReductionDb?: number;
   onBrowseAmpCapture?: () => void;
   onBrowseLocalAmpCapture?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
@@ -2378,11 +5083,31 @@ function SectionStage({
   rig: NAMRackDesignRigSummary;
   recovery?: NAMRackDesignRecovery;
 }) {
-  if (sectionId === "pre") return <PreFxStage />;
-  if (sectionId === "cab") return <CabStage cabLabel={rig.cabLabel} cabMode={rig.cabMode} onBrowseCabIR={onBrowseCabIR} onBrowseLocalCabIR={onBrowseLocalCabIR} onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture} />;
+  if (sectionId === "pre")
+    return <PreFxStage compressorGainReductionDb={compressorGainReductionDb} />;
+  if (sectionId === "cab")
+    return (
+      <CabStage
+        cabLabel={rig.cabLabel}
+        cabMode={rig.cabMode}
+        onBrowseCabIR={onBrowseCabIR}
+        onBrowseLocalCabIR={onBrowseLocalCabIR}
+        onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+      />
+    );
   if (sectionId === "eq") return <EqStage />;
   if (sectionId === "post") return <PostFxStage />;
-  return <AmpStage onBrowseAmpCapture={onBrowseAmpCapture} onBrowseLocalAmpCapture={onBrowseLocalAmpCapture} ampLabel={rig.ampLabel} hasAmpCapture={rig.hasAmpCapture} ampIncludesCab={rig.cabMode === "embedded"} ampCaptureMissing={rig.ampCaptureMissing} recovery={recovery} />;
+  return (
+    <AmpStage
+      onBrowseAmpCapture={onBrowseAmpCapture}
+      onBrowseLocalAmpCapture={onBrowseLocalAmpCapture}
+      ampLabel={rig.ampLabel}
+      hasAmpCapture={rig.hasAmpCapture}
+      ampIncludesCab={rig.cabMode === "embedded"}
+      ampCaptureMissing={rig.ampCaptureMissing}
+      recovery={recovery}
+    />
+  );
 }
 
 function SourceChip({
@@ -2398,9 +5123,19 @@ function SourceChip({
   value?: string;
   onClick?: () => void;
 }) {
-  const extraAttrs = attr === 'data-supported-pedal="true"' ? { "data-supported-pedal": "true" } : {};
+  const extraAttrs =
+    attr === 'data-supported-pedal="true"'
+      ? { "data-supported-pedal": "true" }
+      : {};
   return (
-    <button type="button" data-active={Boolean(active)} aria-pressed={active === undefined ? undefined : active} data-source-flow-value={value} {...extraAttrs} onClick={onClick}>
+    <button
+      type="button"
+      data-active={Boolean(active)}
+      aria-pressed={active === undefined ? undefined : active}
+      data-source-flow-value={value}
+      {...extraAttrs}
+      onClick={onClick}
+    >
       {children}
     </button>
   );
@@ -2411,11 +5146,13 @@ function ToneResultRow({
   onSelect,
   onAction,
   onFavorite,
+  disabled = false,
 }: {
   item: NAMSourceFlowDesignResult;
   onSelect: () => void;
   onAction: () => void;
   onFavorite: () => void;
+  disabled?: boolean;
 }) {
   const rowMeta = `${item.creator} \u00b7 ${item.kind} \u00b7 ${item.arch}`;
   return (
@@ -2439,19 +5176,33 @@ function ToneResultRow({
         aria-label={`Select ${item.name}`}
       />
       <div className="tone-row-art" aria-hidden="true">
-        {item.artUrl ? <img src={item.artUrl} alt="" /> : <span>{item.kind.slice(0, 1)}</span>}
+        {item.artUrl ? (
+          <img src={item.artUrl} alt="" />
+        ) : (
+          <span>{item.kind.slice(0, 1)}</span>
+        )}
       </div>
       <div className="tone-row-main">
         <strong title={item.name}>{item.name}</strong>
         <span title={rowMeta}>{rowMeta}</span>
-        <div className="tone-row-tags">{item.tags.slice(0, 2).map((tag) => <i key={tag}>{tag}</i>)}</div>
+        <div className="tone-row-tags">
+          {item.tags.slice(0, 2).map((tag) => (
+            <i key={tag}>{tag}</i>
+          ))}
+        </div>
         {item.source === "tone3000" && (
           <div className="tone-row-stats">
-            <span title={`${item.downloads} downloads`} aria-label={`${item.downloads} downloads`}>
+            <span
+              title={`${item.downloads} downloads`}
+              aria-label={`${item.downloads} downloads`}
+            >
               <Download aria-hidden="true" />
               {item.downloads}
             </span>
-            <span title={`${item.likes} favorites`} aria-label={`${item.likes} favorites`}>
+            <span
+              title={`${item.likes} favorites`}
+              aria-label={`${item.likes} favorites`}
+            >
               <Heart aria-hidden="true" />
               {item.likes}
             </span>
@@ -2459,17 +5210,41 @@ function ToneResultRow({
         )}
       </div>
       <div className="tone-row-side">
-        {item.source !== "openstudio" ? <button
-          type="button"
-          className="tone-row-favorite"
-          data-active={Boolean(item.favorite)}
-          aria-pressed={Boolean(item.favorite)}
-          aria-label={item.favorite ? `Remove ${item.name} from favorites` : `Add ${item.name} to favorites`}
-          title={item.favorite ? "Remove favorite" : "Add favorite"}
-          onClick={(event) => { event.stopPropagation(); onFavorite(); }}
-        >{item.favorite ? "★" : "☆"}</button> : <span className="tone-row-favorite-spacer" />}
+        {item.source !== "openstudio" ? (
+          <button
+            type="button"
+            className="tone-row-favorite"
+            data-active={Boolean(item.favorite)}
+            aria-pressed={Boolean(item.favorite)}
+            aria-label={
+              item.favorite
+                ? `Remove ${item.name} from favorites`
+                : `Add ${item.name} to favorites`
+            }
+            title={item.favorite ? "Remove favorite" : "Add favorite"}
+            onClick={(event) => {
+              event.stopPropagation();
+              onFavorite();
+            }}
+            disabled={disabled}
+          >
+            {item.favorite ? "★" : "☆"}
+          </button>
+        ) : (
+          <span className="tone-row-favorite-spacer" />
+        )}
         <em>{item.stateLabel}</em>
-        <button className="tone-row-action" type="button" onClick={(event) => { event.stopPropagation(); onAction(); }}>{item.action}</button>
+        <button
+          className="tone-row-action"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onAction();
+          }}
+          disabled={disabled}
+        >
+          {item.action}
+        </button>
       </div>
     </article>
   );
@@ -2482,23 +5257,75 @@ function SourceFlowSurface({
   config: NAMSourceFlowDesignConfig;
   onAction: (message: NAMSourceFlowDesignPortMessage) => void;
 }) {
-  const emit = (action: NAMSourceFlowDesignActionId, value = "", rowId = "") => {
-    onAction({ type: "nam-source-flow-design-port", instanceId: "native-source-flow", action, value, rowId });
+  const emit = (
+    action: NAMSourceFlowDesignActionId,
+    value = "",
+    rowId = "",
+  ) => {
+    onAction({
+      type: "nam-source-flow-design-port",
+      instanceId: "native-source-flow",
+      action,
+      value,
+      rowId,
+    });
   };
-  const architectureFilters = config.filters.filter((filter) => filter.id.startsWith("arch-"));
-  const typeFilters = config.filters.filter((filter) => !filter.id.startsWith("arch-"));
-  const selectedTypeFilter = typeFilters.find((filter) => filter.active)?.id ?? "";
+  const feedListRef = useRef<HTMLDivElement | null>(null);
+  const appendSentinelRef = useRef<HTMLDivElement | null>(null);
+  const architectureFilters = config.filters.filter((filter) =>
+    filter.id.startsWith("arch-"),
+  );
+  const typeFilters = config.filters.filter(
+    (filter) => !filter.id.startsWith("arch-"),
+  );
+  const selectedTypeFilter =
+    typeFilters.find((filter) => filter.active)?.id ?? "";
   const sourceResourceTerms = sourceFlowResourceTerms(config.mode);
   const sourceResourceLabel = sourceResourceTerms.label;
   const sourceResourceTitle = sourceResourceTerms.title;
   const sourceLibraryLabel = sourceResourceTerms.library;
-  const resultTotal = config.pagination?.totalResults ?? config.resultTotal ?? config.resultCount;
-  const resultSummary = resultTotal > config.resultCount
-    ? `${config.resultCount.toLocaleString()} shown \u00b7 ${resultTotal.toLocaleString()} matches`
-    : `${resultTotal.toLocaleString()} ${resultTotal === 1 ? "match" : "matches"}`;
+  const resultTotal =
+    config.pagination?.totalResults ?? config.resultTotal ?? config.resultCount;
+  const resultSummary =
+    resultTotal > config.resultCount
+      ? `${config.resultCount.toLocaleString()} shown \u00b7 ${resultTotal.toLocaleString()} matches`
+      : `${resultTotal.toLocaleString()} ${resultTotal === 1 ? "match" : "matches"}`;
+  useEffect(() => {
+    if (feedListRef.current)
+      feedListRef.current.scrollTop = Math.max(0, config.initialScrollTop ?? 0);
+  }, [config.sessionKey]);
+  useEffect(() => {
+    if (
+      !config.pagination ||
+      config.pagination.mode !== "live" ||
+      !config.pagination.canLoadMore ||
+      config.busy
+    )
+      return;
+    return observeTONE3000AppendSentinel(
+      appendSentinelRef.current,
+      feedListRef.current,
+      () => emit("auto-load-more"),
+    );
+  }, [
+    config.busy,
+    config.pagination?.canLoadMore,
+    config.pagination?.mode,
+    config.pagination?.page,
+    config.pagination?.requestKey,
+  ]);
   return (
-    <div className="tone-rack-flow tone-source-flow tone-source-v2" data-origin={config.originId} data-source-mode={config.sourceMode} data-target-slot={config.targetSlot} data-library-mode="source-flow">
-      <section className="tone-source-header" aria-label={`${config.sourceLabel} entry and return`}>
+    <div
+      className="tone-rack-flow tone-source-flow tone-source-v2"
+      data-origin={config.originId}
+      data-source-mode={config.sourceMode}
+      data-target-slot={config.targetSlot}
+      data-library-mode="source-flow"
+    >
+      <section
+        className="tone-source-header"
+        aria-label={`${config.sourceLabel} entry and return`}
+      >
         <button
           type="button"
           className="tone-return-button"
@@ -2507,177 +5334,420 @@ function SourceFlowSurface({
           onClick={() => emit("return")}
           disabled={config.busy}
           aria-busy={config.busy || undefined}
-        ><ArrowLeft />{config.returnLabel}</button>
-        <div className="tone-breadcrumb" aria-label={`${sourceLibraryLabel} breadcrumb`}>
-          <span>{config.originLabel} / {sourceLibraryLabel}</span>
+        >
+          <ArrowLeft />
+          {config.returnLabel}
+        </button>
+        <div
+          className="tone-breadcrumb"
+          aria-label={`${sourceLibraryLabel} breadcrumb`}
+        >
+          <span>
+            {config.originLabel} / {sourceLibraryLabel}
+          </span>
           <b>{config.sourceLabel}</b>
         </div>
         <div className="tone-connection-state" data-auth={config.authState}>
           <i />
           <span>{config.authTitle}</span>
           {config.statusAction ? (
-            <button type="button" onClick={() => emit(config.statusAction!.id)}>{config.statusAction.label}</button>
+            <button type="button" onClick={() => emit(config.statusAction!.id)}>
+              {config.statusAction.label}
+            </button>
           ) : null}
         </div>
       </section>
       <div className="tone-source-v2-workspace">
-      <main className="tone-selected-stage" aria-label={config.selectedAvailable ? `Selected ${sourceResourceLabel}` : `${sourceResourceTitle} selection`}>
-        <div
-          className="tone-selected-visual"
-          data-has-art={Boolean(config.selectedArtUrl)}
-          data-source-mode={config.mode}
-          data-target-slot={config.targetSlot}
+        <main
+          className="tone-selected-stage"
+          aria-label={
+            config.selectedAvailable
+              ? `Selected ${sourceResourceLabel}`
+              : `${sourceResourceTitle} selection`
+          }
         >
-          {config.selectedArtUrl ? <img src={config.selectedArtUrl} alt="" /> : null}
-          <div className="tone-selected-visual-shade" />
-          <div className="tone-selected-identity">
-            <span>{config.selectedAvailable ? config.detailEyebrow : `Choose ${sourceResourceLabel}`}</span>
-            <h1>{config.selectedAvailable ? config.selectedName : config.emptyTitle}</h1>
-            <p>{config.selectedAvailable ? config.selectedMeta : config.emptyBody}</p>
-            <div className="tone-selected-chips">
-              {config.selectedTags.slice(0, 5).map((tag) => <i key={tag}>{tag}</i>)}
+          <div
+            className="tone-selected-visual"
+            data-has-art={Boolean(config.selectedArtUrl)}
+            data-source-mode={config.mode}
+            data-target-slot={config.targetSlot}
+          >
+            {config.selectedArtUrl ? (
+              <img src={config.selectedArtUrl} alt="" />
+            ) : null}
+            <div className="tone-selected-visual-shade" />
+            <div className="tone-selected-identity">
+              <span>
+                {config.selectedAvailable
+                  ? config.detailEyebrow
+                  : `Choose ${sourceResourceLabel}`}
+              </span>
+              <h1>
+                {config.selectedAvailable
+                  ? config.selectedName
+                  : config.emptyTitle}
+              </h1>
+              <p>
+                {config.selectedAvailable
+                  ? config.selectedMeta
+                  : config.emptyBody}
+              </p>
+              <div className="tone-selected-chips">
+                {config.selectedTags.slice(0, 5).map((tag) => (
+                  <i key={tag}>{tag}</i>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-        {config.selectedAvailable ? <div className="tone-selected-info">
-          <div className="tone-selected-meta">
-            {config.detailMeta.slice(0, 5).map((line) => <span key={line}>{line}</span>)}
-          </div>
-          <div className="tone-selected-stats">
-            {config.selectedStats.map((stat) => <span key={stat}>{stat}</span>)}
-          </div>
-        </div> : null}
-        {config.selectedAvailable ? <div
-          className="tone-action-grid"
-          aria-label={`Preview and use ${sourceResourceLabel} actions`}
-          style={{
-            gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
-            maxWidth: `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
-          }}
-        >
-          {config.actions.map((action) => (
-            <button key={`${action.id}-${action.label}`} type="button" disabled={action.disabled} data-primary={Boolean(action.primary)} data-source-flow-action={action.id} onClick={() => emit(action.id, "", config.selectedRowId || "")}>
-              {action.label}
-            </button>
-          ))}
-        </div> : <div className="tone-action-grid tone-action-grid-empty" aria-hidden="true" />}
-        {config.selectedAvailable ? <div className="tone-audition-status" aria-label="Preview routing status">
-          <span>{config.statusTitle}</span><b title={config.route}>{config.route}</b><em>{config.statusDetail}</em>
-        </div> : null}
-      </main>
-      <aside className="tone-browser-feed tone-library-panel" aria-label={`${config.sourceLabel} browse feed`}>
-        <div className="tone-library-heading">
-          <div><span>{sourceLibraryLabel}</span><strong title={config.feedTitle}>{config.feedTitle}</strong></div>
-          <em>{resultSummary}</em>
-        </div>
-        <div className="tone-search-panel">
-          <Search aria-hidden="true" />
-          <input
-            type="search"
-            value={config.query}
-            placeholder={config.searchLabel}
-            aria-label={config.searchLabel}
-            onChange={(event) => emit("query", event.currentTarget.value)}
-            onKeyDown={(event) => { if (event.key === "Enter") emit("search"); }}
-          />
-          <button type="button" aria-label={config.searchAction} title={config.searchAction} data-source-flow-action="search" onClick={() => emit("search")}><ArrowRight /></button>
-        </div>
-        <div className="tone-tab-row" aria-label="Browse tabs">
-          {config.tabs.map((tab, index) => <SourceChip key={tab} value={tab} active={index === config.activeTab} onClick={() => emit("tab", tab)}>{tab}</SourceChip>)}
-        </div>
-        <div className="tone-filter-row" aria-label="Source filters and sorting">
-          {typeFilters.length > 0 ? (
-            <select aria-label={`${sourceResourceTitle} type`} value={selectedTypeFilter} onChange={(event) => event.currentTarget.value && emit("filter", event.currentTarget.value)}>
-              {!selectedTypeFilter ? <option value="">All types</option> : null}
-              {typeFilters.map((filter) => <option key={filter.id} value={filter.id}>{filter.label}</option>)}
-            </select>
+          {config.selectedAvailable ? (
+            <div className="tone-selected-info">
+              <div className="tone-selected-meta">
+                {config.detailMeta.slice(0, 5).map((line) => (
+                  <span key={line}>{line}</span>
+                ))}
+              </div>
+              <div className="tone-selected-stats">
+                {config.selectedStats.map((stat) => (
+                  <span key={stat}>{stat}</span>
+                ))}
+              </div>
+            </div>
           ) : null}
-          {architectureFilters.length > 0 ? <div className="tone-arch-filter">{architectureFilters.map((filter) => <SourceChip key={filter.id} value={filter.id} active={filter.active} onClick={() => emit("filter", filter.id)}>{filter.label}</SourceChip>)}</div> : null}
-          <select aria-label={`Sort ${sourceLibraryLabel}`} value={config.sortValue} onChange={(event) => emit("sort", event.currentTarget.value)}>
-            {config.sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-        </div>
-        {config.selectedAvailable ? <div className="tone-compact-selection" aria-label={`Selected ${sourceResourceLabel} actions`}>
-          <div className="tone-compact-selection-copy">
-            <span>Selected</span>
-            <strong title={config.selectedName}>{config.selectedName}</strong>
+          {config.selectedAvailable ? (
+            <div
+              className="tone-action-grid"
+              aria-label={`Preview and use ${sourceResourceLabel} actions`}
+              style={{
+                gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
+                maxWidth: `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
+              }}
+            >
+              {config.actions.map((action) => (
+                <button
+                  key={`${action.id}-${action.label}`}
+                  type="button"
+                  disabled={action.disabled}
+                  data-primary={Boolean(action.primary)}
+                  data-source-flow-action={action.id}
+                  onClick={() =>
+                    emit(action.id, "", config.selectedRowId || "")
+                  }
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div
+              className="tone-action-grid tone-action-grid-empty"
+              aria-hidden="true"
+            />
+          )}
+          {config.selectedAvailable ? (
+            <div
+              className="tone-audition-status"
+              aria-label="Preview routing status"
+            >
+              <span>{config.statusTitle}</span>
+              <b title={config.route}>{config.route}</b>
+              <em>{config.statusDetail}</em>
+            </div>
+          ) : null}
+        </main>
+        <aside
+          className="tone-browser-feed tone-library-panel"
+          aria-label={`${config.sourceLabel} browse feed`}
+        >
+          <div className="tone-library-heading">
+            <div>
+              <span>{sourceLibraryLabel}</span>
+              <strong title={config.feedTitle}>{config.feedTitle}</strong>
+            </div>
+            <em>{resultSummary}</em>
           </div>
-          <div
-            className="tone-action-grid tone-compact-actions"
-            style={{ gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))` }}
-          >
-            {config.actions.map((action) => (
-              <button key={`compact-${action.id}-${action.label}`} type="button" disabled={action.disabled} data-primary={Boolean(action.primary)} data-source-flow-action={action.id} onClick={() => emit(action.id, "", config.selectedRowId || "")}>
-                {action.label}
-              </button>
+          <div className="tone-search-panel">
+            <Search aria-hidden="true" />
+            <input
+              type="search"
+              value={config.query}
+              placeholder={config.searchLabel}
+              aria-label={config.searchLabel}
+              onChange={(event) => emit("query", event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") emit("search");
+              }}
+            />
+            <button
+              type="button"
+              aria-label={config.searchAction}
+              title={config.searchAction}
+              data-source-flow-action="search"
+              onClick={() => emit("search")}
+            >
+              <ArrowRight />
+            </button>
+          </div>
+          <div className="tone-tab-row" aria-label="Browse tabs">
+            {config.tabs.map((tab, index) => (
+              <SourceChip
+                key={tab}
+                value={tab}
+                active={index === config.activeTab}
+                onClick={() => emit("tab", tab)}
+              >
+                {tab}
+              </SourceChip>
             ))}
           </div>
-        </div> : null}
-        <div className="tone-feed-list" data-busy={config.busy}>
-          {config.busy && config.results.length === 0 ? Array.from({ length: 5 }, (_, index) => <div className="tone-feed-skeleton" key={index} />) : null}
-          {!config.busy && config.results.length === 0 ? (
-            <div className="tone-feed-empty">
-              <strong>{config.emptyTitle}</strong>
-              <p>{config.emptyBody}</p>
-              {config.emptyAction ? (
-                <button type="button" data-primary={Boolean(config.emptyAction.primary)} onClick={() => emit(config.emptyAction!.id)}>{config.emptyAction.label}</button>
-              ) : null}
-              <button type="button" onClick={() => emit("clear-filters")}>Clear filters</button>
+          <div
+            className="tone-filter-row"
+            aria-label="Source filters and sorting"
+          >
+            {typeFilters.length > 0 ? (
+              <select
+                aria-label={`${sourceResourceTitle} type`}
+                value={selectedTypeFilter}
+                onChange={(event) =>
+                  event.currentTarget.value &&
+                  emit("filter", event.currentTarget.value)
+                }
+              >
+                {!selectedTypeFilter ? (
+                  <option value="">All types</option>
+                ) : null}
+                {typeFilters.map((filter) => (
+                  <option key={filter.id} value={filter.id}>
+                    {filter.label}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            {architectureFilters.length > 0 ? (
+              <div className="tone-arch-filter">
+                {architectureFilters.map((filter) => (
+                  <SourceChip
+                    key={filter.id}
+                    value={filter.id}
+                    active={filter.active}
+                    onClick={() => emit("filter", filter.id)}
+                  >
+                    {filter.label}
+                  </SourceChip>
+                ))}
+              </div>
+            ) : null}
+            <select
+              aria-label={`Sort ${sourceLibraryLabel}`}
+              value={config.sortValue}
+              onChange={(event) => emit("sort", event.currentTarget.value)}
+            >
+              {config.sortOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          {config.selectedAvailable ? (
+            <div
+              className="tone-compact-selection"
+              aria-label={`Selected ${sourceResourceLabel} actions`}
+            >
+              <div className="tone-compact-selection-copy">
+                <span>Selected</span>
+                <strong title={config.selectedName}>
+                  {config.selectedName}
+                </strong>
+              </div>
+              <div
+                className="tone-action-grid tone-compact-actions"
+                style={{
+                  gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
+                }}
+              >
+                {config.actions.map((action) => (
+                  <button
+                    key={`compact-${action.id}-${action.label}`}
+                    type="button"
+                    disabled={action.disabled}
+                    data-primary={Boolean(action.primary)}
+                    data-source-flow-action={action.id}
+                    onClick={() =>
+                      emit(action.id, "", config.selectedRowId || "")
+                    }
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          ) : config.results.map((item) => (
-            <ToneResultRow
-              key={item.id}
-              item={item}
-              onSelect={() => emit("select-row", "", item.id)}
-              onAction={() => emit(item.actionId, "", item.id)}
-              onFavorite={() => emit("favorite", "", item.id)}
-            />
-          ))}
-        </div>
-        {config.pagination && config.pagination.totalPages > 1 ? (
-          <div className="tone-library-pager" data-mode={config.pagination.mode} aria-label="Tone library pages">
-            <button type="button" disabled={config.busy || !config.pagination.hasPrevious} onClick={() => emit("previous-page")} aria-label="Previous tone page"><ArrowLeft aria-hidden="true" /></button>
-            <span>Page {config.pagination.page} / {config.pagination.totalPages}</span>
-            <button type="button" disabled={config.busy || !config.pagination.hasMore} onClick={() => emit("next-page")} aria-label="Next tone page"><ArrowRight aria-hidden="true" /></button>
-            {config.pagination.mode === "live" ? (
-              <button type="button" className="tone-library-load-more" disabled={config.busy || !config.pagination.canLoadMore} onClick={() => emit("load-more")}>Load more</button>
+          ) : null}
+          <div
+            className="tone-feed-list"
+            data-busy={config.busy}
+            ref={feedListRef}
+            onScroll={(event) =>
+              emit("scroll", String(event.currentTarget.scrollTop))
+            }
+          >
+            {config.busy && config.results.length === 0
+              ? Array.from({ length: 5 }, (_, index) => (
+                  <div className="tone-feed-skeleton" key={index} />
+                ))
+              : null}
+            {!config.busy && config.results.length === 0 ? (
+              <div className="tone-feed-empty">
+                <strong>{config.emptyTitle}</strong>
+                <p>{config.emptyBody}</p>
+                {config.emptyAction ? (
+                  <button
+                    type="button"
+                    data-primary={Boolean(config.emptyAction.primary)}
+                    onClick={() => emit(config.emptyAction!.id)}
+                  >
+                    {config.emptyAction.label}
+                  </button>
+                ) : null}
+                <button type="button" onClick={() => emit("clear-filters")}>
+                  Clear filters
+                </button>
+              </div>
+            ) : (
+              config.results.map((item) => (
+                <ToneResultRow
+                  key={item.id}
+                  item={item}
+                  onSelect={() => emit("select-row", "", item.id)}
+                  onAction={() => emit(item.actionId, "", item.id)}
+                  onFavorite={() => emit("favorite", "", item.id)}
+                  disabled={config.busy}
+                />
+              ))
+            )}
+            {config.pagination?.mode === "live" ? (
+              <div
+                ref={appendSentinelRef}
+                className="tone-library-append-sentinel"
+                data-qa="tone3000-append-sentinel"
+                aria-hidden="true"
+              />
             ) : null}
           </div>
-        ) : null}
-      </aside>
+          {config.pagination && config.pagination.totalPages > 1 ? (
+            <div
+              className="tone-library-pager"
+              data-mode={config.pagination.mode}
+              aria-label="Tone library pages"
+            >
+              <span>
+                {config.resultCount.toLocaleString()} shown of{" "}
+                {config.pagination.totalResults.toLocaleString()}
+              </span>
+              <button
+                type="button"
+                className="tone-library-load-more"
+                disabled={config.busy || !config.pagination.canLoadMore}
+                onClick={() => emit("load-more")}
+                aria-label="Load more online tones"
+              >
+                {config.busy
+                  ? "Loading"
+                  : config.pagination.canLoadMore
+                    ? "Load more"
+                    : "All loaded"}
+              </button>
+            </div>
+          ) : null}
+        </aside>
       </div>
     </div>
   );
 }
 
-function PremiumTunerStage({ tuner, onClose }: { tuner: NAMRackDesignTunerSummary; onClose: () => void }) {
+function PremiumTunerStage({
+  tuner,
+  onClose,
+}: {
+  tuner: NAMRackDesignTunerSummary;
+  onClose: () => void;
+}) {
   const cents = Math.round(tuner.centsPct - 50);
+  const liveTrackingStatus = tuner.statusLabel.startsWith("Holding")
+    ? "holding pitch"
+    : tuner.pitchLocked
+      ? "pitch tracking"
+      : tuner.signalPresent
+        ? "acquiring pitch"
+        : "no pitch lock";
   return (
     <section
       className="premium-tuner-stage"
       data-signal={tuner.signalPresent}
-      style={{ "--premium-tuner-pct": `${clamp(tuner.centsPct, 0, 100)}%` } as NativeStyle}
-      aria-label="Guitar tuner display"
+      style={
+        {
+          "--premium-tuner-pct": `${clamp(tuner.centsPct, 0, 100)}%`,
+        } as NativeStyle
+      }
+      aria-label="Chromatic guitar and bass tuner"
     >
-      <button type="button" className="premium-tuner-stage-close" aria-label="Close tuner" onClick={onClose}><X aria-hidden="true" /><span>Close</span></button>
+      <span
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {tuner.pitchLocked
+          ? `${tuner.noteLabel}, ${liveTrackingStatus}`
+          : liveTrackingStatus}
+      </span>
+      <button
+        type="button"
+        className="premium-tuner-stage-close"
+        aria-label="Close tuner"
+        onClick={onClose}
+      >
+        <X aria-hidden="true" />
+        <span>Close</span>
+      </button>
       <div className="premium-tuner-stage-copy">
         <span>Chromatic tuner</span>
         <strong>{tuner.noteLabel}</strong>
         <b>{tuner.statusLabel}</b>
         <em>{`${cents > 0 ? "+" : ""}${cents} cents`}</em>
       </div>
-      <div className="premium-tuner-scale" aria-label={`Tuning position ${tuner.centsPct.toFixed(0)} percent`}>
+      <div
+        className="premium-tuner-scale"
+        aria-label={`Tuning position ${tuner.centsPct.toFixed(0)} percent`}
+      >
         <div className="premium-tuner-scale-ticks" aria-hidden="true">
-          {Array.from({ length: 21 }).map((_, index) => <i key={index} data-major={index % 5 === 0} />)}
+          {Array.from({ length: 21 }).map((_, index) => (
+            <i key={index} data-major={index % 5 === 0} />
+          ))}
         </div>
         <span className="premium-tuner-needle" aria-hidden="true" />
-        <div className="premium-tuner-scale-labels"><span>-50</span><span>0</span><span>+50</span></div>
+        <div className="premium-tuner-scale-labels">
+          <span>-50</span>
+          <span>0</span>
+          <span>+50</span>
+        </div>
       </div>
       <div className="premium-tuner-stage-readouts">
-        <article><span>Pitch</span><strong>{tuner.frequencyLabel}</strong></article>
-        <article><span>Input</span><strong>{tuner.inputLevelLabel}</strong></article>
-        <article><span>Tracking</span><strong>{tuner.confidenceLabel}</strong></article>
-        <article><span>Reference</span><strong>440 Hz</strong></article>
+        <article>
+          <span>Pitch</span>
+          <strong>{tuner.frequencyLabel}</strong>
+        </article>
+        <article>
+          <span>Input</span>
+          <strong>{tuner.inputLevelLabel}</strong>
+        </article>
+        <article>
+          <span>Tracking</span>
+          <strong>{tuner.confidenceLabel}</strong>
+        </article>
+        <article>
+          <span>Reference</span>
+          <strong>440 Hz</strong>
+        </article>
       </div>
     </section>
   );
@@ -2694,22 +5764,45 @@ function AssetRecoveryDock({ recovery }: { recovery: NAMRackDesignRecovery }) {
       aria-live="polite"
       aria-label={`${recovery.slotLabel} asset recovery`}
     >
-      <span className="premium-asset-recovery-icon" aria-hidden="true"><AlertTriangle /></span>
+      <span className="premium-asset-recovery-icon" aria-hidden="true">
+        <AlertTriangle />
+      </span>
       <span className="premium-asset-recovery-copy">
-        <small>{recovery.slotLabel} file unavailable{extraCount > 0 ? ` · ${extraCount} more missing` : ""}</small>
+        <small>
+          {recovery.slotLabel} file unavailable
+          {extraCount > 0 ? ` · ${extraCount} more missing` : ""}
+        </small>
         <strong title={recovery.pathLabel}>{recovery.pathLabel}</strong>
         <em>{recovery.detail}</em>
       </span>
-      <span className="premium-asset-recovery-actions" aria-label={`${recovery.slotLabel} recovery actions`}>
-        <button type="button" onClick={recovery.onLocate} disabled={recovery.busy} title={`Locate the missing ${recovery.assetLabel}`}>
+      <span
+        className="premium-asset-recovery-actions"
+        aria-label={`${recovery.slotLabel} recovery actions`}
+      >
+        <button
+          type="button"
+          onClick={recovery.onLocate}
+          disabled={recovery.busy}
+          title={`Locate the missing ${recovery.assetLabel}`}
+        >
           <FolderOpen aria-hidden="true" />
           {recovery.busy ? "Locating" : "Locate"}
         </button>
-        <button type="button" onClick={recovery.onReplace} disabled={recovery.busy} title={`Choose another ${recovery.assetLabel}`}>
+        <button
+          type="button"
+          onClick={recovery.onReplace}
+          disabled={recovery.busy}
+          title={`Choose another ${recovery.assetLabel}`}
+        >
           <Library aria-hidden="true" />
           Replace
         </button>
-        <button type="button" onClick={recovery.onBypass} disabled={recovery.busy || recovery.bypassed} title={`Safely bypass the missing ${recovery.slotLabel} slot`}>
+        <button
+          type="button"
+          onClick={recovery.onBypass}
+          disabled={recovery.busy || recovery.bypassed}
+          title={`Safely bypass the missing ${recovery.slotLabel} slot`}
+        >
           <Power aria-hidden="true" />
           {recovery.bypassed ? "Bypassed" : "Bypass"}
         </button>
@@ -2748,95 +5841,188 @@ function PremiumRigDrawer({
     active?: boolean;
     actionLabel: string;
     onClick: () => void;
-  }> = sectionId === "cab"
-    ? [
-      {
-        id: "cab-source",
-        eyebrow: rig.cabMode === "embedded" ? "Full-rig Capture" : rig.cabMode === "loaded" ? "Active IR" : "Cab source needed",
-        label: rig.cabLabel,
-        detail: rig.cabStatus,
-        asset: BODIES.cab,
-        active: rig.cabMode === "embedded" || rig.cabMode === "loaded",
-        actionLabel: "Open Cab / IR controls",
-        onClick: () => onOpenAdvancedStage("cab"),
-      },
-      {
-        id: "cab-filter",
-        eyebrow: "Native cabinet stage",
-        label: rig.cabMode === "embedded" ? "External IR shaper bypassed" : "IR shaper & filters",
-        detail: rig.cabMode === "embedded" ? "Load an amp-only Capture to enable it" : "Edge / damp / blend / low bloom / HPF / LPF",
-        asset: BODIES.mic,
-        actionLabel: "Open Cab / IR controls",
-        onClick: () => onOpenAdvancedStage("cab"),
-      },
-    ]
-    : sectionId === "eq" || sectionId === "post"
+  }> =
+    sectionId === "cab"
       ? [
-        { id: "eq", eyebrow: "Post-cab", label: "Graphic EQ", detail: "Nine supported bands", asset: BODIES.eq, active: sectionId === "eq", actionLabel: "Open Graphic EQ controls", onClick: () => onOpenAdvancedStage("eq") },
-        { id: "mod", eyebrow: "OpenStudio effect", label: "Modulator", detail: "Chorus / flanger", asset: BODIES.copperWide, active: sectionId === "post", actionLabel: "Open Modulator controls", onClick: () => onOpenAdvancedStage("mod") },
-        { id: "delay", eyebrow: "OpenStudio effect", label: "Stereo Delay", detail: "Tempo sync · feedback · ducking", asset: BODIES.darkWidePedal, actionLabel: "Open Stereo Delay controls", onClick: () => onOpenAdvancedStage("delay") },
-        { id: "reverb", eyebrow: "OpenStudio effect", label: "Reverb", detail: "Pre-delay / decay / tone", asset: BODIES.blueWidePedal, actionLabel: "Open Reverb controls", onClick: () => onOpenAdvancedStage("reverb") },
-      ]
-      : [
-        {
-          id: sectionId === "pre" ? "drive-pedals" : "amp-capture",
-          eyebrow: sectionId === "pre" ? "Native pre effects" : "Amp capture",
-          label: sectionId === "pre" ? "Precision + Distortion" : rig.ampLabel,
-          detail: sectionId === "pre"
-            ? "Two independent pre-amp drive circuits"
-            : (rig.hasAmpCapture ? "Active NAM Capture" : "Browse Captures or choose Local .nam"),
-          asset: sectionId === "pre" ? BODIES.red : BODIES.amp,
-          active: sectionId === "amp" && rig.hasAmpCapture,
-          actionLabel: sectionId === "pre" ? "Open drive controls" : "Open Amp controls",
-          onClick: () => onOpenAdvancedStage(sectionId === "pre" ? "precision-drive" : "amp"),
-        },
-        ...(sectionId === "amp" && !rig.hasAmpCapture
-          ? [{
-            id: "templates-locked",
-            eyebrow: "Next step",
-            label: "Templates locked",
-            detail: "Load an amp or full-rig .nam first",
-            asset: BODIES.darkWide,
-            active: false,
-            actionLabel: "Open Amp Capture Library",
-            onClick: () => onOpenLibrary("amp"),
-          }]
-          : libraryItems.slice(0, 3).map((item, index) => ({
-            id: item.id,
-            eyebrow: "Template for current capture",
-            label: item.name,
-            detail: item.subtitle,
-            asset: ([BODIES.darkWide, BODIES.blue, BODIES.stone] as NAMDesignBodyAssetId[])[index % 3],
-            active: item.active,
-            actionLabel: `Apply ${item.name} template`,
-            onClick: () => onSelectLibraryItem?.(item.id),
-          }))),
-      ];
-  const libraryTarget = sectionId === "cab" && (rig.cabMode === "embedded" || rig.cabMode === "empty")
-    ? "amp"
-    : sectionId === "eq" ? "post" : sectionId;
-  const libraryTitle = sectionId === "cab"
-    ? rig.cabMode === "embedded" || rig.cabMode === "empty" ? "Capture Library" : "IR Library"
-    : sectionId === "eq" || sectionId === "post" ? "Effects & Presets" : "Capture Library";
-  const libraryEyebrow = sectionId === "cab"
-    ? rig.cabMode === "embedded" ? "Full-rig cabinet" : "Cabinet source"
-    : sectionId === "eq" || sectionId === "post" ? "Supported OpenStudio effects" : "Captures & templates";
-  const librarySearchLabel = sectionId === "cab"
-    ? rig.cabMode === "embedded"
-      ? "Browse amp-only captures..."
-      : rig.cabMode === "empty"
-        ? "Browse amp captures..."
-        : rig.cabMode === "loaded" ? "Replace cabinet IR..." : "Choose cabinet IR..."
-    : sectionId === "eq" || sectionId === "post" ? "Browse effect presets..." : "Browse NAM captures / Local .nam...";
-  const libraryActionLabel = sectionId === "cab"
-    ? rig.cabMode === "embedded"
-      ? "Browse Amp-Only Captures"
-      : rig.cabMode === "empty"
-        ? "Browse Amp Captures"
-        : rig.cabMode === "loaded" ? "Replace IR" : "Choose IR"
-    : libraryTarget === "post" ? "Open Effect Preset Library" : "Open Capture Library";
+          {
+            id: "cab-source",
+            eyebrow:
+              rig.cabMode === "embedded"
+                ? "Full-rig Capture"
+                : rig.cabMode === "loaded"
+                  ? "Active IR"
+                  : "Cab source needed",
+            label: rig.cabLabel,
+            detail: rig.cabStatus,
+            asset: BODIES.cab,
+            active: rig.cabMode === "embedded" || rig.cabMode === "loaded",
+            actionLabel: "Open Cab / IR controls",
+            onClick: () => onOpenAdvancedStage("cab"),
+          },
+          {
+            id: "cab-filter",
+            eyebrow: "Native cabinet stage",
+            label:
+              rig.cabMode === "embedded"
+                ? "External IR shaper bypassed"
+                : "IR shaper & filters",
+            detail:
+              rig.cabMode === "embedded"
+                ? "Load an amp-only Capture to enable it"
+                : "Edge / damp / blend / low bloom / HPF / LPF",
+            asset: BODIES.mic,
+            actionLabel: "Open Cab / IR controls",
+            onClick: () => onOpenAdvancedStage("cab"),
+          },
+        ]
+      : sectionId === "eq" || sectionId === "post"
+        ? [
+            {
+              id: "eq",
+              eyebrow: "Post-cab",
+              label: "Graphic EQ",
+              detail: "Nine supported bands",
+              asset: BODIES.eq,
+              active: sectionId === "eq",
+              actionLabel: "Open Graphic EQ controls",
+              onClick: () => onOpenAdvancedStage("eq"),
+            },
+            {
+              id: "mod",
+              eyebrow: "OpenStudio effect",
+              label: "Modulator",
+              detail: "Chorus / flanger",
+              asset: BODIES.copperWide,
+              active: sectionId === "post",
+              actionLabel: "Open Modulator controls",
+              onClick: () => onOpenAdvancedStage("mod"),
+            },
+            {
+              id: "delay",
+              eyebrow: "OpenStudio effect",
+              label: "Stereo Delay",
+              detail: "Tempo sync · feedback · ducking",
+              asset: BODIES.darkWidePedal,
+              actionLabel: "Open Stereo Delay controls",
+              onClick: () => onOpenAdvancedStage("delay"),
+            },
+            {
+              id: "reverb",
+              eyebrow: "OpenStudio effect",
+              label: "Reverb",
+              detail: "Pre-delay / decay / tone",
+              asset: BODIES.blueWidePedal,
+              actionLabel: "Open Reverb controls",
+              onClick: () => onOpenAdvancedStage("reverb"),
+            },
+          ]
+        : [
+            {
+              id: sectionId === "pre" ? "drive-pedals" : "amp-capture",
+              eyebrow:
+                sectionId === "pre" ? "Native pre effects" : "Amp capture",
+              label:
+                sectionId === "pre" ? "Precision + Distortion" : rig.ampLabel,
+              detail:
+                sectionId === "pre"
+                  ? "Two independent pre-amp drive circuits"
+                  : rig.hasAmpCapture
+                    ? "Active NAM Capture"
+                    : "Browse Captures or choose Local .nam",
+              asset: sectionId === "pre" ? BODIES.red : BODIES.amp,
+              active: sectionId === "amp" && rig.hasAmpCapture,
+              actionLabel:
+                sectionId === "pre"
+                  ? "Open drive controls"
+                  : "Open Amp controls",
+              onClick: () =>
+                onOpenAdvancedStage(
+                  sectionId === "pre" ? "precision-drive" : "amp",
+                ),
+            },
+            ...(sectionId === "amp" && !rig.hasAmpCapture
+              ? [
+                  {
+                    id: "templates-locked",
+                    eyebrow: "Next step",
+                    label: "Templates locked",
+                    detail: "Load an amp or full-rig .nam first",
+                    asset: BODIES.darkWide,
+                    active: false,
+                    actionLabel: "Open Amp Capture Library",
+                    onClick: () => onOpenLibrary("amp"),
+                  },
+                ]
+              : libraryItems.slice(0, 3).map((item, index) => ({
+                  id: item.id,
+                  eyebrow: "Template for current capture",
+                  label: item.name,
+                  detail: item.subtitle,
+                  asset: (
+                    [
+                      BODIES.darkWide,
+                      BODIES.blue,
+                      BODIES.stone,
+                    ] as NAMDesignBodyAssetId[]
+                  )[index % 3],
+                  active: item.active,
+                  actionLabel: `Apply ${item.name} template`,
+                  onClick: () => onSelectLibraryItem?.(item.id),
+                }))),
+          ];
+  const libraryTarget =
+    sectionId === "cab" &&
+    (rig.cabMode === "embedded" || rig.cabMode === "empty")
+      ? "amp"
+      : sectionId === "eq"
+        ? "post"
+        : sectionId;
+  const libraryTitle =
+    sectionId === "cab"
+      ? rig.cabMode === "embedded" || rig.cabMode === "empty"
+        ? "Capture Library"
+        : "IR Library"
+      : sectionId === "eq" || sectionId === "post"
+        ? "Effects & Presets"
+        : "Capture Library";
+  const libraryEyebrow =
+    sectionId === "cab"
+      ? rig.cabMode === "embedded"
+        ? "Full-rig cabinet"
+        : "Cabinet source"
+      : sectionId === "eq" || sectionId === "post"
+        ? "Supported OpenStudio effects"
+        : "Captures & templates";
+  const librarySearchLabel =
+    sectionId === "cab"
+      ? rig.cabMode === "embedded"
+        ? "Browse amp-only captures..."
+        : rig.cabMode === "empty"
+          ? "Browse amp captures..."
+          : rig.cabMode === "loaded"
+            ? "Replace cabinet IR..."
+            : "Choose cabinet IR..."
+      : sectionId === "eq" || sectionId === "post"
+        ? "Browse effect presets..."
+        : "Browse NAM captures / Local .nam...";
+  const libraryActionLabel =
+    sectionId === "cab"
+      ? rig.cabMode === "embedded"
+        ? "Browse Amp-Only Captures"
+        : rig.cabMode === "empty"
+          ? "Browse Amp Captures"
+          : rig.cabMode === "loaded"
+            ? "Replace IR"
+            : "Choose IR"
+      : libraryTarget === "post"
+        ? "Open Effect Preset Library"
+        : "Open Capture Library";
   const openResolvedLibrary = () => {
-    if (sectionId === "cab" && rig.cabMode === "embedded" && onBrowseAmpOnlyCapture) {
+    if (
+      sectionId === "cab" &&
+      rig.cabMode === "embedded" &&
+      onBrowseAmpOnlyCapture
+    ) {
       onBrowseAmpOnlyCapture();
       return;
     }
@@ -2844,50 +6030,79 @@ function PremiumRigDrawer({
   };
 
   return (
-    <aside className="premium-rig-drawer" data-cab-mode={sectionId === "cab" ? rig.cabMode : undefined} aria-label={`${libraryTitle} and current rack`}>
+    <aside
+      className="premium-rig-drawer"
+      data-cab-mode={sectionId === "cab" ? rig.cabMode : undefined}
+      aria-label={`${libraryTitle} and current rack`}
+    >
       <div className="premium-drawer-heading">
-        <div><span>{libraryEyebrow}</span><strong>{libraryTitle}</strong></div>
+        <div>
+          <span>{libraryEyebrow}</span>
+          <strong>{libraryTitle}</strong>
+        </div>
         <i aria-hidden="true" />
       </div>
-      <button type="button" className="premium-library-search" onClick={openResolvedLibrary}>
+      <button
+        type="button"
+        className="premium-library-search"
+        onClick={openResolvedLibrary}
+      >
         <Search aria-hidden="true" />
         <span>{librarySearchLabel}</span>
       </button>
       <div className="premium-library-filter">
-        <span>{sectionId === "amp" && !rig.hasAmpCapture ? "Capture required" : sectionId === "amp" || sectionId === "pre" ? "Capture + templates" : "Loaded and supported"}</span>
-        <strong>{sectionId === "amp" && !rig.hasAmpCapture ? "Setup" : `${sectionItems.length} items`}</strong>
+        <span>
+          {sectionId === "amp" && !rig.hasAmpCapture
+            ? "Capture required"
+            : sectionId === "amp" || sectionId === "pre"
+              ? "Capture + templates"
+              : "Loaded and supported"}
+        </span>
+        <strong>
+          {sectionId === "amp" && !rig.hasAmpCapture
+            ? "Setup"
+            : `${sectionItems.length} items`}
+        </strong>
       </div>
       <div className="premium-rig-list">
         {sectionItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="premium-rig-card"
-              data-active={Boolean(item.active)}
-              aria-pressed={Boolean(item.active)}
-              aria-label={item.actionLabel}
-              title={item.actionLabel}
-              onClick={item.onClick}
-            >
-              <span className="premium-rig-thumb"><DesignAssetImage assetId={item.asset} /></span>
-              <span className="premium-rig-copy">
-                <small>{item.eyebrow}</small>
-                <strong title={item.label}>{item.label}</strong>
-                <em title={item.detail}>{item.detail}</em>
-              </span>
-              <i aria-hidden="true" />
-            </button>
+          <button
+            key={item.id}
+            type="button"
+            className="premium-rig-card"
+            data-active={Boolean(item.active)}
+            aria-pressed={Boolean(item.active)}
+            aria-label={item.actionLabel}
+            title={item.actionLabel}
+            onClick={item.onClick}
+          >
+            <span className="premium-rig-thumb">
+              <DesignAssetImage assetId={item.asset} />
+            </span>
+            <span className="premium-rig-copy">
+              <small>{item.eyebrow}</small>
+              <strong title={item.label}>{item.label}</strong>
+              <em title={item.detail}>{item.detail}</em>
+            </span>
+            <i aria-hidden="true" />
+          </button>
         ))}
       </div>
-      <button type="button" className="premium-library-cta" onClick={openResolvedLibrary}>
+      <button
+        type="button"
+        className="premium-library-cta"
+        onClick={openResolvedLibrary}
+      >
         <Library aria-hidden="true" />
         {libraryActionLabel}
       </button>
-      <p>{sectionId === "amp" || sectionId === "pre"
-        ? "Templates for Current Capture adjust supported effect settings while keeping the loaded Capture and IR identities. Local .nam is available in the Capture Library."
-        : sectionId === "cab" && rig.cabMode === "embedded"
-          ? "The retained external IR stays bypassed and returns automatically when an amp-only Capture is loaded."
-          : "Only configured IRs and OpenStudio-owned effects are shown here."}</p>
+      <p>
+        {sectionId === "amp" || sectionId === "pre"
+          ? "Templates for Current Capture adjust supported effect settings while keeping the loaded Capture and IR identities. Local .nam is available in the Capture Library."
+          : sectionId === "cab" && rig.cabMode === "embedded"
+            ? "The retained external IR stays bypassed and returns automatically when an amp-only Capture is loaded."
+            : "Only configured IRs and OpenStudio-owned effects are shown here."}
+      </p>
     </aside>
   );
 }
@@ -2900,11 +6115,13 @@ export function NAMRackDesignPort({
   sectionId,
   rackSizePercent,
   parameters,
+  compressorGainReductionDb,
   rig,
   runtime,
   recovery,
   tuner,
   calibration,
+  utilityControls,
   libraryItems,
   compareSlot,
   tunerOpen,
@@ -2920,6 +6137,8 @@ export function NAMRackDesignPort({
   onOpenLibrary,
   onPreviousPreset,
   onNextPreset,
+  previousPresetLabel,
+  nextPresetLabel,
   onSaveTone,
   onOpenPresetManager,
   onRecallCompare,
@@ -2936,17 +6155,22 @@ export function NAMRackDesignPort({
   sectionId: RackSectionId;
   rackSizePercent: number;
   parameters?: BuiltInParamDescriptor[];
+  compressorGainReductionDb?: number;
   rig: NAMRackDesignRigSummary;
   runtime: NAMRackDesignRuntimeStatus;
   recovery?: NAMRackDesignRecovery;
   tuner: NAMRackDesignTunerSummary;
   calibration?: NAMRackDesignCalibrationSummary;
+  utilityControls?: NAMRackDesignUtilityControls;
   libraryItems?: NAMRackDesignLibraryItem[];
   compareSlot: "A" | "B";
   tunerOpen: boolean;
   signalChainOpen?: boolean;
   onParamChange?: DesignParamChangeHandler;
-  onEnterSection: (sectionId: RackSectionId, targetModule: RackModuleId) => void;
+  onEnterSection: (
+    sectionId: RackSectionId,
+    targetModule: RackModuleId,
+  ) => void;
   onOpenAdvancedStage: (stageId: NAMRackAdvancedStageId) => void;
   onBrowseAmpCapture?: () => void;
   onBrowseLocalAmpCapture?: () => void;
@@ -2956,9 +6180,11 @@ export function NAMRackDesignPort({
   onOpenLibrary: (sectionId: RackSectionId) => void;
   onPreviousPreset?: () => void;
   onNextPreset?: () => void;
+  previousPresetLabel?: string;
+  nextPresetLabel?: string;
   onSaveTone: () => void;
   onOpenPresetManager?: () => void;
-  onRecallCompare: (slot: "A" | "B") => void;
+  onRecallCompare?: (slot: "A" | "B") => void;
   onOpenCalibration?: () => void;
   onSelectLibraryItem?: (itemId: string) => void;
   onOpenTuner: () => void;
@@ -2976,27 +6202,45 @@ export function NAMRackDesignPort({
   const designSection = designSectionFor(sectionId);
   const boardId = shellBoardForSection(sectionId);
   const inlineAmpRecovery = Boolean(
-    designSection === "amp"
-      && recovery?.slot === "amp"
-      && (recovery.additionalMissingCount ?? 0) === 0,
+    designSection === "amp" &&
+    recovery?.slot === "amp" &&
+    (recovery.additionalMissingCount ?? 0) === 0,
   );
   const recoveryInset = recovery && !inlineAmpRecovery && !tunerOpen ? 70 : 0;
   const placement = useMemo(() => {
-    const availableStage = recoveryInset > 0
-      ? { width: stageSize.width, height: Math.max(120, stageSize.height - recoveryInset) }
-      : stageSize;
-    const next = computePremiumStagePlacement(availableStage, SECTION_GROUP_BOX[designSection], rackSizePercent);
-    return recoveryInset > 0 ? { ...next, top: next.top + recoveryInset } : next;
+    const availableStage =
+      recoveryInset > 0
+        ? {
+            width: stageSize.width,
+            height: Math.max(120, stageSize.height - recoveryInset),
+          }
+        : stageSize;
+    const next = computePremiumStagePlacement(
+      availableStage,
+      SECTION_GROUP_BOX[designSection],
+      rackSizePercent,
+    );
+    return recoveryInset > 0
+      ? { ...next, top: next.top + recoveryInset }
+      : next;
   }, [designSection, rackSizePercent, recoveryInset, stageSize]);
-  const activeLabel = designSection === "pre" ? "PEDALS" : designSection === "post" ? "POST FX" : designSection.toUpperCase();
+  const activeLabel =
+    designSection === "pre"
+      ? "PEDALS"
+      : designSection === "post"
+        ? "POST FX"
+        : designSection.toUpperCase();
   const effectsDisabled =
-    (designSection === "pre" || designSection === "eq" || designSection === "post")
-    && !rig.hasAmpCapture;
-  const ampRequiredCopy = designSection === "eq"
-    ? "to use the graphic EQ"
-    : designSection === "post"
-      ? "to use post effects"
-      : "to use these pedals";
+    (designSection === "pre" ||
+      designSection === "eq" ||
+      designSection === "post") &&
+    !rig.hasAmpCapture;
+  const ampRequiredCopy =
+    designSection === "eq"
+      ? "to use the graphic EQ"
+      : designSection === "post"
+        ? "to use post effects"
+        : "to use these pedals";
   const paramsById = useMemo(
     () => new Map((parameters ?? []).map((param) => [param.id, param])),
     [parameters],
@@ -3014,7 +6258,10 @@ export function NAMRackDesignPort({
           changed = true;
           continue;
         }
-        if (Math.abs(sourceParam.value - value) <= Math.max(stepForParam(sourceParam), 0.0001) * 0.5) {
+        if (
+          Math.abs(sourceParam.value - value) <=
+          Math.max(stepForParam(sourceParam), 0.0001) * 0.5
+        ) {
           changed = true;
           continue;
         }
@@ -3039,7 +6286,12 @@ export function NAMRackDesignPort({
   );
   return (
     <DesignParamContext.Provider value={paramContext}>
-      <section ref={hostRef} className="nam-rack-design-port nam-native-design-surface" data-design-board={boardId} data-design-section={designSection}>
+      <section
+        ref={hostRef}
+        className="nam-rack-design-port nam-native-design-surface"
+        data-design-board={boardId}
+        data-design-section={designSection}
+      >
         <NativeDesignStyles />
         <div
           className="screen-shell nam-native-shell premium-nam-shell"
@@ -3049,9 +6301,21 @@ export function NAMRackDesignPort({
           <div className="nam-top-artboard">
             <TopShell
               active={activeLabel}
-              presetName={rig.hasAmpCapture || rig.ampCaptureMissing ? rig.presetName : "Start a New Rig"}
-              presetEyebrow={rig.ampCaptureMissing ? "Amp Capture Missing" : rig.hasAmpCapture ? rig.presetEyebrow : "No Amp Capture Loaded"}
-              presetDirty={(rig.hasAmpCapture || rig.ampCaptureMissing) && rig.presetDirty}
+              presetName={
+                rig.hasAmpCapture || rig.ampCaptureMissing
+                  ? rig.presetName
+                  : "Start a New Rig"
+              }
+              presetEyebrow={
+                rig.ampCaptureMissing
+                  ? "Amp Capture Missing"
+                  : rig.hasAmpCapture
+                    ? rig.presetEyebrow
+                    : "No Amp Capture Loaded"
+              }
+              presetDirty={
+                (rig.hasAmpCapture || rig.ampCaptureMissing) && rig.presetDirty
+              }
               compareSlot={compareSlot}
               inputLevelDb={runtime.inputLevelDb}
               outputLevelDb={runtime.outputLevelDb}
@@ -3059,14 +6323,19 @@ export function NAMRackDesignPort({
               calibrationStatus={calibration?.status}
               calibrationOpen={calibration?.open}
               previewText={`${rig.ampLabel || "No Amp Capture"} \u2192 ${rig.cabLabel || "No IR loaded"}`}
-              onEnterSection={(nextSection) => onEnterSection(nextSection, SECTION_TARGET_MODULE[nextSection])}
+              onEnterSection={(nextSection) =>
+                onEnterSection(nextSection, SECTION_TARGET_MODULE[nextSection])
+              }
               onOpenLibrary={() => onOpenLibrary(designSection)}
               onPreviousPreset={onPreviousPreset}
               onNextPreset={onNextPreset}
+              previousPresetLabel={previousPresetLabel}
+              nextPresetLabel={nextPresetLabel}
               onSaveTone={onSaveTone}
               onOpenPresetManager={onOpenPresetManager}
               onRecallCompare={onRecallCompare}
               onOpenCalibration={onOpenCalibration}
+              utilityControls={utilityControls}
             />
           </div>
           <div className="hardware-stage" data-tuner-open={tunerOpen}>
@@ -3074,9 +6343,15 @@ export function NAMRackDesignPort({
               ref={stageRef}
               className="premium-stage-canvas"
               data-recovery={recovery && !tunerOpen ? recovery.slot : undefined}
-              style={{ "--nam-studio-backdrop": `url(${STUDIO_BACKDROP_URL})` } as NativeStyle}
+              style={
+                {
+                  "--nam-studio-backdrop": `url(${STUDIO_BACKDROP_URL})`,
+                } as NativeStyle
+              }
             >
-              {recovery && !inlineAmpRecovery && !tunerOpen ? <AssetRecoveryDock recovery={recovery} /> : null}
+              {recovery && !inlineAmpRecovery && !tunerOpen ? (
+                <AssetRecoveryDock recovery={recovery} />
+              ) : null}
               {effectsDisabled && !tunerOpen ? (
                 <button
                   type="button"
@@ -3100,10 +6375,13 @@ export function NAMRackDesignPort({
                   data-design-board={boardId}
                   data-effects-disabled={effectsDisabled}
                   aria-disabled={effectsDisabled || undefined}
-                  style={{ transform: `translate(${placement.left}px, ${placement.top}px) scale(${placement.scale})` }}
+                  style={{
+                    transform: `translate(${placement.left}px, ${placement.top}px) scale(${placement.scale})`,
+                  }}
                 >
                   <SectionStage
                     sectionId={designSection}
+                    compressorGainReductionDb={compressorGainReductionDb}
                     onBrowseAmpCapture={onBrowseAmpCapture}
                     onBrowseLocalAmpCapture={onBrowseLocalAmpCapture}
                     onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
@@ -3114,12 +6392,21 @@ export function NAMRackDesignPort({
                   />
                 </div>
               )}
-              {!recovery && !tunerOpen && runtime.diagnosticMessage && runtime.diagnosticTone && runtime.diagnosticTone !== "idle" && runtime.diagnosticTone !== "success" && (
-                <div className="premium-stage-status" data-tone={runtime.diagnosticTone ?? "idle"} title={runtime.diagnosticMessage}>
-                  <i aria-hidden="true" />
-                  <span>{runtime.diagnosticMessage}</span>
-                </div>
-              )}
+              {!recovery &&
+                !tunerOpen &&
+                runtime.diagnosticMessage &&
+                runtime.diagnosticTone &&
+                runtime.diagnosticTone !== "idle" &&
+                runtime.diagnosticTone !== "success" && (
+                  <div
+                    className="premium-stage-status"
+                    data-tone={runtime.diagnosticTone ?? "idle"}
+                    title={runtime.diagnosticMessage}
+                  >
+                    <i aria-hidden="true" />
+                    <span>{runtime.diagnosticMessage}</span>
+                  </div>
+                )}
             </div>
             <PremiumRigDrawer
               sectionId={designSection}
@@ -3144,12 +6431,12 @@ export function NAMRackDesignPort({
             dspLabel={runtime.dspLabel}
             dspAlert={runtime.dspAlert}
             tunerOpen={tunerOpen}
-              signalChainOpen={signalChainOpen}
-              onOpenTuner={onOpenTuner}
-              onOpenPedalboard={onOpenSignalChain ?? onOpenPedalboard}
-              onOpenSettings={onOpenSettings}
-              onOpenAdvanced={onOpenAdvanced}
-              onCycleSize={onCycleSize}
+            signalChainOpen={signalChainOpen}
+            onOpenTuner={onOpenTuner}
+            onOpenPedalboard={onOpenSignalChain ?? onOpenPedalboard}
+            onOpenSettings={onOpenSettings}
+            onOpenAdvanced={onOpenAdvanced}
+            onCycleSize={onCycleSize}
             onMaxSize={onMaxSize}
           />
         </div>
@@ -3174,6 +6461,8 @@ export function NAMRackSourceFlowDesignPort({
   onCloseLibrary,
   onPreviousPreset,
   onNextPreset,
+  previousPresetLabel,
+  nextPresetLabel,
   onSavePreset,
   onOpenPresetManager,
   onRecallCompare,
@@ -3201,6 +6490,8 @@ export function NAMRackSourceFlowDesignPort({
   onCloseLibrary?: () => void;
   onPreviousPreset?: () => void;
   onNextPreset?: () => void;
+  previousPresetLabel?: string;
+  nextPresetLabel?: string;
   onSavePreset?: () => void;
   onOpenPresetManager?: () => void;
   onRecallCompare?: (slot: "A" | "B") => void;
@@ -3214,11 +6505,14 @@ export function NAMRackSourceFlowDesignPort({
   onAction: (message: NAMSourceFlowDesignPortMessage) => void;
 }) {
   const [hostRef] = useElementSize<HTMLElement>();
-  const readOnlyParamContext = useMemo<DesignParamContextValue>(() => ({
-    paramsById: new Map((parameters ?? []).map((param) => [param.id, param])),
-    localValues: {},
-    setLocalValue: () => undefined,
-  }), [parameters]);
+  const readOnlyParamContext = useMemo<DesignParamContextValue>(
+    () => ({
+      paramsById: new Map((parameters ?? []).map((param) => [param.id, param])),
+      localValues: {},
+      setLocalValue: () => undefined,
+    }),
+    [parameters],
+  );
   return (
     <DesignParamContext.Provider value={readOnlyParamContext}>
       <section
@@ -3226,7 +6520,11 @@ export function NAMRackSourceFlowDesignPort({
         className="nam-rack-design-port nam-rack-source-flow-design-port nam-native-design-surface"
         data-design-board={config.boardId}
         data-source-flow-mode={config.mode}
-        style={{ "--nam-studio-backdrop": `url(${STUDIO_BACKDROP_URL})` } as NativeStyle}
+        style={
+          {
+            "--nam-studio-backdrop": `url(${STUDIO_BACKDROP_URL})`,
+          } as NativeStyle
+        }
       >
         <NativeDesignStyles />
         <div
@@ -3240,7 +6538,12 @@ export function NAMRackSourceFlowDesignPort({
               libraryActive
               previewText={config.previewText}
               presetName={presetName}
-              presetEyebrow={presetEyebrow ?? (presetName === "Start a New Rig" ? "No Amp Capture Loaded" : "Current preset")}
+              presetEyebrow={
+                presetEyebrow ??
+                (presetName === "Start a New Rig"
+                  ? "No Amp Capture Loaded"
+                  : "Current preset")
+              }
               presetDirty={presetDirty}
               compareSlot={compareSlot}
               inputLevelDb={runtime?.inputLevelDb}
@@ -3252,13 +6555,18 @@ export function NAMRackSourceFlowDesignPort({
               onOpenLibrary={onCloseLibrary}
               onPreviousPreset={onPreviousPreset}
               onNextPreset={onNextPreset}
+              previousPresetLabel={previousPresetLabel}
+              nextPresetLabel={nextPresetLabel}
               onSaveTone={onSavePreset}
               onOpenPresetManager={onOpenPresetManager}
               onRecallCompare={onRecallCompare}
               onOpenCalibration={onOpenCalibration}
             />
           </div>
-          <div className="source-flow-workspace" data-design-board={config.boardId}>
+          <div
+            className="source-flow-workspace"
+            data-design-board={config.boardId}
+          >
             <SourceFlowSurface config={config} onAction={onAction} />
           </div>
           <Footer
@@ -3665,11 +6973,6 @@ const NATIVE_DESIGN_CSS = `
      them without tweening through a knob-like rotation. */
   transition: filter 130ms ease;
 }
-.asset-control.three-way-toggle {
-  transition:
-    transform 105ms cubic-bezier(.22, .82, .32, 1),
-    filter 130ms ease;
-}
 .asset-control.control-disabled,
 .control-label.control-disabled {
   filter: grayscale(.82) saturate(.24);
@@ -3858,14 +7161,25 @@ const NATIVE_DESIGN_CSS = `
 .mix-fader { width: 4.05%; }
 .eq-scale-grid {
   position: absolute;
-  left: 19%;
-  top: 20%;
   z-index: 4;
-  width: 68.2%;
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,.11) 0 1px, transparent 1px 9.5%);
+}
+.eq-lane-gridline {
+  position: absolute;
+  z-index: 4;
+  width: 1px;
+  transform: translateX(-.5px);
+  background: rgba(255,255,255,.065);
+  pointer-events: none;
+}
+.eq-level-separator {
+  position: absolute;
+  top: 20%;
+  z-index: 5;
+  width: 1px;
   height: 61%;
-  background:
-    repeating-linear-gradient(0deg, rgba(255,255,255,.11) 0 1px, transparent 1px 9.5%),
-    repeating-linear-gradient(90deg, rgba(255,255,255,.05) 0 1px, transparent 1px 6.7%);
+  background: linear-gradient(transparent, rgba(235,241,248,.24) 10%, rgba(235,241,248,.24) 90%, transparent);
+  pointer-events: none;
 }
 .eq-rack .fader { width: 1.95%; }
 .eq-rack .fader-cap { width: 145%; }
@@ -3877,6 +7191,9 @@ const NATIVE_DESIGN_CSS = `
   font-weight: 950;
 }
 .eq-rack .eq-frequency { font-size: max(8px, .58cqw); }
+.eq-rack .eq-level-lane .eq-band-value,
+.eq-rack .eq-level-lane .eq-frequency { color: #e7b85e; }
+.eq-rack .eq-level-lane .fader-track { border-color: rgba(231,184,94,.36); }
 .eq-rack .label.dark { color: rgba(242,247,253,.86); }
 .tone-rack-flow {
   position: absolute;
@@ -4951,7 +8268,7 @@ const NATIVE_PREMIUM_DARK_CSS = `
   color: #ffd78e !important;
   font-size: max(7px, .62cqw) !important;
   text-overflow: ellipsis;
-  text-shadow: 0 0 7px rgba(255,184,74,.3);
+  text-shadow: none;
   white-space: nowrap;
 }
 .nam-rack-design-port .delay-display i {
@@ -5093,6 +8410,11 @@ const NATIVE_PREMIUM_DARK_CSS = `
 .nam-rack-design-port .cab-controls-locked .cab-control-deck .asset-control.led {
   filter: grayscale(.9) saturate(.18);
   opacity: .28;
+}
+.nam-rack-design-port .cab-controls-locked .cab-room-bay .knob-position-indicator { opacity: 1; }
+.nam-rack-design-port .cab-controls-locked .cab-room-bay .asset-control.led {
+  filter: none;
+  opacity: 1;
 }
 .nam-rack-design-port .cabinet.cab-mode-empty .module-frame { filter: brightness(.38) saturate(.45); }
 .nam-rack-design-port .cabinet.cab-mode-required .module-frame { filter: brightness(.55) saturate(.62); }
@@ -5822,7 +9144,7 @@ const NATIVE_PREMIUM_DARK_CSS = `
   font-family: Inter, "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
 }
 .nam-rack-design-port .global-strip {
-  grid-template-columns: minmax(328px, 350px) minmax(520px, 780px) minmax(150px, 174px);
+  grid-template-columns: minmax(328px, 350px) minmax(0, 1fr) minmax(150px, 174px);
   justify-content: space-between;
   gap: 20px;
   padding: 18px clamp(24px, 1.8vw, 30px) 16px;
@@ -5955,11 +9277,14 @@ const NATIVE_PREMIUM_DARK_CSS = `
 }
 .nam-rack-design-port .premium-level-meter > strong { min-width: 28px; font-size: 9px; line-height: 15px; }
 .nam-rack-design-port .preset-area {
-  position: relative !important;
-  left: auto !important;
+  position: absolute !important;
+  left: 50% !important;
+  width: clamp(900px, 54vw, 1040px) !important;
+  transform: translateX(-50%) !important;
   top: auto !important;
-  inset: auto !important;
-  grid-column: 2;
+  right: auto !important;
+  bottom: 0 !important;
+  grid-column: auto;
   grid-template-columns: minmax(0,1fr);
   grid-template-rows: minmax(0, 1fr);
   align-self: end;
@@ -5967,19 +9292,183 @@ const NATIVE_PREMIUM_DARK_CSS = `
   gap: 0;
   padding: 0 0 21px;
 }
+.nam-rack-design-port .premium-routing-utility {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  min-width: 0;
+  height: 70px;
+  display: grid;
+  grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
+  align-items: stretch;
+  gap: 14px;
+  color: #aeb4bd;
+  font-style: normal;
+}
+.nam-rack-design-port .premium-instrument-choice,
+.nam-rack-design-port .premium-doubler-utility {
+  min-width: 0;
+  display: grid;
+  align-items: center;
+  gap: 5px 10px;
+  padding: 8px 12px;
+  overflow: hidden;
+  border: 1px solid rgba(158,174,194,.13);
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, rgba(24,29,35,.98), rgba(8,11,15,.99)),
+    #090c10;
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.035),
+    inset 0 -1px rgba(0,0,0,.7),
+    0 7px 18px rgba(0,0,0,.3);
+}
+.nam-rack-design-port .premium-instrument-choice {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 14px 27px 12px;
+  gap: 3px;
+  padding-inline: 12px;
+}
+.nam-rack-design-port .premium-instrument-choice > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(62px, 1fr));
+  gap: 6px;
+}
+.nam-rack-design-port .premium-instrument-choice > div > button {
+  min-width: 0;
+  height: 27px;
+  padding: 0 10px;
+  border: 1px solid rgba(141,154,169,.16);
+  border-radius: 4px;
+  color: #737b85;
+  background: linear-gradient(180deg, #11151a, #080b0f);
+  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 2px 5px rgba(0,0,0,.32);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.nam-rack-design-port .premium-instrument-choice > div > button[data-active="true"] {
+  border-color: rgba(222,154,63,.65);
+  color: #f4d09c;
+  background: linear-gradient(180deg, rgba(116,74,27,.68), rgba(57,35,14,.76));
+  box-shadow: inset 0 0 0 1px rgba(255,209,145,.06), 0 0 10px rgba(224,155,63,.07);
+}
+.nam-rack-design-port .premium-instrument-choice > div > button:disabled { cursor: not-allowed; opacity: .64; }
+.nam-rack-design-port .instrument-heading-short,
+.nam-rack-design-port .instrument-label-short { display: none; }
+.nam-rack-design-port .premium-instrument-choice > small {
+  overflow: hidden;
+  color: #7f8791;
+  font-size: 8px;
+  font-weight: 560;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nam-rack-design-port .premium-utility-heading {
+  color: #a2a9b3;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.nam-rack-design-port .premium-doubler-utility {
+  grid-template-columns: auto 50px minmax(48px, 1fr) minmax(48px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 8px;
+  padding-inline: 17px;
+}
+.nam-rack-design-port .premium-doubler-power {
+  height: 30px;
+  min-width: 50px;
+  display: inline-grid;
+  grid-template-columns: 15px auto;
+  place-items: center;
+  gap: 4px;
+  padding: 0 5px;
+  border: 1px solid rgba(141,154,169,.16);
+  border-radius: 4px;
+  color: #7f8791;
+  background: linear-gradient(180deg, #11151a, #080b0f);
+  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 2px 5px rgba(0,0,0,.32);
+  cursor: pointer;
+}
+.nam-rack-design-port .premium-doubler-power svg { width: 14px; height: 14px; }
+.nam-rack-design-port .premium-doubler-power strong { font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
+.nam-rack-design-port .premium-doubler-power[data-active="true"] {
+  border-color: rgba(222,160,79,.58);
+  color: #ffd69d;
+  background: rgba(143,88,30,.24);
+}
+.nam-rack-design-port .premium-doubler-utility[data-paused="true"] .premium-doubler-power {
+  border-color: rgba(146,113,72,.5);
+  color: #c7a87e;
+  background: rgba(88,67,42,.22);
+}
+.nam-rack-design-port .premium-utility-rotary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px;
+  grid-template-rows: 10px 36px 8px;
+  align-items: center;
+  justify-content: center;
+  color: #9ba2ac;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.nam-rack-design-port .premium-utility-rotary > span { grid-column: 1; grid-row: 1; justify-self: center; letter-spacing: .05em; }
+.nam-rack-design-port .premium-utility-rotary > .premium-utility-knob-well { grid-column: 1; grid-row: 2; }
+.nam-rack-design-port .premium-utility-rotary > strong {
+  grid-column: 1;
+  grid-row: 3;
+  color: #c8ccd1;
+  font-size: 8px;
+  font-weight: 650;
+  line-height: 1;
+  text-align: center;
+  text-transform: none;
+}
+.nam-rack-design-port .premium-utility-rotary-spread { grid-template-columns: 42px; }
+.nam-rack-design-port .premium-utility-rotary-spread > .premium-utility-knob-well { grid-column: 1; grid-row: 2; }
+.nam-rack-design-port .premium-utility-rotary-spread > strong { grid-column: 1; grid-row: 3; }
+.nam-rack-design-port .premium-utility-rotary-spread > span { grid-column: 1; grid-row: 1; justify-self: center; }
+.nam-rack-design-port .premium-utility-knob-well {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  justify-self: center;
+}
+.nam-rack-design-port .premium-utility-knob-well > .asset-control {
+  filter: brightness(.82) contrast(1.14) drop-shadow(0 4px 4px rgba(0,0,0,.65));
+}
+.nam-rack-design-port .premium-utility-knob-well > .knob-position-indicator::after { background: #e6aa55; }
+.nam-rack-design-port .premium-doubler-utility[data-paused="true"] .premium-utility-knob-well {
+  opacity: .55;
+  filter: grayscale(.55);
+}
 .nam-rack-design-port .preset-context {
   display: none;
 }
 .nam-rack-design-port .preset-console {
+  --preset-previous-width: 48px;
+  --preset-next-width: 48px;
+  --preset-save-width: 60px;
+  --preset-compare-width: 76px;
+  --preset-action-rail-width: calc(var(--preset-next-width) + var(--preset-save-width) + var(--preset-compare-width));
+  position: relative;
   grid-column: 1 / -1;
   min-width: 0;
-  height: 76px;
-  display: grid;
-  grid-template-columns: 50px minmax(220px,1fr) 50px 58px 78px;
-  align-items: stretch;
+  height: 63px;
+  display: block;
   overflow: hidden;
   border: 1px solid rgba(255,255,255,.14);
-  border-radius: 5px;
+  border-radius: 4px;
   background: linear-gradient(180deg, #15181d, #0a0d10);
   box-shadow: inset 0 1px rgba(255,255,255,.035), inset 0 -1px rgba(0,0,0,.8), 0 12px 32px rgba(0,0,0,.34);
 }
@@ -6215,9 +9704,218 @@ const NATIVE_PREMIUM_DARK_CSS = `
   font-weight: 590 !important;
 }
 .nam-rack-design-port .asset-button.hot span { color: #e6ad5b !important; }
+.nam-rack-design-port .module[data-module="compressor"] .control-label {
+  width: 27%;
+  max-width: 27%;
+  overflow: visible;
+  font-size: 7.6px !important;
+  text-align: center;
+  white-space: nowrap;
+}
+.nam-rack-design-port .preset-console > .preset-title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  width: auto !important;
+  /* Reserve the larger action bank on both sides. The title element, its
+     content box and the displayed preset text now share the rack centreline. */
+  padding: 0 calc(var(--preset-action-rail-width) + 18px);
+}
+.nam-rack-design-port .preset-console > [data-qa="nam-preset-previous"] {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--preset-previous-width);
+  z-index: 2;
+}
+.nam-rack-design-port .preset-console > [data-qa="nam-preset-next"] {
+  position: absolute;
+  top: 0;
+  right: calc(var(--preset-save-width) + var(--preset-compare-width));
+  bottom: 0;
+  width: var(--preset-next-width);
+  z-index: 2;
+}
+.nam-rack-design-port .preset-console > .preset-save {
+  position: absolute;
+  top: 0;
+  right: var(--preset-compare-width);
+  bottom: 0;
+  width: var(--preset-save-width);
+  z-index: 2;
+}
+.nam-rack-design-port .preset-console > .premium-compare {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: var(--preset-compare-width);
+  z-index: 2;
+}
+.nam-rack-design-port .three-position-selector-detents,
+.nam-rack-design-port .four-position-selector-detents {
+  position: absolute;
+  z-index: 6;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.nam-rack-design-port .three-position-selector-detents i,
+.nam-rack-design-port .four-position-selector-detents i {
+  position: absolute;
+  width: 2px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(216,226,234,.42);
+}
+.nam-rack-design-port .three-position-selector-detents i[data-active="true"],
+.nam-rack-design-port .four-position-selector-detents i[data-active="true"] {
+  width: 2.5px;
+  height: 4px;
+  background: #dff5ff;
+}
+.nam-rack-design-port .asset-control.enum-position-rotary {
+  z-index: 8;
+  filter: saturate(1.08) brightness(1.04) contrast(1.08) drop-shadow(0 1px 1px rgba(0,0,0,.72));
+  transition: transform 170ms cubic-bezier(.2, .92, .28, 1.12), filter 150ms ease;
+}
+.nam-rack-design-port .reverb-voice-display {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.14);
+  border-radius: 2px;
+  color: #e6ad5b;
+  background: linear-gradient(180deg, rgba(1,2,2,.99), rgba(5,7,7,.98));
+  box-shadow: none;
+  filter: none;
+  font-size: 7.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .05em;
+  line-height: 1;
+  text-shadow: none;
+}
+.nam-rack-design-port .module[data-module="compressor"] .compressor-hpf-readout {
+  position: absolute;
+  z-index: 8;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  align-items: center;
+  box-sizing: border-box;
+  color: rgba(237,235,229,.78);
+  font-size: 7px;
+  font-weight: 720;
+  letter-spacing: .025em;
+  line-height: 1;
+  text-align: center;
+  text-shadow: none;
+  pointer-events: none;
+}
+.nam-rack-design-port .module[data-module="compressor"] .compressor-hpf-readout strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: stretch;
+  min-width: 0;
+  min-height: 9px;
+  padding: 1px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 1px;
+  color: #efbd72;
+  background: linear-gradient(180deg, rgba(2,4,5,.99), rgba(8,11,13,.99));
+  box-shadow: none;
+  filter: none;
+  font-size: 7px;
+  font-weight: 780;
+  letter-spacing: 0;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.nam-rack-design-port .compressor-gr-meter {
+  position: absolute;
+  z-index: 7;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px;
+  box-sizing: border-box;
+  padding: 2px 3px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.13);
+  border-radius: 2px;
+  color: rgba(229,236,244,.78);
+  background: linear-gradient(180deg, rgba(3,6,8,.98), rgba(9,13,16,.98));
+  box-shadow: none;
+  filter: none;
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.nam-rack-design-port .compressor-gr-label {
+  color: rgba(229,236,244,.68);
+  font-weight: 760;
+  letter-spacing: .03em;
+}
+.nam-rack-design-port .compressor-gr-segments {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(2px, 1fr));
+  gap: 1px;
+  min-width: 0;
+}
+.nam-rack-design-port .compressor-gr-segments i {
+  display: block;
+  height: 4px;
+  border-radius: 1px;
+  background: rgba(103,126,145,.24);
+  box-shadow: none;
+}
+.nam-rack-design-port .compressor-gr-segments i[data-active="true"] {
+  background: #69d8e6;
+  box-shadow: none;
+}
+.nam-rack-design-port .compressor-gr-segments i:nth-last-child(-n+2)[data-active="true"] {
+  background: #e6ad5b;
+  box-shadow: none;
+}
+.nam-rack-design-port .compressor-gr-meter strong {
+  min-width: 16px;
+  color: rgba(239,243,246,.86);
+  font-size: 8px;
+  font-weight: 700;
+  text-align: right;
+}
+.nam-rack-design-port .module[data-module="distortion"] .control-label {
+  width: 27%;
+  max-width: 27%;
+  overflow: visible;
+  text-align: center;
+}
+.nam-rack-design-port .module[data-module="distortion"] .distortion-mode-display {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.14);
+  color: #e6ad5b !important;
+  background:
+    linear-gradient(180deg, rgba(1,2,2,.99), rgba(5,7,7,.98));
+  box-shadow: none;
+  filter: none;
+  font-size: 8.35px !important;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .055em;
+  line-height: 1;
+  text-align: center;
+  text-shadow: none;
+  white-space: nowrap;
+}
 .nam-rack-design-port .module-display {
   color: #e6ad5b;
   font-weight: 650;
+}
+.nam-rack-design-port .stompbox .module-display,
+.nam-rack-design-port .wide-pedal .module-display {
+  box-shadow: none;
+  filter: none;
 }
 .nam-rack-design-port .mic-panel .panel-title,
 .nam-rack-design-port .mic-panel .control-label,
@@ -6275,6 +9973,10 @@ const NATIVE_PREMIUM_DARK_CSS = `
   inset: 0;
   z-index: 6;
 }
+.nam-rack-design-port .ir-shaper-panel .cab-ir-primary-controls {
+  position: absolute;
+  inset: 0;
+}
 .nam-rack-design-port .ir-shaper-panel .control-label,
 .nam-rack-design-port .ir-shaper-panel .ir-utility-label {
   color: rgba(237,232,222,.86) !important;
@@ -6291,6 +9993,240 @@ const NATIVE_PREMIUM_DARK_CSS = `
 .nam-rack-design-port .ir-shaper-panel .cab-control-deck[data-locked="true"] .ir-utility-label {
   filter: grayscale(.75);
   opacity: .36;
+}
+.nam-rack-design-port .cab-room-console .module-frame {
+  overflow: hidden;
+  border-radius: 2.4%;
+}
+.nam-rack-design-port .cab-room-console .cab-source-selector {
+  left: 2.5%;
+  top: 4.6%;
+  width: 95%;
+  height: 13%;
+  padding: 4px 7px 4px 15px;
+  border-color: rgba(228,188,126,.22);
+  background: linear-gradient(180deg, rgba(17,18,18,.98), rgba(6,7,8,.99));
+}
+.nam-rack-design-port .cab-room-console .cab-source-copy > small {
+  color: rgba(228,179,103,.82);
+  font-size: 9px;
+  letter-spacing: .1em;
+}
+.nam-rack-design-port .cab-room-console .cab-source-copy > strong {
+  font-size: 12.5px;
+}
+.nam-rack-design-port .cab-room-console .cab-source-actions {
+  gap: 7px;
+}
+.nam-rack-design-port .cab-room-console .cab-source-actions > button {
+  padding-inline: 14px;
+  border-radius: 4px;
+  font-size: 9px;
+}
+.nam-rack-design-port .cab-room-console .cab-source-actions > button svg {
+  width: 14px;
+  height: 14px;
+}
+.nam-rack-design-port .cab-room-console .ir-primary-label {
+  color: rgba(242,238,230,.9) !important;
+  font-size: 11px !important;
+  font-weight: 650 !important;
+  letter-spacing: .045em !important;
+}
+.nam-rack-design-port .cab-room-console .ir-filter-value {
+  min-width: 10%;
+  padding: 4px 0 3px;
+  color: rgba(222,216,204,.75) !important;
+  border-bottom: 1px solid rgba(255,255,255,.09);
+  font-size: 9px !important;
+  font-weight: 560 !important;
+  letter-spacing: .015em !important;
+  text-transform: none;
+}
+.nam-rack-design-port .cab-room-console .cab-room-bay {
+  position: absolute;
+  left: 2.2%;
+  right: 2.2%;
+  top: 62.2%;
+  bottom: 2%;
+  z-index: 18;
+  display: grid;
+  grid-template-columns: .96fr 1fr 1fr 1fr;
+  align-items: stretch;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-zone,
+.nam-rack-design-port .cab-room-console .cab-room-control,
+.nam-rack-design-port .cab-room-console .cab-room-purpose {
+  position: relative;
+  min-width: 0;
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-zone::after,
+.nam-rack-design-port .cab-room-console .cab-room-control::after {
+  content: "";
+  position: absolute;
+  top: 15%;
+  right: 0;
+  bottom: 15%;
+  width: 1px;
+  background: rgba(157,178,194,.18);
+  box-shadow: 1px 0 rgba(0,0,0,.72);
+}
+.nam-rack-design-port .cab-room-console .cab-room-amount::after { display: none; }
+.nam-rack-design-port .cab-room-console .cab-room-power-zone {
+  display: block;
+  padding: 0;
+}
+.nam-rack-design-port .cab-room-console .cab-room-title {
+  position: absolute;
+  left: 22%;
+  top: 22%;
+  color: #659ddd;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: .08em;
+}
+.nam-rack-design-port .cab-room-console .cab-room-switch-row {
+  position: absolute;
+  inset: 0;
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-switch {
+  position: absolute;
+  left: 22%;
+  top: 52%;
+  width: 35%;
+  height: 11%;
+  min-height: 0;
+  padding: 0;
+  overflow: visible;
+  border: 1px solid rgba(154,169,184,.58);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #141a20, #080b0e 72%);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,.9), 0 1px rgba(255,255,255,.08);
+  pointer-events: auto;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-switch > i {
+  position: absolute;
+  top: 50%;
+  left: calc(100% - 3px);
+  width: 31%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(235,237,238,.64);
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, #d7dadd 0 10%, #8c9195 28%, #3e4245 62%, #16191b 100%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.45), 0 2px 4px rgba(0,0,0,.82);
+  transform: translate(-100%, -50%);
+  transition: left 140ms cubic-bezier(.2,.75,.25,1), transform 140ms cubic-bezier(.2,.75,.25,1);
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-switch[data-active="true"] {
+  border-color: rgba(108,163,220,.72);
+  background: linear-gradient(180deg, #16283a, #0a121a 72%);
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-switch[data-active="true"] > i {
+  left: 3px;
+  transform: translate(0, -50%);
+}
+.nam-rack-design-port .cab-room-console .cab-room-status-led {
+  position: absolute;
+  left: 145%;
+  top: 50%;
+  width: 18%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(158,190,226,.72);
+  border-radius: 50%;
+  background: radial-gradient(circle at 42% 36%, #dbeaff 0 12%, #79aaf0 28%, #315a8b 60%, #111b27 100%);
+  box-shadow: inset 0 1px rgba(255,255,255,.52), 0 0 8px rgba(92,154,231,.82), 0 2px 3px rgba(0,0,0,.8);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.nam-rack-design-port .cab-room-console .cab-room-status-led[data-active="false"] {
+  filter: grayscale(.72) brightness(.46);
+  box-shadow: inset 0 1px rgba(255,255,255,.24), 0 2px 3px rgba(0,0,0,.8);
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-switch:focus-visible {
+  outline: 1px solid #73aee8;
+  outline-offset: 2px;
+}
+.nam-rack-design-port .cab-room-console .cab-room-power-switch:disabled {
+  cursor: default;
+  opacity: .46;
+}
+.nam-rack-design-port .cab-room-console .cab-room-state-labels {
+  position: absolute;
+  left: 22%;
+  top: 72%;
+  display: flex;
+  width: 35%;
+  justify-content: space-between;
+  color: rgba(230,232,234,.8);
+  font-size: 8px;
+  font-weight: 610;
+}
+.nam-rack-design-port .cab-room-console .cab-room-state-labels i {
+  font-style: normal;
+}
+.nam-rack-design-port .cab-room-console .cab-room-control {
+  display: block;
+  padding: 0;
+}
+.nam-rack-design-port .cab-room-console .cab-room-control > strong {
+  position: absolute;
+  left: 50%;
+  top: 11%;
+  transform: translateX(-50%);
+  color: rgba(235,233,227,.88);
+  font-size: 10px;
+  font-weight: 630;
+  letter-spacing: .045em;
+}
+.nam-rack-design-port .cab-room-console .cab-room-control > .cab-room-value {
+  position: absolute;
+  left: 50%;
+  bottom: 13%;
+  min-width: 42%;
+  padding: 2px 5px 1px;
+  transform: translateX(-50%);
+  color: rgba(223,225,227,.77);
+  font-size: 9px;
+  font-weight: 570;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+}
+.nam-rack-design-port .cab-room-console .cab-room-control .asset-control.knob {
+  filter: drop-shadow(0 5px 5px rgba(0,0,0,.65)) drop-shadow(0 0 1px rgba(106,167,219,.55));
+}
+.nam-rack-design-port .cab-room-console .cab-room-control .asset-control.knob.blue-steel {
+  filter: brightness(.7) saturate(.72) contrast(1.04) drop-shadow(0 5px 5px rgba(0,0,0,.7));
+}
+.nam-rack-design-port .cab-room-console .cab-room-control .control-hit {
+  pointer-events: auto;
+}
+.nam-rack-design-port .cab-room-console .cab-room-purpose {
+  display: grid;
+  place-items: center;
+  padding: 10%;
+  color: #6198d7;
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: .045em;
+  text-align: center;
+}
+.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-bay {
+  filter: none;
+  opacity: 1;
+}
+.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-control,
+.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-power-zone {
+  filter: none;
+  opacity: 1;
 }
 .nam-rack-design-port .amp-brand {
   top: 25.5%;
@@ -6651,40 +10587,19 @@ const NATIVE_PREMIUM_DARK_CSS = `
   .nam-rack-design-port .mini-param .global-label { font-size: 9px !important; }
   .nam-rack-design-port .mini-param strong { font-size: 10px; }
   .nam-rack-design-port .preset-area {
-    grid-template-columns: minmax(0,1fr) 42px;
-    gap: 6px;
+    grid-template-columns: minmax(0,1fr);
+    gap: 0;
     padding-bottom: 8px;
   }
   .nam-rack-design-port .preset-console {
     grid-column: 1;
     grid-row: 1;
-    height: 61px;
+    height: 57px;
     grid-template-columns: 32px minmax(135px,1fr) 32px 42px 50px;
   }
   .nam-rack-design-port .preset-title { padding: 0 8px; }
   .nam-rack-design-port .preset-title b { font-size: 16px; }
-  .nam-rack-design-port .tone-library-mark {
-    grid-column: 2;
-    grid-row: 1;
-    align-self: stretch;
-    justify-self: stretch;
-    min-width: 42px;
-    width: 42px;
-    height: 61px;
-    display: inline-flex !important;
-    justify-content: center;
-    margin: 0;
-    padding: 0;
-    overflow: hidden;
-    color: transparent;
-    font-size: 0 !important;
-  }
-  .nam-rack-design-port .tone-library-mark svg {
-    width: 16px;
-    height: 16px;
-    flex: 0 0 auto;
-    color: #dca257;
-  }
+  .nam-rack-design-port .tone-library-mark { display: none !important; }
   .nam-rack-design-port .top-nav { grid-template-columns: repeat(5,minmax(78px,120px)); gap: 6px; padding: 0 14px; }
   .nam-rack-design-port .nav-item { grid-template-columns: 20px auto 5px; gap: 7px; font-size: 11px !important; }
   .nam-rack-design-port .premium-nav-icon,
@@ -7089,12 +11004,13 @@ const NATIVE_PREMIUM_DARK_CSS = `
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list::-webkit-scrollbar { width: 5px; }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #343a43; }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list::-webkit-scrollbar-track { background: transparent; }
+.nam-rack-source-flow-design-port .tone-source-v2 .tone-library-append-sentinel { width: 100%; height: 1px; }
 .nam-rack-source-flow-design-port .tone-library-pager {
   position: relative;
   z-index: 6;
   min-width: 0;
   display: grid;
-  grid-template-columns: 30px minmax(72px,1fr) 30px auto;
+  grid-template-columns: minmax(72px,1fr) auto;
   align-items: center;
   gap: 5px;
   padding-top: 7px;
@@ -7411,6 +11327,21 @@ const NATIVE_PREMIUM_DARK_CSS = `
     0 0 0 5px rgba(224, 161, 73, .22),
     0 0 14px rgba(224, 161, 73, .24);
 }
+.nam-rack-design-port .module .control-hit.interactive:is(
+  [data-param-id="chaosMode"],
+  [data-param-id="compressorSidechainHPF"]
+):focus-visible {
+  outline: 1px solid rgba(239, 186, 104, .76);
+  outline-offset: -1px;
+  box-shadow: 0 0 0 1px rgba(6, 8, 10, .72);
+}
+.nam-rack-design-port .module .control-hit.interactive.pointer-focused:is(
+  [data-param-id="chaosMode"],
+  [data-param-id="compressorSidechainHPF"]
+):focus-visible {
+  outline: none;
+  box-shadow: none;
+}
 .nam-rack-design-port .control-hit.disabled-feedback {
   cursor: help;
 }
@@ -7418,108 +11349,6 @@ const NATIVE_PREMIUM_DARK_CSS = `
   outline: 1px solid rgba(210, 169, 105, .8);
   outline-offset: -1px;
   box-shadow: 0 0 0 3px rgba(224, 161, 73, .14);
-}
-.nam-rack-design-port .control-value-popover {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  z-index: 90;
-  min-width: 70px;
-  max-width: 112px;
-  display: grid;
-  gap: 2px;
-  padding: 5px 8px 6px;
-  border: 1px solid rgba(239, 186, 104, .48);
-  border-radius: 4px;
-  opacity: 0;
-  color: #f2f0ea;
-  background:
-    linear-gradient(180deg, rgba(35, 37, 39, .98), rgba(9, 11, 13, .98));
-  box-shadow:
-    inset 0 1px rgba(255,255,255,.07),
-    0 8px 18px rgba(0,0,0,.52);
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  text-align: center;
-  pointer-events: none;
-  visibility: hidden;
-  transform: translate(-50%, calc(-100% - 9px)) scale(.96);
-  transform-origin: 50% 100%;
-  transition: opacity 90ms ease, transform 110ms ease, visibility 0s linear 110ms;
-}
-.nam-rack-design-port .control-value-popover[data-visible="true"] {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, calc(-100% - 9px)) scale(1);
-  transition-delay: 0s;
-}
-.nam-rack-design-port .control-value-popover[data-placement="below"] {
-  transform: translate(-50%, 9px) scale(.96);
-  transform-origin: 50% 0;
-}
-.nam-rack-design-port .control-value-popover[data-placement="below"][data-visible="true"] {
-  transform: translate(-50%, 9px) scale(1);
-}
-.nam-rack-design-port .control-value-popover[data-align="start"] {
-  transform: translate(-14%, calc(-100% - 9px)) scale(.96);
-  transform-origin: 14% 100%;
-}
-.nam-rack-design-port .control-value-popover[data-align="start"][data-visible="true"] {
-  transform: translate(-14%, calc(-100% - 9px)) scale(1);
-}
-.nam-rack-design-port .control-value-popover[data-align="end"] {
-  transform: translate(-86%, calc(-100% - 9px)) scale(.96);
-  transform-origin: 86% 100%;
-}
-.nam-rack-design-port .control-value-popover[data-align="end"][data-visible="true"] {
-  transform: translate(-86%, calc(-100% - 9px)) scale(1);
-}
-.nam-rack-design-port .control-value-popover[data-placement="below"][data-align="start"] {
-  transform: translate(-14%, 9px) scale(.96);
-  transform-origin: 14% 0;
-}
-.nam-rack-design-port .control-value-popover[data-placement="below"][data-align="start"][data-visible="true"] {
-  transform: translate(-14%, 9px) scale(1);
-}
-.nam-rack-design-port .control-value-popover[data-placement="below"][data-align="end"] {
-  transform: translate(-86%, 9px) scale(.96);
-  transform-origin: 86% 0;
-}
-.nam-rack-design-port .control-value-popover[data-placement="below"][data-align="end"][data-visible="true"] {
-  transform: translate(-86%, 9px) scale(1);
-}
-.nam-rack-design-port .control-value-popover small {
-  overflow: hidden;
-  color: #9da2a7;
-  font-size: 7px;
-  font-weight: 690;
-  letter-spacing: .08em;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.nam-rack-design-port .control-value-popover strong {
-  overflow: hidden;
-  color: #f4c77f;
-  font-size: 10px;
-  font-weight: 740;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .control-value-popover[data-kind="reason"] {
-  min-width: 98px;
-  max-width: 118px;
-  padding: 4px 6px 5px;
-}
-.nam-rack-design-port .control-value-popover[data-kind="reason"] small {
-  display: none;
-}
-.nam-rack-design-port .control-value-popover[data-kind="reason"] strong {
-  color: #d7c19d;
-  font-size: 7.4px;
-  line-height: 1.25;
-  text-wrap: balance;
-  white-space: normal;
 }
 .nam-rack-design-port .asset-control.led {
   opacity: 1;
@@ -7545,7 +11374,7 @@ const NATIVE_PREMIUM_DARK_CSS = `
 }
 .nam-rack-design-port .primary-foot-state {
   min-width: 32px;
-  padding: 1px 4px;
+  padding: 0 3px;
   border: 1px solid rgba(255,255,255,.1);
   border-radius: 999px;
   color: #777d84 !important;
@@ -7561,7 +11390,7 @@ const NATIVE_PREMIUM_DARK_CSS = `
   letter-spacing: .045em;
 }
 .nam-rack-design-port .primary-foot-state {
-  font-size: 6.25px !important;
+  font-size: 7px !important;
   letter-spacing: .035em;
 }
 .nam-rack-design-port .module[data-module="modulator"] .mod-switch-label {
@@ -7574,27 +11403,13 @@ const NATIVE_PREMIUM_DARK_CSS = `
 .nam-rack-design-port .module[data-module="modulator"] .mod-switch-state {
   color: #e6ad5b;
 }
-.nam-rack-design-port .three-way-toggle-labels {
-  position: absolute;
-  z-index: 17;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  width: 28%;
-  transform: translate(-50%, -50%);
-  color: rgba(232,225,213,.54);
-  font-size: 5.5px;
-  font-weight: 680;
-  letter-spacing: .025em;
+.nam-rack-design-port .wide-pedal .post-label {
+  /* Preserve full-size physical hardware by taking the required breathing
+     room from typography, not from the LED or footswitch photographs. */
+  font-size: 7px !important;
+  font-weight: 720 !important;
+  letter-spacing: .025em !important;
   line-height: 1;
-  text-align: center;
-  text-shadow: 0 1px 1px rgba(0,0,0,.72);
-  pointer-events: none;
-}
-.nam-rack-design-port .three-way-toggle-labels span[data-active="true"] {
-  color: #efbd72;
-  text-shadow:
-    0 1px 1px rgba(0,0,0,.78),
-    0 0 5px rgba(224,161,73,.34);
 }
 .nam-rack-design-port .nam-rack-artboard[data-effects-disabled="true"] .module {
   filter: grayscale(.82) saturate(.24) brightness(.64);
@@ -7699,6 +11514,592 @@ const NATIVE_PREMIUM_DARK_CSS = `
 }
 @media (max-width: 960px) {
   .nam-rack-design-port .premium-asset-recovery { right: 14px; }
+}
+
+/* Header utility compression preserves both rack-owned cards. Labels and
+   values remain visible; only physical spacing and dial size reduce. */
+@media (max-width: 1400px) {
+  .nam-rack-design-port .preset-area { width: clamp(720px, 62vw, 900px) !important; }
+  .nam-rack-design-port .premium-routing-utility {
+    bottom: calc(100% + 8px);
+    height: 65px;
+    grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
+    gap: 12px;
+  }
+  .nam-rack-design-port .premium-instrument-choice,
+  .nam-rack-design-port .premium-doubler-utility { gap: 4px 9px; padding: 6px 12px; }
+  .nam-rack-design-port .premium-instrument-choice { grid-template-rows: 12px 25px 10px; gap: 2px; padding-inline: 9px; }
+  .nam-rack-design-port .premium-instrument-choice > div { gap: 4px; }
+  .nam-rack-design-port .premium-instrument-choice > div > button { height: 25px; padding-inline: 6px; font-size: 9px; }
+  .nam-rack-design-port .premium-instrument-choice > small { font-size: 7px; }
+  .nam-rack-design-port .premium-doubler-utility { grid-template-columns: auto 48px minmax(42px, 1fr) minmax(42px, 1fr); gap: 5px; padding-inline: 9px; }
+  .nam-rack-design-port .premium-doubler-power { min-width: 48px; height: 29px; padding-inline: 5px; }
+  .nam-rack-design-port .premium-utility-rotary,
+  .nam-rack-design-port .premium-utility-rotary-spread { grid-template-columns: 39px; grid-template-rows: 9px 34px 9px; font-size: 8px; }
+  .nam-rack-design-port .premium-utility-knob-well { width: 34px; height: 34px; }
+  .nam-rack-design-port .preset-console {
+    --preset-previous-width: 42px;
+    --preset-next-width: 42px;
+    --preset-save-width: 52px;
+    --preset-compare-width: 70px;
+    height: 63px;
+  }
+}
+@media (max-width: 1030px) {
+  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 196px 52px minmax(0,1fr) 46px; }
+  .nam-rack-design-port .global-strip { padding-top: 61px; }
+  .nam-rack-design-port .preset-area { width: calc(100% - 24px) !important; }
+  .nam-rack-design-port .premium-routing-utility { height: 60px; grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr); gap: 7px; }
+  .nam-rack-design-port .premium-instrument-choice,
+  .nam-rack-design-port .premium-doubler-utility { padding-inline: 7px; }
+  .nam-rack-design-port .premium-instrument-choice > small { display: none; }
+  .nam-rack-design-port .premium-instrument-choice { grid-template-rows: 12px 28px; align-content: center; }
+  .nam-rack-design-port .premium-utility-heading { font-size: 8px; }
+  .nam-rack-design-port .premium-doubler-utility { grid-template-columns: auto 44px minmax(42px,1fr) minmax(46px,1fr); gap: 3px; padding-inline: 6px; }
+  .nam-rack-design-port .premium-doubler-power { min-width: 44px; grid-template-columns: 12px auto; gap: 2px; padding-inline: 3px; }
+  .nam-rack-design-port .premium-doubler-power svg { width: 13px; height: 13px; }
+  .nam-rack-design-port .premium-utility-rotary { grid-template-columns: 36px; grid-template-rows: 11px 30px 10px; row-gap: 0; }
+  .nam-rack-design-port .premium-utility-rotary > span,
+  .nam-rack-design-port .premium-utility-rotary-spread > span { grid-column: 1; grid-row: 1; justify-self: center; }
+  .nam-rack-design-port .premium-utility-rotary > .premium-utility-knob-well,
+  .nam-rack-design-port .premium-utility-rotary-spread > .premium-utility-knob-well { grid-column: 1; grid-row: 2; }
+  .nam-rack-design-port .premium-utility-rotary > strong,
+  .nam-rack-design-port .premium-utility-rotary-spread > strong { grid-column: 1; grid-row: 3; }
+  .nam-rack-design-port .premium-utility-knob-well { width: 30px; height: 30px; }
+  .nam-rack-design-port .preset-console {
+    --preset-previous-width: 36px;
+    --preset-next-width: 36px;
+    --preset-save-width: 46px;
+    --preset-compare-width: 62px;
+    height: 57px;
+  }
+}
+@media (max-width: 780px) {
+  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 196px 48px minmax(0,1fr) 48px; }
+  .nam-rack-design-port .global-strip { grid-template-columns: 92px minmax(0,1fr) 54px; gap: 7px; padding: 61px 9px 9px; }
+  .nam-rack-design-port .preset-area { grid-column: auto; width: calc(100% - 18px) !important; }
+  .nam-rack-design-port .premium-routing-utility { height: 57px; grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr); gap: 7px; }
+  .nam-rack-design-port .premium-doubler-utility { grid-template-columns: auto 41px minmax(36px,1fr) minmax(38px,1fr); }
+  .nam-rack-design-port .premium-doubler-power { min-width: 41px; height: 29px; }
+  .nam-rack-design-port .premium-doubler-power strong { font-size: 7px; }
+  .nam-rack-design-port .premium-utility-rotary { grid-template-columns: 29px; grid-template-rows: 10px 27px 9px; font-size: 7px; }
+  .nam-rack-design-port .premium-utility-knob-well { width: 27px; height: 27px; }
+  .nam-rack-design-port .preset-console {
+    --preset-previous-width: 30px;
+    --preset-next-width: 30px;
+    --preset-save-width: 38px;
+    --preset-compare-width: 40px;
+  }
+  .nam-rack-design-port .preset-console > .preset-title {
+    padding-inline: calc(var(--preset-action-rail-width) + 8px);
+  }
+}
+
+/* Responsive header contract. Complete hardware bays remain edge controls at
+   every supported width while both centre rails stay shell-centred. */
+
+@media (min-width: 1031px) and (max-width: 1919px) {
+  .nam-rack-design-port .premium-nam-shell {
+    grid-template-rows: 213px clamp(52px, 4.4vw, 60px) minmax(0,1fr) clamp(46px, 3.5vw, 48px);
+  }
+  .nam-rack-design-port .preset-area {
+    top: 63px !important;
+    bottom: auto !important;
+    width: min(1040px, calc(100% - 24px)) !important;
+    padding: 80px 0 0;
+  }
+  .nam-rack-design-port .premium-routing-utility {
+    top: 0;
+    bottom: auto;
+  }
+  .nam-rack-design-port .premium-brand {
+    left: 50% !important;
+    right: auto !important;
+    top: 4px !important;
+    width: 132px;
+    height: 52px;
+    transform: translateX(-50%);
+    align-content: center;
+    justify-items: center;
+    text-align: center;
+  }
+  .nam-rack-design-port .premium-brand > span { font-size: 8px; }
+  .nam-rack-design-port .premium-brand > strong { margin-top: 1px; font-size: 18px; }
+  .nam-rack-design-port .premium-calibration-launch {
+    position: absolute;
+    left: auto !important;
+    right: 100px !important;
+    top: 14px !important;
+    z-index: 4;
+    width: auto;
+    height: 22px;
+    display: grid;
+    grid-template-columns: 12px auto;
+    gap: 4px;
+    margin: 0;
+  }
+  .nam-rack-design-port .premium-calibration-launch > strong { display: none; }
+  .nam-rack-design-port .global-block.left,
+  .nam-rack-design-port .global-block.right {
+    position: absolute !important;
+    top: 4px !important;
+    bottom: auto !important;
+    z-index: 3;
+    height: 52px;
+    align-items: center;
+    gap: 5px;
+    padding-top: 0;
+  }
+  .nam-rack-design-port .global-block.left {
+    left: 10px !important;
+    right: auto !important;
+  }
+  .nam-rack-design-port .global-block.right {
+    right: 10px !important;
+    left: auto !important;
+    display: flex;
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter,
+  .nam-rack-design-port .global-block.right .premium-level-meter {
+    display: block;
+    width: 21px;
+    height: 50px;
+    flex-basis: 21px;
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter > strong,
+  .nam-rack-design-port .global-block.right .premium-level-meter > strong {
+    min-width: 20px;
+    font-size: 7.5px;
+    line-height: 9px;
+  }
+  .nam-rack-design-port .global-block.left .mini-param,
+  .nam-rack-design-port .global-block.right .mini-param {
+    width: 42px;
+    height: 52px;
+    display: grid !important;
+    grid-template-rows: 9px 34px 9px;
+  }
+  .nam-rack-design-port .global-block.left .mini-param > .asset-control,
+  .nam-rack-design-port .global-block.right .mini-param > .asset-control {
+    top: 27px !important;
+    width: 32px !important;
+    height: 32px !important;
+  }
+  .nam-rack-design-port .global-block.left .mini-param > .knob-position-indicator,
+  .nam-rack-design-port .global-block.right .mini-param > .knob-position-indicator {
+    top: 27px !important;
+    width: 32px !important;
+  }
+  .nam-rack-design-port .global-block.left .mini-param .global-label,
+  .nam-rack-design-port .global-block.right .mini-param .global-label,
+  .nam-rack-design-port .global-block.left .mini-param strong,
+  .nam-rack-design-port .global-block.right .mini-param strong { font-size: 7px !important; }
+}
+
+@media (max-width: 1030px) {
+  .nam-rack-design-port .premium-brand {
+    left: 50% !important;
+    right: auto !important;
+    top: 4px !important;
+    width: 132px;
+    height: 52px;
+    transform: translateX(-50%);
+    align-content: center;
+    justify-items: center;
+    text-align: center;
+  }
+  .nam-rack-design-port .premium-brand > span { font-size: 8px; }
+  .nam-rack-design-port .premium-brand > strong { margin-top: 1px; font-size: 18px; }
+  .nam-rack-design-port .premium-calibration-launch {
+    position: absolute;
+    left: auto !important;
+    right: 110px !important;
+    top: 18px !important;
+    z-index: 4;
+    width: auto;
+    height: 18px;
+    display: grid;
+    grid-template-columns: 10px auto;
+    gap: 3px;
+    margin: 0;
+  }
+  .nam-rack-design-port .premium-calibration-launch > strong { display: none; }
+  .nam-rack-design-port .global-block.left,
+  .nam-rack-design-port .global-block.right {
+    position: absolute !important;
+    top: 4px !important;
+    bottom: auto !important;
+    z-index: 3;
+    height: 52px;
+    align-items: center;
+    gap: 5px;
+    padding-top: 0;
+  }
+  .nam-rack-design-port .global-block.left {
+    left: 10px !important;
+    right: auto !important;
+    display: flex !important;
+  }
+  .nam-rack-design-port .global-block.right {
+    right: 10px !important;
+    left: auto !important;
+    display: flex !important;
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter,
+  .nam-rack-design-port .global-block.right .premium-level-meter {
+    display: block !important;
+    width: 21px;
+    height: 50px;
+    flex-basis: 21px;
+  }
+  .nam-rack-design-port .global-block .premium-level-meter > span,
+  .nam-rack-design-port .global-block .premium-level-meter > i { inset: 3px; }
+  .nam-rack-design-port .global-block .premium-level-meter > strong {
+    min-width: 20px;
+    font-size: 7.5px;
+    line-height: 9px;
+  }
+  .nam-rack-design-port .global-block.left .mini-param,
+  .nam-rack-design-port .global-block.right .mini-param {
+    width: 42px;
+    height: 52px;
+    display: grid !important;
+    grid-template-rows: 9px 34px 9px;
+  }
+  .nam-rack-design-port .global-block .mini-param > .asset-control {
+    top: 27px !important;
+    width: 32px !important;
+    height: 32px !important;
+  }
+  .nam-rack-design-port .global-block .mini-param > .knob-position-indicator {
+    top: 27px !important;
+    width: 32px !important;
+  }
+  .nam-rack-design-port .global-block .mini-param .global-label,
+  .nam-rack-design-port .global-block .mini-param strong {
+    font-size: 7px !important;
+    line-height: 1;
+  }
+}
+
+/* Medium hosts have enough real side gutter for full-height hardware bays.
+   At 1264px the left bay is exactly 96px wide and is pulled through the
+   global-strip padding so it remains at least 8px clear of the 1040px rail. */
+@media (min-width: 1264px) and (max-width: 1919px) {
+  .nam-rack-design-port .global-block.left,
+  .nam-rack-design-port .global-block.right {
+    top: 58px !important;
+    bottom: auto !important;
+    height: 149px;
+    align-items: center;
+  }
+  .nam-rack-design-port .global-block.left {
+    left: -17px !important;
+  }
+  .nam-rack-design-port .global-block.right {
+    right: 10px !important;
+  }
+}
+
+@media (min-width: 1264px) and (max-width: 1399px) {
+  .nam-rack-design-port .global-block.left,
+  .nam-rack-design-port .global-block.right {
+    gap: clamp(3px, calc(2.5vw - 29px), 6px);
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter,
+  .nam-rack-design-port .global-block.right .premium-level-meter {
+    width: clamp(18px, calc(5vw - 46px), 24px);
+    height: clamp(136px, calc(6.667vw + 50.67px), 144px);
+    flex-basis: clamp(18px, calc(5vw - 46px), 24px);
+  }
+  .nam-rack-design-port .global-block.left .mini-param,
+  .nam-rack-design-port .global-block.right .mini-param {
+    width: clamp(36px, calc(6.667vw - 49.33px), 44px);
+    height: clamp(118px, calc(10vw - 10px), 130px);
+    grid-template-rows: 13px minmax(0,1fr) 18px;
+  }
+  .nam-rack-design-port .global-block.left .mini-param > .asset-control,
+  .nam-rack-design-port .global-block.right .mini-param > .asset-control {
+    top: clamp(58px, calc(5vw - 6px), 64px) !important;
+    width: clamp(34px, calc(5vw - 30px), 40px) !important;
+    height: clamp(34px, calc(5vw - 30px), 40px) !important;
+  }
+  .nam-rack-design-port .global-block.left .mini-param > .knob-position-indicator,
+  .nam-rack-design-port .global-block.right .mini-param > .knob-position-indicator {
+    top: clamp(58px, calc(5vw - 6px), 64px) !important;
+    width: clamp(34px, calc(5vw - 30px), 40px) !important;
+  }
+}
+
+@media (min-width: 1400px) and (max-width: 1919px) {
+  .nam-rack-design-port .global-block.left,
+  .nam-rack-design-port .global-block.right {
+    gap: clamp(6px, calc(.7143vw - 4px), 8px);
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter,
+  .nam-rack-design-port .global-block.right .premium-level-meter {
+    width: clamp(24px, calc(2.5vw - 11px), 31px);
+    height: clamp(144px, calc(2.143vw + 114px), 150px);
+    flex-basis: clamp(24px, calc(2.5vw - 11px), 31px);
+  }
+  .nam-rack-design-port .global-block.left .mini-param,
+  .nam-rack-design-port .global-block.right .mini-param {
+    width: clamp(44px, calc(4.286vw - 16px), 56px);
+    height: clamp(130px, calc(2.5vw + 95px), 137px);
+    grid-template-rows: 14px minmax(0,1fr) 20px;
+  }
+  .nam-rack-design-port .global-block.left .mini-param > .asset-control,
+  .nam-rack-design-port .global-block.right .mini-param > .asset-control {
+    top: clamp(64px, calc(1.429vw + 44px), 68px) !important;
+    width: clamp(40px, 2.857vw, 48px) !important;
+    height: clamp(40px, 2.857vw, 48px) !important;
+  }
+  .nam-rack-design-port .global-block.left .mini-param > .knob-position-indicator,
+  .nam-rack-design-port .global-block.right .mini-param > .knob-position-indicator {
+    top: clamp(64px, calc(1.429vw + 44px), 68px) !important;
+    width: clamp(40px, 2.857vw, 48px) !important;
+  }
+  .nam-rack-design-port .global-block.left .mini-param .global-label,
+  .nam-rack-design-port .global-block.right .mini-param .global-label,
+  .nam-rack-design-port .global-block.left .mini-param strong,
+  .nam-rack-design-port .global-block.right .mini-param strong {
+    font-size: 8px !important;
+  }
+}
+
+@media (max-width: 780px) {
+  .nam-rack-design-port .premium-calibration-launch {
+    right: 92px !important;
+    display: grid;
+  }
+  .nam-rack-design-port .global-block.left {
+    left: 9px !important;
+    display: flex !important;
+  }
+  .nam-rack-design-port .global-block.left .mini-param,
+  .nam-rack-design-port .global-block.right .mini-param { width: 38px; }
+  .nam-rack-design-port .global-block .mini-param > .asset-control {
+    width: 29px !important;
+    height: 29px !important;
+  }
+  .nam-rack-design-port .global-block .mini-param > .knob-position-indicator { width: 29px !important; }
+}
+
+@media (min-width: 1680px) and (max-width: 1919px) {
+  .nam-rack-design-port .preset-area {
+    width: clamp(1040px, 62vw, 1200px) !important;
+  }
+}
+
+@media (min-width: 1920px) {
+  .nam-rack-design-port .premium-nam-shell {
+    grid-template-rows: 213px clamp(66px, 7.8vh, 76px) minmax(0, 1fr) clamp(58px, 6.4vh, 62px);
+  }
+  .nam-rack-design-port .premium-brand { top: 13px; }
+  .nam-rack-design-port .preset-area {
+    top: 63px !important;
+    bottom: auto !important;
+    width: clamp(1040px, 62vw, 1200px) !important;
+    padding: 80px 0 0;
+  }
+  .nam-rack-design-port .premium-routing-utility {
+    top: 0;
+    bottom: auto;
+  }
+  .nam-rack-design-port .premium-calibration-launch {
+    position: absolute;
+    left: auto !important;
+    right: clamp(174px, 10vw, 212px) !important;
+    top: 14px !important;
+    z-index: 4;
+    width: 120px;
+    height: 22px;
+    display: grid;
+    grid-template-columns: 12px auto minmax(0, 1fr);
+    gap: 5px;
+    margin: 0;
+  }
+  .nam-rack-design-port .premium-calibration-launch > strong { display: block; }
+  .nam-rack-design-port .global-block.left,
+  .nam-rack-design-port .global-block.right {
+    position: absolute !important;
+    top: 58px !important;
+    bottom: auto !important;
+    z-index: 3;
+    height: 150px;
+    align-items: center;
+    gap: 12px;
+    padding-top: 0;
+  }
+  .nam-rack-design-port .global-block.left {
+    left: clamp(24px, 1.55vw, 32px) !important;
+    right: auto !important;
+  }
+  .nam-rack-design-port .global-block.right {
+    right: clamp(24px, 1.55vw, 32px) !important;
+    left: auto !important;
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter,
+  .nam-rack-design-port .global-block.right .premium-level-meter {
+    width: 42px;
+    height: 150px;
+    flex-basis: 42px;
+  }
+  .nam-rack-design-port .global-block.left .premium-level-meter > span,
+  .nam-rack-design-port .global-block.left .premium-level-meter > i,
+  .nam-rack-design-port .global-block.right .premium-level-meter > span,
+  .nam-rack-design-port .global-block.right .premium-level-meter > i { inset: 6px; }
+  .nam-rack-design-port .global-block.left .premium-level-meter > strong,
+  .nam-rack-design-port .global-block.right .premium-level-meter > strong {
+    min-width: 40px;
+    font-size: 9px;
+    line-height: 16px;
+  }
+}
+
+/* Final header composition. Routing and channel selection belong to the DAW,
+   so the rack header owns only its two real global utilities. Keep those
+   cards content-weighted, bounded, and centred independently of the wider
+   preset rail. */
+.nam-rack-design-port .premium-brand {
+  left: 50% !important;
+  right: auto !important;
+  justify-items: center;
+  text-align: center;
+  transform: translateX(-50%);
+}
+.nam-rack-design-port .premium-routing-utility {
+  left: 50%;
+  right: auto;
+  width: min(780px, calc(100% - 16px));
+  box-sizing: border-box;
+  grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
+  gap: clamp(8px, 1vw, 14px);
+  overflow: visible;
+  transform: translateX(-50%);
+}
+.nam-rack-design-port .premium-instrument-choice {
+  position: relative;
+  inset: auto;
+  width: auto;
+  height: auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 14px 27px 12px;
+  align-content: center;
+  gap: 3px;
+  padding: 8px 12px;
+}
+.nam-rack-design-port .premium-instrument-choice > .premium-utility-heading {
+  overflow: visible;
+  font-size: 9px;
+  letter-spacing: .1em;
+  line-height: normal;
+  text-align: left;
+}
+.nam-rack-design-port .instrument-heading-long,
+.nam-rack-design-port .instrument-label-long { display: inline; }
+.nam-rack-design-port .instrument-heading-short,
+.nam-rack-design-port .instrument-label-short { display: none; }
+.nam-rack-design-port .premium-instrument-choice > div {
+  grid-template-columns: repeat(2, minmax(62px, 1fr));
+  grid-template-rows: none;
+  gap: 6px;
+}
+.nam-rack-design-port .premium-instrument-choice > div > button {
+  width: auto;
+  height: 27px;
+  min-height: 0;
+  padding: 0 10px;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: .045em;
+}
+.nam-rack-design-port .premium-instrument-choice > small { display: block; }
+
+@media (max-width: 1400px) {
+  .nam-rack-design-port .premium-routing-utility {
+    grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
+    gap: clamp(8px, 1vw, 12px);
+  }
+  .nam-rack-design-port .premium-instrument-choice {
+    grid-template-rows: 12px 25px 10px;
+    gap: 2px;
+    padding: 6px 9px;
+  }
+  .nam-rack-design-port .premium-instrument-choice > div { gap: 4px; }
+  .nam-rack-design-port .premium-instrument-choice > div > button {
+    height: 25px;
+    padding-inline: 6px;
+    font-size: 9px;
+  }
+  .nam-rack-design-port .premium-instrument-choice > small { display: block; font-size: 7px; }
+}
+
+@media (max-width: 1030px) {
+  .nam-rack-design-port .premium-routing-utility {
+    width: min(780px, calc(100% - 16px));
+    grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
+    gap: 7px;
+  }
+  .nam-rack-design-port .premium-instrument-choice {
+    grid-template-rows: 12px 28px;
+    align-content: center;
+    padding-inline: 7px;
+  }
+  .nam-rack-design-port .premium-instrument-choice > small { display: none; }
+}
+
+@media (min-width: 1264px) {
+  /* With the obsolete setup column gone, both hardware bays fit wholly inside
+     the shell and CAL can align directly over the Output bay. The input bay is
+     pulled through the strip's 25px content inset so its painted edge lands at
+     8px and remains clear of the 1040px preset console at 1264/1280px. */
+  .nam-rack-design-port .global-block.left { left: -17px !important; }
+  .nam-rack-design-port .premium-calibration-launch {
+    left: auto !important;
+    right: 10px !important;
+    top: 14px !important;
+    height: 22px;
+    grid-template-columns: 12px auto;
+    justify-content: center;
+    justify-items: center;
+    gap: 4px;
+  }
+  .nam-rack-design-port .premium-calibration-launch svg { display: block; }
+  .nam-rack-design-port .premium-calibration-launch > strong { display: none; }
+  .nam-rack-design-port .premium-calibration-launch > span {
+    overflow: visible;
+    font-size: 8px;
+    letter-spacing: .1em;
+  }
+}
+
+@media (min-width: 1264px) and (max-width: 1399px) {
+  .nam-rack-design-port .premium-calibration-launch {
+    width: calc(
+      clamp(18px, calc(5vw - 46px), 24px)
+      + clamp(3px, calc(2.5vw - 29px), 6px)
+      + clamp(36px, calc(6.667vw - 49.33px), 44px)
+    );
+  }
+}
+
+@media (min-width: 1400px) and (max-width: 1919px) {
+  .nam-rack-design-port .premium-calibration-launch {
+    width: calc(
+      clamp(24px, calc(2.5vw - 11px), 31px)
+      + clamp(6px, calc(.7143vw - 4px), 8px)
+      + clamp(44px, calc(4.286vw - 16px), 56px)
+    );
+  }
+}
+
+@media (min-width: 1920px) {
+  .nam-rack-design-port .premium-calibration-launch {
+    right: clamp(24px, 1.55vw, 32px) !important;
+    top: 14px !important;
+    width: 134px;
+  }
 }
 
 /* The hardware surface is designed down to a 700px host height. Below that,

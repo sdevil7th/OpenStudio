@@ -27,6 +27,7 @@ import {
 } from "../store/automationParams";
 import { subscribeToInstrumentChanged } from "../utils/fxChain";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { TrackNameEditor } from "./TrackNameEditor";
 
 interface TrackHeaderProps {
   track: Track;
@@ -256,10 +257,6 @@ export const TrackHeader = React.memo(function TrackHeader({
     setSamplerDialog(null);
   };
 
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    updateTrack(track.id, { name: e.target.value });
-  };
-
   const currentInputValue = `${track.inputStartChannel}-${track.inputChannelCount}`;
 
   // Meter gradient based on dB-normalized level (matches PeakMeter breakpoints)
@@ -418,12 +415,9 @@ export const TrackHeader = React.memo(function TrackHeader({
               )}
 
             {/* Track Name */}
-            <Input
-              type="text"
-              variant="inline"
-              size="sm"
-              value={track.name}
-              onChange={handleNameChange}
+            <TrackNameEditor
+              trackId={track.id}
+              name={track.name}
               placeholder="Track Name"
               className="min-w-[40px] flex-1 basis-16"
               inputClassName="w-full min-w-0"

@@ -1,7 +1,7 @@
 import { NAM_RACK_ART } from "./NAMRackHardwareArt";
 import type { RackModuleId } from "./NAMRackPedalHardware";
 
-export type RackSectionId = "pre" | "amp" | "cab" | "eq" | "post" | "special" | "browser" | "tuner" | "settings";
+export type RackSectionId = "pre" | "amp" | "cab" | "eq" | "post" | "browser" | "tuner" | "settings";
 
 export type NAMRackVisualMode = "approved-parity-2d" | "cab-room-3d-proof" | "debug-anchors";
 
@@ -66,7 +66,6 @@ export function isRackSectionId(value: unknown): value is RackSectionId {
     value === "cab" ||
     value === "eq" ||
     value === "post" ||
-    value === "special" ||
     value === "browser" ||
     value === "tuner" ||
     value === "settings"
@@ -86,19 +85,21 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
   {
     id: "pre-compressor-design-a",
     section: "pre",
-    title: "Gate Drive",
+    title: "Compressor",
     assetUrl: NAM_RACK_ART.preCompressorPbr,
     sourceSize: { width: 720, height: 1040 },
     aspectRatio: "720 / 1040",
     material: "pedal",
     controls: [
-      { id: "comp-detail", paramId: "compressorDetail", kind: "knob", x: 0.23, y: 0.18, width: 0.21, height: 0.15, label: "Detail" },
-      { id: "comp-mix", paramId: "compressorMix", kind: "knob", x: 0.76, y: 0.18, width: 0.21, height: 0.15, label: "Mix" },
-      { id: "comp-volume", paramId: "compressorVolumeDb", kind: "knob", x: 0.23, y: 0.38, width: 0.21, height: 0.15, label: "Volume" },
-      { id: "comp-comp", paramId: "compressorComp", kind: "knob", x: 0.76, y: 0.38, width: 0.21, height: 0.15, label: "Comp" },
-      { id: "comp-meter", kind: "meter", x: 0.5, y: 0.11, width: 0.56, height: 0.04, label: "Compression" },
-      { id: "comp-display", kind: "display", x: 0.5, y: 0.58, width: 0.54, height: 0.09 },
-      { id: "comp-engage", paramId: "compressorEnabled", kind: "footswitch", x: 0.5, y: 0.84, width: 0.18, height: 0.12 },
+      { id: "comp-comp", paramId: "compressorComp", kind: "knob", x: 0.18, y: 0.205, width: 0.17, height: 0.13, label: "Comp" },
+      { id: "comp-attack", paramId: "compressorAttackMs", kind: "knob", x: 0.5, y: 0.205, width: 0.17, height: 0.13, label: "Attack", displayFormat: "ms" },
+      { id: "comp-release", paramId: "compressorReleaseMs", kind: "knob", x: 0.82, y: 0.205, width: 0.17, height: 0.13, label: "Release", displayFormat: "ms" },
+      { id: "comp-tone", paramId: "compressorToneDb", kind: "knob", x: 0.18, y: 0.425, width: 0.17, height: 0.13, label: "Tone", displayFormat: "db" },
+      { id: "comp-mix", paramId: "compressorMix", kind: "knob", x: 0.5, y: 0.425, width: 0.17, height: 0.13, label: "Mix", displayFormat: "percent" },
+      { id: "comp-volume", paramId: "compressorVolumeDb", kind: "knob", x: 0.82, y: 0.425, width: 0.17, height: 0.13, label: "Level", displayFormat: "db" },
+      { id: "comp-hpf", paramId: "compressorSidechainHPF", kind: "switch", x: 0.22, y: 0.63, width: 0.13, height: 0.1, label: "HPF" },
+      { id: "comp-meter", kind: "meter", x: 0.65, y: 0.632, width: 0.51, height: 0.09, label: "Gain reduction" },
+      { id: "comp-engage", paramId: "compressorEnabled", kind: "footswitch", x: 0.5, y: 0.86, width: 0.16, height: 0.12 },
     ],
   },
   {
@@ -122,7 +123,7 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
   {
     id: "pre-dual-octaver-design-a",
     section: "pre",
-    title: "Tone Shaper",
+    title: "Poly Octaver",
     assetUrl: NAM_RACK_ART.preDualOctaverPbr,
     sourceSize: { width: 720, height: 1040 },
     aspectRatio: "720 / 1040",
@@ -164,10 +165,13 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     aspectRatio: "520 / 1040",
     material: "pedal",
     controls: [
-      { id: "chaos-drive", paramId: "chaosDrive", kind: "knob", x: 0.28, y: 0.2, width: 0.26, height: 0.18, label: "Drive" },
-      { id: "chaos-tone", paramId: "chaosTone", kind: "knob", x: 0.72, y: 0.2, width: 0.26, height: 0.18, label: "Tone" },
-      { id: "chaos-mix", paramId: "chaosMix", kind: "knob", x: 0.28, y: 0.42, width: 0.24, height: 0.17, label: "Mix" },
-      { id: "chaos-level", paramId: "chaosLevelDb", kind: "knob", x: 0.72, y: 0.42, width: 0.24, height: 0.17, label: "Level" },
+      { id: "chaos-mode", paramId: "chaosMode", kind: "button", x: 0.5, y: 0.11, width: 0.24, height: 0.08 },
+      { id: "chaos-drive", paramId: "chaosDrive", kind: "knob", x: 0.2, y: 0.27, width: 0.2, height: 0.15, label: "Drive" },
+      { id: "chaos-gate", paramId: "chaosGate", kind: "knob", x: 0.5, y: 0.27, width: 0.18, height: 0.14, label: "Gate" },
+      { id: "chaos-tone", paramId: "chaosTone", kind: "knob", x: 0.8, y: 0.27, width: 0.2, height: 0.15, label: "Tone" },
+      { id: "chaos-weight", paramId: "chaosWeight", kind: "knob", x: 0.2, y: 0.48, width: 0.2, height: 0.15, label: "Weight: Tight to Thick" },
+      { id: "chaos-mix", paramId: "chaosMix", kind: "knob", x: 0.5, y: 0.48, width: 0.2, height: 0.15, label: "Mix" },
+      { id: "chaos-level", paramId: "chaosLevelDb", kind: "knob", x: 0.8, y: 0.48, width: 0.2, height: 0.15, label: "Level" },
       { id: "chaos-engage", paramId: "chaosEnabled", kind: "footswitch", x: 0.5, y: 0.84, width: 0.2, height: 0.12 },
     ],
   },
@@ -214,7 +218,7 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
       { id: "cab-hpf", paramId: "cabHPFHz", kind: "knob", x: 0.32, y: 0.72, width: 0.1, height: 0.18, label: "HPF", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "hz" },
       { id: "cab-blend", paramId: "cabMicBlend", kind: "knob", x: 0.50, y: 0.72, width: 0.1, height: 0.18, label: "Blend", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
       { id: "cab-lpf", paramId: "cabLPFHz", kind: "knob", x: 0.68, y: 0.72, width: 0.1, height: 0.18, label: "LPF", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "hz" },
-      { id: "cab-room", paramId: "cabRoomSend", kind: "knob", x: 0.18, y: 0.88, width: 0.085, height: 0.14, label: "Room", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
+      { id: "cab-room", paramId: "cabRoomSend", kind: "knob", x: 0.18, y: 0.88, width: 0.085, height: 0.14, label: "Bloom", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
       { id: "cab-pan", paramId: "cabPan", kind: "knob", x: 0.82, y: 0.88, width: 0.085, height: 0.14, label: "Pan", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "plain" },
       { id: "cab-phase", paramId: "cabPhaseInvert", kind: "switch", x: 0.82, y: 0.72, width: 0.09, height: 0.13, label: "Phase" },
       { id: "cab-ir-display", kind: "display", x: 0.5, y: 0.15, width: 0.32, height: 0.1 },
@@ -232,16 +236,16 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     material: "rack",
     controls: [
       { id: "eq-input-trim", kind: "label", x: 0.12, y: 0.46, width: 0.11, height: 0.42, label: "Input Off" },
-      { id: "eq-65", paramId: "eq65Db", kind: "fader", x: 0.26, y: 0.49, width: 0.052, height: 0.52, label: "65 Hz" },
-      { id: "eq-125", paramId: "eq125Db", kind: "fader", x: 0.33, y: 0.49, width: 0.052, height: 0.52, label: "125 Hz" },
-      { id: "eq-250", paramId: "eq250Db", kind: "fader", x: 0.4, y: 0.49, width: 0.052, height: 0.52, label: "250 Hz" },
-      { id: "eq-500", paramId: "eq500Db", kind: "fader", x: 0.47, y: 0.49, width: 0.052, height: 0.52, label: "500 Hz" },
-      { id: "eq-1k", paramId: "eq1kDb", kind: "fader", x: 0.54, y: 0.49, width: 0.052, height: 0.52, label: "1 kHz" },
-      { id: "eq-2k", paramId: "eq2kDb", kind: "fader", x: 0.61, y: 0.49, width: 0.052, height: 0.52, label: "2 kHz" },
-      { id: "eq-4k", paramId: "eq4kDb", kind: "fader", x: 0.68, y: 0.49, width: 0.052, height: 0.52, label: "4 kHz" },
-      { id: "eq-8k", paramId: "eq8kDb", kind: "fader", x: 0.75, y: 0.49, width: 0.052, height: 0.52, label: "8 kHz" },
-      { id: "eq-16k", paramId: "eq16kDb", kind: "fader", x: 0.82, y: 0.49, width: 0.052, height: 0.52, label: "16 kHz" },
-      { id: "eq-output-trim", kind: "label", x: 0.92, y: 0.46, width: 0.11, height: 0.42, label: "Output Off" },
+      { id: "eq-65", paramId: "eq65Db", kind: "fader", x: 0.18, y: 0.52, width: 0.044, height: 0.46, label: "65 Hz" },
+      { id: "eq-125", paramId: "eq125Db", kind: "fader", x: 0.2511, y: 0.52, width: 0.044, height: 0.46, label: "125 Hz" },
+      { id: "eq-250", paramId: "eq250Db", kind: "fader", x: 0.3222, y: 0.52, width: 0.044, height: 0.46, label: "250 Hz" },
+      { id: "eq-500", paramId: "eq500Db", kind: "fader", x: 0.3933, y: 0.52, width: 0.044, height: 0.46, label: "500 Hz" },
+      { id: "eq-1k", paramId: "eq1kDb", kind: "fader", x: 0.4644, y: 0.52, width: 0.044, height: 0.46, label: "1 kHz" },
+      { id: "eq-2k", paramId: "eq2kDb", kind: "fader", x: 0.5356, y: 0.52, width: 0.044, height: 0.46, label: "2 kHz" },
+      { id: "eq-4k", paramId: "eq4kDb", kind: "fader", x: 0.6067, y: 0.52, width: 0.044, height: 0.46, label: "4 kHz" },
+      { id: "eq-8k", paramId: "eq8kDb", kind: "fader", x: 0.6778, y: 0.52, width: 0.044, height: 0.46, label: "8 kHz" },
+      { id: "eq-16k", paramId: "eq16kDb", kind: "fader", x: 0.7489, y: 0.52, width: 0.044, height: 0.46, label: "16 kHz" },
+      { id: "eq-output-level", paramId: "eqLevelDb", kind: "fader", x: 0.82, y: 0.52, width: 0.044, height: 0.46, label: "Level" },
       { id: "eq-display", kind: "display", x: 0.54, y: 0.16, width: 0.5, height: 0.1 },
       { id: "eq-power", paramId: "eqEnabled", kind: "footswitch", x: 0.08, y: 0.76, width: 0.07, height: 0.1 },
     ],
@@ -302,6 +306,8 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     aspectRatio: "720 / 1040",
     material: "pedal",
     controls: [
+      { id: "reverb-voice-display", paramId: "reverbVoice", kind: "display", x: 0.07, y: 0.155, width: 0.55, height: 0.10, label: "Voice" },
+      { id: "reverb-voice", paramId: "reverbVoice", kind: "knob", x: 0.76, y: 0.205, width: 0.109, height: 0.109, rotationMinDeg: -60, rotationMaxDeg: 60 },
       { id: "reverb-mix", paramId: "reverbMix", kind: "knob", x: 0.10, y: 0.16, width: 0.18, height: 0.15, rotationMinDeg: -135, rotationMaxDeg: 135 },
       { id: "reverb-pre-delay", paramId: "reverbPreDelayMs", kind: "knob", x: 0.41, y: 0.16, width: 0.18, height: 0.15, rotationMinDeg: -135, rotationMaxDeg: 135 },
       { id: "reverb-decay", paramId: "reverbDecaySec", kind: "knob", x: 0.72, y: 0.16, width: 0.18, height: 0.15, rotationMinDeg: -135, rotationMaxDeg: 135 },
@@ -311,26 +317,6 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
       { id: "reverb-footswitch", paramId: "reverbEnabled", kind: "footswitch", x: 0.42, y: 0.84, width: 0.18, height: 0.12 },
     ],
   },
-  {
-    id: "special-laser-design-a",
-    section: "special",
-    moduleId: "mod",
-    title: "Laser Mod",
-    assetUrl: NAM_RACK_ART.specialLaserExpressionPbr,
-    sourceSize: { width: 720, height: 1040 },
-    aspectRatio: "720 / 1040",
-    material: "pedal",
-    controls: [
-      { id: "laser-preset-display", kind: "display", x: 0.76, y: 0.24, width: 0.29, height: 0.17 },
-      { id: "laser-mode-cycle", paramId: "laserMode", kind: "button", x: 0.76, y: 0.24, width: 0.29, height: 0.17, label: "Mode" },
-      { id: "laser-mix", paramId: "laserMix", kind: "knob", x: 0.74, y: 0.43, width: 0.14, height: 0.11, rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent", label: "Mix" },
-      { id: "laser-mode-switch", paramId: "laserEnvelopeMode", kind: "switch", x: 0.80, y: 0.55, width: 0.12, height: 0.06, label: "Env" },
-      { id: "laser-speed", paramId: "laserSpeedHz", kind: "knob", x: 0.67, y: 0.66, width: 0.13, height: 0.11, rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "hz", label: "Speed" },
-      { id: "laser-sensitivity", paramId: "laserSensitivity", kind: "knob", x: 0.84, y: 0.66, width: 0.13, height: 0.11, rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent", label: "Sens" },
-      { id: "laser-trigger", paramId: "laserTrigger", kind: "button", x: 0.75, y: 0.76, width: 0.10, height: 0.065, label: "Trigger" },
-      { id: "special-engage", paramId: "laserEnabled", kind: "footswitch", x: 0.75, y: 0.88, width: 0.13, height: 0.09, label: "Engage" },
-    ],
-  },
 ];
 
 export function deviceSkinForModule(moduleId: RackModuleId): NAMRackDeviceSkin | undefined {
@@ -338,6 +324,5 @@ export function deviceSkinForModule(moduleId: RackModuleId): NAMRackDeviceSkin |
 }
 
 export function deviceSkinsForSection(sectionId: RackSectionId): NAMRackDeviceSkin[] {
-  if (sectionId === "special") return [];
   return NAM_RACK_DEVICE_SKINS.filter((skin) => skin.section === sectionId);
 }

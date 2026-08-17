@@ -80,6 +80,14 @@ import {
   type QuantizeGroovePreset,
 } from "../utils/snapToGrid";
 import { windowRole, windowSessionId } from "../utils/windowEnvironment";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import {
+  activateShortcutContext,
+  registerShortcutSurface,
+  shortcutExactlyMatches,
+  type EditShortcutContext,
+  type ShortcutSurfaceHandler,
+} from "../utils/shortcutContext";
 import {
   getNoteNameFromPitch,
   isNoteInScale,
@@ -1386,263 +1394,228 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     return () => window.removeEventListener("blur", handleBlur);
   }, [stopAudition]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      const target = event.target as HTMLElement;
-      if (["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+  // The root app owns the one capture-phase key listener. The most recently
+  // interacted editor session registers its local behavior with that router.
+  const shortcutSessionId = sessionId || windowSessionId || `docked:${trackId}:${clipId}`;
+  const pianoShortcutContext = useMemo<EditShortcutContext>(
+    () => ({ kind: "piano_roll", sessionId: shortcutSessionId }),
+    [shortcutSessionId],
+  );
+  const shortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
+  shortcutHandlerRef.current = (event) => {
+    const key = (event.key ?? "").toLowerCase();
+    const hasCommandModifier = Boolean(event.ctrlKey || event.metaKey || event.altKey);
 
-      const key = event.key.toLowerCase();
-      const isStepInputNoteKey =
-        stepInputEnabled
-        && selectedNoteIds.length === 0
-        && KEY_TO_NOTE[key] !== undefined;
-      if (isStepInputNoteKey) return;
+    if (matchesActionShortcut(event, "edit.undo")) {
+      if (event.repeat) return "claimed_noop";
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.publishAppCommand({ command: "edit.undo", sessionId: shortcutSessionId });
+      } else {
+        useDAWStore.getState().undo();
+      }
+      return "handled";
+    }
+    if (matchesActionShortcut(event, "edit.redo")) {
+      if (event.repeat) return "claimed_noop";
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.publishAppCommand({ command: "edit.redo", sessionId: shortcutSessionId });
+      } else {
+        useDAWStore.getState().redo();
+      }
+      return "handled";
+    }
 
-      const hasShortcutModifier = event.ctrlKey || event.metaKey || event.altKey;
+    if (shortcutExactlyMatches(event, "Esc")) {
+      if (event.repeat) return "claimed_noop";
+      stopAudition();
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.closeMidiEditorWindow(shortcutSessionId, "close");
+      } else {
+        useDAWStore.getState().closePianoRoll();
+      }
+      return "handled";
+    }
 
-      if (!hasShortcutModifier && key === "d") {
-        event.preventDefault();
-        setTool("draw");
-        return;
-      }
-      if (!hasShortcutModifier && key === "v") {
-        event.preventDefault();
-        setTool("select");
-        return;
-      }
-      if (!hasShortcutModifier && key === "e") {
-        event.preventDefault();
-        setTool("erase");
-        return;
-      }
-      if (!hasShortcutModifier && key === "t") {
-        event.preventDefault();
-        setTool("trim");
-        return;
-      }
-      if (!hasShortcutModifier && key === "b") {
-        event.preventDefault();
-        setTool("split");
-        return;
-      }
-      if (!hasShortcutModifier && key === "g") {
-        event.preventDefault();
-        setTool("glue");
-        return;
-      }
-      if (!hasShortcutModifier && key === "m") {
-        event.preventDefault();
-        setTool("mute");
-        return;
-      }
-      if (!hasShortcutModifier && key === "y") {
-        event.preventDefault();
-        setTool("velocity");
-        return;
-      }
-      if (!hasShortcutModifier && key === "l") {
-        event.preventDefault();
-        setTool("line");
-        return;
-      }
-      if (!hasShortcutModifier && key === "z") {
-        event.preventDefault();
-        setTool("zoom");
-        return;
-      }
-      if (!hasShortcutModifier && key === "h") {
-        event.preventDefault();
-        setTool("pan");
-        return;
-      }
-      if (!hasShortcutModifier && key === "r" && event.shiftKey) {
-        event.preventDefault();
-        const repeatingRange = !!midiEditRange;
-        const nextIds = repeatMIDISelection(trackId, clipId);
-        if (!repeatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
-      if (!hasShortcutModifier && key === "r") {
-        event.preventDefault();
-        setTool("range");
-        return;
-      }
-      if (!hasShortcutModifier && key === "q") {
-        event.preventDefault();
-        const nextIds = quantizeSelectedMIDINotesUsingLast(trackId, clipId);
-        if (nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
-
-      if ((event.ctrlKey || event.metaKey) && key === "a") {
-        event.preventDefault();
-        selectAllMIDINotes();
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "c") {
-        event.preventDefault();
-        if (midiEditRange) copyMIDIRange(trackId, clipId);
-        else copySelectedMIDINotes(trackId, clipId);
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "x") {
-        event.preventDefault();
-        if (midiEditRange) cutMIDIRange(trackId, clipId);
-        else cutSelectedMIDINotes(trackId, clipId);
-        stopAudition();
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "v") {
-        event.preventDefault();
-        const pastingRange = midiRangeClipboard.rangeLength > 0;
-        const nextIds = pastingRange
-          ? pasteMIDIRange(trackId, clipId)
-          : pasteMIDINotes(trackId, clipId);
-        if (!pastingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "d" && (selectedNoteIds.length > 0 || midiEditRange)) {
-        event.preventDefault();
-        const duplicatingRange = !!midiEditRange;
-        const nextIds = duplicatingRange
-          ? duplicateMIDIRange(trackId, clipId)
-          : duplicateSelectedMIDINotes(trackId, clipId);
-        if (!duplicatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
-
-      if ((key === "delete" || key === "backspace") && midiEditRange) {
-        event.preventDefault();
-        deleteMIDIRange(trackId, clipId);
-        stopAudition();
-        return;
-      }
-
-      if ((key === "delete" || key === "backspace") && selectedNoteIds.length > 0) {
-        event.preventDefault();
-        removeMIDINotes(trackId, clipId, selectedNoteIds);
-        setSelectedNoteIds([]);
-        stopAudition();
-        return;
-      }
-
-      if (selectedNoteIds.length > 0 && key.startsWith("arrow")) {
-        event.preventDefault();
-        const timeStep = event.shiftKey ? stepDurationSeconds : snapDuration;
-        let deltaTime = 0;
-        let deltaNote = 0;
-        if (key === "arrowleft") deltaTime = -timeStep;
-        if (key === "arrowright") deltaTime = timeStep;
-        if (key === "arrowup") deltaNote = event.shiftKey ? 12 : 1;
-        if (key === "arrowdown") deltaNote = event.shiftKey ? -12 : -1;
-        const nextIds = moveMIDINotes(trackId, clipId, selectedNoteIds, deltaTime, deltaNote);
-        if (nextIds.length > 0) {
-          setSelectedNoteIds(nextIds);
-          const nextPair = parseNotePairs(getLatestClipEvents()).find((pair) =>
-            nextIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
-          );
-          if (nextPair) auditionNote(nextPair.noteNumber, nextPair.velocity);
-        }
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    auditionNote,
-    clipId,
-    copyMIDIRange,
-    copySelectedMIDINotes,
-    cutMIDIRange,
-    cutSelectedMIDINotes,
-    deleteMIDIRange,
-    duplicateMIDIRange,
-    duplicateSelectedMIDINotes,
-    getLatestClipEvents,
-    midiEditRange,
-    midiRangeClipboard.rangeLength,
-    moveMIDINotes,
-    pasteMIDIRange,
-    pasteMIDINotes,
-    quantizeSelectedMIDINotesUsingLast,
-    removeMIDINotes,
-    repeatMIDISelection,
-    selectAllMIDINotes,
-    selectedNoteIds,
-    setSelectedNoteIds,
-    snapDuration,
-    stepDurationSeconds,
-    stepInputEnabled,
-    stopAudition,
-    trackId,
-  ]);
-
-  useEffect(() => {
-    if (!stepInputEnabled) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      const target = event.target as HTMLElement;
-      if (["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
-      if (selectedNoteIds.length > 0) return;
-
-      const key = event.key.toLowerCase();
-      if (key === "arrowup") {
-        event.preventDefault();
-        setStepInputOctave((previous) => Math.min(8, previous + 1));
-        return;
-      }
-      if (key === "arrowdown") {
-        event.preventDefault();
-        setStepInputOctave((previous) => Math.max(-2, previous - 1));
-        return;
-      }
-      if (key === "arrowleft") {
-        event.preventDefault();
-        setStepInputPosition(Math.max(0, stepInputPosition - stepDurationSeconds));
-        setTimelineScroll(clamp(timelineScrollX - stepDurationSeconds * pixelsPerSecond, 0, maxScrollX), timelineScrollY);
-        return;
-      }
-      if (key === "arrowright") {
-        event.preventDefault();
-        setStepInputPosition(stepInputPosition + stepDurationSeconds);
-        setTimelineScroll(clamp(timelineScrollX + stepDurationSeconds * pixelsPerSecond, 0, maxScrollX), timelineScrollY);
-        return;
-      }
-
-      const semitone = KEY_TO_NOTE[key];
-      if (semitone === undefined) return;
-      event.preventDefault();
-      const noteNumber = (stepInputOctave + 2) * 12 + semitone + (event.shiftKey ? 1 : 0);
-      if (noteNumber < 0 || noteNumber > 127) return;
-
-      const newId = addMIDINote(trackId, clipId, stepInputPosition, noteNumber, stepDurationSeconds, pianoRollInsertVelocity);
+    const stepInputSemitone = KEY_TO_NOTE[key];
+    if (
+      stepInputEnabled
+      && selectedNoteIds.length === 0
+      && !hasCommandModifier
+      && stepInputSemitone !== undefined
+    ) {
+      const noteNumber = (stepInputOctave + 2) * 12 + stepInputSemitone + (event.shiftKey ? 1 : 0);
+      if (noteNumber < 0 || noteNumber > 127) return "claimed_noop";
+      const newId = addMIDINote(
+        trackId,
+        clipId,
+        stepInputPosition,
+        noteNumber,
+        stepDurationSeconds,
+        pianoRollInsertVelocity,
+      );
       setSelectedNoteIds(newId ? [newId] : []);
       auditionNote(noteNumber, pianoRollInsertVelocity);
       setStepInputPosition(stepInputPosition + stepDurationSeconds);
-    };
+      return "handled";
+    }
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    addMIDINote,
-    auditionNote,
-    clipId,
-    maxScrollX,
-    pianoRollInsertVelocity,
-    pixelsPerSecond,
-    selectedNoteIds.length,
-    setTimelineScroll,
-    setStepInputPosition,
-    stepDurationSeconds,
-    stepInputEnabled,
-    stepInputOctave,
-    stepInputPosition,
-    timelineScrollX,
-    timelineScrollY,
-    trackId,
-  ]);
+    const toolByShortcut: Record<string, Parameters<typeof setTool>[0]> = {
+      D: "draw",
+      V: "select",
+      E: "erase",
+      T: "trim",
+      B: "split",
+      G: "glue",
+      M: "mute",
+      Y: "velocity",
+      L: "line",
+      Z: "zoom",
+      H: "pan",
+      R: "range",
+    };
+    const toolEntry = Object.entries(toolByShortcut).find(([shortcut]) =>
+      shortcutExactlyMatches(event, shortcut),
+    );
+    if (toolEntry) {
+      if (event.repeat) return "claimed_noop";
+      setTool(toolEntry[1]);
+      return "handled";
+    }
+
+    if (shortcutExactlyMatches(event, "Shift+R")) {
+      if (event.repeat) return "claimed_noop";
+      const repeatingRange = Boolean(midiEditRange);
+      const nextIds = repeatMIDISelection(trackId, clipId);
+      if (!repeatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return repeatingRange || nextIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (matchesActionShortcut(event, "midi.quantizeLast")) {
+      if (event.repeat) return "claimed_noop";
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.publishAppCommand({ command: "midi.quantize", sessionId: shortcutSessionId });
+        return "handled";
+      }
+      const nextIds = quantizeSelectedMIDINotesUsingLast(trackId, clipId);
+      if (nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return nextIds.length > 0 ? "handled" : "claimed_noop";
+    }
+
+    if (shortcutExactlyMatches(event, "Ctrl+A")) {
+      if (event.repeat) return "claimed_noop";
+      selectAllMIDINotes();
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Ctrl+C")) {
+      if (event.repeat) return "claimed_noop";
+      if (!midiEditRange && selectedNoteIds.length === 0) return "claimed_noop";
+      if (midiEditRange) copyMIDIRange(trackId, clipId);
+      else copySelectedMIDINotes(trackId, clipId);
+      return midiEditRange || selectedNoteIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (shortcutExactlyMatches(event, "Ctrl+X")) {
+      if (event.repeat) return "claimed_noop";
+      if (!midiEditRange && selectedNoteIds.length === 0) return "claimed_noop";
+      if (midiEditRange) cutMIDIRange(trackId, clipId);
+      else cutSelectedMIDINotes(trackId, clipId);
+      stopAudition();
+      return midiEditRange || selectedNoteIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (shortcutExactlyMatches(event, "Ctrl+V")) {
+      if (event.repeat) return "claimed_noop";
+      const pastingRange = midiRangeClipboard.rangeLength > 0;
+      const nextIds = pastingRange
+        ? pasteMIDIRange(trackId, clipId)
+        : pasteMIDINotes(trackId, clipId);
+      if (!pastingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return pastingRange || nextIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (shortcutExactlyMatches(event, "Ctrl+D")) {
+      if (event.repeat) return "claimed_noop";
+      if (!midiEditRange && selectedNoteIds.length === 0) return "claimed_noop";
+      const duplicatingRange = Boolean(midiEditRange);
+      const nextIds = duplicatingRange
+        ? duplicateMIDIRange(trackId, clipId)
+        : duplicateSelectedMIDINotes(trackId, clipId);
+      if (!duplicatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return "handled";
+    }
+
+    if (shortcutExactlyMatches(event, "Delete", "Backspace")) {
+      if (event.repeat) return "claimed_noop";
+      if (midiEditRange) {
+        deleteMIDIRange(trackId, clipId);
+      } else if (selectedNoteIds.length > 0) {
+        removeMIDINotes(trackId, clipId, selectedNoteIds);
+        setSelectedNoteIds([]);
+      } else {
+        return "claimed_noop";
+      }
+      stopAudition();
+      return "handled";
+    }
+
+    const isArrowShortcut = shortcutExactlyMatches(
+      event,
+      "Left",
+      "Right",
+      "Up",
+      "Down",
+      "Shift+Left",
+      "Shift+Right",
+      "Shift+Up",
+      "Shift+Down",
+    );
+    if (isArrowShortcut && selectedNoteIds.length > 0) {
+      const timeStep = event.shiftKey ? stepDurationSeconds : snapDuration;
+      let deltaTime = 0;
+      let deltaNote = 0;
+      if (key === "arrowleft") deltaTime = -timeStep;
+      if (key === "arrowright") deltaTime = timeStep;
+      if (key === "arrowup") deltaNote = event.shiftKey ? 12 : 1;
+      if (key === "arrowdown") deltaNote = event.shiftKey ? -12 : -1;
+      const nextIds = moveMIDINotes(trackId, clipId, selectedNoteIds, deltaTime, deltaNote);
+      if (nextIds.length > 0) {
+        setSelectedNoteIds(nextIds);
+        const nextPair = parseNotePairs(getLatestClipEvents()).find((pair) =>
+          nextIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+        );
+        if (nextPair) auditionNote(nextPair.noteNumber, nextPair.velocity);
+      }
+      return "handled";
+    }
+
+    if (isArrowShortcut && stepInputEnabled) {
+      if (key === "arrowup") setStepInputOctave((previous) => Math.min(8, previous + 1));
+      if (key === "arrowdown") setStepInputOctave((previous) => Math.max(-2, previous - 1));
+      if (key === "arrowleft") {
+        setStepInputPosition(Math.max(0, stepInputPosition - stepDurationSeconds));
+        setTimelineScroll(
+          clamp(timelineScrollX - stepDurationSeconds * pixelsPerSecond, 0, maxScrollX),
+          timelineScrollY,
+        );
+      }
+      if (key === "arrowright") {
+        setStepInputPosition(stepInputPosition + stepDurationSeconds);
+        setTimelineScroll(
+          clamp(timelineScrollX + stepDurationSeconds * pixelsPerSecond, 0, maxScrollX),
+          timelineScrollY,
+        );
+      }
+      return "handled";
+    }
+
+    return isArrowShortcut ? "claimed_noop" : "unmatched";
+  };
+
+  useEffect(() => {
+    const unregister = registerShortcutSurface(
+      pianoShortcutContext,
+      (event) => shortcutHandlerRef.current(event),
+      isDetached ? { kind: "application" } : { kind: "timeline" },
+    );
+    if (isDetached || windowRole !== "main") activateShortcutContext(pianoShortcutContext);
+    return unregister;
+  }, [isDetached, pianoShortcutContext]);
 
   const handleScrollbarScroll = useCallback(() => {
     const scrollbar = scrollbarRef.current;
@@ -4893,7 +4866,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   };
 
   return (
-    <div className="piano-roll" ref={containerRef}>
+    <div
+      className="piano-roll"
+      ref={containerRef}
+      onPointerDownCapture={() => activateShortcutContext(pianoShortcutContext)}
+      onContextMenuCapture={() => activateShortcutContext(pianoShortcutContext)}
+      onFocusCapture={() => activateShortcutContext(pianoShortcutContext)}
+      data-shortcut-context={`piano_roll:${shortcutSessionId}`}
+    >
       <PianoRollToolbar
         ref={toolbarRef}
         tool={tool}

@@ -408,7 +408,28 @@ async function waitForDesignPort(cdp) {
         return Boolean(host?.querySelector('.screen-shell') && host.querySelector('[data-rack-design-asset-kind]'));
       })()
     `);
-    if (ready) return;
+    if (ready) {
+      await evaluate(cdp, `
+        (async () => {
+          if (document.fonts?.ready) await document.fonts.ready;
+          const images = Array.from(document.querySelectorAll(
+            '.nam-rack-design-port [data-rack-design-asset-kind], .nam-rack-source-flow-design-port [data-rack-design-asset-kind]'
+          )).filter((node) => node instanceof HTMLImageElement);
+          await Promise.all(images.map(async (image) => {
+            if (!image.complete) {
+              await new Promise((resolve) => {
+                image.addEventListener('load', resolve, { once: true });
+                image.addEventListener('error', resolve, { once: true });
+              });
+            }
+            if (typeof image.decode === 'function') await image.decode().catch(() => {});
+          }));
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          return true;
+        })()
+      `);
+      return;
+    }
     await sleep(250);
   }
   throw new Error("NAM Rack design-port board did not become ready.");
@@ -703,6 +724,238 @@ async function openFooterSizeMenu(cdp) {
   await sleep(160);
 }
 
+async function runInstrumentProfileProbe(cdp, outDir, viewportName) {
+  const result = await evaluate(cdp, `(() => {
+    const root = document.querySelector('[data-param-id="instrumentProfile"]');
+    const buttons = Array.from(root?.querySelectorAll('button') || []);
+    const bass = buttons.find((button) => (button.textContent || '').trim() === 'Bass');
+    if (!bass) return { pass: false, reason: 'Bass control missing' };
+    bass.click();
+    const read = () => ({
+      labels: buttons.map((button) => (button.textContent || '').trim()),
+      pressed: buttons.map((button) => button.getAttribute('aria-pressed')),
+      active: buttons.map((button) => button.getAttribute('data-active')),
+      rootRect: (() => { const r = root.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; })(),
+      viewport: { width: innerWidth, height: innerHeight },
+      documentOverflowX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    });
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(read()))));
+  })()`);
+  const value = result?.result?.value ?? result?.value ?? result;
+  await screenshot(cdp, path.join(outDir, `nam-instrument-bass-${viewportName}.png`));
+  const bounds = value?.rootRect;
+  const pass = Array.isArray(value?.pressed)
+    && value.pressed[0] === 'false'
+    && value.pressed[1] === 'true'
+    && value.active[0] === 'false'
+    && value.active[1] === 'true'
+    && value.documentOverflowX === false
+    && bounds?.left >= 0
+    && bounds?.top >= 0
+    && bounds?.right <= value.viewport.width
+    && bounds?.bottom <= value.viewport.height;
+  return { ...value, pass };
+}
+
+async function readThreePositionSelector(cdp, moduleName, paramId, readoutSelector) {
+  return evaluate(cdp, `(() => {
+    const module = document.querySelector('[data-module=${JSON.stringify(moduleName)}]');
+    const hit = module?.querySelector('.control-hit[data-param-id=${JSON.stringify(paramId)}]');
+    const ring = module?.querySelector('.three-position-selector-detents');
+    const readout = module?.querySelector(${JSON.stringify(readoutSelector)});
+    const knob = module?.querySelector('.asset-control.three-position-rotary');
+    const detents = ring ? Array.from(ring.querySelectorAll('i')) : [];
+    const activeIndex = detents.findIndex((detent) => detent.getAttribute('data-active') === 'true');
+    if (!module || !hit || !ring || !readout || !knob || activeIndex < 0) {
+      return { pass: false, reason: 'Three-position faceplate controls missing' };
+    }
+    const moduleRect = module.getBoundingClientRect();
+    const hitRect = hit.getBoundingClientRect();
+    const ringRect = ring.getBoundingClientRect();
+    const readoutRect = readout.getBoundingClientRect();
+    const center = { x: ringRect.left + ringRect.width / 2, y: ringRect.top + ringRect.height / 2 };
+    const measured = detents.map((detent) => {
+      const rect = detent.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      return {
+        angle: Math.atan2(x - center.x, center.y - y) * 180 / Math.PI,
+        radius: Math.hypot(x - center.x, y - center.y),
+      };
+    });
+    return {
+      pass: true,
+      value: Number(hit.getAttribute('aria-valuenow')),
+      valueText: hit.getAttribute('aria-valuetext') || '',
+      aria: hit.getAttribute('aria-label') || '',
+      interaction: hit.getAttribute('data-control-interaction') || '',
+      text: (readout.textContent || '').replace(/\\s+/g, ' ').trim(),
+      activeIndex,
+      knobStateClass: Array.from(knob.classList).find((name) => name.startsWith('control-state-')) || '',
+      measured,
+      moduleRect: { left: moduleRect.left, top: moduleRect.top, right: moduleRect.right, bottom: moduleRect.bottom },
+      hitRect: { left: hitRect.left, top: hitRect.top, right: hitRect.right, bottom: hitRect.bottom, width: hitRect.width, height: hitRect.height },
+      readoutRect: { left: readoutRect.left, top: readoutRect.top, right: readoutRect.right, bottom: readoutRect.bottom },
+    };
+  })()`);
+}
+
+async function dispatchMouseClick(cdp, point) {
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    buttons: 1,
+    clickCount: 1,
+  });
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    buttons: 0,
+    clickCount: 1,
+  });
+  await sleep(90);
+}
+
+async function dispatchVerticalMouseDrag(cdp, point, deltaY) {
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    buttons: 1,
+    clickCount: 1,
+  });
+  for (let step = 1; step <= 5; step += 1) {
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: point.x,
+      y: point.y + deltaY * step / 5,
+      button: 'left',
+      buttons: 1,
+      clickCount: 0,
+    });
+    await sleep(20);
+  }
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: point.x,
+    y: point.y + deltaY,
+    button: 'left',
+    buttons: 0,
+    clickCount: 1,
+  });
+  await sleep(120);
+}
+
+function threePositionSelectorSamplePass(sample, expectedValue, expectedText) {
+  const expectedAngles = [-52, 0, 52];
+  const angleError = sample?.measured?.map((item, index) => Math.abs(item.angle - expectedAngles[index])) ?? [];
+  const radii = sample?.measured?.map((item) => item.radius) ?? [];
+  const radiusSpread = radii.length > 0 ? Math.max(...radii) - Math.min(...radii) : Number.POSITIVE_INFINITY;
+  const moduleRect = sample?.moduleRect;
+  const hitRect = sample?.hitRect;
+  const readoutRect = sample?.readoutRect;
+  return sample?.pass === true
+    && sample.value === expectedValue
+    && sample.activeIndex === expectedValue
+    && sample.knobStateClass === `control-state-${expectedValue}`
+    && sample.interaction === 'hybrid'
+    && sample.text === expectedText
+    && angleError.length === 3
+    && angleError.every((error) => error <= 2)
+    && radiusSpread <= 1
+    && hitRect.left >= moduleRect.left
+    && hitRect.right <= moduleRect.right
+    && readoutRect.left >= moduleRect.left
+    && readoutRect.right <= moduleRect.right
+    && readoutRect.top >= moduleRect.top
+    && readoutRect.bottom <= moduleRect.bottom;
+}
+
+async function runCompressorHpfProbe(cdp, outDir, viewportName) {
+  const moduleName = 'compressor';
+  const paramId = 'compressorSidechainHPF';
+  const readoutSelector = '.compressor-hpf-readout';
+  let current = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  const center = () => ({
+    x: (current.hitRect.left + current.hitRect.right) / 2,
+    y: (current.hitRect.top + current.hitRect.bottom) / 2,
+  });
+  for (let attempt = 0; current.value !== 0 && attempt < 3; attempt += 1) {
+    await dispatchMouseClick(cdp, center());
+    current = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  }
+
+  const samples = [current];
+  await screenshot(cdp, path.join(outDir, `nam-compressor-hpf-click-0-${viewportName}.png`));
+  for (let value = 1; value <= 2; value += 1) {
+    await dispatchMouseClick(cdp, center());
+    current = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+    samples.push(current);
+    await screenshot(cdp, path.join(outDir, `nam-compressor-hpf-click-${value}-${viewportName}.png`));
+  }
+  await dispatchMouseClick(cdp, center());
+  current = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  const resetByClick = current.value === 0;
+
+  // The 50 px release point is deliberately outside the compact selector hit
+  // ring. Pointer capture must retain the drag, snap to 120 Hz, and suppress
+  // the synthetic release click that would otherwise advance to 240 Hz.
+  await dispatchVerticalMouseDrag(cdp, center(), -50);
+  const dragSample = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  await screenshot(cdp, path.join(outDir, `nam-compressor-hpf-drag-1-${viewportName}.png`));
+
+  const expectedTexts = ['HPFOFF', 'HPF120', 'HPF240'];
+  const clickPass = samples.every((sample, index) => threePositionSelectorSamplePass(sample, index, expectedTexts[index]));
+  const dragPass = threePositionSelectorSamplePass(dragSample, 1, 'HPF120');
+  return { pass: resetByClick && clickPass && dragPass, resetByClick, clickPass, dragPass, samples, dragSample };
+}
+
+async function runDistortionModeProbe(cdp, outDir, viewportName) {
+  const moduleName = 'distortion';
+  const paramId = 'chaosMode';
+  const readoutSelector = '.distortion-mode-display';
+  let current = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  const center = () => ({
+    x: (current.hitRect.left + current.hitRect.right) / 2,
+    y: (current.hitRect.top + current.hitRect.bottom) / 2,
+  });
+  for (let attempt = 0; current.value !== 0 && attempt < 3; attempt += 1) {
+    await dispatchMouseClick(cdp, center());
+    current = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  }
+  const initial = current;
+  await dispatchMouseClick(cdp, center());
+  const clicked = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  current = clicked;
+  await dispatchVerticalMouseDrag(cdp, center(), -50);
+  const dragged = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
+  await screenshot(cdp, path.join(outDir, `nam-distortion-mode-click-drag-${viewportName}.png`));
+  const initialPass = threePositionSelectorSamplePass(initial, 0, 'HEAVY');
+  const clickPass = threePositionSelectorSamplePass(clicked, 1, 'XTREME');
+  const dragPass = threePositionSelectorSamplePass(dragged, 2, 'CRUNCH');
+  return { pass: initialPass && clickPass && dragPass, initialPass, clickPass, dragPass, initial, clicked, dragged };
+}
+
+async function selectMixerStage(cdp, stageId) {
+  const changed = await evaluate(cdp, `
+    (() => {
+      const select = document.querySelector('.nam-rack-mixer-stage-picker select');
+      if (!(select instanceof HTMLSelectElement)) return false;
+      if (!Array.from(select.options).some((option) => option.value === ${JSON.stringify(stageId)})) return false;
+      select.value = ${JSON.stringify(stageId)};
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()
+  `);
+  if (!changed) throw new Error(`NAM Rack mixer stage is unavailable: ${stageId}`);
+  await sleep(160);
+}
+
 async function qualityChecks(cdp, scenarioName) {
   const expectedNeuralSection = scenarioName === "rack-neural-size-menu"
     ? "post"
@@ -734,7 +987,10 @@ async function qualityChecks(cdp, scenarioName) {
       const headerPresetSelectIcons = Array.from(document.querySelectorAll('.nam-product-topbar .nam-preset-select svg'));
       const root = document.documentElement;
       const body = document.body;
-      const rootScrollbar = root.scrollHeight > window.innerHeight + 2 || body.scrollHeight > window.innerHeight + 2;
+      const rootScrollbar = root.scrollHeight > window.innerHeight + 2
+        || body.scrollHeight > window.innerHeight + 2
+        || root.scrollWidth > window.innerWidth + 2
+        || body.scrollWidth > window.innerWidth + 2;
       const productRect = product?.getBoundingClientRect();
       const productStyle = product ? window.getComputedStyle(product) : null;
       const cssToken = (name) => (productStyle?.getPropertyValue(name) || '').trim();
@@ -1078,7 +1334,7 @@ async function qualityChecks(cdp, scenarioName) {
         visible: visibleBox(el),
       }));
       const neuralGlobalControlCount = neuralGlobalStrip
-        ? neuralGlobalStrip.querySelectorAll('.nam-meter-trim, .nam-neural-global-knob, .nam-neural-stepper, .nam-neural-input-mode').length
+        ? neuralGlobalStrip.querySelectorAll('.nam-meter-trim, .nam-neural-global-knob, .nam-neural-stepper').length
         : 0;
       const neuralPresetLibraryButton = document.querySelector('.nam-neural-preset-library-button');
       const neuralGlobalLibraryButton = document.querySelector('.nam-neural-global-side-right .nam-neural-library-button');
@@ -1091,9 +1347,9 @@ async function qualityChecks(cdp, scenarioName) {
         && visibleBox(neuralPresetHub)
         && visibleBox(neuralPresetLibraryButton)
         && !visibleBox(neuralGlobalLibraryButton)
-        && neuralGlobalDividerCount >= 4
+        && neuralGlobalDividerCount >= 3
       );
-      const neuralInputModeBound = document.querySelector('.nam-neural-input-mode')?.getAttribute('data-bound') === 'true';
+      const neuralRetiredInputModeAbsent = !document.querySelector('.nam-neural-input-mode, [data-param="inputMode"]');
       const neuralRetiredTransposeAbsent = !document.querySelector('[data-param="transposeSemitones"], [aria-label="Transpose"]');
       const neuralPrePedalCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-material="pedal"]').length;
       const neuralCompressorBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-module="pre-compressor-design-a"] [data-bound="true"]').length;
@@ -1146,12 +1402,12 @@ async function qualityChecks(cdp, scenarioName) {
         sectionButtonsVisible: neuralSectionButtons.length >= 5 && neuralSectionButtons.every((item) => item.visible),
         globalStripVisible: visibleBox(neuralGlobalStrip),
         globalControlCount: neuralGlobalControlCount,
-        globalLabelsReady: neuralGlobalControlCount >= 4 && neuralInputModeBound && neuralRetiredTransposeAbsent,
+        globalLabelsReady: neuralGlobalControlCount >= 4 && neuralRetiredInputModeAbsent && neuralRetiredTransposeAbsent,
         topStripRegionsReady: neuralTopStripRegionsReady,
         globalDividerCount: neuralGlobalDividerCount,
         presetLibraryButtonVisible: visibleBox(neuralPresetLibraryButton),
         globalLibraryButtonVisible: visibleBox(neuralGlobalLibraryButton),
-        inputModeBound: neuralInputModeBound,
+        retiredInputModeAbsent: neuralRetiredInputModeAbsent,
         retiredTransposeAbsent: neuralRetiredTransposeAbsent,
         presetHubVisible: visibleBox(neuralPresetHub),
         postSuiteVisible: visibleBox(neuralPostSuite),
@@ -2041,7 +2297,40 @@ async function qualityChecks(cdp, scenarioName) {
       const text = document.body.innerText;
       const forbiddenNormalWords = ['client_id', 'Callback URL', 'Manual access token'].filter((term) => text.includes(term));
       const rawWords = ['Cache', 'Disk', 'Fetch models'].filter((term) => text.includes(term));
-      const activeForbiddenTerms = text.match(/\b(?:Special FX|Glitch|Doubler)\b/g) || [];
+      const retiredLaserParamIds = new Set([
+        'laserEnabled',
+        'laserMode',
+        'laserMix',
+        'laserSpeedHz',
+        'laserSensitivity',
+        'laserEnvelopeMode',
+        'laserTrigger',
+      ]);
+      const isRetiredLaserNode = (el) => {
+        const paramId = el?.getAttribute?.('data-param')
+          || el?.getAttribute?.('data-param-id')
+          || '';
+        return el?.getAttribute?.('data-section') === 'special'
+          || el?.getAttribute?.('data-module') === 'laser'
+          || String(el?.getAttribute?.('data-skin') || '').includes('special-laser')
+          || retiredLaserParamIds.has(paramId)
+          || (el?.tagName === 'OPTION' && el?.value === 'special');
+      };
+      const retiredLaserSelector =
+        '[data-section], [data-module], [data-skin], [data-param], [data-param-id], option[value]';
+      const activeRetiredLaserNodes = Array.from(document.querySelectorAll(retiredLaserSelector))
+        .filter((el) => isRetiredLaserNode(el) && visibleBox(el))
+        .map((el) => el.getAttribute('data-param')
+          || el.getAttribute('data-param-id')
+          || el.getAttribute('data-skin')
+          || el.getAttribute('data-module')
+          || el.getAttribute('data-section')
+          || el.value
+          || el.tagName);
+      const activeForbiddenTerms = [
+        ...(text.match(/\b(?:Special FX|Glitch|Doubler)\b/g) || []),
+        ...activeRetiredLaserNodes,
+      ];
       const windowControlItems = Array.from(windowControls?.querySelectorAll('span, button') || []);
       const duplicateWindowControlsHidden = !windowControls
         || !visibleBox(windowControls)
@@ -2093,9 +2382,38 @@ async function qualityChecks(cdp, scenarioName) {
       const mixerStageStrips = Array.from(document.querySelectorAll('.nam-rack-mixer-strip'));
       const mixerBackButton = document.querySelector('[data-qa="nam-mixer-back"]');
       const mixerRect = rackMixer?.getBoundingClientRect();
+      const mixerStagePicker = rackMixer?.querySelector('.nam-rack-mixer-stage-picker select');
+      const mixerStageOptions = Array.from(mixerStagePicker?.options || []).map((option) => option.value);
+      const mixerFocusedStage = rackMixer?.getAttribute('data-focused-stage') || '';
+      const mixerSingleStage = rackMixer?.getAttribute('data-single-stage') === 'true';
+      const mixerControlGroups = Array.from(rackMixer?.querySelectorAll('.nam-rack-mixer-control-group') || []).map((group) => ({
+        id: group.getAttribute('data-control-group') || '',
+        label: (group.querySelector(':scope > strong')?.textContent || '').replace(/\s+/g, ' ').trim(),
+        visible: visibleBox(group),
+        paramIds: Array.from(group.querySelectorAll('.nam-rack-control[data-param]'))
+          .map((control) => control.getAttribute('data-param') || '')
+          .filter(Boolean),
+      }));
+      const mixerReverbExpectedGroups = {
+        reverb: ['reverbEnabled', 'reverbMix', 'reverbDecaySec', 'reverbPreDelayMs', 'reverbLowCutHz', 'reverbTone', 'reverbShimmer'],
+      };
+      const mixerReverbGroupLabels = {
+        reverb: 'Reverb',
+      };
+      const mixerReverbGroupsReady = mixerFocusedStage === 'reverb'
+        && Object.entries(mixerReverbExpectedGroups).every(([id, paramIds]) => {
+          const group = mixerControlGroups.find((item) => item.id === id);
+          return Boolean(group
+            && group.visible
+            && group.label === mixerReverbGroupLabels[id]
+            && paramIds.every((paramId) => group.paramIds.includes(paramId)));
+        })
+        && !mixerControlGroups.some((group) => group.id === 'additional');
       const mixerReadable = Boolean(visibleBox(rackMixer)
-        && mixerStageStrips.length >= 9
+        && mixerSingleStage
+        && mixerStageStrips.length === 1
         && mixerStageStrips.every((el) => visibleBox(el))
+        && mixerStageOptions.length >= 9
         && Array.from(document.querySelectorAll('.nam-rack-mixer-strip-head strong')).every((el) => {
           const rect = el.getBoundingClientRect();
           return rect.width >= 24 && rect.height >= 10;
@@ -2193,8 +2511,18 @@ async function qualityChecks(cdp, scenarioName) {
         .filter(Boolean);
       // Retired or unsupported stages must not return through route copy,
       // hydrated detail state, or old visual manifests.
-      const sourceFlowForbiddenText =
-        sourceFlowText.match(/Special FX|Glitch|Doubler|Stereo Width/g) || [];
+      const sourceFlowForbiddenText = [
+        ...(sourceFlowText.match(/Special FX|Glitch|Doubler|Stereo Width/g) || []),
+        ...Array.from(sourceFlowEl?.querySelectorAll(retiredLaserSelector) || [])
+          .filter(isRetiredLaserNode)
+          .map((el) => el.getAttribute('data-param')
+            || el.getAttribute('data-param-id')
+            || el.getAttribute('data-skin')
+            || el.getAttribute('data-module')
+            || el.getAttribute('data-section')
+            || el.value
+            || el.tagName),
+      ];
       const sourceFlowUnsupportedTone3000FXRows = sourceFlowRows.filter((row) => (
         row.source === 'tone3000' && /^(mod|delay|reverb)$/.test(row.category)
       ));
@@ -2355,26 +2683,25 @@ async function qualityChecks(cdp, scenarioName) {
         && rect.height >= window.innerHeight - 16);
       const designReferenceBoxes = {
         pre: {
-          'pedal-nam': { x: 42, y: 35, w: 118, h: 270 },
-          compressor: { x: 177, y: 35, w: 122, h: 270 },
-          'tape-echo': { x: 316, y: 35, w: 139, h: 270 },
-          octaver: { x: 472, y: 35, w: 121, h: 270 },
-          'precision-drive': { x: 610, y: 35, w: 118, h: 270 },
+          compressor: { x: 5, y: 42, w: 156, h: 232 },
+          'tape-echo': { x: 171, y: 42, w: 156, h: 232 },
+          octaver: { x: 337, y: 42, w: 120, h: 232 },
+          'precision-drive': { x: 467, y: 42, w: 120, h: 232 },
+          distortion: { x: 597, y: 42, w: 156, h: 232 },
         },
         amp: {
           'amp-head': { x: 24, y: -2, w: 720, h: 345 },
         },
         cab: {
-          cabinet: { x: 35, y: 70, w: 280, h: 240 },
-          'mic-panel': { x: 335, y: 50, w: 400, h: 260 },
+          'mic-panel': { x: 54, y: -30, w: 660, h: 402 },
         },
         eq: {
           'eq-rack': { x: 24, y: 20, w: 720, h: 300 },
         },
         post: {
-          modulator: { x: 25, y: 34, w: 220, h: 270 },
-          delay: { x: 254, y: 18, w: 260, h: 300 },
-          reverb: { x: 528, y: 34, w: 220, h: 270 },
+          modulator: { x: 25, y: 40, w: 220, h: 175 },
+          delay: { x: 254, y: 24, w: 260, h: 200 },
+          reverb: { x: 528, y: 29, w: 220, h: 195 },
         },
       };
       const toDesignArtboardBox = (el) => {
@@ -2388,6 +2715,430 @@ async function qualityChecks(cdp, scenarioName) {
         };
       };
       const designPortModules = Array.from(designPortHost?.querySelectorAll('.screen-shell .module[data-module]') || []);
+      const rectWithInset = (node, scale = 1) => {
+        const rect = node.getBoundingClientRect();
+        const artboard = node.closest('.nam-rack-artboard');
+        const matrix = artboard ? new DOMMatrixReadOnly(getComputedStyle(artboard).transform) : null;
+        const artboardScale = matrix ? Math.hypot(matrix.a, matrix.b) : 1;
+        const computedSize = Number.parseFloat(getComputedStyle(node).width);
+        // A rotated square's axis-aligned DOMRect grows with its angle. Build
+        // the visible dial box from the declared edge and artboard scale so a
+        // 45-degree knob is not reported as larger or closer to its label.
+        const declaredEdge = Number.isFinite(computedSize) ? computedSize * artboardScale : rect.width;
+        const width = declaredEdge * scale;
+        const height = declaredEdge * scale;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        return {
+          left: centerX - width / 2,
+          right: centerX + width / 2,
+          top: centerY - height / 2,
+          bottom: centerY + height / 2,
+          width,
+          height,
+        };
+      };
+      const horizontalOverlap = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left);
+      const verticalGap = (a, b) => Math.max(b.top - a.bottom, a.top - b.bottom);
+      const postKnobLabelGapFailures = activeRackSection !== 'post' ? [] : designPortModules.flatMap((module) => {
+        const moduleId = module.getAttribute('data-module') || 'post-module';
+        const knobs = Array.from(module.querySelectorAll('.asset-control.knob'))
+          .filter((node) => visibleBox(node))
+          // The knob PNGs intentionally have transparent square padding. The
+          // 72% inset matches the visible metal/black dial, which is what can
+          // actually collide with typography in a screenshot.
+          .map((node) => rectWithInset(node, 0.72));
+        const labels = Array.from(module.querySelectorAll('.label.post-label'))
+          .filter((node) => visibleBox(node));
+        return labels.flatMap((label) => {
+          const labelRect = label.getBoundingClientRect();
+          const text = (label.textContent || 'label').replace(/\s+/g, ' ').trim();
+          const nearestGap = knobs
+            .filter((knob) => horizontalOverlap(labelRect, knob) > 1)
+            .reduce((gap, knob) => Math.min(gap, verticalGap(labelRect, knob)), Number.POSITIVE_INFINITY);
+          return nearestGap < 3
+            ? [moduleId + ':' + text + ':gap=' + nearestGap.toFixed(2)]
+            : [];
+        });
+      });
+      const postVisibleControlContainmentFailures = activeRackSection !== 'post' ? [] : designPortModules.flatMap((module) => {
+        const moduleRect = module.getBoundingClientRect();
+        const moduleId = module.getAttribute('data-module') || 'post-module';
+        return Array.from(module.querySelectorAll('.asset-control.knob, .label.post-label, .module-title'))
+          .filter((node) => visibleBox(node))
+          .filter((node) => {
+            const rect = node.getBoundingClientRect();
+            return rect.left < moduleRect.left + 2
+              || rect.right > moduleRect.right - 2
+              || rect.top < moduleRect.top + 2
+              || rect.bottom > moduleRect.bottom - 2;
+          })
+          .map((node) => moduleId + ':' + ((node.textContent || node.className || node.tagName).replace(/\s+/g, ' ').trim().slice(0, 40)));
+      });
+      const postPrimaryHardware = activeRackSection !== 'post' ? [] : [
+        { moduleId: 'modulator', paramId: 'modulatorEnabled' },
+        { moduleId: 'delay', paramId: 'delayEnabled' },
+        { moduleId: 'reverb', paramId: 'reverbEnabled' },
+      ].map(({ moduleId, paramId }) => {
+        const module = designPortModules.find((node) => node.getAttribute('data-module') === moduleId);
+        const paramHits = Array.from(module?.querySelectorAll('.control-hit[data-param-id="' + paramId + '"]') || []);
+        const resolveAssetAfter = (node) => {
+          if (!node) return null;
+          let sibling = node.nextElementSibling;
+          while (sibling && !sibling.classList?.contains('asset-control')) sibling = sibling.nextElementSibling;
+          return sibling;
+        };
+        const footHit = paramHits.find((node) => resolveAssetAfter(node)?.classList?.contains('footswitch'));
+        const foot = resolveAssetAfter(footHit);
+        const footRectForLookup = foot?.getBoundingClientRect();
+        const ledCandidates = Array.from(module?.querySelectorAll('.asset-control.led') || []);
+        const led = ledCandidates.reduce((best, node) => {
+          if (!footRectForLookup) return best || node;
+          const rect = node.getBoundingClientRect();
+          const delta = Math.abs((rect.left + rect.width / 2) - (footRectForLookup.left + footRectForLookup.width / 2));
+          if (!best) return node;
+          const bestRect = best.getBoundingClientRect();
+          const bestDelta = Math.abs((bestRect.left + bestRect.width / 2) - (footRectForLookup.left + footRectForLookup.width / 2));
+          return delta < bestDelta ? node : best;
+        }, null);
+        const state = module?.querySelector('.primary-foot-state');
+        const toMetric = (node) => {
+          if (!node || !visibleBox(node)) return null;
+          const rect = node.getBoundingClientRect();
+          return {
+            left: Number(rect.left.toFixed(2)),
+            top: Number(rect.top.toFixed(2)),
+            right: Number(rect.right.toFixed(2)),
+            bottom: Number(rect.bottom.toFixed(2)),
+            width: Number(rect.width.toFixed(2)),
+            height: Number(rect.height.toFixed(2)),
+            centerX: Number((rect.left + rect.width / 2).toFixed(2)),
+            centerY: Number((rect.top + rect.height / 2).toFixed(2)),
+          };
+        };
+        return { moduleId, foot: toMetric(foot), led: toMetric(led), state: toMetric(state) };
+      });
+      const postPrimaryHardwareFailures = [];
+      if (activeRackSection === 'post') {
+        if (postPrimaryHardware.some((entry) => !entry.foot || !entry.led || !entry.state)) {
+          postPrimaryHardwareFailures.push('primary-hardware:missing');
+        } else {
+          const spread = (values) => Math.max(...values) - Math.min(...values);
+          const footWidths = postPrimaryHardware.map((entry) => entry.foot.width);
+          const ledWidths = postPrimaryHardware.map((entry) => entry.led.width);
+          if (spread(footWidths) > 1) postPrimaryHardwareFailures.push('primary-foot-width-spread=' + spread(footWidths).toFixed(2));
+          if (spread(ledWidths) > 1) postPrimaryHardwareFailures.push('primary-led-width-spread=' + spread(ledWidths).toFixed(2));
+          postPrimaryHardware.forEach((entry) => {
+            if (!(entry.led.centerY < entry.state.centerY && entry.state.centerY < entry.foot.centerY)) {
+              postPrimaryHardwareFailures.push(entry.moduleId + ':footer-order');
+            }
+            if (entry.led.bottom > entry.state.top + 0.5) {
+              postPrimaryHardwareFailures.push(entry.moduleId + ':led-state-overlap=' + (entry.led.bottom - entry.state.top).toFixed(2));
+            }
+            if (entry.state.bottom > entry.foot.top + 0.5) {
+              postPrimaryHardwareFailures.push(entry.moduleId + ':state-foot-overlap=' + (entry.state.bottom - entry.foot.top).toFixed(2));
+            }
+          });
+        }
+      }
+      const pedalHardwareContract = { knob: 28, footswitch: 25, toggle: 24, led: 12 };
+      const pedalArtboard = designPortHost?.querySelector('.nam-rack-artboard');
+      const pedalArtboardRect = pedalArtboard?.getBoundingClientRect();
+      const pedalArtboardStyle = pedalArtboard ? getComputedStyle(pedalArtboard) : null;
+      const pedalArtboardCssWidth = Number.parseFloat(pedalArtboardStyle?.width || '');
+      const pedalArtboardCssHeight = Number.parseFloat(pedalArtboardStyle?.height || '');
+      const pedalArtboardScale = {
+        x: Number.isFinite(pedalArtboardCssWidth) && pedalArtboardCssWidth > 0 && pedalArtboardRect
+          ? pedalArtboardRect.width / pedalArtboardCssWidth
+          : 1,
+        y: Number.isFinite(pedalArtboardCssHeight) && pedalArtboardCssHeight > 0 && pedalArtboardRect
+          ? pedalArtboardRect.height / pedalArtboardCssHeight
+          : 1,
+      };
+      const pedalHardwareMetrics = Array.from(
+        // Header utility controls intentionally have their own larger sizing.
+        // The physical-pedal contract applies only inside the scaled artboard.
+        designPortHost?.querySelectorAll('.nam-rack-artboard .asset-control[data-nam-hardware-kind]') || [],
+      ).filter(visibleBox).map((node) => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        const standardPx = Number.parseFloat(node.getAttribute('data-nam-hardware-standard-px') || '');
+        const computedWidth = Number.parseFloat(style.width);
+        const computedHeight = Number.parseFloat(style.height);
+        let transform = null;
+        if (style.transform && style.transform !== 'none') {
+          try { transform = new DOMMatrixReadOnly(style.transform); } catch { transform = null; }
+        }
+        const a = transform?.a ?? 1;
+        const b = transform?.b ?? 0;
+        const c = transform?.c ?? 0;
+        const d = transform?.d ?? 1;
+        const expectedBoxWidth = Number.isFinite(computedWidth) && Number.isFinite(computedHeight)
+          ? (Math.abs(a) * computedWidth + Math.abs(c) * computedHeight) * pedalArtboardScale.x
+          : Number.NaN;
+        const expectedBoxHeight = Number.isFinite(computedWidth) && Number.isFinite(computedHeight)
+          ? (Math.abs(b) * computedWidth + Math.abs(d) * computedHeight) * pedalArtboardScale.y
+          : Number.NaN;
+        return {
+          renderContext: 'scaled-stage',
+          moduleId: node.closest('.module')?.getAttribute('data-module') || 'stage',
+          kind: node.getAttribute('data-nam-hardware-kind') || '',
+          standardPx: Number.isFinite(standardPx) ? standardPx : null,
+          computedWidth: Number.isFinite(computedWidth) ? computedWidth : null,
+          computedHeight: Number.isFinite(computedHeight) ? computedHeight : null,
+          width: Number(rect.width.toFixed(2)),
+          height: Number(rect.height.toFixed(2)),
+          expectedBoxWidth: Number.isFinite(expectedBoxWidth) ? Number(expectedBoxWidth.toFixed(2)) : null,
+          expectedBoxHeight: Number.isFinite(expectedBoxHeight) ? Number(expectedBoxHeight.toFixed(2)) : null,
+        };
+      });
+      const pedalHardwareConsistencyFailures = [];
+      if (designPortReady) {
+        pedalHardwareMetrics
+          .filter((entry) => !(entry.kind in pedalHardwareContract))
+          .forEach((entry) => pedalHardwareConsistencyFailures.push(entry.moduleId + ':unknown-kind=' + entry.kind));
+        Object.entries(pedalHardwareContract).forEach(([kind, expected]) => {
+          const entries = pedalHardwareMetrics.filter((entry) => entry.kind === kind);
+          if (entries.length === 0) return;
+          if (entries.some((entry) => !Number.isFinite(entry.standardPx))) {
+            pedalHardwareConsistencyFailures.push(kind + ':non-finite-standard');
+          }
+          if (entries.some((entry) => Number.isFinite(entry.standardPx) && Math.abs(entry.standardPx - expected) > .01)) {
+            pedalHardwareConsistencyFailures.push(kind + ':standard-attr-mismatch');
+          }
+          if (entries.some((entry) => !Number.isFinite(entry.computedWidth))) {
+            pedalHardwareConsistencyFailures.push(kind + ':non-finite-computed-width');
+          }
+          if (entries.some((entry) => !Number.isFinite(entry.computedHeight))) {
+            pedalHardwareConsistencyFailures.push(kind + ':non-finite-computed-height');
+          }
+          if (entries.some((entry) => Number.isFinite(entry.computedWidth) && Math.abs(entry.computedWidth - expected) > .1)) {
+            pedalHardwareConsistencyFailures.push(kind + ':computed-width-mismatch');
+          }
+          if (entries.some((entry) => Number.isFinite(entry.computedHeight) && Math.abs(entry.computedHeight - expected) > .1)) {
+            pedalHardwareConsistencyFailures.push(kind + ':computed-height-mismatch');
+          }
+          if (entries.some((entry) => !Number.isFinite(entry.width) || !Number.isFinite(entry.expectedBoxWidth))) {
+            pedalHardwareConsistencyFailures.push(kind + ':non-finite-rendered-width');
+          }
+          if (entries.some((entry) => !Number.isFinite(entry.height) || !Number.isFinite(entry.expectedBoxHeight))) {
+            pedalHardwareConsistencyFailures.push(kind + ':non-finite-rendered-height');
+          }
+          if (entries.some((entry) => Number.isFinite(entry.expectedBoxWidth) && Math.abs(entry.width - entry.expectedBoxWidth) > .75)) {
+            pedalHardwareConsistencyFailures.push(kind + ':rendered-width-mismatch');
+          }
+          if (entries.some((entry) => Number.isFinite(entry.expectedBoxHeight) && Math.abs(entry.height - entry.expectedBoxHeight) > .75)) {
+            pedalHardwareConsistencyFailures.push(kind + ':rendered-height-mismatch');
+          }
+        });
+      }
+      const designEqModule = designPortModules.find((module) => module.getAttribute('data-module') === 'eq-rack');
+      const eqFaders = Array.from(designEqModule?.querySelectorAll('.fader[data-param-id]') || [])
+        .filter((node) => visibleBox(node));
+      const eqFaderParamIds = eqFaders.map((node) => node.getAttribute('data-param-id') || '');
+      const eqLaneAlignmentFailures = !designEqModule ? [] : Array.from(designEqModule.querySelectorAll('.eq-band')).flatMap((lane) => {
+        const fader = lane.querySelector('.fader[data-param-id]');
+        const value = lane.querySelector('.eq-band-value');
+        const label = lane.querySelector('.eq-frequency');
+        if (!fader || !value || !label || !visibleBox(fader) || !visibleBox(value) || !visibleBox(label)) return ['eq-lane:missing'];
+        const faderRect = fader.getBoundingClientRect();
+        const faderCenter = faderRect.left + faderRect.width / 2;
+        const valueRect = value.getBoundingClientRect();
+        const labelRect = label.getBoundingClientRect();
+        const centerError = Math.max(
+          Math.abs(faderCenter - (valueRect.left + valueRect.width / 2)),
+          Math.abs(faderCenter - (labelRect.left + labelRect.width / 2)),
+        );
+        const collision = valueRect.bottom > faderRect.top - 3 || labelRect.top < faderRect.bottom + 3;
+        return centerError > 2 || collision
+          ? [(fader.getAttribute('data-param-id') || 'eq-lane') + ':center=' + centerError.toFixed(2) + ',collision=' + collision]
+          : [];
+      });
+      const headerShell = designPortHost?.querySelector('.premium-nam-shell');
+      const headerUtility = designPortHost?.querySelector('.premium-routing-utility');
+      const headerPreset = designPortHost?.querySelector('.preset-console');
+      const headerInstrument = designPortHost?.querySelector('.premium-instrument-choice');
+      const headerDoubler = designPortHost?.querySelector('.premium-doubler-utility');
+      const headerPresetTitle = designPortHost?.querySelector('.preset-console > .preset-title');
+      const headerBrand = designPortHost?.querySelector('.premium-brand');
+      const headerCalibration = designPortHost?.querySelector('[data-qa="nam-premium-calibration"]');
+      const headerInputBlock = designPortHost?.querySelector('.global-block.left');
+      const headerOutputBlock = designPortHost?.querySelector('.global-block.right');
+      const headerInputPeakMeter = headerInputBlock?.querySelector('.premium-level-meter');
+      const headerOutputPeakMeter = headerOutputBlock?.querySelector('.premium-level-meter');
+      const headerUtilityCards = Array.from(headerUtility?.children || []).filter((node) => visibleBox(node));
+      const headerUtilityCardClasses = headerUtilityCards.map((node) => node.className);
+      const headerProcessingPresent = Boolean(designPortHost?.querySelector('.premium-processing-choice'));
+      const headerPhysicalSourcePresent = Boolean(designPortHost?.querySelector('[data-qa="nam-physical-source"]'));
+      const centerMetric = (node) => {
+        if (!node || !visibleBox(node)) return null;
+        const rect = node.getBoundingClientRect();
+        return {
+          left: Number(rect.left.toFixed(2)),
+          top: Number(rect.top.toFixed(2)),
+          right: Number(rect.right.toFixed(2)),
+          bottom: Number(rect.bottom.toFixed(2)),
+          width: Number(rect.width.toFixed(2)),
+          height: Number(rect.height.toFixed(2)),
+          centerX: Number((rect.left + rect.width / 2).toFixed(2)),
+        };
+      };
+      const headerGeometry = {
+        shell: centerMetric(headerShell),
+        utility: centerMetric(headerUtility),
+        preset: centerMetric(headerPreset),
+        instrument: centerMetric(headerInstrument),
+        doubler: centerMetric(headerDoubler),
+        title: centerMetric(headerPresetTitle),
+        brand: centerMetric(headerBrand),
+        calibration: centerMetric(headerCalibration),
+        input: centerMetric(headerInputBlock),
+        output: centerMetric(headerOutputBlock),
+        inputPeakMeter: centerMetric(headerInputPeakMeter),
+        outputPeakMeter: centerMetric(headerOutputPeakMeter),
+        utilityCardClasses: headerUtilityCardClasses,
+        processingPresent: headerProcessingPresent,
+        physicalSourcePresent: headerPhysicalSourcePresent,
+      };
+      const headerGeometryFailures = [];
+      if (designPortReady) {
+        const requiredHeaderGeometry = [
+          headerGeometry.shell,
+          headerGeometry.utility,
+          headerGeometry.preset,
+          headerGeometry.instrument,
+          headerGeometry.doubler,
+          headerGeometry.title,
+          headerGeometry.brand,
+          headerGeometry.calibration,
+          headerGeometry.input,
+          headerGeometry.output,
+        ];
+        if (requiredHeaderGeometry.some((metric) => !metric)) {
+          headerGeometryFailures.push('header-geometry:missing');
+        } else {
+          const shellCenter = headerGeometry.shell.centerX;
+           const centerChecks = [
+            ['brand', headerGeometry.brand.centerX],
+             ['utility', headerGeometry.utility.centerX],
+             ['preset', headerGeometry.preset.centerX],
+             ['title', headerGeometry.title.centerX],
+          ];
+          centerChecks.forEach(([name, center]) => {
+            const delta = Math.abs(center - shellCenter);
+            if (delta > 1.25) headerGeometryFailures.push(name + '-center-delta=' + delta.toFixed(2));
+          });
+          if (headerGeometry.utility.width > headerGeometry.preset.width - 8) {
+            headerGeometryFailures.push('utility-not-narrower-than-preset=' + (headerGeometry.preset.width - headerGeometry.utility.width).toFixed(2));
+          }
+          if (headerGeometry.utilityCardClasses.length !== 2
+            || !headerGeometry.utilityCardClasses.includes('premium-instrument-choice')
+            || !headerGeometry.utilityCardClasses.includes('premium-doubler-utility')) {
+            headerGeometryFailures.push('utility-card-contract=' + headerGeometry.utilityCardClasses.join(','));
+          }
+          if (headerGeometry.processingPresent) headerGeometryFailures.push('processing-card-present');
+          if (headerGeometry.physicalSourcePresent) headerGeometryFailures.push('physical-source-present');
+          const utilityCardRatio = headerGeometry.doubler.width / headerGeometry.instrument.width;
+          const expectedUtilityCardRatio = 1.18 / .82;
+          if (Math.abs(utilityCardRatio - expectedUtilityCardRatio) > .03) {
+            headerGeometryFailures.push('utility-card-ratio=' + utilityCardRatio.toFixed(3));
+          }
+          if (headerGeometry.instrument.width < 300) {
+            headerGeometryFailures.push('instrument-card-min-width=' + headerGeometry.instrument.width.toFixed(2));
+          }
+          if (headerGeometry.doubler.width < 430) {
+            headerGeometryFailures.push('doubler-card-min-width=' + headerGeometry.doubler.width.toFixed(2));
+          }
+          const metricInside = (metric, container, padding = 0) => Boolean(metric && container
+            && metric.left >= container.left + padding - 1
+            && metric.right <= container.right - padding + 1
+            && metric.top >= container.top + padding - 1
+            && metric.bottom <= container.bottom - padding + 1);
+          if (!metricInside(headerGeometry.utility, headerGeometry.shell)) headerGeometryFailures.push('utility-shell-overflow');
+          if (!metricInside(headerGeometry.preset, headerGeometry.shell)) headerGeometryFailures.push('preset-shell-overflow');
+          if (window.innerWidth >= 1264) {
+            const calOutputCenterDelta = Math.abs(headerGeometry.calibration.centerX - headerGeometry.output.centerX);
+            const calOutputWidthDelta = Math.abs(headerGeometry.calibration.width - headerGeometry.output.width);
+            if (calOutputCenterDelta > 1.25) headerGeometryFailures.push('cal-output-center-delta=' + calOutputCenterDelta.toFixed(2));
+            if (calOutputWidthDelta > 1.25) headerGeometryFailures.push('cal-output-width-delta=' + calOutputWidthDelta.toFixed(2));
+          } else {
+            const calOutputGap = headerGeometry.output.left - headerGeometry.calibration.right;
+            if (calOutputGap < 4 || calOutputGap > 48) headerGeometryFailures.push('cal-output-gap=' + calOutputGap.toFixed(2));
+          }
+
+          const intersects = (left, right) => {
+            if (!left || !right || !visibleBox(left) || !visibleBox(right)) return false;
+            const a = left.getBoundingClientRect();
+            const b = right.getBoundingClientRect();
+            return a.left < b.right - 1 && a.right > b.left + 1 && a.top < b.bottom - 1 && a.bottom > b.top + 1;
+          };
+          const headerChrome = [headerBrand, headerCalibration, headerInputBlock, headerOutputBlock].filter(Boolean);
+          headerChrome.forEach((node) => {
+            const name = node.classList.contains('premium-brand')
+              ? 'brand'
+              : node.classList.contains('premium-calibration-launch') ? 'cal'
+              : node.classList.contains('left') ? 'input-block' : 'output-block';
+            if (intersects(node, headerUtility)) headerGeometryFailures.push(name + '-utility-overlap');
+            if (intersects(node, headerPreset)) headerGeometryFailures.push(name + '-preset-overlap');
+          });
+
+          // At medium and desktop widths the side gutters are intentional
+          // hardware bays, not a shallow mobile strip. Require them to span
+          // both centre rows and keep the peak meters physically substantial.
+          if (window.innerWidth >= 1264) {
+            const inputMetric = headerGeometry.input;
+            const outputMetric = headerGeometry.output;
+            const inputMeterMetric = headerGeometry.inputPeakMeter;
+            const outputMeterMetric = headerGeometry.outputPeakMeter;
+            if (!inputMetric || !outputMetric || !inputMeterMetric || !outputMeterMetric) {
+              headerGeometryFailures.push('header-side-bay:missing');
+            } else {
+              const minimumMeterHeight = 136;
+              if (inputMeterMetric.height < minimumMeterHeight) {
+                headerGeometryFailures.push('input-meter-height=' + inputMeterMetric.height.toFixed(2));
+              }
+              if (outputMeterMetric.height < minimumMeterHeight) {
+                headerGeometryFailures.push('output-meter-height=' + outputMeterMetric.height.toFixed(2));
+              }
+              if (inputMetric.top > headerGeometry.utility.top + 6
+                || outputMetric.top > headerGeometry.utility.top + 6) {
+                headerGeometryFailures.push('header-side-bay:top-heavy');
+              }
+              if (inputMetric.bottom < headerGeometry.preset.bottom - 4
+                || outputMetric.bottom < headerGeometry.preset.bottom - 4) {
+                headerGeometryFailures.push('header-side-bay:unused-bottom-space');
+              }
+              if (inputMetric.right > headerGeometry.utility.left - 5) {
+                headerGeometryFailures.push('input-rail-clearance=' + (headerGeometry.utility.left - inputMetric.right).toFixed(2));
+              }
+              if (outputMetric.left < headerGeometry.utility.right + 5) {
+                headerGeometryFailures.push('output-rail-clearance=' + (outputMetric.left - headerGeometry.utility.right).toFixed(2));
+              }
+            }
+          }
+        }
+      }
+      const designPostReverb = designPortModules.find((module) => module.getAttribute('data-module') === 'reverb');
+      const designPostReverbParamHits = Array.from(designPostReverb?.querySelectorAll('.control-hit[data-param-id]') || []);
+      const designPostReverbParamIds = designPostReverbParamHits
+        .map((control) => control.getAttribute('data-param-id') || '')
+        .filter(Boolean);
+      const designPostReverbFootActionLabels = Array.from(designPostReverb?.querySelectorAll('.foot-action-label') || [])
+        .map((label) => (label.textContent || '').replace(/\s+/g, ' ').trim());
+      const designPostReverbFixedParamIds = [
+        'reverbVoice',
+        'reverbPreDelayMs',
+        'reverbDecaySec',
+        'reverbMix',
+        'reverbLowCutHz',
+        'reverbTone',
+        'reverbShimmer',
+        'reverbEnabled',
+      ];
+      const designPostReverbFixedReady = Boolean(designPostReverb
+        && designPostReverbFixedParamIds.every((paramId) => designPostReverbParamIds.includes(paramId))
+        && designPostReverbParamIds.every((paramId) => designPostReverbFixedParamIds.includes(paramId))
+        && designPostReverbFootActionLabels.includes('ON / OFF'));
       const designModuleBoxes = Object.fromEntries(designPortModules.map((module) => [
         module.getAttribute('data-module') || '',
         toDesignArtboardBox(module),
@@ -2447,11 +3198,11 @@ async function qualityChecks(cdp, scenarioName) {
           });
       });
       const rackExpectedBodyIdsBySection = {
-        pre: ['stompbox-body-blue', 'stompbox-body-olive', 'stompbox-body-dark-wide', 'stompbox-body-red', 'stompbox-body-stone'],
+        pre: ['stompbox-body-blue-wide', 'stompbox-body-olive', 'stompbox-body-dark-wide', 'stompbox-body-red-wide', 'stompbox-body-stone'],
         amp: ['amp-head-body'],
-        cab: ['cabinet-body', 'mic-panel-body'],
+        cab: ['cab-room-integrated-body'],
         eq: ['rack-unit-body-deep'],
-        post: ['wide-pedal-body-copper-deep', 'wide-pedal-body-dark-deep', 'wide-pedal-body-navy-deep'],
+        post: ['wide-pedal-body-copper-tall', 'wide-pedal-body-dark-tall', 'wide-pedal-body-navy-tall'],
       };
       const rackExpectedBodyIds = rackExpectedBodyIdsBySection[activeRackSection] || [];
       const rackDesignImages = Array.from(designPortHost?.querySelectorAll('.screen-shell [data-rack-design-asset-kind]') || [])
@@ -2525,7 +3276,18 @@ async function qualityChecks(cdp, scenarioName) {
         });
       const rackMainForbiddenVisibleTerms = Array.from(designPortHost?.querySelectorAll('.screen-shell') || [])
         .filter((el) => visibleBox(el))
-        .flatMap((el) => ((el.textContent || '').match(/\b(?:Special FX|Glitch|Doubler)\b/g) || []));
+        .flatMap((el) => [
+          ...((el.textContent || '').match(/\b(?:Special FX|Glitch|Doubler)\b/g) || []),
+          ...Array.from(el.querySelectorAll(retiredLaserSelector))
+            .filter(isRetiredLaserNode)
+            .map((node) => node.getAttribute('data-param')
+              || node.getAttribute('data-param-id')
+              || node.getAttribute('data-skin')
+              || node.getAttribute('data-module')
+              || node.getAttribute('data-section')
+              || node.value
+              || node.tagName),
+        ]);
       return {
         scenario: ${JSON.stringify(scenarioName)},
         productVisible: Boolean(product),
@@ -2587,6 +3349,11 @@ async function qualityChecks(cdp, scenarioName) {
         mixerReadable,
         mixerBackVisible,
         mixerViewportFill,
+        mixerSingleStage,
+        mixerFocusedStage,
+        mixerStageOptions,
+        mixerControlGroups,
+        mixerReverbGroupsReady,
         hasCabRoom: Boolean(document.querySelector('.nam-cab-room')),
         hasCabRail: Boolean(cabRail),
         cabRailCompactLayout,
@@ -2758,6 +3525,21 @@ async function qualityChecks(cdp, scenarioName) {
           fontFloorFailures: rackFontFloorFailures,
           forbiddenVisibleTerms: rackMainForbiddenVisibleTerms,
           deviceCount: rackSceneDevices.length,
+          reverbFixedControls: {
+            ready: designPostReverbFixedReady,
+            paramIds: designPostReverbParamIds,
+            footActionLabels: designPostReverbFootActionLabels,
+          },
+          postKnobLabelGapFailures,
+          postVisibleControlContainmentFailures,
+          postPrimaryHardware,
+          postPrimaryHardwareFailures,
+          pedalHardwareMetrics,
+          pedalHardwareConsistencyFailures,
+          eqFaderParamIds,
+          eqLaneAlignmentFailures,
+          headerGeometry,
+          headerGeometryFailures,
           suiteRect: rackSuiteRect ? {
             left: Number(rackSuiteRect.left.toFixed(1)),
             top: Number(rackSuiteRect.top.toFixed(1)),
@@ -3002,11 +3784,30 @@ async function main() {
           if (scenario.name === "rack-neural-size-menu") {
             await openFooterSizeMenu(cdp);
           }
+          if (scenario.name === "mixer") {
+            await selectMixerStage(cdp, "reverb");
+          }
           if (scenario.name.startsWith("rack-neural-")) {
             await waitForDesignPort(cdp);
           }
           item.checks = await qualityChecks(cdp, checkName);
           await screenshot(cdp, filePath);
+          if (checkName === "rack-neural-pre" && viewport.name === "1920x1080") {
+            item.compressorHpfInteraction = await runCompressorHpfProbe(cdp, args.outDir, viewport.name);
+            if (item.compressorHpfInteraction?.pass !== true) {
+              throw new Error(`Compressor HPF interaction failed: ${JSON.stringify(item.compressorHpfInteraction)}`);
+            }
+            item.distortionModeInteraction = await runDistortionModeProbe(cdp, args.outDir, viewport.name);
+            if (item.distortionModeInteraction?.pass !== true) {
+              throw new Error(`Distortion mode interaction failed: ${JSON.stringify(item.distortionModeInteraction)}`);
+            }
+          }
+          if (scenario.name === "rack-neural-amp") {
+            item.instrumentProfileInteraction = await runInstrumentProfileProbe(cdp, args.outDir, viewport.name);
+            if (item.instrumentProfileInteraction?.pass !== true) {
+              throw new Error(`Instrument profile interaction failed: ${JSON.stringify(item.instrumentProfileInteraction)}`);
+            }
+          }
           if (scenario.name.startsWith("source-")) {
             const sourceScenarioKey = scenario.checkName || scenario.name;
             const expectedSourceModes = {
@@ -3119,6 +3920,7 @@ async function main() {
               ))
             );
             const sourceFiltersReady = !["Special FX", "Glitch", "Doubler"].some((label) => (flow.filters || []).includes(label))
+              && (flow.forbiddenText || []).length === 0
               && (sourceScenarioKey !== "source-pedal" || !["A1", "A2"].some((label) => (flow.filters || []).includes(label)));
             const sourceDetailReady = flow.selectedAvailable !== true
               ? flow.emptyStateVisible === true
@@ -3186,7 +3988,7 @@ async function main() {
               && rackMain.frameWindowFill === true
               && rackMain.shellViewportFill === true
               && rackMain.shellAspectSafe === true
-              && (tunerStageOverlay || rackMain.deviceCount === (rackMain.section === "post" ? 3 : rackMain.section === "pre" ? 5 : rackMain.section === "cab" ? 2 : 1))
+              && (tunerStageOverlay || rackMain.deviceCount === (rackMain.section === "post" ? 3 : rackMain.section === "pre" ? 5 : 1))
               && item.checks.rootScrollbar === false
               && item.checks.forbiddenNormalWords.length === 0
               && (item.checks.activeForbiddenTerms || []).length === 0
@@ -3202,7 +4004,20 @@ async function main() {
               && (rackMain.subjectContainmentFailures || []).length === 0
               && (rackMain.textOverflowFailures || []).length === 0
               && (rackMain.fontFloorFailures || []).length === 0
+              && (rackMain.headerGeometryFailures || []).length === 0
+              && (rackMain.pedalHardwareConsistencyFailures || []).length === 0
               && rackMain.oldPbrSceneImageCount === 0
+              && (rackMain.section !== "post" || rackMain.reverbFixedControls?.ready === true)
+              && (rackMain.section !== "post" || (
+                (rackMain.postKnobLabelGapFailures || []).length === 0
+                && (rackMain.postVisibleControlContainmentFailures || []).length === 0
+                && (rackMain.postPrimaryHardwareFailures || []).length === 0
+              ))
+              && (rackMain.section !== "eq" || (
+                (rackMain.eqFaderParamIds || []).length === 10
+                && rackMain.eqFaderParamIds.includes("eqLevelDb")
+                && (rackMain.eqLaneAlignmentFailures || []).length === 0
+              ))
               && (scenario.name !== "rack-tuner" || (
                 item.checks.tunerButtonEnabled === true
                 && item.checks.hasTunerPanel === true
@@ -3212,7 +4027,12 @@ async function main() {
                 item.checks.hasCalibrationDrawer === true
                 && item.checks.calibration?.ready === true
               ))
-              && (!expectedRackSize || (rackMain.size === expectedRackSize && String(rackMain.sizeLabel || '').includes(`${expectedRackSize}%`)))
+              // The footer now presents semantic rack-size names (for example
+              // "Small") while the stored/runtime value remains numeric.  The
+              // numeric readback is the authoritative contract for a requested
+              // harness size; requiring the old "100%" label made every valid
+              // responsive capture fail after the copy was improved.
+              && (!expectedRackSize || rackMain.size === expectedRackSize)
               && (scenario.name !== "rack-neural-size-menu" || (
                 item.checks.footerSizeMenu?.triggerVisible === true
                 && item.checks.footerSizeMenu?.popoverVisible === true
@@ -3278,6 +4098,7 @@ async function main() {
                 && item.checks.mixerBackVisible === true
                 && item.checks.mixerViewportFill === true
               ))
+              && (scenario.name !== "mixer" || item.checks.mixerReverbGroupsReady === true)
               && (scenario.name !== "rack-sort-open" || (
                 item.checks.railSortMenuOpen === true
                 && item.checks.railSortOptionLabels?.includes('Newest')

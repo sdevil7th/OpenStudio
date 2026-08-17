@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "AutomationList.h"
+#include "BuiltInParameterSupport.h"
 #include "BuiltInEffects.h"
 #include "ARAHostController.h"
 #include <map>
@@ -32,7 +33,10 @@ enum class ProcessingPrecisionMode
     Hybrid64
 };
 
-class TrackProcessor  : public juce::AudioProcessor
+class TrackMIDIOutputDispatcher;
+
+class TrackProcessor  : public juce::AudioProcessor,
+                        private juce::Timer
 {
 public:
     struct ARAProcessDebugInfo
@@ -61,6 +65,8 @@ public:
         juce::String destTrackId;
         float level = 0.0f;
         float pan = 0.0f;
+        float leftGain = 0.0f;
+        float rightGain = 0.0f;
         bool enabled = false;
         bool preFader = false;
         bool phaseInvert = false;
@@ -130,11 +136,26 @@ public:
     void resetClipLatch() { clipLatched.store(false, std::memory_order_relaxed); }
     
     // Recording & Monitoring (Phase 1)
-    void setRecordArmed(bool armed) { if (!isRecordSafe) isRecordArmed = armed; }
-    bool getRecordArmed() const { return isRecordArmed; }
+    void setRecordArmed(bool armed)
+    {
+        if (! isRecordSafe.load(std::memory_order_acquire))
+            isRecordArmed.store(armed, std::memory_order_release);
+    }
+    bool getRecordArmed() const
+    {
+        return isRecordArmed.load(std::memory_order_acquire);
+    }
 
-    void setRecordSafe(bool safe) { isRecordSafe = safe; if (safe) isRecordArmed = false; }
-    bool getRecordSafe() const { return isRecordSafe; }
+    void setRecordSafe(bool safe)
+    {
+        isRecordSafe.store(safe, std::memory_order_release);
+        if (safe)
+            isRecordArmed.store(false, std::memory_order_release);
+    }
+    bool getRecordSafe() const
+    {
+        return isRecordSafe.load(std::memory_order_acquire);
+    }
     
     void setInputMonitoring(bool enabled) { isInputMonitoringEnabled.store(enabled, std::memory_order_release); }
     bool getInputMonitoring() const { return isInputMonitoringEnabled.load(std::memory_order_acquire); }
@@ -169,6 +190,10 @@ public:
     std::shared_ptr<const std::map<int, bool>> getTrackFXBypassSnapshot() const;
     std::shared_ptr<const std::map<int, bool>> getInputFXPrecisionOverrideSnapshot() const;
     std::shared_ptr<const std::map<int, bool>> getTrackFXPrecisionOverrideSnapshot() const;
+    // Called from the control thread when hosted latency may have changed.
+    // Publishes resized immutable delay storage without touching callback-owned
+    // ring positions.
+    void refreshHostBypassDelayStorage();
     
     // Sidechain Routing (Phase 4.4)
     void setSidechainSource(int pluginIndex, const juce::String& sourceTrackId);
@@ -209,8 +234,15 @@ public:
     float getPan() const { return trackPan.load(std::memory_order_relaxed); }
 
     // Pan Law
-    void setPanLaw(PanLaw law) { panLaw = law; recomputePanGains(); }
-    PanLaw getPanLaw() const { return panLaw; }
+    void setPanLaw(PanLaw law)
+    {
+        panLaw.store(law, std::memory_order_release);
+        recomputePanGains();
+    }
+    PanLaw getPanLaw() const
+    {
+        return panLaw.load(std::memory_order_acquire);
+    }
     
     // Mute/Solo
     void setMute(bool shouldMute);
@@ -232,19 +264,23 @@ public:
     void setMIDIInputDevice(const juce::String& device) { midiInputDevice = device; }
     juce::String getMIDIInputDevice() const { return midiInputDevice; }
     
-    void setMIDIChannel(int channel) { midiChannel = juce::jlimit(0, 16, channel); } // 0 = all, 1-16 = specific
-    int getMIDIChannel() const { return midiChannel; }
+    void setMIDIChannel(int channel)
+    {
+        midiChannel.store(
+            juce::jlimit(0, 16, channel),
+            std::memory_order_release);
+    } // 0 = all, 1-16 = specific
+    int getMIDIChannel() const
+    {
+        return midiChannel.load(std::memory_order_acquire);
+    }
     
     // Instrument plugin (Phase 2)
     void setInstrument(std::unique_ptr<juce::AudioPluginInstance> plugin, double callerSampleRate = 0.0, int callerBlockSize = 0);
     void clearInstrument();
     juce::AudioPluginInstance* getInstrument() const { return instrumentPlugin.get(); }
     std::shared_ptr<juce::AudioPluginInstance> getInstrumentShared() const { return instrumentPlugin; }
-    bool isUsingFallbackInstrument() const
-    {
-        return trackType.load(std::memory_order_acquire) == TrackType::Instrument
-            && std::atomic_load_explicit(&realtimeInstrumentSnapshot, std::memory_order_acquire) == nullptr;
-    }
+    bool isUsingFallbackInstrument() const;
     bool loadFallbackSamplerSample(const juce::String& filePath, int rootNote);
     void clearFallbackSamplerSample();
     bool hasFallbackSamplerSample() const;
@@ -300,15 +336,35 @@ public:
     void invalidatePluginAutomationCache() noexcept;
 
     // DC Offset Removal
-    void setDCOffsetRemoval(bool enabled) { dcOffsetRemoval = enabled; }
-    bool getDCOffsetRemoval() const { return dcOffsetRemoval; }
+    void setDCOffsetRemoval(bool enabled)
+    {
+        dcOffsetRemoval.store(enabled, std::memory_order_release);
+    }
+    bool getDCOffsetRemoval() const
+    {
+        return dcOffsetRemoval.load(std::memory_order_acquire);
+    }
 
     // Channel Strip EQ — always-available inline parametric EQ (not a plugin slot)
-    void setChannelStripEQEnabled(bool enabled) { channelStripEQEnabled = enabled; }
-    bool getChannelStripEQEnabled() const { return channelStripEQEnabled; }
+    void setChannelStripEQEnabled(bool enabled)
+    {
+        channelStripEQEnabled.store(enabled, std::memory_order_release);
+        channelStripEQ.setPowerEnabled(enabled);
+    }
+    bool getChannelStripEQEnabled() const
+    {
+        return channelStripEQEnabled.load(std::memory_order_acquire);
+    }
     S13EQ* getChannelStripEQ() { return &channelStripEQ; }
     void setChannelStripEQParam(int paramIndex, float value);
     float getChannelStripEQParam(int paramIndex) const;
+
+    // Stable bridge indices used by the six-control Channel Strip EQ surface.
+    // These are deliberately independent of AudioProcessor's parameter list so
+    // the inline strip cannot silently become a no-op when S13EQ is hosted
+    // directly rather than as a plug-in instance.
+    static constexpr int channelStripEQBandCount = 6;
+    static constexpr int channelStripEQValuesPerBand = 4;
 
     // Phase Invert (polarity flip)
     void setPhaseInvert(bool invert) { phaseInverted.store(invert); }
@@ -337,7 +393,8 @@ public:
 
     // Per-track MIDI Output
     void setMIDIOutputDevice(const juce::String& deviceName);
-    juce::String getMIDIOutputDeviceName() const { return midiOutputDeviceName; }
+    juce::String getMIDIOutputDeviceName() const;
+    bool hasMIDIOutputDevice() const noexcept;
     void sendMIDIToOutput(const juce::MidiBuffer& buffer, double sampleRate, bool resetMessagesOnly = false);
 
     // Automation
@@ -385,7 +442,12 @@ public:
     bool initializeARA(int fxIndex, double sampleRate, int blockSize,
                        std::function<void(bool, bool, const juce::String&)> onComplete = nullptr);
     // Check if this track has an active ARA session
-    bool hasActiveARA() const { return araController != nullptr && araController->isActive(); }
+    bool hasActiveARA() const
+    {
+        return araFXIndexForRealtime.load(
+                   std::memory_order_acquire)
+            >= 0;
+    }
     // Get the ARA controller (for adding sources, etc.)
     ARAHostController* getARAController() { return araController.get(); }
     int getARAFXIndex() const { return araFXIndex; }
@@ -405,6 +467,13 @@ public:
     void shutdownARA();
 
 private:
+    // Native deterministic regressions exercise the realtime tail-service
+    // state machine, including its control-thread timer handoff.
+    friend class AudioEngine;
+    friend class NAMDelayRegression;
+
+    struct FallbackSamplerSample;
+
     struct PluginAutomationRoute
     {
         juce::String parameterId;
@@ -415,6 +484,8 @@ private:
         float builtInMinimum = 0.0f;
         float builtInMaximum = 1.0f;
         bool builtInDiscrete = false;
+        OpenStudioBuiltInParameterCurve builtInCurve =
+            OpenStudioBuiltInParameterCurve::linear;
         std::shared_ptr<AutomationList> automation = std::make_shared<AutomationList>();
         std::atomic<float> lastAppliedValue { std::numeric_limits<float>::quiet_NaN() };
     };
@@ -439,16 +510,40 @@ private:
     };
 
     void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&);
+    void timerCallback() override;
+    void refreshRealtimeFXTailBudgetOnControlThread();
+    void resetExpiredRealtimeFXTailOnControlThread();
     void publishRealtimeStateSnapshots();
+    void reclaimRetiredRealtimeGraphSnapshots();
+    void reclaimRetiredRealtimeAuxOwners();
+    void publishFallbackSamplerSample(
+        std::shared_ptr<const FallbackSamplerSample> sample);
+    void publishScheduledMIDIClips(
+        std::shared_ptr<const std::vector<ScheduledMIDIClip>> snapshot);
+    void reclaimRetiredScheduledMIDISnapshots();
+    void resetFXContinuityStates() noexcept;
+    void publishPluginAutomationRoutes(
+        std::shared_ptr<const PluginAutomationRouteSnapshot> snapshot);
+    void publishMIDICCAutomationRoutes(
+        std::shared_ptr<const MIDICCAutomationRouteSnapshot> snapshot);
     std::shared_ptr<PluginAutomationRoute> getOrCreatePluginAutomationRoute(const juce::String& parameterId);
     std::shared_ptr<PluginAutomationRoute> findPluginAutomationRoute(const juce::String& parameterId) const;
     std::optional<PluginAutomationParameterRef> parsePluginAutomationParameterId(const juce::String& parameterId) const;
-    void applyPluginAutomationForProcessor(juce::AudioProcessor* proc, bool isInputFX, int fxIndex, double blockTimeSeconds);
+    void applyPluginAutomationForProcessor(
+        juce::AudioProcessor* proc,
+        bool isInputFX,
+        int fxIndex,
+        double blockTimeSeconds,
+        const PluginAutomationRouteSnapshot* routes);
     std::shared_ptr<MIDICCAutomationRoute> getOrCreateMIDICCAutomationRoute(const juce::String& parameterId);
     std::shared_ptr<MIDICCAutomationRoute> findMIDICCAutomationRoute(const juce::String& parameterId) const;
     static std::optional<int> parseMIDICCAutomationParameterId(const juce::String& parameterId);
-    void applyMIDIAutomationToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
-                                     int numSamples, double sampleRate);
+    void applyMIDIAutomationToBuffer(
+        juce::MidiBuffer& destination,
+        double blockTimeSeconds,
+        int numSamples,
+        double sampleRate,
+        const MIDICCAutomationRouteSnapshot* ccRoutes);
     bool shouldApplyAutomation(const AutomationList& automation) const;
 
     // Current peak level (was named currentRMS but now holds peak — kept as-is
@@ -467,8 +562,8 @@ private:
     std::atomic<bool> clipLatched { false };
     
     // Recording state (Phase 1)
-    bool isRecordArmed = false;
-    bool isRecordSafe = false;  // Phase 3.3 — prevents arming
+    std::atomic<bool> isRecordArmed { false };
+    std::atomic<bool> isRecordSafe { false };  // Phase 3.3 — prevents arming
     std::atomic<bool> isInputMonitoringEnabled { false };
     std::atomic<int> inputStartChannel { 0 };    // Hardware input start (0-based)
     std::atomic<int> inputChannelCount { 2 };     // Stereo by default
@@ -483,6 +578,8 @@ private:
     using SidechainSourceSnapshot = std::map<int, juce::String>;
     using BypassSnapshot = std::map<int, bool>;
     using PrecisionOverrideSnapshot = std::map<int, bool>;
+    static constexpr size_t maxRealtimeFXContinuitySlots = 64;
+    static constexpr int hostBypassDryChannels = 2;
 
     std::vector<ProcessorPtr> inputFXPlugins;  // Pre-recording FX
     std::vector<ProcessorPtr> trackFXPlugins;  // Playback FX
@@ -498,6 +595,42 @@ private:
         bool phaseInvert = false;
     };
     using SendSnapshot = std::vector<SendConfig>;
+    struct FXBypassDelayStorage
+    {
+        const juce::AudioProcessor* processor = nullptr;
+        juce::AudioBuffer<float> ring;
+        // AudioProcessor::getLatencySamples() reads JUCE's non-atomic latency
+        // member. Publish the control-thread value explicitly so a NAM model
+        // load cannot race this realtime dry-history path.
+        std::atomic<int> publishedLatency { 0 };
+        int writePosition = 0;
+        int currentLatency = 0;
+        int targetLatency = 0;
+        int latencyRampRemaining = 0;
+        int latencyRampLength = 0;
+        bool latencyInitialised = false;
+    };
+    using FXBypassDelayStoragePtr =
+        std::shared_ptr<FXBypassDelayStorage>;
+    struct RealtimeGraphSnapshot
+    {
+        uint64 generation = 0;
+        ProcessorSnapshot inputFX;
+        ProcessorSnapshot trackFX;
+        BypassSnapshot inputFXBypass;
+        BypassSnapshot trackFXBypass;
+        PrecisionOverrideSnapshot inputFXPrecisionOverrides;
+        PrecisionOverrideSnapshot trackFXPrecisionOverrides;
+        ProcessorPtr instrument;
+        SidechainSourceSnapshot sidechainSources;
+        SendSnapshot sends;
+        std::array<FXBypassDelayStoragePtr,
+                   maxRealtimeFXContinuitySlots>
+            inputFXBypassDelay;
+        std::array<FXBypassDelayStoragePtr,
+                   maxRealtimeFXContinuitySlots>
+            trackFXBypassDelay;
+    };
     std::vector<SendConfig> sends;
     std::map<int, bool> inputFXForceFloatOverrides;
     std::map<int, bool> trackFXForceFloatOverrides;
@@ -509,6 +642,35 @@ private:
     // than our 2-channel track buffer (avoids heap allocation on audio thread)
     juce::AudioBuffer<float> fxProcessBuffer;
     juce::AudioBuffer<double> fxProcessBufferDouble;
+    struct FXContinuityState
+    {
+        const juce::AudioProcessor* processor = nullptr;
+        uint64 graphGeneration = 0;
+        std::array<float, 2> lastOutput { 0.0f, 0.0f };
+        bool valid = false;
+        bool skippedLastBlock = false;
+        float hostBypassWetMix = 1.0f;
+        bool targetBypassed = false;
+        std::array<float, 2> endpointCorrection {
+            0.0f, 0.0f
+        };
+        std::array<float, 2> endpointCorrectionStep {
+            0.0f, 0.0f
+        };
+        int endpointCorrectionSamplesRemaining = 0;
+    };
+    std::array<FXContinuityState, maxRealtimeFXContinuitySlots>
+        inputFXContinuity {};
+    std::array<FXContinuityState, maxRealtimeFXContinuitySlots>
+        trackFXContinuity {};
+    FXContinuityState instrumentContinuity;
+    // Every loaded slot feeds its latency-aligned dry history continuously so
+    // an eventual bypass transition starts from valid delayed audio. This
+    // buffer is separate from fxProcessBuffer because expanded/sidechain
+    // processing overwrites that buffer before the dry/wet crossfade.
+    juce::AudioBuffer<float> fxBypassDryBuffer;
+    float fxBypassRampStep = 1.0f / 882.0f;
+    int fxContinuityRampSamples = 353;
 
     // Sidechain Routing (Phase 4.4)
     // Maps trackFX plugin index -> source track ID that provides sidechain audio.
@@ -524,7 +686,7 @@ private:
     std::atomic<float> trackPan { 0.0f };        // -1.0 (L) to +1.0 (R)
 
     // Pan Law
-    PanLaw panLaw { PanLaw::Linear };
+    std::atomic<PanLaw> panLaw { PanLaw::Linear };
 
     // Cached pan gains — pre-computed in setPan()/setVolume(), avoids trig on audio thread
     std::atomic<float> cachedPanL { 1.0f };
@@ -534,7 +696,7 @@ private:
     // Track Type & MIDI (Phase 2)
     std::atomic<TrackType> trackType { TrackType::Audio };
     juce::String midiInputDevice;
-    int midiChannel = 0;  // 0 = all channels, 1-16 = specific channel
+    std::atomic<int> midiChannel { 0 };  // 0 = all channels, 1-16 = specific channel
     std::shared_ptr<juce::AudioPluginInstance> instrumentPlugin;
     juce::MidiBuffer midiBuffer;  // For MIDI event storage
 
@@ -558,16 +720,39 @@ private:
     juce::AudioBuffer<float> automationGainBuffer;
     juce::CriticalSection pluginAutomationRouteLock;
     std::shared_ptr<const PluginAutomationRouteSnapshot> pluginAutomationSnapshot;
+    std::atomic<const PluginAutomationRouteSnapshot*>
+        pluginAutomationSnapshotForAudio { nullptr };
+    // These flags are published after their corresponding immutable snapshot.
+    // Empty tracks can therefore avoid MSVC's process-wide atomic<shared_ptr>
+    // lock in the callback; an observed true flag guarantees a visible snapshot.
+    std::atomic<bool> hasPublishedPluginAutomationRoutes { false };
     juce::CriticalSection midiAutomationRouteLock;
     std::shared_ptr<const MIDICCAutomationRouteSnapshot> midiCCAutomationSnapshot;
+    std::atomic<const MIDICCAutomationRouteSnapshot*>
+        midiCCAutomationSnapshotForAudio { nullptr };
+    std::atomic<bool> hasPublishedMIDICCAutomationRoutes { false };
+    // Automation routes and the fallback sampler are immutable publications.
+    // A single callback-reader epoch lets their realtime paths load raw
+    // pointers without entering MSVC's process-wide atomic<shared_ptr> lock.
+    mutable std::atomic<std::uint32_t>
+        realtimeAuxAudioReaders { 0 };
+    juce::CriticalSection realtimeAuxPublicationLock;
+    juce::CriticalSection realtimeAuxRetirementLock;
+    std::vector<std::shared_ptr<const void>>
+        retiredRealtimeAuxOwners;
 
     // Plugin Delay Compensation (PDC)
     juce::dsp::DelayLine<float> pdcDelayLine { 96000 };  // max 2 seconds at 48kHz
     std::atomic<int> pdcDelaySamples { 0 };
     std::atomic<bool> pdcDelayDirty { false };
+    int pdcCurrentDelaySamples = 0;
+    int pdcTargetDelaySamples = 0;
+    int pdcPendingDelaySamples = 0;
+    int pdcTransitionSamplesRemaining = 0;
+    int pdcTransitionSamplesTotal = 1;
 
     // DC Offset Removal
-    bool dcOffsetRemoval { false };
+    std::atomic<bool> dcOffsetRemoval { false };
     float dcFilterStateL { 0.0f };
     float dcFilterStateR { 0.0f };
     float dcPrevInputL { 0.0f };
@@ -575,7 +760,7 @@ private:
 
     // Channel Strip EQ
     S13EQ channelStripEQ;
-    bool channelStripEQEnabled { false };
+    std::atomic<bool> channelStripEQEnabled { false };
 
     // Phase Invert
     std::atomic<bool> phaseInverted { false };
@@ -600,9 +785,11 @@ private:
     juce::AudioBuffer<float> preFaderBuffer;
 
     // Per-track MIDI Output
-    juce::String midiOutputDeviceName;
-    std::unique_ptr<juce::MidiOutput> midiOutputDevice;
-    juce::MidiBuffer midiOutputResetBuffer;
+    // The dispatcher object itself is immutable for the TrackProcessor
+    // lifetime. The callback only writes to its pre-allocated SPSC queue;
+    // device ownership and operating-system MIDI calls stay on control/sender
+    // threads.
+    std::unique_ptr<TrackMIDIOutputDispatcher> midiOutputDispatcher;
     juce::AudioBuffer<float> realtimeFallbackBuffer;
     std::atomic<int> realtimeFallbackReuseCount { 0 };
     std::atomic<int> pluginBusySkipCount { 0 };
@@ -621,35 +808,54 @@ private:
     std::atomic<int> lastBuiltMidiEventCount { 0 };
     std::atomic<int> maxBuiltMidiEventCount { 0 };
     std::atomic<bool> scheduledMIDIChaseRequested { true };
+    // Control threads publish only a request. The callback owns
+    // activeMIDINotes and emits the actual reset messages in-order.
+    std::atomic<bool> allNotesOffRequested { false };
 
     std::shared_ptr<const std::vector<ScheduledMIDIClip>> scheduledMIDIClips {
         std::make_shared<const std::vector<ScheduledMIDIClip>>()
     };
-    std::shared_ptr<const ProcessorSnapshot> realtimeInputFXSnapshot {
-        std::make_shared<const ProcessorSnapshot>()
+    std::atomic<const std::vector<ScheduledMIDIClip>*>
+        scheduledMIDIClipsForAudio { nullptr };
+    std::atomic<bool> hasScheduledMIDIClipsForAudio { false };
+    mutable std::atomic<std::uint32_t>
+        scheduledMIDIAudioReaders { 0 };
+    juce::CriticalSection scheduledMIDIPublicationLock;
+    juce::CriticalSection scheduledMIDIRetirementLock;
+    std::vector<std::shared_ptr<const std::vector<ScheduledMIDIClip>>>
+        retiredScheduledMIDISnapshots;
+    // One immutable publication replaces nine independent atomic<shared_ptr>
+    // loads on every track callback. On MSVC those free-function atomics share
+    // a process-wide spin lock, so consolidating them materially reduces
+    // contention at 16/32-sample buffers.
+    std::shared_ptr<const RealtimeGraphSnapshot> realtimeGraphSnapshot {
+        std::make_shared<const RealtimeGraphSnapshot>()
     };
-    std::shared_ptr<const ProcessorSnapshot> realtimeTrackFXSnapshot {
-        std::make_shared<const ProcessorSnapshot>()
-    };
-    std::shared_ptr<const BypassSnapshot> realtimeInputFXBypassSnapshot {
-        std::make_shared<const BypassSnapshot>()
-    };
-    std::shared_ptr<const BypassSnapshot> realtimeTrackFXBypassSnapshot {
-        std::make_shared<const BypassSnapshot>()
-    };
-    std::shared_ptr<const PrecisionOverrideSnapshot> realtimeInputFXPrecisionOverrideSnapshot {
-        std::make_shared<const PrecisionOverrideSnapshot>()
-    };
-    std::shared_ptr<const PrecisionOverrideSnapshot> realtimeTrackFXPrecisionOverrideSnapshot {
-        std::make_shared<const PrecisionOverrideSnapshot>()
-    };
-    std::shared_ptr<juce::AudioProcessor> realtimeInstrumentSnapshot;
-    std::shared_ptr<const SidechainSourceSnapshot> realtimeSidechainSnapshot {
-        std::make_shared<const SidechainSourceSnapshot>()
-    };
-    std::shared_ptr<const SendSnapshot> realtimeSendSnapshot {
-        std::make_shared<const SendSnapshot>()
-    };
+    std::atomic<const RealtimeGraphSnapshot*>
+        realtimeGraphSnapshotForAudio { nullptr };
+    mutable std::atomic<std::uint32_t>
+        realtimeGraphAudioReaders { 0 };
+    juce::CriticalSection realtimeGraphPublicationLock;
+    juce::CriticalSection realtimeGraphRetirementLock;
+    std::vector<std::shared_ptr<const RealtimeGraphSnapshot>>
+        retiredRealtimeGraphSnapshots;
+    std::atomic<uint64> realtimeGraphGeneration { 0 };
+    // Audio tracks that lose their live/playback input still need bounded
+    // zero-input processing so delays and reverbs drain instead of freezing in
+    // memory. The callback owns the integer countdowns below; only the small
+    // publication/request fields are shared with the control-thread timer.
+    std::atomic<bool> realtimeFXTailActive { false };
+    std::atomic<bool> realtimeFXTailResetPending { false };
+    std::atomic<uint64> realtimeFXTailActivityGeneration { 0 };
+    std::atomic<uint64> realtimeFXTailResetGeneration { 0 };
+    std::atomic<int> realtimeFXTailSampleRateHz { 44100 };
+    std::atomic<int> realtimeFXTailBudgetSamples { 1367100 }; // 31 s at 44.1 kHz until prepared
+    std::atomic<int> realtimeFXTailMinimumDrainSamples { 1323000 }; // 30 s at 44.1 kHz
+    int realtimeFXTailHardSamplesRemaining = 0;
+    int realtimeFXTailMinimumSamplesRemaining = 0;
+    int realtimeFXTailQuietSamples = 0;
+    int realtimeFXTailLastPublishedBudgetSamples = 0;
+    bool realtimeFXPreviousBlockHadInput = false;
     std::array<std::array<bool, 128>, 16> activeMIDINotes {};
     std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteActive {};
     std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteReleasing {};
@@ -691,6 +897,8 @@ private:
         juce::String filePath;
     };
     std::shared_ptr<const FallbackSamplerSample> fallbackSamplerSample;
+    std::atomic<const FallbackSamplerSample*>
+        fallbackSamplerSampleForAudio { nullptr };
     ProcessingPrecisionMode processingPrecisionMode { ProcessingPrecisionMode::Float32 };
 
     void markActiveMIDINoteState(const juce::MidiMessage& message);
@@ -701,20 +909,35 @@ private:
                                   const juce::MidiBuffer& midiMessages,
                                   int numSamples,
                                   double sampleRate);
-    void appendScheduledMIDIChaseToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
-                                          double sampleRate) const;
-    void appendScheduledMIDIToBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
-                                     int numSamples, double sampleRate) const;
+    void appendScheduledMIDIChaseToBuffer(
+        juce::MidiBuffer& destination,
+        const std::vector<ScheduledMIDIClip>* clips,
+        double blockTimeSeconds,
+        double sampleRate) const;
+    void appendScheduledMIDIToBuffer(
+        juce::MidiBuffer& destination,
+        const std::vector<ScheduledMIDIClip>* clips,
+        double blockTimeSeconds,
+        int numSamples,
+        double sampleRate) const;
     void appendQueuedMIDIToBuffer(juce::MidiBuffer& destination, int numSamples);
     bool hasQueuedMIDI() const;
     bool hasScheduledMIDIClips() const;
-    bool hasScheduledMIDIInBlock(double blockTimeSeconds, int numSamples, double sampleRate) const;
+    bool hasScheduledMIDIInBlock(
+        double blockTimeSeconds,
+        int numSamples,
+        double sampleRate,
+        const std::vector<ScheduledMIDIClip>* clips) const;
 
     // ARA Plugin Hosting (Phase 9)
     mutable juce::CriticalSection araStatusLock;
     std::unique_ptr<ARAHostController> araController;
     ARAHostController::PlaybackRequestHandlers araPlaybackRequestHandlers;
     int araFXIndex = -1;  // Which FX slot has ARA active (-1 = none)
+    // The callback must not inspect the control-owned unique_ptr merely to
+    // discover that ARA is absent. Publish the active slot only after ARA
+    // initialization completes, and withdraw it before a quiesced shutdown.
+    std::atomic<int> araFXIndexForRealtime { -1 };
     std::atomic<int> araLastAttemptFXIndex { -1 };
     std::atomic<bool> araLastAttemptComplete { false };
     std::atomic<bool> araLastAttemptWasARAPlugin { false };

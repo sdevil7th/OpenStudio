@@ -17,6 +17,53 @@ export const isMac: boolean =
   (/Mac|iPhone|iPad|iPod/.test(navigator.platform) ||
     /Mac/.test(navigator.userAgent));
 
+export type ShortcutPlatform = "macos" | "other";
+
+export interface ShortcutKeyEventLike {
+  key?: string;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  metaKey?: boolean;
+}
+
+/**
+ * Convert a physical key event to the canonical shortcut spelling used by
+ * actionRegistry. macOS Option is intentionally not aliased to canonical Alt:
+ * canonical Alt means physical Control on macOS, and treating both keys as the
+ * same modifier makes exact shortcut matching impossible.
+ */
+export function canonicalizeShortcutEvent(
+  event: ShortcutKeyEventLike,
+  platform: ShortcutPlatform,
+): string | null {
+  if (platform === "macos" && event.altKey) return null;
+
+  const parts: string[] = [];
+  if (platform === "macos") {
+    if (event.metaKey) parts.push("Ctrl");
+    if (event.ctrlKey) parts.push("Alt");
+  } else {
+    if (event.ctrlKey || event.metaKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+  }
+  if (event.shiftKey) parts.push("Shift");
+
+  let key = event.key ?? "";
+  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return null;
+  if (key === " ") key = "Space";
+  else if (key === "ArrowLeft") key = "Left";
+  else if (key === "ArrowRight") key = "Right";
+  else if (key === "ArrowUp") key = "Up";
+  else if (key === "ArrowDown") key = "Down";
+  else if (key === "Escape") key = "Esc";
+  else if (key.length === 1) key = key.toUpperCase();
+
+  if (!key) return null;
+  parts.push(key);
+  return parts.join("+");
+}
+
 /**
  * Format a canonical shortcut string for display on the current platform.
  *
@@ -53,36 +100,14 @@ export function formatShortcut(shortcut: string | undefined): string {
  * On macOS:
  *   metaKey (Cmd)  → "Ctrl"
  *   ctrlKey (Ctrl) → "Alt"
- *   altKey (Option) → not mapped (ignored)
+ *   altKey (Option) is unsupported so it cannot alias physical Control
  *
  * On Windows/Linux:
  *   ctrlKey | metaKey → "Ctrl"
  *   altKey            → "Alt"
  */
 export function keyEventToCanonicalShortcut(e: KeyboardEvent): string {
-  const parts: string[] = [];
-
-  if (isMac) {
-    if (e.metaKey) parts.push("Ctrl"); // Cmd → Ctrl
-    if (e.ctrlKey) parts.push("Alt"); // Ctrl → Alt
-  } else {
-    if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
-    if (e.altKey) parts.push("Alt");
-  }
-  if (e.shiftKey) parts.push("Shift");
-
-  let key = e.key;
-  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return "";
-  if (key === " ") key = "Space";
-  else if (key === "ArrowLeft") key = "Left";
-  else if (key === "ArrowRight") key = "Right";
-  else if (key === "ArrowUp") key = "Up";
-  else if (key === "ArrowDown") key = "Down";
-  else if (key === "Escape") key = "Esc";
-  else if (key.length === 1) key = key.toUpperCase();
-
-  parts.push(key);
-  return parts.join("+");
+  return canonicalizeShortcutEvent(e, isMac ? "macos" : "other") ?? "";
 }
 
 /**

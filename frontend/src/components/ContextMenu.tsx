@@ -156,7 +156,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                   <div
                     key={subIndex}
                     className={`
-                      px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2
+                      px-3 py-1.5 text-sm cursor-pointer flex items-center justify-between gap-4
                       ${subItem.disabled ? "text-neutral-500 cursor-not-allowed" : "text-neutral-200 hover:bg-neutral-700"}
                     `}
                     onClick={(e) => {
@@ -167,13 +167,21 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                       }
                     }}
                   >
-                    {subItem.swatchColor && (
-                      <span
-                        className="w-3.5 h-3.5 rounded-sm border border-white/40 shadow-sm"
-                        style={{ backgroundColor: subItem.swatchColor }}
-                      />
+                    <div className="flex items-center gap-2">
+                      {subItem.icon && <span className="w-4 h-4">{subItem.icon}</span>}
+                      {subItem.swatchColor && (
+                        <span
+                          className="w-3.5 h-3.5 rounded-sm border border-white/40 shadow-sm"
+                          style={{ backgroundColor: subItem.swatchColor }}
+                        />
+                      )}
+                      <span>{subItem.label}</span>
+                    </div>
+                    {subItem.shortcut && (
+                      <span className="text-xs text-neutral-500">
+                        {subItem.shortcut}
+                      </span>
                     )}
-                    <span>{subItem.label}</span>
                   </div>
                 ))}
               </div>

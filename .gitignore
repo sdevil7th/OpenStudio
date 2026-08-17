@@ -54,6 +54,7 @@ get-pip.py
 # Local pitch/render regression outputs
 /qa/
 /.playwright-cli/
+/.codex_tmp/
 /output/
 /tmp_nam_rack_runs/
 /tmp_clean_guitar_runs/

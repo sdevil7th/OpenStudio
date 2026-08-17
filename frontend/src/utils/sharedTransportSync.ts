@@ -10,6 +10,12 @@ export function startSharedTransportSync(options: SharedTransportSyncOptions = {
   let frameId = 0;
   let lastFrameTime = performance.now();
 
+  const ensureInterpolationRunning = () => {
+    if (!interpolate || frameId !== 0) return;
+    lastFrameTime = performance.now();
+    frameId = window.requestAnimationFrame(tick);
+  };
+
   const unsubscribeTransport = nativeBridge.onTransportUpdate((data) => {
     const state = useDAWStore.getState();
     const backendPos = Math.max(0, Number(data.position) || 0);
@@ -29,9 +35,12 @@ export function startSharedTransportSync(options: SharedTransportSyncOptions = {
         },
       }));
     }
+
+    if (backendPlaying) ensureInterpolationRunning();
   });
 
-  const tick = () => {
+  function tick() {
+    frameId = 0;
     const now = performance.now();
     const dt = Math.max(0, (now - lastFrameTime) / 1000);
     lastFrameTime = now;
@@ -44,14 +53,11 @@ export function startSharedTransportSync(options: SharedTransportSyncOptions = {
         nextTime = loopStart + (nextTime - loopEnd);
       }
       state.setCurrentTime(nextTime);
+      frameId = window.requestAnimationFrame(tick);
     }
-
-    frameId = window.requestAnimationFrame(tick);
-  };
-
-  if (interpolate) {
-    frameId = window.requestAnimationFrame(tick);
   }
+
+  if (useDAWStore.getState().transport.isPlaying) ensureInterpolationRunning();
 
   return () => {
     unsubscribeTransport();

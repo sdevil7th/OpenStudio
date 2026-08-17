@@ -3,22 +3,20 @@
   "skinId": "eq-rack-design-a",
   "artboard": { "width": 1280, "height": 720 },
   "device": { "kind": "rack", "title": "Graphic EQ", "subtitle": "OpenStudio Rack", "color": "#d7dce2", "accent": "#6e7684" },
-  "composition": { "targetDeviceCount": 1, "layout": "grey-graphic-eq-rack", "requiredModules": ["IN", "fader grid", "OUT", "LEVEL"] },
+  "composition": { "targetDeviceCount": 1, "layout": "grey-graphic-eq-rack", "requiredModules": ["EQ ON", "ten-fader grid", "LEVEL"] },
   "controls": [
     { "id": "eq-in-led", "kind": "led", "x": 132, "y": 205, "width": 44, "height": 44, "diameter": 32, "zIndex": 8 },
     { "id": "eq-power", "paramId": "eqEnabled", "kind": "switch", "x": 132, "y": 332, "width": 62, "height": 92, "label": "In", "labelPlacement": "below", "zIndex": 9 },
-    { "id": "eq-31", "kind": "fader", "x": 222, "y": 360, "width": 52, "height": 330, "label": "31", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-62", "paramId": "eq65Db", "kind": "fader", "x": 309, "y": 360, "width": 52, "height": 330, "label": "62", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-125", "paramId": "eq125Db", "kind": "fader", "x": 395, "y": 360, "width": 52, "height": 330, "label": "125", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-250", "paramId": "eq250Db", "kind": "fader", "x": 482, "y": 360, "width": 52, "height": 330, "label": "250", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-500", "paramId": "eq500Db", "kind": "fader", "x": 569, "y": 360, "width": 52, "height": 330, "label": "500", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-1k", "paramId": "eq1kDb", "kind": "fader", "x": 655, "y": 360, "width": 52, "height": 330, "label": "1K", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-2k", "paramId": "eq2kDb", "kind": "fader", "x": 742, "y": 360, "width": 52, "height": 330, "label": "2K", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-4k", "paramId": "eq4kDb", "kind": "fader", "x": 829, "y": 360, "width": 52, "height": 330, "label": "4K", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-8k", "paramId": "eq8kDb", "kind": "fader", "x": 915, "y": 360, "width": 52, "height": 330, "label": "8K", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-16k", "paramId": "eq16kDb", "kind": "fader", "x": 1002, "y": 360, "width": 52, "height": 330, "label": "16K", "labelPlacement": "hidden", "zIndex": 8 },
-    { "id": "eq-out-led", "kind": "led", "x": 1124, "y": 205, "width": 44, "height": 44, "diameter": 32, "zIndex": 8 },
-    { "id": "eq-output-level", "kind": "knob", "x": 1124, "y": 355, "width": 112, "height": 112, "diameter": 92, "label": "Level", "zIndex": 8, "rotationRange": [-135, 135] }
+    { "id": "eq-65", "paramId": "eq65Db", "kind": "fader", "x": 230, "y": 374, "width": 46, "height": 331, "label": "65", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-125", "paramId": "eq125Db", "kind": "fader", "x": 321, "y": 374, "width": 46, "height": 331, "label": "125", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-250", "paramId": "eq250Db", "kind": "fader", "x": 412, "y": 374, "width": 46, "height": 331, "label": "250", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-500", "paramId": "eq500Db", "kind": "fader", "x": 503, "y": 374, "width": 46, "height": 331, "label": "500", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-1k", "paramId": "eq1kDb", "kind": "fader", "x": 594, "y": 374, "width": 46, "height": 331, "label": "1K", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-2k", "paramId": "eq2kDb", "kind": "fader", "x": 686, "y": 374, "width": 46, "height": 331, "label": "2K", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-4k", "paramId": "eq4kDb", "kind": "fader", "x": 777, "y": 374, "width": 46, "height": 331, "label": "4K", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-8k", "paramId": "eq8kDb", "kind": "fader", "x": 868, "y": 374, "width": 46, "height": 331, "label": "8K", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-16k", "paramId": "eq16kDb", "kind": "fader", "x": 959, "y": 374, "width": 46, "height": 331, "label": "16K", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 },
+    { "id": "eq-output-level", "paramId": "eqLevelDb", "kind": "fader", "x": 1050, "y": 374, "width": 46, "height": 331, "label": "Level", "labelPlacement": "hidden", "valuePlacement": "above", "zIndex": 8 }
   ],
   "hitboxes": []
 }

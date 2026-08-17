@@ -1,63 +1,52 @@
 import { nativeBridge, type NativeGlobalShortcutEvent } from "../services/NativeBridge";
-import { getRegisteredActions, type ActionDef } from "../store/actionRegistry";
+import {
+  getRegisteredAction,
+  getRegisteredActions,
+  type ActionDef,
+  type ActionShortcutScope,
+} from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
-import { isMac } from "./platform";
+import {
+  dispatchActiveShortcut,
+  getActiveShortcutContext,
+  shouldPreserveEditableShortcut,
+  shouldPreserveNonTextControlShortcut,
+  shortcutExactlyMatches,
+  toPressedShortcut,
+  type ShortcutEventLike,
+} from "./shortcutContext";
 import { windowRole, windowSessionId } from "./windowEnvironment";
 
 let _lastSpacebarMs = 0;
 let _lastRecordShortcutMs = 0;
 
+const REPEATABLE_ACTION_IDS = new Set([
+  "navigate.nextTransient",
+  "navigate.prevTransient",
+  "edit.nudgeLeft",
+  "edit.nudgeRight",
+  "edit.nudgeLeftFine",
+  "edit.nudgeRightFine",
+  "view.zoomIn",
+  "view.zoomOut",
+]);
+
 export interface GlobalShortcutPayload extends NativeGlobalShortcutEvent {
   targetIsEditable?: boolean;
+  targetIsNonTextControl?: boolean;
   preventDefault?: () => void;
   stopPropagation?: () => void;
-}
-
-/**
- * Convert a key event payload into the canonical shortcut string used in actionRegistry.
- *
- * Canonical format uses Windows-style names: "Ctrl+Z", "Alt+Enter", "Ctrl+Shift+Z"
- *
- * Platform mapping:
- *   macOS — metaKey (Cmd) → "Ctrl", ctrlKey (^) → "Alt", altKey (Option) ignored
- *   Win   — ctrlKey/metaKey → "Ctrl", altKey → "Alt"
- */
-function toPressedShortcut(payload: GlobalShortcutPayload): string | null {
-  const parts: string[] = [];
-
-  if (isMac) {
-    if (payload.metaKey) parts.push("Ctrl"); // Cmd → Ctrl
-    if (payload.ctrlKey) parts.push("Alt");  // Ctrl → Alt
-  } else {
-    if (payload.ctrlKey || payload.metaKey) parts.push("Ctrl");
-    if (payload.altKey) parts.push("Alt");
-  }
-  if (payload.shiftKey) parts.push("Shift");
-
-  let key = payload.key ?? "";
-  if (["Control", "Shift", "Alt", "Meta"].includes(key)) {
-    return null;
-  }
-
-  if (key === " ") key = "Space";
-  else if (key === "ArrowLeft") key = "Left";
-  else if (key === "ArrowRight") key = "Right";
-  else if (key === "ArrowUp") key = "Up";
-  else if (key === "ArrowDown") key = "Down";
-  else if (key === "Escape") key = "Esc";
-  else if (key.length === 1) key = key.toUpperCase();
-
-  parts.push(key);
-  return parts.join("+");
+  stopImmediatePropagation?: () => void;
 }
 
 function markHandled(payload: GlobalShortcutPayload): true {
   payload.preventDefault?.();
-  payload.stopPropagation?.();
+  if (payload.stopImmediatePropagation) payload.stopImmediatePropagation();
+  else payload.stopPropagation?.();
   return true;
 }
 
-function isPlainSpacebar(payload: GlobalShortcutPayload): boolean {
+function isPlainSpacebar(payload: ShortcutEventLike): boolean {
   return (payload.key === " " || payload.code === "Space")
     && !payload.ctrlKey
     && !payload.metaKey
@@ -65,21 +54,47 @@ function isPlainSpacebar(payload: GlobalShortcutPayload): boolean {
     && !payload.shiftKey;
 }
 
-function isGlobalShortcutAction(action: ActionDef): boolean {
-  return (action.shortcutScope ?? "global") === "global";
+function effectiveActionShortcuts(action: ActionDef): string[] {
+  const customShortcuts = useDAWStore.getState().customShortcuts;
+  if (Object.prototype.hasOwnProperty.call(customShortcuts, action.id)) {
+    const custom = customShortcuts[action.id];
+    return custom ? [custom] : [];
+  }
+
+  return [action.shortcut, ...(action.shortcutAliases ?? [])].filter(
+    (shortcut): shortcut is string => typeof shortcut === "string" && !shortcut.includes("("),
+  );
 }
 
-function shortcutMatchesAction(action: ActionDef, pressed: string): boolean {
-  if (action.shortcut === pressed) return true;
-  return (action.shortcutAliases ?? []).includes(pressed);
+function actionMatchesPressed(action: ActionDef, pressed: string): boolean {
+  return effectiveActionShortcuts(action).includes(pressed);
 }
 
-function findMatchingGlobalAction(pressed: string): ActionDef | undefined {
+export function matchesActionShortcut(
+  event: ShortcutEventLike,
+  actionId: string,
+): boolean {
+  const action = getRegisteredAction(actionId);
+  const pressed = toPressedShortcut(event);
+  return Boolean(action && pressed && actionMatchesPressed(action, pressed));
+}
+
+function findMatchingAction(
+  pressed: string,
+  scope: ActionShortcutScope,
+): ActionDef | undefined {
   return getRegisteredActions().find((action) => (
-    Boolean(action.shortcut)
-    && isGlobalShortcutAction(action)
-    && shortcutMatchesAction(action, pressed)
+    (action.shortcutScope ?? "global") === scope
+    && actionMatchesPressed(action, pressed)
   ));
+}
+
+function activeRegistryScope(): ActionShortcutScope | null {
+  const context = getActiveShortcutContext();
+  if (context.kind === "timeline") return "timeline";
+  if (context.kind === "pitch_editor") return "pitch_editor";
+  if (context.kind === "piano_roll") return "piano_roll";
+  return null;
 }
 
 function publishDetachedCommand(command: string, payload: Record<string, unknown> = {}): void {
@@ -97,18 +112,68 @@ function shouldDebounceRecordShortcut(): boolean {
   return false;
 }
 
-export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean {
-  if (payload.repeat) {
-    return false;
+function executeMatchedAction(
+  action: ActionDef,
+  payload: GlobalShortcutPayload,
+): true {
+  markHandled(payload);
+  if (payload.repeat && !REPEATABLE_ACTION_IDS.has(action.id)) return true;
+  if (action.canHandleShortcut && !action.canHandleShortcut()) return true;
+  if (action.id === "transport.record" && shouldDebounceRecordShortcut()) return true;
+  action.execute();
+  return true;
+}
+
+function dispatchApplicationShortcut(
+  payload: GlobalShortcutPayload,
+  pressed: string | null,
+): boolean {
+  const state = useDAWStore.getState();
+
+  if (isPlainSpacebar(payload) && matchesActionShortcut(payload, "transport.play")) {
+    markHandled(payload);
+    if (payload.repeat) return true;
+    const now = Date.now();
+    if (now - _lastSpacebarMs < 150) return true;
+    _lastSpacebarMs = now;
+    if (windowRole !== "main") publishDetachedCommand("transport.toggle");
+    else if (state.transport.isRecording || state.transport.isPlaying) state.stop();
+    else state.play();
+    return true;
   }
 
+  if (!pressed) return false;
+
+  const action = findMatchingAction(pressed, "global");
+  if (windowRole !== "main" && action?.id === "transport.play") {
+    markHandled(payload);
+    if (!payload.repeat) publishDetachedCommand("transport.toggle");
+    return true;
+  }
+  if (windowRole !== "main" && action?.id === "transport.record") {
+    markHandled(payload);
+    if (payload.repeat || shouldDebounceRecordShortcut()) return true;
+    publishDetachedCommand("transport.record");
+    return true;
+  }
+  return action ? executeMatchedAction(action, payload) : false;
+}
+
+export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean {
   const pressed = toPressedShortcut(payload);
   const state = useDAWStore.getState();
-  const key = payload.key ?? "";
+  const registeredApplicationAction = pressed
+    ? findMatchingAction(pressed, "global")
+    : undefined;
+
+  if (payload.targetIsNonTextControl && shouldPreserveNonTextControlShortcut(payload)) {
+    return false;
+  }
 
   if (payload.targetIsEditable) {
     if (isPlainSpacebar(payload) && (state.transport.isRecording || state.transport.isPlaying)) {
       markHandled(payload);
+      if (payload.repeat) return true;
       const now = Date.now();
       if (now - _lastSpacebarMs < 150) return true;
       _lastSpacebarMs = now;
@@ -117,90 +182,26 @@ export function dispatchGlobalShortcut(payload: GlobalShortcutPayload): boolean 
       return true;
     }
 
-    return false;
+    if (shouldPreserveEditableShortcut(payload, Boolean(registeredApplicationAction))) return false;
+    return dispatchApplicationShortcut(payload, pressed);
   }
 
-  if (pressed) {
-    const customShortcuts = useDAWStore.getState().customShortcuts;
-    for (const [actionId, shortcut] of Object.entries(customShortcuts)) {
-      if (shortcut === pressed) {
-        const action = getRegisteredActions().find((candidate) => candidate.id === actionId);
-        if (action && isGlobalShortcutAction(action) && (!action.canHandleShortcut || action.canHandleShortcut())) {
-          markHandled(payload);
-          if (action.id === "transport.record" && shouldDebounceRecordShortcut()) return true;
-          action.execute();
-          return true;
-        }
-      }
-    }
+  // Native plugin-window payloads have no trustworthy DOM edit owner.
+  if (payload.source !== "pluginWindow") {
+    const result = dispatchActiveShortcut(payload);
+    if (result !== "unmatched") return markHandled(payload);
+
+    const scope = activeRegistryScope();
+    const scopedAction = pressed && scope ? findMatchingAction(pressed, scope) : undefined;
+    if (scopedAction) return executeMatchedAction(scopedAction, payload);
   }
 
-  if (windowRole !== "main") {
-    if (key === " " || payload.code === "Space") {
-      markHandled(payload);
-      const now = Date.now();
-      if (now - _lastSpacebarMs < 150) return true;
-      _lastSpacebarMs = now;
-      publishDetachedCommand("transport.toggle");
-      return true;
-    }
+  return dispatchApplicationShortcut(payload, pressed);
+}
 
-    if (pressed === "Ctrl+R") {
-      markHandled(payload);
-      if (shouldDebounceRecordShortcut()) return true;
-      publishDetachedCommand("transport.record");
-      return true;
-    }
-
-    if (pressed === "Ctrl+Z") {
-      markHandled(payload);
-      publishDetachedCommand("edit.undo");
-      return true;
-    }
-
-    if (pressed === "Ctrl+Y" || pressed === "Ctrl+Shift+Z") {
-      markHandled(payload);
-      publishDetachedCommand("edit.redo");
-      return true;
-    }
-
-    if (pressed === "Q") {
-      markHandled(payload);
-      publishDetachedCommand("midi.quantize");
-      return true;
-    }
-  }
-
-  if (key === " " || payload.code === "Space") {
-    markHandled(payload);
-    // Debounce: the Win32 keyboard hook can deliver duplicate events for a
-    // single keypress. Without debounce, both arrive before the async play()
-    // sets isPlaying=true, causing double-play instead of toggle.
-    const now = Date.now();
-    if (now - _lastSpacebarMs < 150) return true;
-    _lastSpacebarMs = now;
-    if (state.transport.isRecording || state.transport.isPlaying) state.stop();
-    else state.play();
-    return true;
-  }
-
-  if (pressed) {
-    const action = findMatchingGlobalAction(pressed);
-    if (action && (!action.canHandleShortcut || action.canHandleShortcut())) {
-      markHandled(payload);
-      if (action.id === "transport.record" && shouldDebounceRecordShortcut()) return true;
-      action.execute();
-      return true;
-    }
-  }
-
-  if (key === "Escape" || key === "Esc") {
-    if (state.showPianoRoll) {
-      markHandled(payload);
-      state.closePianoRoll();
-      return true;
-    }
-  }
-
-  return false;
+export function isExactShortcut(
+  payload: ShortcutEventLike,
+  ...shortcuts: readonly string[]
+): boolean {
+  return shortcutExactlyMatches(payload, ...shortcuts);
 }

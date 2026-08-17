@@ -1,7 +1,15 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
-import { isPrimaryModifier, formatShortcut } from "../utils/platform";
+import { formatShortcut } from "../utils/platform";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import {
+  activateShortcutContext,
+  registerShortcutSurface,
+  shortcutExactlyMatches,
+  toPressedShortcut,
+  type ShortcutSurfaceHandler,
+} from "../utils/shortcutContext";
 import { usePitchEditorStore, PitchEditorTool, PitchSnapMode, PITCH_EDITOR_FORMANT_EDITING_ENABLED } from "../store/pitchEditorStore";
 import { GripHorizontal, X, Scissors, MousePointer, Activity, Waves, ChevronRight, Pencil } from "lucide-react";
 import { NoteInspector } from "./NoteInspector";
@@ -891,52 +899,72 @@ export function PitchEditorLowerZone() {
     setDragState(null);
   }, [dragState, commitNoteEdit, commitDrawPitch, endInteractivePreview]);
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (!pitchEditorTrackId) return;
-      const key = e.key.toLowerCase();
-      if (isPrimaryModifier(e) && key === "z" && !e.shiftKey) {
-        if (usePitchEditorStore.getState().undoStack.length > 0) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          undo();
-        }
-        return;
-      }
-      if (isPrimaryModifier(e) && (key === "y" || (key === "z" && e.shiftKey))) {
-        if (usePitchEditorStore.getState().redoStack.length > 0) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          redo();
-        }
-        return;
-      }
-      if (isPrimaryModifier(e) && key === "a") { e.preventDefault(); selectAll(); return; }
-      if (e.key === "Escape") { closePitchEditor(); return; }
-      if (e.key === "ArrowUp" && !isPrimaryModifier(e)) {
-        e.preventDefault();
-        moveSelectedPitch(e.shiftKey ? 0.1 : 1);
-        return;
-      }
-      if (e.key === "ArrowDown" && !isPrimaryModifier(e)) {
-        e.preventDefault();
-        moveSelectedPitch(e.shiftKey ? -0.1 : -1);
-        return;
-      }
-      if (key === "q") { correctSelectedToScale(); return; }
-      if (isPrimaryModifier(e) && key === "j") {
-        e.preventDefault();
-        const sIds = usePitchEditorStore.getState().selectedNoteIds;
-        if (sIds.length >= 2) mergeNotes(sIds);
-        return;
-      }
-      const toolKey = Number.parseInt(e.key);
-      if (toolKey >= 1 && toolKey <= TOOL_DEFS.length) setTool(TOOL_DEFS[toolKey - 1].id);
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [pitchEditorTrackId, undo, redo, selectAll, closePitchEditor, moveSelectedPitch, correctSelectedToScale, setTool, mergeNotes]);
+  // Keyboard shortcuts are registered with the app's single capture router.
+  const shortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
+  shortcutHandlerRef.current = (event) => {
+    if (!pitchEditorTrackId) return "unmatched";
+
+    if (matchesActionShortcut(event, "edit.undo")) {
+      if (event.repeat) return "claimed_noop";
+      if (usePitchEditorStore.getState().undoStack.length === 0) return "claimed_noop";
+      undo();
+      return "handled";
+    }
+    if (matchesActionShortcut(event, "edit.redo")) {
+      if (event.repeat) return "claimed_noop";
+      if (usePitchEditorStore.getState().redoStack.length === 0) return "claimed_noop";
+      redo();
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Ctrl+A")) {
+      if (event.repeat) return "claimed_noop";
+      selectAll();
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Esc")) {
+      if (event.repeat) return "claimed_noop";
+      closePitchEditor();
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Up", "Shift+Up")) {
+      moveSelectedPitch(event.shiftKey ? 0.1 : 1);
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Down", "Shift+Down")) {
+      moveSelectedPitch(event.shiftKey ? -0.1 : -1);
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Q")) {
+      if (event.repeat) return "claimed_noop";
+      correctSelectedToScale();
+      return "handled";
+    }
+    if (shortcutExactlyMatches(event, "Ctrl+J")) {
+      if (event.repeat) return "claimed_noop";
+      const selectedIds = usePitchEditorStore.getState().selectedNoteIds;
+      if (selectedIds.length < 2) return "claimed_noop";
+      mergeNotes(selectedIds);
+      return "handled";
+    }
+
+    const pressed = toPressedShortcut(event);
+    const toolIndex = pressed && /^\d$/.test(pressed)
+      ? Number.parseInt(pressed, 10) - 1
+      : -1;
+    if (toolIndex >= 0 && toolIndex < TOOL_DEFS.length) {
+      if (event.repeat) return "claimed_noop";
+      setTool(TOOL_DEFS[toolIndex].id);
+      return "handled";
+    }
+
+    return "unmatched";
+  };
+
+  useEffect(() => registerShortcutSurface(
+    { kind: "pitch_editor" },
+    (event) => shortcutHandlerRef.current(event),
+    { kind: "timeline" },
+  ), []);
 
   // Panel resize
   const isDragging = useRef(false);
@@ -971,6 +999,10 @@ export function PitchEditorLowerZone() {
     <div
       className="flex flex-col border-t border-neutral-800 bg-neutral-950 shrink-0"
       style={{ height: lowerZoneHeight }}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "pitch_editor" })}
+      onContextMenuCapture={() => activateShortcutContext({ kind: "pitch_editor" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "pitch_editor" })}
+      data-shortcut-context="pitch_editor"
     >
       {/* Resize grip */}
       <div

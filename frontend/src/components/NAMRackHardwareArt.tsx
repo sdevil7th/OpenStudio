@@ -56,7 +56,6 @@ export const NAM_RACK_ART = {
   preDualOctaverPbr: new URL("../assets/nam/pre-dual-octaver-pbr-skin.webp", import.meta.url).href,
   prePrecisionDrivePbr: new URL("../assets/nam/pre-precision-drive-pbr-skin.webp", import.meta.url).href,
   preChaosPbr: new URL("../assets/nam/pre-chaos-pbr-skin.webp", import.meta.url).href,
-  specialLaserExpressionPbr: new URL("../assets/nam/special-laser-expression-pbr-skin.webp", import.meta.url).href,
   modulatorExpressionPbr: new URL("../assets/nam/modulator-expression-pbr-skin.webp", import.meta.url).href,
   reverbBluePbr: new URL("../assets/nam/reverb-blue-pbr-skin.webp", import.meta.url).href,
   rackRoomBlank: new URL("../assets/nam/rack-room-blank-skin.webp", import.meta.url).href,

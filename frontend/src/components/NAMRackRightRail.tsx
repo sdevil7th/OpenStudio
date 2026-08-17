@@ -3,6 +3,7 @@ import type { BuiltInPluginAddress, BuiltInPluginSchema } from "../services/Nati
 import { NAMExplorer, type NAMExplorerIntent } from "./NAMExplorer";
 import type { RackRightRailTab } from "./NAMRackChrome";
 import { NAMRackTuner, type NAMRailTunerState } from "./NAMRackTuner";
+import type { NAMInstrumentProfile } from "../utils/namInstrumentProfile";
 
 export type NAMRailGearState = {
   pedalTitle?: string;
@@ -34,6 +35,7 @@ export type NAMRailPresetItem = {
   name: string;
   subtitle: string;
   title?: string;
+  active?: boolean;
 };
 
 export type NAMRailSavedState = {
@@ -49,11 +51,14 @@ export function NAMRackRightRail({
   address,
   schema,
   explorerIntent,
+  instrumentProfile,
   gear,
   cab,
   saved,
+  presetBusy,
   tuner,
   onRefreshRack,
+  onFlushPendingParamWrites,
   onShowGear,
   onOpenTones,
   onOpenCab,
@@ -72,11 +77,14 @@ export function NAMRackRightRail({
   address: BuiltInPluginAddress;
   schema: BuiltInPluginSchema;
   explorerIntent: NAMExplorerIntent | null;
+  instrumentProfile: NAMInstrumentProfile;
   gear: NAMRailGearState;
   cab: NAMRailCabState;
   saved: NAMRailSavedState;
+  presetBusy: boolean;
   tuner: NAMRailTunerState;
   onRefreshRack: () => BuiltInPluginSchema | null | Promise<BuiltInPluginSchema | null>;
+  onFlushPendingParamWrites: () => Promise<boolean>;
   onShowGear: () => void;
   onOpenTones: () => void;
   onOpenCab: () => void;
@@ -138,7 +146,9 @@ export function NAMRackRightRail({
             address={address}
             schema={schema}
             onRefreshRack={onRefreshRack}
+            onFlushPendingParamWrites={onFlushPendingParamWrites}
             intent={explorerIntent}
+            instrumentProfile={instrumentProfile}
             variant="rail"
           />
         </div>
@@ -193,31 +203,31 @@ export function NAMRackRightRail({
       )}
 
       {rackRailTab === "saved" && (
-        <div className="nam-rail-section nam-rail-saved" data-qa="nam-rail-saved">
+        <div className="nam-rail-section nam-rail-saved" data-qa="nam-rail-saved" aria-busy={presetBusy || undefined}>
           <div className="nam-rail-panel-head">
             <span>Saved</span>
             <strong>{saved.heading}</strong>
             <small>{saved.status}</small>
           </div>
           <div className="nam-rail-button-row">
-            <button type="button" onClick={onOpenPresetManager}>
+            <button type="button" onClick={onOpenPresetManager} disabled={presetBusy}>
               <Library size={12} />
               Preset Manager
             </button>
-            <button type="button" onClick={onSaveTone} disabled={saved.saveToneBusy}>
+            <button type="button" onClick={onSaveTone} disabled={saved.saveToneBusy || presetBusy}>
               <Save size={12} />
               Save Preset
             </button>
           </div>
           <div className="nam-rail-preset-list">
             {saved.userPresets.map((entry) => (
-              <button type="button" key={entry.key} onClick={() => onLoadUserPreset(entry.name)} title={entry.title}>
+              <button type="button" key={entry.key} data-active={entry.active} aria-current={entry.active ? "true" : undefined} onClick={() => onLoadUserPreset(entry.name)} title={entry.title} disabled={presetBusy}>
                 <strong>{entry.name}</strong>
                 <small>{entry.subtitle}</small>
               </button>
             ))}
             {saved.userPresets.length === 0 && saved.factoryPresets.map((entry) => (
-              <button type="button" key={entry.key} onClick={() => entry.id && onLoadFactoryPreset(entry.id)}>
+              <button type="button" key={entry.key} data-active={entry.active} aria-current={entry.active ? "true" : undefined} onClick={() => entry.id && onLoadFactoryPreset(entry.id)} disabled={presetBusy}>
                 <strong>{entry.name}</strong>
                 <small>{entry.subtitle}</small>
               </button>

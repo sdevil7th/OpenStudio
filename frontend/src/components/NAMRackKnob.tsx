@@ -1,14 +1,30 @@
-import { type CSSProperties, type PointerEvent, useCallback, useRef } from "react";
+import {
+  type CSSProperties,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Power } from "lucide-react";
 import type { BuiltInParamDescriptor } from "../services/NativeBridge";
 import {
+  denormalizeParamValue,
   formatParamValue,
   normalizeParam,
   normalizeParamValue,
+  offsetParamValue,
+  paramValueFromRangeInput,
   quantizeParamValue,
-  stepForParam,
+  rangeInputMax,
+  rangeInputMin,
+  rangeInputStep,
+  rangeInputValue,
 } from "../utils/builtInParamValue";
 import { knobAssetForVariant, knobAtlasFrame, knobFrameIndex } from "./NAMRackControlAssets";
+import { NAMRackControlTooltip } from "./NAMRackControlTooltip";
+
+type TooltipActivity = "hovered" | "focused" | "dragging";
 
 function RasterKnobCap({
   pct,
@@ -67,7 +83,47 @@ export function RackKnob({
     "--nam-knob-fill-end": `${fillEnd}%`,
   } as CSSProperties;
   const knobStyle = styleOverride ? ({ ...style, ...styleOverride } as CSSProperties) : style;
-  const dragRef = useRef<{ pointerId: number; startY: number; startValue: number } | null>(null);
+  const controlRef = useRef<HTMLLabelElement | null>(null);
+  const dragRef = useRef<{ pointerId: number; startY: number; startNormalized: number } | null>(null);
+  const tooltipTimerRef = useRef<number | null>(null);
+  const pointerInitiatedFocusRef = useRef(false);
+  const tooltipActivityRef = useRef<Record<TooltipActivity, boolean>>({
+    hovered: false,
+    focused: false,
+    dragging: false,
+  });
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const clearTooltipTimer = useCallback(() => {
+    if (tooltipTimerRef.current === null) return;
+    window.clearTimeout(tooltipTimerRef.current);
+    tooltipTimerRef.current = null;
+  }, []);
+  const setTooltipActivity = useCallback(
+    (activity: TooltipActivity, active: boolean) => {
+      tooltipActivityRef.current[activity] = active;
+      clearTooltipTimer();
+      if (active) {
+        if (activity === "hovered") {
+          tooltipTimerRef.current = window.setTimeout(() => {
+            tooltipTimerRef.current = null;
+            if (tooltipActivityRef.current.hovered) setTooltipOpen(true);
+          }, 220);
+        } else {
+          setTooltipOpen(true);
+        }
+        return;
+      }
+      if (!Object.values(tooltipActivityRef.current).some(Boolean)) setTooltipOpen(false);
+    },
+    [clearTooltipTimer],
+  );
+  const showTooltipNow = useCallback(() => {
+    clearTooltipTimer();
+    setTooltipOpen(true);
+  }, [clearTooltipTimer]);
+
+  useEffect(() => () => clearTooltipTimer(), [clearTooltipTimer]);
+
   const setValue = useCallback(
     (value: number) => {
       if (disabled) return;
@@ -79,17 +135,21 @@ export function RackKnob({
     (event: PointerEvent<HTMLLabelElement>) => {
       const drag = dragRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
-      const span = Math.max(param.max - param.min, 0.0001);
       const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 0.25 : 1;
-      const delta = (drag.startY - event.clientY) * (span / 220) * fine;
-      setValue(drag.startValue + delta);
+      const deltaNormalized = (drag.startY - event.clientY) / 220 * fine;
+      setValue(denormalizeParamValue(param, drag.startNormalized + deltaNormalized));
     },
-    [param.max, param.min, setValue],
+    [param, setValue],
   );
 
   if (param.type === "enum") {
     return (
-      <label className="nam-rack-control nam-rack-control-select" data-disabled={disabled || undefined} title={disabled ? disabledReason ?? param.label : param.label}>
+      <label
+        className="nam-rack-control nam-rack-control-select"
+        data-param={param.id}
+        data-disabled={disabled || undefined}
+        title={disabled ? disabledReason ?? param.label : param.label}
+      >
         <span>{param.label}</span>
         <select
           value={Math.round(param.value)}
@@ -112,6 +172,7 @@ export function RackKnob({
       <button
         type="button"
         className="nam-rack-control nam-rack-control-switch"
+        data-param={param.id}
         data-active={active}
         data-disabled={disabled || undefined}
         disabled={disabled}
@@ -127,71 +188,102 @@ export function RackKnob({
   }
 
   return (
-    <label
-      className="nam-rack-control nam-rack-control-knob"
-      data-size={size}
-      data-param={param.id}
-      data-bipolar={bipolar}
-      data-qa={size === "large" ? "nam-faceplate-knob" : undefined}
-      data-scene-anchor={size === "large" ? param.id : undefined}
-      data-renderer="pbr-raster-atlas-v1"
-      data-disabled={disabled || undefined}
-      aria-disabled={disabled || undefined}
-      style={knobStyle}
-      title={disabled ? disabledReason ?? `${param.label} is unavailable` : undefined}
-      onPointerDown={(event) => {
-        if (disabled || event.button !== 0) return;
-        event.preventDefault();
-        dragRef.current = {
-          pointerId: event.pointerId,
-          startY: event.clientY,
-          startValue: param.value,
-        };
-        event.currentTarget.setPointerCapture(event.pointerId);
-      }}
-      onPointerMove={(event) => dragToValue(event)}
-      onPointerUp={(event) => {
-        if (dragRef.current?.pointerId === event.pointerId) {
-          dragToValue(event);
-          dragRef.current = null;
-        }
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      }}
-      onPointerCancel={(event) => {
-        if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      }}
-      onWheel={(event) => {
-        if (disabled) return;
-        event.preventDefault();
-        const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-        const direction = event.deltaY > 0 ? -1 : 1;
-        setValue(param.value + stepForParam(param) * fine * direction);
-      }}
-      onDoubleClick={(event) => {
-        if (disabled) return;
-        event.preventDefault();
-        setValue(param.defaultValue ?? 0);
-      }}
-    >
-      <RasterKnobCap pct={pct} size={size} />
-      <span className="nam-rack-knob-label">{param.label}</span>
-      <strong>{formatParamValue(param)}</strong>
-      <input
-        className="nam-rack-knob-input"
-        type="range"
-        min={param.min}
-        max={param.max}
-        step={stepForParam(param)}
-        value={param.value}
-        disabled={disabled}
-        aria-label={param.label}
-        onChange={(event) => onChange(param, Number(event.currentTarget.value))}
+    <>
+      <label
+        ref={controlRef}
+        className="nam-rack-control nam-rack-control-knob"
+        data-size={size}
+        data-param={param.id}
+        data-bipolar={bipolar}
+        data-qa={size === "large" ? "nam-faceplate-knob" : undefined}
+        data-scene-anchor={size === "large" ? param.id : undefined}
+        data-renderer="pbr-raster-atlas-v1"
+        data-disabled={disabled || undefined}
+        aria-disabled={disabled || undefined}
+        style={knobStyle}
+        title={disabled ? disabledReason ?? `${param.label} is unavailable` : undefined}
+        onPointerEnter={() => setTooltipActivity("hovered", true)}
+        onPointerLeave={() => setTooltipActivity("hovered", false)}
+        onFocus={() => {
+          if (!pointerInitiatedFocusRef.current) setTooltipActivity("focused", true);
+        }}
+        onBlur={() => {
+          pointerInitiatedFocusRef.current = false;
+          setTooltipActivity("focused", false);
+        }}
+        onPointerDown={(event) => {
+          if (disabled || event.button !== 0) return;
+          event.preventDefault();
+          pointerInitiatedFocusRef.current = true;
+          setTooltipActivity("dragging", true);
+          dragRef.current = {
+            pointerId: event.pointerId,
+            startY: event.clientY,
+            startNormalized: normalizeParam(param),
+          };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => dragToValue(event)}
+        onPointerUp={(event) => {
+          if (dragRef.current?.pointerId === event.pointerId) {
+            dragToValue(event);
+            dragRef.current = null;
+            setTooltipActivity("dragging", false);
+          }
+          pointerInitiatedFocusRef.current = false;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+        }}
+        onPointerCancel={(event) => {
+          if (dragRef.current?.pointerId === event.pointerId) {
+            dragRef.current = null;
+            setTooltipActivity("dragging", false);
+          }
+          pointerInitiatedFocusRef.current = false;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+        }}
+        onWheel={(event) => {
+          if (disabled) return;
+          event.preventDefault();
+          showTooltipNow();
+          const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
+          const direction = event.deltaY > 0 ? -1 : 1;
+          setValue(offsetParamValue(param, param.value, fine * direction));
+        }}
+        onDoubleClick={(event) => {
+          if (disabled) return;
+          event.preventDefault();
+          showTooltipNow();
+          setValue(param.defaultValue ?? 0);
+        }}
+      >
+        <RasterKnobCap pct={pct} size={size} />
+        <span className="nam-rack-knob-label">{param.label}</span>
+        <strong>{formatParamValue(param)}</strong>
+        <input
+          className="nam-rack-knob-input"
+          type="range"
+          min={rangeInputMin(param)}
+          max={rangeInputMax(param)}
+          step={rangeInputStep(param)}
+          value={rangeInputValue(param)}
+          disabled={disabled}
+          aria-label={param.label}
+          onChange={(event) => setValue(
+            paramValueFromRangeInput(param, Number(event.currentTarget.value)),
+          )}
+        />
+      </label>
+      <NAMRackControlTooltip
+        anchor={controlRef.current}
+        open={tooltipOpen}
+        label={param.label}
+        value={disabled ? disabledReason ?? `${param.label} is unavailable` : formatParamValue(param)}
+        kind={disabled ? "reason" : "value"}
       />
-    </label>
+    </>
   );
 }

@@ -3,6 +3,7 @@ import { MixerPanel } from "./components/MixerPanel";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
+import { isEditableShortcutTarget } from "./utils/shortcutContext";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import {
   hydrateMixerUISnapshotFromNative,
@@ -70,7 +71,6 @@ export default function MixerWindowApp() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
       void dispatchGlobalShortcut({
         key: e.key,
         code: e.code,
@@ -80,14 +80,10 @@ export default function MixerWindowApp() {
         metaKey: e.metaKey,
         repeat: e.repeat,
         source: "browser",
-        targetIsEditable:
-          !!target &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLSelectElement ||
-            target instanceof HTMLTextAreaElement ||
-            target.isContentEditable),
+        targetIsEditable: isEditableShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
+        stopImmediatePropagation: () => e.stopImmediatePropagation(),
       });
     };
 

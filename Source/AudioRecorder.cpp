@@ -2,17 +2,16 @@
 
 namespace
 {
-#if JUCE_DEBUG
-constexpr bool kAudioRecordDebugLogs = true;
-#else
-constexpr bool kAudioRecordDebugLogs = false;
+#ifndef OPENSTUDIO_AUDIO_RECORD_DEBUG
+ #define OPENSTUDIO_AUDIO_RECORD_DEBUG 0
 #endif
 
+#if OPENSTUDIO_AUDIO_RECORD_DEBUG
 static void logAudioRecord(const juce::String& message)
 {
-    if (kAudioRecordDebugLogs)
-        juce::Logger::writeToLog("[audio.record] " + message);
+    juce::Logger::writeToLog("[audio.record] " + message);
 }
+ #define OPENSTUDIO_LOG_AUDIO_RECORD(message) logAudioRecord(message)
 
 static float peakFromBuffer(const juce::AudioBuffer<float>& buffer, int numSamples)
 {
@@ -25,6 +24,9 @@ static float peakFromBuffer(const juce::AudioBuffer<float>& buffer, int numSampl
     }
     return peak;
 }
+#else
+ #define OPENSTUDIO_LOG_AUDIO_RECORD(message) do { } while (false)
+#endif
 }
 
 AudioRecorder::AudioRecorder()
@@ -41,23 +43,40 @@ AudioRecorder::~AudioRecorder()
 
 bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File& file, double sampleRate, int numChannels)
 {
-    logAudioRecord("startRecording track=" + trackId
+    return startRecordingInternal(trackId, file, sampleRate, numChannels, 0.0, nullptr);
+}
+
+bool AudioRecorder::rolloverRecording(const juce::String& trackId,
+                                      const juce::File& nextFile,
+                                      double sampleRate,
+                                      int numChannels,
+                                      double nextStartTime,
+                                      CompletedRecording& completedPreviousTake)
+{
+    completedPreviousTake = {};
+    return startRecordingInternal(trackId,
+                                  nextFile,
+                                  sampleRate,
+                                  numChannels,
+                                  nextStartTime,
+                                  &completedPreviousTake);
+}
+
+bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
+                                           const juce::File& file,
+                                           double sampleRate,
+                                           int numChannels,
+                                           double initialStartTime,
+                                           CompletedRecording* replacedTake)
+{
+    OPENSTUDIO_LOG_AUDIO_RECORD("startRecording track=" + trackId
         + " file=" + file.getFullPathName()
         + " sampleRate=" + juce::String(sampleRate, 2)
         + " channels=" + juce::String(numChannels));
-    // Stop any existing recording for this track (brief lock)
-    {
-        const juce::ScopedLock sl(writerLock);
-        if (activeRecordings.find(trackId) != activeRecordings.end())
-        {
-            auto it = activeRecordings.find(trackId);
-            it->second.isActive = false;
-            it->second.threadedWriter.reset();
-            activeRecordings.erase(it);
-        }
-    }
-    // Lock released — all heavy I/O below happens WITHOUT holding writerLock,
-    // so the audio thread's TryLock won't fail during setup.
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> previousWriter;
+    // Construct the replacement completely before unpublishing any current
+    // take. During loop preparation the callback can continue writing the old
+    // writer, so file creation cannot open a no-writer gap.
 
     // Create parent directory if needed
     auto parentDir = file.getParentDirectory();
@@ -94,49 +113,79 @@ bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File
     // Entry layout: [min_ch0, max_ch0, min_ch1, max_ch1] per PEAK_STRIDE samples.
     // At 44.1kHz/256 stride: ~20 700 entries × 2 ch × 2 values × 4 B ≈ 660 KB/track.
     // Zero-init so getRecordingPeaks can safely read unwritten entries as 0.
-    const size_t maxEntries = static_cast<size_t>(sampleRate * 120.0 / ActiveRecording::PEAK_STRIDE) + 2;
+    const size_t maxEntries = static_cast<size_t>(
+        sampleRate * ActiveRecording::PEAK_CHUNK_SECONDS / ActiveRecording::PEAK_STRIDE) + 2;
     const int    entryFloats = std::min(numChannels, ActiveRecording::PEAK_MAX_CHANNELS) * 2;
     auto peakBuf = std::unique_ptr<float[]>(new float[maxEntries * static_cast<size_t>(entryFloats)]());
 
     // Brief lock: insert into map
     {
         const juce::ScopedLock sl(writerLock);
+        auto previous = activeRecordings.find(trackId);
+        if (previous != activeRecordings.end())
+        {
+            previous->second.isActive = false;
+            if (replacedTake != nullptr && previous->second.threadedWriter)
+            {
+                replacedTake->trackId = trackId;
+                replacedTake->file = previous->second.outputFile;
+                replacedTake->startTime = previous->second.startTime;
+                replacedTake->duration = previous->second.samplesWritten.load(std::memory_order_relaxed)
+                    / juce::jmax(1.0, previous->second.sampleRate);
+            }
+            previousWriter = std::move(previous->second.threadedWriter);
+            activeRecordings.erase(previous);
+        }
+
         ActiveRecording& state = activeRecordings[trackId];
         state.trackId = trackId;
         state.threadedWriter = std::move(threadedWriter);
         state.outputFile = file;
         state.isActive = true;
-        state.startTime = 0.0;
+        state.startTime = initialStartTime;
         state.samplesWritten = 0;
         state.numChannels = numChannels;
         state.sampleRate = sampleRate;
-        state.peakTable         = std::move(peakBuf);
-        state.peakTableCapacity = maxEntries;
+        state.captureStartOnFirstWrite = true;
+        state.hasStartTimeFallback = replacedTake != nullptr;
+        for (size_t chunk = 0; chunk < ActiveRecording::PEAK_MAX_CHUNKS; ++chunk)
+            state.peakChunkPtrs[chunk].store(nullptr, std::memory_order_relaxed);
+        state.peakChunks[0] = std::move(peakBuf);
+        state.peakChunkPtrs[0].store(state.peakChunks[0].get(), std::memory_order_release);
+        state.peakAllocatedChunks.store(1, std::memory_order_release);
+        state.peakChunkEntries = maxEntries;
         state.peakTableSize.store(0, std::memory_order_relaxed);
         state.accumMin[0] = state.accumMin[1] = 0.0f;
         state.accumMax[0] = state.accumMax[1] = 0.0f;
         state.accumCount = 0;
     }
+    previousWriter.reset();
 
     juce::Logger::writeToLog("AudioRecorder: Started recording track " + trackId +
                            " to " + file.getFullPathName());
-    logAudioRecord("startRecording success track=" + trackId
+    OPENSTUDIO_LOG_AUDIO_RECORD("startRecording success track=" + trackId
         + " file=" + file.getFullPathName());
     return true;
 }
 
-void AudioRecorder::writeBlock(const juce::String& trackId, const juce::AudioBuffer<float>& buffer, int numSamples)
+void AudioRecorder::writeBlock(const juce::String& trackId,
+                               const juce::AudioBuffer<float>& buffer,
+                               int numSamples,
+                               double compensatedBlockStartTimeSeconds)
 {
     // Use TryLock to avoid blocking the audio thread
-    // If the lock is held (during start/stop recording), we skip this block
-    // This is extremely rare and inaudible
+    // If control publication holds the lock, the file loses this block. Keep
+    // the window short and expose a counter rather than hiding the gap.
     const juce::ScopedTryLock sl(writerLock);
     if (!sl.isLocked())
     {
+        writeLockMissCount.fetch_add(1, std::memory_order_relaxed);
+#if OPENSTUDIO_AUDIO_RECORD_DEBUG
         static std::atomic<int> globalLockMissLogCounter { 0 };
         const int lockMiss = ++globalLockMissLogCounter;
         if ((lockMiss % 20) == 1)
-            logAudioRecord("writeBlock lock miss track=" + trackId + " count=" + juce::String(lockMiss));
+            OPENSTUDIO_LOG_AUDIO_RECORD("writeBlock lock miss track=" + trackId + " count=" + juce::String(lockMiss));
+#endif
         return;
     }
 
@@ -145,26 +194,48 @@ void AudioRecorder::writeBlock(const juce::String& trackId, const juce::AudioBuf
         return;
 
     auto& state = it->second;
+    const double captureToleranceSeconds = juce::jmax(
+        0.25,
+        4.0 * static_cast<double>(numSamples) / juce::jmax(1.0, state.sampleRate));
+    const bool plausibleFirstBlock = !state.hasStartTimeFallback
+        || std::abs(compensatedBlockStartTimeSeconds - state.startTime)
+            <= captureToleranceSeconds;
+    if (state.captureStartOnFirstWrite
+        && std::isfinite(compensatedBlockStartTimeSeconds)
+        && compensatedBlockStartTimeSeconds >= 0.0
+        && plausibleFirstBlock)
+    {
+        state.startTime = compensatedBlockStartTimeSeconds;
+        state.captureStartOnFirstWrite = false;
+    }
+#if OPENSTUDIO_AUDIO_RECORD_DEBUG
     const float inputPeak = peakFromBuffer(buffer, numSamples);
+#endif
 
     // ThreadedWriter::write() is audio-thread safe (lock-free ring buffer internally)
     // It copies data immediately, so buffer pointers don't need to remain valid
-    state.threadedWriter->write(buffer.getArrayOfReadPointers(), numSamples);
-    state.samplesWritten.fetch_add(numSamples);
+    if (!state.threadedWriter->write(buffer.getArrayOfReadPointers(), numSamples))
+    {
+        writerBufferOverflowCount.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    state.samplesWritten.fetch_add(numSamples, std::memory_order_relaxed);
+#if OPENSTUDIO_AUDIO_RECORD_DEBUG
     if (state.debugLoggedBlocks < 5)
     {
         ++state.debugLoggedBlocks;
-        logAudioRecord("writeBlock track=" + trackId
+        OPENSTUDIO_LOG_AUDIO_RECORD("writeBlock track=" + trackId
             + " numSamples=" + juce::String(numSamples)
             + " inputPeak=" + juce::String(inputPeak, 4)
             + " cumulativeSamples=" + juce::String(static_cast<juce::int64>(state.samplesWritten.load())));
     }
+#endif
 
     // Incremental peak accumulation for live waveform display.
     // Cheaper than the old interleaved-copy path: only min/max comparisons,
     // no index arithmetic, and the peak table is ~100× smaller than sampleBuffer.
     // The audio thread is the sole writer; message thread reads via atomic size.
-    if (state.peakTable)
+    if (state.peakAllocatedChunks.load(std::memory_order_acquire) > 0)
     {
         const int chCount = std::min(state.numChannels, ActiveRecording::PEAK_MAX_CHANNELS);
         const float* chPtrs[ActiveRecording::PEAK_MAX_CHANNELS] = { nullptr, nullptr };
@@ -184,15 +255,22 @@ void AudioRecorder::writeBlock(const juce::String& trackId, const juce::AudioBuf
             if (++state.accumCount >= ActiveRecording::PEAK_STRIDE)
             {
                 const size_t idx = state.peakTableSize.load(std::memory_order_relaxed);
-                if (idx < state.peakTableCapacity)
+                const size_t chunkIndex = state.peakChunkEntries > 0
+                    ? idx / state.peakChunkEntries
+                    : ActiveRecording::PEAK_MAX_CHUNKS;
+                if (chunkIndex < state.peakAllocatedChunks.load(std::memory_order_acquire))
                 {
-                    float* entry = state.peakTable.get() + idx * static_cast<size_t>(chCount * 2);
-                    for (int ch = 0; ch < chCount; ++ch)
+                    if (float* chunk = state.peakChunkPtrs[chunkIndex].load(std::memory_order_acquire))
                     {
-                        entry[ch * 2]     = state.accumMin[ch];
-                        entry[ch * 2 + 1] = state.accumMax[ch];
+                        const size_t entryIndex = idx % state.peakChunkEntries;
+                        float* entry = chunk + entryIndex * static_cast<size_t>(chCount * 2);
+                        for (int ch = 0; ch < chCount; ++ch)
+                        {
+                            entry[ch * 2]     = state.accumMin[ch];
+                            entry[ch * 2 + 1] = state.accumMax[ch];
+                        }
+                        state.peakTableSize.store(idx + 1, std::memory_order_release);
                     }
-                    state.peakTableSize.store(idx + 1, std::memory_order_release);
                 }
                 state.accumMin[0] = state.accumMin[1] = 0.0f;
                 state.accumMax[0] = state.accumMax[1] = 0.0f;
@@ -205,21 +283,23 @@ void AudioRecorder::writeBlock(const juce::String& trackId, const juce::AudioBuf
 
 void AudioRecorder::stopRecording(const juce::String& trackId)
 {
-    const juce::ScopedLock sl(writerLock);
-
-    auto it = activeRecordings.find(trackId);
-    if (it != activeRecordings.end())
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writerToFlush;
+    juce::File outputFile;
     {
-        // Mark inactive first so audio thread stops writing
+        const juce::ScopedLock sl(writerLock);
+        auto it = activeRecordings.find(trackId);
+        if (it == activeRecordings.end())
+            return;
+
         it->second.isActive = false;
-
-        // ThreadedWriter destructor flushes remaining data
-        it->second.threadedWriter.reset();
-
-        juce::Logger::writeToLog("AudioRecorder: Stopped recording track " + trackId +
-                               " (" + it->second.outputFile.getFullPathName() + ")");
+        writerToFlush = std::move(it->second.threadedWriter);
+        outputFile = it->second.outputFile;
         activeRecordings.erase(it);
     }
+
+    writerToFlush.reset();
+    juce::Logger::writeToLog("AudioRecorder: Stopped recording track " + trackId
+                           + " (" + outputFile.getFullPathName() + ")");
 }
 
 bool AudioRecorder::isRecording(const juce::String& trackId) const
@@ -235,73 +315,113 @@ bool AudioRecorder::isRecording(const juce::String& trackId) const
 
 void AudioRecorder::setRecordingStartTime(const juce::String& trackId, double startTime)
 {
-    juce::ScopedLock lock(writerLock);
+    const juce::ScopedLock lock(writerLock);
     auto it = activeRecordings.find(trackId);
     if (it != activeRecordings.end())
     {
         it->second.startTime = startTime;
+        it->second.hasStartTimeFallback = true;
     }
 }
 
 std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(double currentSampleRate)
 {
-    // Phase 1 (under lock): mark all recordings inactive and collect their writers.
-    // Keeping this section minimal means the audio thread's ScopedTryLock unblocks
-    // as soon as we leave Phase 1, even while writers are still flushing below.
-    std::vector<std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter>> writersToFlush;
-    std::vector<CompletedRecording> completedClips;
-
+    juce::ignoreUnused(currentSampleRate);
+    std::map<juce::String, ActiveRecording> recordingsToFinalize;
     {
         const juce::ScopedLock lock(writerLock);
-
         for (auto& [trackId, state] : activeRecordings)
         {
-            state.isActive = false;  // Audio thread stops calling writeBlock
-
-            if (state.threadedWriter)
-            {
-                CompletedRecording clip;
-                clip.trackId   = trackId;
-                clip.file      = state.outputFile;
-                clip.startTime = state.startTime;
-                clip.duration  = state.samplesWritten.load() / currentSampleRate;
-                completedClips.push_back(clip);
-                logAudioRecord("stopAllRecordings pending track=" + trackId
-                    + " file=" + state.outputFile.getFullPathName()
-                    + " startTime=" + juce::String(state.startTime, 3)
-                    + " samplesWritten=" + juce::String(static_cast<juce::int64>(state.samplesWritten.load()))
-                    + " duration=" + juce::String(clip.duration, 3)
-                    + (clip.duration <= 0.0 ? " WARNING_zero_duration" : ""));
-
-                writersToFlush.push_back(std::move(state.threadedWriter));
-            }
+            juce::ignoreUnused(trackId);
+            state.isActive = false;
         }
-
-        activeRecordings.clear();
+        recordingsToFinalize.swap(activeRecordings);
     }
-    // Lock RELEASED — audio thread's TryLock now succeeds immediately
 
-    // Phase 2 (outside lock): destroy the writers, which flushes remaining data
-    // to disk via the background writerThread.  This may block briefly but does
-    // not contend with the audio thread.
-    writersToFlush.clear();
+    std::vector<std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter>> finalizedWriters;
+    std::vector<CompletedRecording> finalizedClips;
+    finalizedWriters.reserve(recordingsToFinalize.size());
+    finalizedClips.reserve(recordingsToFinalize.size());
 
-    juce::Logger::writeToLog("AudioRecorder: Stopped all recordings. Completed " +
-                             juce::String(completedClips.size()) + " clips.");
-    logAudioRecord("stopAllRecordings completed clipCount=" + juce::String(static_cast<int>(completedClips.size())));
+    for (auto& [trackId, state] : recordingsToFinalize)
+    {
+        if (! state.threadedWriter)
+            continue;
 
-    return completedClips;
+        CompletedRecording clip;
+        clip.trackId = trackId;
+        clip.file = state.outputFile;
+        clip.startTime = state.startTime;
+        clip.duration = state.samplesWritten.load(std::memory_order_relaxed)
+            / juce::jmax(1.0, state.sampleRate);
+        finalizedClips.push_back(clip);
+        OPENSTUDIO_LOG_AUDIO_RECORD("stopAllRecordings pending track=" + trackId
+            + " file=" + state.outputFile.getFullPathName()
+            + " startTime=" + juce::String(state.startTime, 3)
+            + " samplesWritten=" + juce::String(static_cast<juce::int64>(state.samplesWritten.load()))
+            + " duration=" + juce::String(clip.duration, 3)
+            + (clip.duration <= 0.0 ? " WARNING_zero_duration" : ""));
+        finalizedWriters.push_back(std::move(state.threadedWriter));
+    }
+
+    finalizedWriters.clear();
+    juce::Logger::writeToLog("AudioRecorder: Stopped all recordings. Completed "
+                             + juce::String(finalizedClips.size()) + " clips.");
+    OPENSTUDIO_LOG_AUDIO_RECORD("stopAllRecordings completed clipCount="
+        + juce::String(static_cast<int>(finalizedClips.size())));
+    return finalizedClips;
+
 }
 
-juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samplesPerPixel, int numPixels)
+juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId,
+                                           int samplesPerPixel,
+                                           int numPixels,
+                                           juce::int64 startSample)
 {
     // Flat array format: [numChannels, min_ch0_px0, max_ch0_px0, min_ch1_px0, max_ch1_px0, ...]
     juce::Array<juce::var> peakData;
 
-    // Brief lock only to look up the recording entry
+    size_t growFromChunk = ActiveRecording::PEAK_MAX_CHUNKS;
+    size_t growChunkEntries = 0;
+    int growEntryFloats = 0;
+    {
+        const juce::ScopedLock sl(writerLock);
+        auto it = activeRecordings.find(trackId);
+        if (it == activeRecordings.end() || !it->second.isActive.load())
+            return peakData;
+
+        const auto& state = it->second;
+        const size_t allocatedChunks = state.peakAllocatedChunks.load(std::memory_order_acquire);
+        const size_t allocatedEntries = allocatedChunks * state.peakChunkEntries;
+        const size_t completedEntries = juce::jmin(
+            state.peakTableSize.load(std::memory_order_acquire), allocatedEntries);
+        const size_t entriesRemaining = allocatedEntries - completedEntries;
+        const size_t growThreshold = static_cast<size_t>(
+            state.sampleRate * 30.0 / ActiveRecording::PEAK_STRIDE);
+        if (entriesRemaining <= growThreshold
+            && allocatedChunks < ActiveRecording::PEAK_MAX_CHUNKS)
+        {
+            growFromChunk = allocatedChunks;
+            growChunkEntries = state.peakChunkEntries;
+            growEntryFloats = std::min(
+                state.numChannels, ActiveRecording::PEAK_MAX_CHANNELS) * 2;
+        }
+    }
+
+    std::unique_ptr<float[]> nextChunk;
+    if (growFromChunk < ActiveRecording::PEAK_MAX_CHUNKS
+        && growChunkEntries > 0
+        && growEntryFloats > 0)
+    {
+        nextChunk = std::unique_ptr<float[]>(
+            new float[growChunkEntries * static_cast<size_t>(growEntryFloats)]());
+    }
+
+    // Brief lock only to publish growth and snapshot the recording entry.
     int numChannels = 0;
-    const float* tablePtr = nullptr;
     size_t tableSize = 0;
+    size_t chunkEntries = 0;
+    std::array<const float*, ActiveRecording::PEAK_MAX_CHUNKS> chunkPtrs {};
 
     {
         const juce::ScopedLock sl(writerLock);
@@ -309,15 +429,30 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
         if (it == activeRecordings.end() || !it->second.isActive.load())
             return peakData;
 
-        numChannels = std::min(it->second.numChannels, ActiveRecording::PEAK_MAX_CHANNELS);
-        tablePtr    = it->second.peakTable.get();
-        tableSize   = it->second.peakTableSize.load(std::memory_order_acquire);
+        auto& state = it->second;
+        const size_t allocatedChunks = state.peakAllocatedChunks.load(std::memory_order_acquire);
+        if (nextChunk && allocatedChunks == growFromChunk)
+        {
+            state.peakChunks[growFromChunk] = std::move(nextChunk);
+            state.peakChunkPtrs[growFromChunk].store(
+                state.peakChunks[growFromChunk].get(), std::memory_order_release);
+            state.peakAllocatedChunks.store(growFromChunk + 1, std::memory_order_release);
+        }
+
+        numChannels = std::min(state.numChannels, ActiveRecording::PEAK_MAX_CHANNELS);
+        tableSize = state.peakTableSize.load(std::memory_order_acquire);
+        chunkEntries = state.peakChunkEntries;
+        const size_t publishedChunks = state.peakAllocatedChunks.load(std::memory_order_acquire);
+        for (size_t chunk = 0; chunk < publishedChunks; ++chunk)
+            chunkPtrs[chunk] = state.peakChunkPtrs[chunk].load(std::memory_order_acquire);
     }
     // Lock released — read is lock-free (stable pointer, atomic size).
     // getRecordingPeaks() and stopAllRecordings() both run on the message thread
     // so they are never concurrent — no use-after-free risk.
 
-    if (numChannels == 0 || !tablePtr || tableSize == 0 || samplesPerPixel <= 0 || numPixels <= 0)
+    startSample = juce::jmax<juce::int64>(0, startSample);
+    if (numChannels == 0 || chunkEntries == 0 || tableSize == 0
+        || samplesPerPixel <= 0 || numPixels <= 0)
         return peakData;
 
     // Each table entry covers PEAK_STRIDE samples.
@@ -330,7 +465,9 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
 
     // Calculate how many complete pixels the peak table data can cover
     const double totalSamplesCovered = static_cast<double>(tableSize) * stride;
-    const int maxPixelsFromData = static_cast<int>(totalSamplesCovered / samplesPerPixel);
+    const double availableSamples = juce::jmax(
+        0.0, totalSamplesCovered - static_cast<double>(startSample));
+    const int maxPixelsFromData = static_cast<int>(availableSamples / samplesPerPixel);
     const int actualPeaks = std::min(numPixels, maxPixelsFromData);
 
     if (actualPeaks <= 0)
@@ -342,7 +479,8 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
     for (int pixel = 0; pixel < actualPeaks; ++pixel)
     {
         // Map pixel range to sample range, then to peak table entry range
-        const double pixelStartSample = pixel * static_cast<double>(samplesPerPixel);
+        const double pixelStartSample = static_cast<double>(startSample)
+            + pixel * static_cast<double>(samplesPerPixel);
         const double pixelEndSample = pixelStartSample + samplesPerPixel;
         const size_t firstEntry = static_cast<size_t>(pixelStartSample / stride);
         const size_t lastEntry = std::min(static_cast<size_t>(pixelEndSample / stride) + 1,
@@ -353,7 +491,12 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
             float minVal = 0.0f, maxVal = 0.0f;
             for (size_t e = firstEntry; e < lastEntry; ++e)
             {
-                const float* entry = tablePtr + e * static_cast<size_t>(numChannels * 2);
+                const size_t chunkIndex = e / chunkEntries;
+                const size_t entryIndex = e % chunkEntries;
+                if (chunkIndex >= chunkPtrs.size() || chunkPtrs[chunkIndex] == nullptr)
+                    continue;
+                const float* entry = chunkPtrs[chunkIndex]
+                    + entryIndex * static_cast<size_t>(numChannels * 2);
                 const float eMin = entry[ch * 2];
                 const float eMax = entry[ch * 2 + 1];
                 if (eMin < minVal) minVal = eMin;
@@ -366,3 +509,5 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId, int samp
 
     return peakData;
 }
+
+#undef OPENSTUDIO_LOG_AUDIO_RECORD

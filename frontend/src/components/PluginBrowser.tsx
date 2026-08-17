@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/shallow";
 import {
@@ -15,9 +15,19 @@ import {
   Code,
   Star,
   FolderOpen,
+  FolderCog,
+  Plus,
+  Trash2,
+  AlertTriangle,
+  CheckCircle2,
+  RefreshCw,
   Search,
 } from "lucide-react";
-import { nativeBridge } from "../services/NativeBridge";
+import {
+  nativeBridge,
+  type PluginScanConfiguration,
+  type PluginScanReport,
+} from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
 import {
@@ -46,6 +56,7 @@ interface Plugin {
   manufacturer: string;
   category: string;
   fileOrIdentifier: string;
+  identifier?: string;
   isInstrument: boolean;
   snapshot?: string; // base64 data URL from C++ snapshot lookup
   pluginFormat?: string;
@@ -54,33 +65,49 @@ interface Plugin {
   producesMidi?: boolean;
   isMidiEffect?: boolean;
   supportsDoublePrecision?: boolean;
+  numInputChannels?: number;
+  numOutputChannels?: number;
 }
-
-type PluginCapabilityPatch = Pick<
-  Plugin,
-  | "pluginType"
-  | "pluginFormat"
-  | "isInstrument"
-  | "producesMidi"
-  | "isMidiEffect"
-  | "supportsDoublePrecision"
->;
 
 const pluginCatalogCache: {
   plugins: Plugin[] | null;
   loadPromise: Promise<Plugin[]> | null;
-  capabilityPromise: Promise<Plugin[]> | null;
-  capabilityPatches: Map<string, PluginCapabilityPatch>;
+  generation: number;
 } = {
   plugins: null,
   loadPromise: null,
-  capabilityPromise: null,
-  capabilityPatches: new Map(),
+  generation: 0,
 };
 
-function applyCachedCapabilities(plugin: Plugin): Plugin {
-  const cached = pluginCatalogCache.capabilityPatches.get(plugin.fileOrIdentifier);
-  return cached ? { ...plugin, ...cached } : plugin;
+function getPluginIdentity(
+  plugin: Pick<Plugin, "identifier" | "fileOrIdentifier">,
+): string {
+  return plugin.identifier?.trim() || plugin.fileOrIdentifier;
+}
+
+function getPluginLoadTarget(plugin: Plugin): string {
+  return plugin.pluginType === "s13fx" || plugin.pluginType === "builtin"
+    ? plugin.fileOrIdentifier
+    : getPluginIdentity(plugin);
+}
+
+function getComparableBlacklistIdentity(value: string): string {
+  const trimmed = value.trim();
+  const isWindowsPath = /^[a-z]:[\\/]/i.test(trimmed) || trimmed.startsWith("\\\\");
+  if (!isWindowsPath) return trimmed;
+
+  const normalized = trimmed.replace(/\//g, "\\");
+  const bundleMatch = normalized.match(/^(.+?\.(?:vst3|clap|lv2))(?:\\.*)?$/i);
+  return (bundleMatch?.[1] ?? normalized).toLowerCase();
+}
+
+function isPluginFavorite(plugin: Plugin, favorites: Set<string>): boolean {
+  const identity = getPluginIdentity(plugin);
+  return (
+    favorites.has(identity) ||
+    (identity !== plugin.fileOrIdentifier &&
+      favorites.has(plugin.fileOrIdentifier))
+  );
 }
 
 async function fetchPluginCatalog(): Promise<Plugin[]> {
@@ -92,14 +119,15 @@ async function fetchPluginCatalog(): Promise<Plugin[]> {
     return pluginCatalogCache.loadPromise;
   }
 
-  pluginCatalogCache.loadPromise = (async () => {
+  const requestGeneration = pluginCatalogCache.generation;
+  const request = (async () => {
     const pluginList = await nativeBridge.getAvailablePlugins();
     const hostPlugins: Plugin[] = pluginList.map((p: any) => {
       const fmt = (p.pluginFormat || p.pluginFormatName || "").toLowerCase();
       let pluginType: Plugin["pluginType"] = "vst3";
       if (fmt.includes("lv2")) pluginType = "lv2";
       else if (fmt.includes("clap")) pluginType = "clap";
-      return applyCachedCapabilities({ ...p, pluginType });
+      return { ...p, pluginType };
     });
 
     let s13fxPlugins: Plugin[] = [];
@@ -117,101 +145,34 @@ async function fetchPluginCatalog(): Promise<Plugin[]> {
       // S13FX not available, that's OK
     }
 
-    const combined = [...hostPlugins, ...s13fxPlugins];
-    pluginCatalogCache.plugins = combined;
-    return combined;
+    return [...hostPlugins, ...s13fxPlugins];
   })();
+  pluginCatalogCache.loadPromise = request;
 
   try {
-    return await pluginCatalogCache.loadPromise;
+    const catalog = await request;
+    if (requestGeneration !== pluginCatalogCache.generation) {
+      // The invalidation may have happened while this request was in flight.
+      // Detach the stale promise before retrying; otherwise fetchPluginCatalog
+      // would immediately hand the already-resolved stale request back to us.
+      if (pluginCatalogCache.loadPromise === request) {
+        pluginCatalogCache.loadPromise = null;
+      }
+      return await fetchPluginCatalog();
+    }
+    pluginCatalogCache.plugins = catalog;
+    return catalog;
   } finally {
-    pluginCatalogCache.loadPromise = null;
+    if (pluginCatalogCache.loadPromise === request) {
+      pluginCatalogCache.loadPromise = null;
+    }
   }
 }
 
-async function hydratePluginCapabilities(catalog: Plugin[]): Promise<Plugin[]> {
-  const hostPluginsNeedingCapabilities = catalog.filter(
-    (plugin) =>
-      plugin.pluginType !== "s13fx" &&
-      !pluginCatalogCache.capabilityPatches.has(plugin.fileOrIdentifier),
-  );
-
-  if (hostPluginsNeedingCapabilities.length === 0) {
-    return pluginCatalogCache.plugins ?? catalog;
-  }
-
-  if (pluginCatalogCache.capabilityPromise) {
-    return pluginCatalogCache.capabilityPromise;
-  }
-
-  pluginCatalogCache.capabilityPromise = (async () => {
-    await Promise.all(
-      hostPluginsNeedingCapabilities.map(async (plugin) => {
-        try {
-          const capabilities = await nativeBridge.getPluginCapabilities(
-            plugin.fileOrIdentifier,
-          );
-
-          if (!capabilities?.success) {
-            return;
-          }
-
-          const fmt = (
-            capabilities.pluginFormat ||
-            plugin.pluginFormat ||
-            plugin.pluginFormatName ||
-            ""
-          ).toLowerCase();
-
-          let pluginType: Plugin["pluginType"] = plugin.pluginType ?? "vst3";
-          if (fmt.includes("lv2")) pluginType = "lv2";
-          else if (fmt.includes("clap")) pluginType = "clap";
-          else if (fmt.includes("builtin")) pluginType = "builtin";
-          else pluginType = "vst3";
-
-          pluginCatalogCache.capabilityPatches.set(plugin.fileOrIdentifier, {
-            pluginType,
-            pluginFormat: capabilities.pluginFormat || plugin.pluginFormat,
-            isInstrument:
-              typeof capabilities.isInstrument === "boolean"
-                ? capabilities.isInstrument
-                : plugin.isInstrument,
-            producesMidi:
-              typeof capabilities.producesMidi === "boolean"
-                ? capabilities.producesMidi
-                : plugin.producesMidi,
-            isMidiEffect:
-              typeof capabilities.isMidiEffect === "boolean"
-                ? capabilities.isMidiEffect
-                : plugin.isMidiEffect,
-            supportsDoublePrecision:
-              typeof capabilities.supportsDoublePrecision === "boolean"
-                ? capabilities.supportsDoublePrecision
-                : plugin.supportsDoublePrecision,
-          });
-        } catch {
-          // Ignore capability failures and keep cached scan metadata.
-        }
-      }),
-    );
-
-    const mergedCatalog = (pluginCatalogCache.plugins ?? catalog).map(applyCachedCapabilities);
-    pluginCatalogCache.plugins = mergedCatalog;
-    return mergedCatalog;
-  })();
-
-  try {
-    return await pluginCatalogCache.capabilityPromise;
-  } finally {
-    pluginCatalogCache.capabilityPromise = null;
-  }
-}
-
-function invalidatePluginCatalogCache() {
+export function invalidatePluginCatalogCache() {
+  pluginCatalogCache.generation += 1;
   pluginCatalogCache.plugins = null;
   pluginCatalogCache.loadPromise = null;
-  pluginCatalogCache.capabilityPromise = null;
-  pluginCatalogCache.capabilityPatches.clear();
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -263,16 +224,46 @@ const CATEGORY_GROUPS = [
 
 type CategoryGroupId = typeof CATEGORY_GROUPS[number]["id"];
 
-function getPluginGroupId(plugin: { category: string; isInstrument: boolean }): CategoryGroupId {
-  if (plugin.isInstrument) return "instruments";
-  const lowerCat = plugin.category.toLowerCase();
-  for (const group of CATEGORY_GROUPS) {
-    if (group.id === "all" || group.id === "other") continue;
-    if (group.keywords.some((kw) => lowerCat.includes(kw))) return group.id;
+function getPluginCategoryTokens(category: string): string[] {
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const rawToken of category.split("|")) {
+    const token = rawToken.trim();
+    const identity = token.toLowerCase();
+    if (!token || seen.has(identity)) continue;
+    seen.add(identity);
+    tokens.push(token);
   }
-  // If it has "Fx" in category but no specific match, classify as "effects"
-  if (lowerCat.includes("fx") || lowerCat.includes("effect")) return "effects";
-  return "other";
+  return tokens;
+}
+
+function pluginMatchesCategoryGroup(
+  plugin: { category: string; isInstrument: boolean },
+  groupId: CategoryGroupId,
+): boolean {
+  if (groupId === "all") return true;
+  if (groupId === "instruments") return plugin.isInstrument;
+  if (plugin.isInstrument) return false;
+
+  const lowerCategory = getPluginCategoryTokens(plugin.category)
+    .join(" ")
+    .toLowerCase();
+  const group = CATEGORY_GROUPS.find((candidate) => candidate.id === groupId);
+  if (!group) return false;
+
+  if (groupId === "other") {
+    return !CATEGORY_GROUPS.some(
+      (candidate) =>
+        candidate.id !== "all" &&
+        candidate.id !== "instruments" &&
+        candidate.id !== "other" &&
+        candidate.keywords.some((keyword) =>
+          lowerCategory.includes(keyword),
+        ),
+    );
+  }
+
+  return group.keywords.some((keyword) => lowerCategory.includes(keyword));
 }
 
 interface PluginBrowserProps {
@@ -298,6 +289,17 @@ export function PluginBrowser({
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
   const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [showScanFolders, setShowScanFolders] = useState(false);
+  const [scanConfiguration, setScanConfiguration] =
+    useState<PluginScanConfiguration | null>(null);
+  const [scanConfigurationLoading, setScanConfigurationLoading] = useState(false);
+  const [scanFolderBusy, setScanFolderBusy] = useState(false);
+  const [scanFolderError, setScanFolderError] = useState("");
+  const [scanReport, setScanReport] = useState<PluginScanReport | null>(null);
+  const [scanError, setScanError] = useState("");
+  const [retryingBlacklistedPlugin, setRetryingBlacklistedPlugin] = useState<
+    string | null
+  >(null);
   const { currentInstrumentPlugin, removeInstrumentWithUndo } = useDAWStore(
     useShallow((state) => {
       const track = state.tracks.find((candidate) => candidate.id === trackId);
@@ -308,29 +310,26 @@ export function PluginBrowser({
     }),
   );
 
-  const toggleFavorite = (pluginId: string) => {
+  const toggleFavorite = (plugin: Plugin) => {
     setFavorites((prev) => {
       const next = new Set(prev);
-      if (next.has(pluginId)) next.delete(pluginId);
-      else next.add(pluginId);
+      const identity = getPluginIdentity(plugin);
+      if (isPluginFavorite(plugin, next)) {
+        next.delete(identity);
+        next.delete(plugin.fileOrIdentifier);
+      } else {
+        next.add(identity);
+      }
       saveFavorites(next);
       return next;
     });
   };
 
-  const loadPlugins = async () => {
+  const loadPlugins = useCallback(async () => {
     try {
       if (pluginCatalogCache.plugins) {
         setPlugins(pluginCatalogCache.plugins);
         setLoading(false);
-
-        void hydratePluginCapabilities(pluginCatalogCache.plugins)
-          .then((hydratedCatalog) => {
-            setPlugins(hydratedCatalog);
-          })
-          .catch((e) => {
-            console.error("[PluginBrowser] Failed to hydrate cached capabilities:", e);
-          });
         return;
       }
 
@@ -338,39 +337,148 @@ export function PluginBrowser({
       const catalog = await fetchPluginCatalog();
       setPlugins(catalog);
       setLoading(false);
-
-      void hydratePluginCapabilities(catalog)
-        .then((hydratedCatalog) => {
-          setPlugins(hydratedCatalog);
-        })
-        .catch((e) => {
-          console.error("[PluginBrowser] Failed to hydrate plugin capabilities:", e);
-        });
     } catch (e) {
       console.error("[PluginBrowser] Failed to load plugins:", e);
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void loadPlugins();
+  }, [loadPlugins]);
+
+  useEffect(() => {
+    const handleCatalogChanged = () => {
+      invalidatePluginCatalogCache();
+      void loadPlugins();
+    };
+
+    window.addEventListener(
+      "openstudio:plugin-catalog-changed",
+      handleCatalogChanged,
+    );
+    return () => {
+      window.removeEventListener(
+        "openstudio:plugin-catalog-changed",
+        handleCatalogChanged,
+      );
+    };
+  }, [loadPlugins]);
+
+  const loadScanConfiguration = useCallback(async () => {
+    setScanConfigurationLoading(true);
+    setScanFolderError("");
+    try {
+      setScanConfiguration(await nativeBridge.getPluginScanConfiguration());
+    } catch (e) {
+      console.error("[PluginBrowser] Failed to load scan folders:", e);
+      setScanFolderError("OpenStudio could not read the plug-in scan folders.");
+    } finally {
+      setScanConfigurationLoading(false);
+    }
   }, []);
 
-  const handleScan = async () => {
-    setLoading(true);
+  const handleToggleScanFolders = () => {
+    const nextVisible = !showScanFolders;
+    setShowScanFolders(nextVisible);
+    if (nextVisible && scanConfiguration === null) {
+      void loadScanConfiguration();
+    }
+  };
+
+  const handleAddScanFolder = async () => {
+    setScanFolderBusy(true);
+    setScanFolderError("");
     try {
-      await nativeBridge.scanForPlugins();
-      invalidatePluginCatalogCache();
+      const selectedPath = (
+        await nativeBridge.browseForFolder("Choose a plug-in scan folder")
+      ).trim();
+      if (!selectedPath) return;
+
+      if (!(await nativeBridge.addPluginScanPath(selectedPath))) {
+        setScanFolderError(
+          "That folder could not be added. Choose an existing plug-in folder.",
+        );
+        return;
+      }
+
+      await loadScanConfiguration();
+    } catch (e) {
+      console.error("[PluginBrowser] Failed to add scan folder:", e);
+      setScanFolderError("OpenStudio could not add that scan folder.");
+    } finally {
+      setScanFolderBusy(false);
+    }
+  };
+
+  const handleRemoveScanFolder = async (path: string) => {
+    setScanFolderBusy(true);
+    setScanFolderError("");
+    try {
+      if (!(await nativeBridge.removePluginScanPath(path))) {
+        setScanFolderError("OpenStudio could not remove that scan folder.");
+        return;
+      }
+      await loadScanConfiguration();
+    } catch (e) {
+      console.error("[PluginBrowser] Failed to remove scan folder:", e);
+      setScanFolderError("OpenStudio could not remove that scan folder.");
+    } finally {
+      setScanFolderBusy(false);
+    }
+  };
+
+  const handleScan = async (forceRescan = false) => {
+    setLoading(true);
+    setScanError("");
+    setScanReport(null);
+    try {
+      const report = await nativeBridge.scanForPlugins(forceRescan);
+
+      // NativeBridge announces catalog changes. The fallback keeps this
+      // component correct in hosts that cannot dispatch DOM events.
+      if (pluginCatalogCache.plugins !== null || pluginCatalogCache.loadPromise === null) {
+        invalidatePluginCatalogCache();
+      }
       await loadPlugins();
+      await loadScanConfiguration();
+      setScanReport(report);
     } catch (e) {
       console.error("[PluginBrowser] Failed to scan:", e);
+      setScanError(
+        "The scan did not complete. The previous plug-in catalog is still available.",
+      );
     } finally {
       setLoading(false);
     }
   };
 
+  const handleRetryBlacklistedPlugin = async (path: string) => {
+    setRetryingBlacklistedPlugin(path);
+    setScanError("");
+    try {
+      if (!(await nativeBridge.retryBlacklistedPlugin(path))) {
+        setScanError(
+          "That plug-in could not be removed from the safety blacklist.",
+        );
+        return;
+      }
+
+      await loadScanConfiguration();
+      await handleScan(true);
+    } catch (error) {
+      console.error("[PluginBrowser] Failed to retry blacklisted plug-in:", error);
+      setScanError(
+        "The plug-in could not be retried. The previous catalog remains available.",
+      );
+    } finally {
+      setRetryingBlacklistedPlugin(null);
+    }
+  };
+
   const handleAddPlugin = async (plugin: Plugin) => {
-    setAddingPlugin(plugin.fileOrIdentifier);
+    const pluginTarget = getPluginLoadTarget(plugin);
+    setAddingPlugin(getPluginIdentity(plugin));
     try {
       let success = false;
       let shouldNotifyChain = false;
@@ -404,12 +512,12 @@ export function PluginBrowser({
       } else if (targetChain === "instrument") {
         success = await store.loadInstrumentWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginTarget,
         );
         if (success) {
           await waitForInstrumentPlugin(
             trackId,
-            plugin.fileOrIdentifier,
+            pluginTarget,
             (candidateTrackId) =>
               useDAWStore
                 .getState()
@@ -417,24 +525,24 @@ export function PluginBrowser({
           );
           notifyInstrumentChanged({
             trackId,
-            instrumentPlugin: plugin.fileOrIdentifier,
+            instrumentPlugin: pluginTarget,
           });
           await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (targetChain === "input") {
         success = await store.addTrackFXWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginTarget,
           "input",
         );
       } else if (targetChain === "track") {
         success = await store.addTrackFXWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginTarget,
           "track",
         );
       } else if (targetChain === "master") {
-        success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
+        success = await nativeBridge.addMasterFX(pluginTarget);
         shouldNotifyChain = success;
       }
 
@@ -463,29 +571,48 @@ export function PluginBrowser({
       // Only show instrument plugins
       return plugins.filter((p) => p.isInstrument);
     }
-    // For FX chains (input/track/master), exclude instrument plugins
-    let filtered = plugins.filter((p) => !p.isInstrument);
-    // For pure MIDI tracks (no instrument loaded), audio FX won't work
-    // — only show S13FX and plugins that explicitly support MIDI
-    if (trackType === "midi") {
-      filtered = filtered.filter(
-        (p) => p.pluginType === "s13fx" || p.producesMidi || p.isMidiEffect,
-      );
-    }
+    // MIDI production is a runtime capability. Keep every scanned effect
+    // visible instead of instantiating third-party binaries to classify it.
+    const filtered = plugins.filter((p) => !p.isInstrument);
     return filtered;
-  }, [plugins, targetChain, trackType]);
+  }, [plugins, targetChain]);
 
-  const categories = [
-    "All",
-    ...Array.from(new Set(basePlugins.map((p) => p.category))),
-  ];
+  const scannedInstrumentCount = useMemo(
+    () => plugins.filter((plugin) => plugin.isInstrument).length,
+    [plugins],
+  );
+  const scannedEffectCount = plugins.length - scannedInstrumentCount;
 
-  // Compute available category groups (only show tabs that have plugins)
+  const categories = useMemo(() => {
+    const categoryByIdentity = new Map<string, string>();
+    for (const plugin of basePlugins) {
+      for (const category of getPluginCategoryTokens(plugin.category)) {
+        const identity = category.toLowerCase();
+        if (!categoryByIdentity.has(identity)) {
+          categoryByIdentity.set(identity, category);
+        }
+      }
+    }
+    return [
+      "All",
+      ...Array.from(categoryByIdentity.values()).sort((a, b) =>
+        a.localeCompare(b),
+      ),
+    ];
+  }, [basePlugins]);
+
+  // A VST3 can advertise several categories, so one plug-in may belong to
+  // multiple useful tabs (for example Effects, Distortion, Dynamics, Reverb).
   const availableGroups = useMemo(() => {
     const groupCounts = new Map<CategoryGroupId, number>();
-    for (const p of basePlugins) {
-      const gid = getPluginGroupId(p);
-      groupCounts.set(gid, (groupCounts.get(gid) || 0) + 1);
+    for (const group of CATEGORY_GROUPS) {
+      if (group.id === "all") continue;
+      groupCounts.set(
+        group.id,
+        basePlugins.filter((plugin) =>
+          pluginMatchesCategoryGroup(plugin, group.id),
+        ).length,
+      );
     }
     return CATEGORY_GROUPS.filter(
       (g) => g.id === "all" || (groupCounts.get(g.id) || 0) > 0
@@ -503,18 +630,22 @@ export function PluginBrowser({
       p.manufacturer.toLowerCase().includes(term) ||
       p.category.toLowerCase().includes(term);
     const matchesCategory =
-      categoryFilter === "All" || p.category === categoryFilter;
+      categoryFilter === "All" ||
+      getPluginCategoryTokens(p.category).some(
+        (category) =>
+          category.toLowerCase() === categoryFilter.toLowerCase(),
+      );
     const matchesGroup =
-      categoryGroupFilter === "all" || getPluginGroupId(p) === categoryGroupFilter;
-    const matchesFavorite = !showFavoritesOnly || favorites.has(p.fileOrIdentifier);
+      pluginMatchesCategoryGroup(p, categoryGroupFilter);
+    const matchesFavorite = !showFavoritesOnly || isPluginFavorite(p, favorites);
     return matchesSearch && matchesCategory && matchesGroup && matchesFavorite;
   });
 
   // Sort: favorites first, then alphabetical
   const sortedPlugins = useMemo(() => {
     return [...filteredPlugins].sort((a, b) => {
-      const aFav = favorites.has(a.fileOrIdentifier) ? 0 : 1;
-      const bFav = favorites.has(b.fileOrIdentifier) ? 0 : 1;
+      const aFav = isPluginFavorite(a, favorites) ? 0 : 1;
+      const bFav = isPluginFavorite(b, favorites) ? 0 : 1;
       if (aFav !== bFav) return aFav - bFav;
       return a.name.localeCompare(b.name);
     });
@@ -522,9 +653,79 @@ export function PluginBrowser({
 
   const currentInstrumentName = useMemo(() => {
     if (!currentInstrumentPlugin) return "";
-    const known = plugins.find((plugin) => plugin.fileOrIdentifier === currentInstrumentPlugin);
+    const known = plugins.find(
+      (plugin) =>
+        getPluginLoadTarget(plugin) === currentInstrumentPlugin ||
+        plugin.fileOrIdentifier === currentInstrumentPlugin,
+    );
     return known?.name || currentInstrumentPlugin.split(/[\\/]/).pop() || "Instrument";
   }, [currentInstrumentPlugin, plugins]);
+
+  const emptyCatalogMessage = useMemo(() => {
+    if (plugins.length === 0) {
+      return "No plug-ins are cataloged yet. Scan the standard folders or add the folder where your plug-ins are installed.";
+    }
+    if (basePlugins.length === 0) {
+      if (targetChain === "instrument") {
+        return `${plugins.length} catalog entries are available, but none report themselves as instruments. This slot hides audio effects.`;
+      }
+      return `${plugins.length} catalog entries are available, but this FX slot hides instruments.`;
+    }
+    const normalizedSearch = searchTerm.trim().toLowerCase();
+    if (normalizedSearch) {
+      const hiddenMatches = plugins.filter((plugin) => {
+        const hiddenBySlot =
+          targetChain === "instrument" ? !plugin.isInstrument : plugin.isInstrument;
+        return (
+          hiddenBySlot &&
+          (plugin.name.toLowerCase().includes(normalizedSearch) ||
+            plugin.manufacturer.toLowerCase().includes(normalizedSearch) ||
+            plugin.category.toLowerCase().includes(normalizedSearch))
+        );
+      }).length;
+      if (hiddenMatches > 0) {
+        return targetChain === "instrument"
+          ? `${hiddenMatches} matching audio effect${hiddenMatches === 1 ? " is" : "s are"} scanned, but this instrument slot only lists instruments.`
+          : `${hiddenMatches} matching instrument${hiddenMatches === 1 ? " is" : "s are"} scanned. Open the Instrument Browser on a MIDI or instrument track to load ${hiddenMatches === 1 ? "it" : "them"}.`;
+      }
+    }
+    return "No plug-ins match the current search, category, or favorites filters.";
+  }, [basePlugins.length, plugins, searchTerm, targetChain]);
+
+  const blacklistedPluginPaths = useMemo(
+    () =>
+      new Set(
+        (scanConfiguration?.blacklistedPlugins ?? []).map(
+          getComparableBlacklistIdentity,
+        ),
+      ),
+    [scanConfiguration],
+  );
+  const isBlacklistedPlugin = (path: string) =>
+    blacklistedPluginPaths.has(getComparableBlacklistIdentity(path));
+
+  const scanHasIssues =
+    scanReport !== null &&
+    (!scanReport.success ||
+      scanReport.failedCount > 0 ||
+      scanReport.skippedCount > 0);
+  const scanSummary = scanReport
+    ? scanReport.success
+      ? `${scanReport.forceRescan ? "Deep scan" : "Scan"} found ${scanReport.pluginCount} plug-in ${scanReport.pluginCount === 1 ? "class" : "classes"}${
+          scanReport.candidateCount > 0
+            ? ` from ${scanReport.candidateCount} candidate${scanReport.candidateCount === 1 ? "" : "s"}`
+            : ""
+        }.${
+          scanReport.failedCount > 0
+            ? ` ${scanReport.failedCount} candidate${scanReport.failedCount === 1 ? " was" : "s were"} not loadable.`
+            : ""
+        }${
+          scanReport.skippedCount > 0
+            ? ` ${scanReport.skippedCount} candidate${scanReport.skippedCount === 1 ? " was" : "s were"} skipped.`
+            : ""
+        }`
+      : `${scanReport.error || "The scan did not complete."} ${scanReport.pluginCount} known plug-in ${scanReport.pluginCount === 1 ? "class remains" : "classes remain"} available.`
+    : "";
 
   const content = (
     <>
@@ -577,14 +778,245 @@ export function PluginBrowser({
           <FolderOpen size={14} />
         </Button>
         <Button
+          variant={showScanFolders ? "primary" : "default"}
+          size="md"
+          onClick={handleToggleScanFolders}
+          title="Manage additional VST3, CLAP, and LV2 scan folders"
+          aria-expanded={showScanFolders}
+        >
+          <FolderCog size={14} />
+          Folders
+        </Button>
+        <Button
           variant="primary"
           size="md"
-          onClick={handleScan}
+          onClick={() => void handleScan(false)}
           disabled={loading}
+          title="Incremental scan: reuse unchanged plug-in metadata"
         >
           {loading ? "Scanning..." : "Scan"}
         </Button>
+        <Button
+          variant="default"
+          size="md"
+          onClick={() => void handleScan(true)}
+          disabled={loading}
+          title="Deep scan: inspect every configured plug-in again"
+        >
+          <RefreshCw size={14} />
+          Deep Scan
+        </Button>
       </div>
+
+      {showScanFolders && (
+        <div className="px-3 py-3 bg-neutral-900 border-b border-neutral-700">
+          <div className="flex items-start justify-between gap-3 mb-2">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-neutral-100">
+                Additional scan folders
+              </div>
+              <div className="text-xs text-neutral-400 mt-0.5">
+                Standard system folders are included automatically. Add vendor or application-specific folders here, then run Scan.
+              </div>
+            </div>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => void handleAddScanFolder()}
+              disabled={scanFolderBusy || scanConfigurationLoading}
+              className="shrink-0"
+            >
+              <Plus size={13} />
+              Add Folder
+            </Button>
+          </div>
+
+          {scanConfigurationLoading ? (
+            <div className="text-xs text-neutral-400 py-2">Loading folders...</div>
+          ) : scanConfiguration ? (
+            <>
+              {scanConfiguration.customPaths.length === 0 ? (
+                <div className="rounded border border-neutral-700 bg-neutral-950/60 px-3 py-2 text-xs text-neutral-400">
+                  No additional folders. OpenStudio will scan its standard locations.
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {scanConfiguration.customPaths.map((path) => (
+                    <div
+                      key={path}
+                      className="flex items-center gap-2 rounded border border-neutral-700 bg-neutral-950/60 px-2.5 py-1.5"
+                    >
+                      <FolderOpen size={13} className="text-blue-400 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate text-xs text-neutral-200" title={path}>
+                        {path}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveScanFolder(path)}
+                        disabled={scanFolderBusy}
+                        className="p-1 rounded text-neutral-500 hover:text-red-300 hover:bg-red-950/40 disabled:opacity-40"
+                        title="Remove scan folder"
+                        aria-label={`Remove scan folder ${path}`}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-2 text-[11px] text-neutral-500">
+                Supported: {scanConfiguration.supportedFormats.join(", ") || "No host formats reported"}
+                {scanConfiguration.effectivePaths.length > 0 &&
+                  ` · ${scanConfiguration.effectivePaths.filter((entry) => entry.exists).length} active scan locations`}
+              </div>
+              {scanConfiguration.unsupportedFormats &&
+                scanConfiguration.unsupportedFormats.length > 0 && (
+                  <div className="mt-1 text-[11px] text-neutral-500">
+                    Not hostable: {scanConfiguration.unsupportedFormats.join(", ")}.
+                  </div>
+                )}
+              {scanConfiguration.contentLibraryNote && (
+                <div className="mt-1 text-[11px] text-neutral-500">
+                  {scanConfiguration.contentLibraryNote}
+                </div>
+              )}
+
+              {scanConfiguration.blacklistedPlugins.length > 0 && (
+                <div className="mt-3 rounded border border-amber-800/60 bg-amber-950/20 p-2.5">
+                  <div className="text-xs font-medium text-amber-200">
+                    Skipped for safety
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-neutral-400">
+                    These candidates were blocked after a previous scan or load
+                    failure. Retry removes one entry from the safety blacklist
+                    and runs a deep scan.
+                  </div>
+                  <div className="mt-2 space-y-1.5">
+                    {scanConfiguration.blacklistedPlugins.map((path) => (
+                      <div
+                        key={path}
+                        className="flex items-center gap-2 rounded border border-amber-900/50 bg-neutral-950/60 px-2.5 py-1.5"
+                      >
+                        <AlertTriangle
+                          size={13}
+                          className="shrink-0 text-amber-400"
+                        />
+                        <span
+                          className="min-w-0 flex-1 truncate text-xs text-neutral-200"
+                          title={path}
+                        >
+                          {path}
+                        </span>
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={() =>
+                            void handleRetryBlacklistedPlugin(path)
+                          }
+                          disabled={retryingBlacklistedPlugin !== null || loading}
+                          title="Remove from the safety blacklist and deep scan"
+                        >
+                          <RefreshCw size={12} />
+                          {retryingBlacklistedPlugin === path
+                            ? "Retrying..."
+                            : "Retry"}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : null}
+
+          {scanFolderError && (
+            <div role="alert" className="mt-2 text-xs text-red-300">
+              {scanFolderError}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(scanReport || scanError) && (
+        <div
+          className={`px-3 py-2 border-b text-xs ${
+            scanError || scanHasIssues
+              ? "border-amber-800/60 bg-amber-950/30 text-amber-200"
+              : "border-emerald-800/50 bg-emerald-950/20 text-emerald-200"
+          }`}
+          role={scanError || scanHasIssues ? "alert" : "status"}
+          aria-live="polite"
+        >
+          <div className="flex items-start gap-2">
+            {scanError || scanHasIssues ? (
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            ) : (
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div>{scanError || scanSummary}</div>
+              {scanReport &&
+                (scanReport.failures.length > 0 ||
+                  scanReport.skipped.length > 0 ||
+                  scanReport.paths.length > 0 ||
+                  Boolean(scanReport.debugLogPath)) && (
+                  <details className="mt-1 text-neutral-400">
+                    <summary className="cursor-pointer select-none hover:text-neutral-200">
+                      Scan details
+                    </summary>
+                    <div className="mt-1.5 space-y-1 pl-1">
+                      <div>
+                        {scanReport.paths.length} configured location{scanReport.paths.length === 1 ? "" : "s"}.
+                      </div>
+                      {scanReport.failures.slice(0, 6).map((failure) => (
+                        <div key={`${failure.format}:${failure.path}`} className="break-words">
+                          {failure.format}: {failure.path} — {failure.reason}
+                        </div>
+                      ))}
+                      {scanReport.failures.length > 6 && (
+                        <div>{scanReport.failures.length - 6} more failures are recorded in the scan log.</div>
+                      )}
+                      {scanReport.skipped.slice(0, 6).map((skipped) => (
+                        <div
+                          key={`skipped:${skipped.format}:${skipped.path}`}
+                          className="flex items-start gap-2 break-words"
+                        >
+                          <span className="min-w-0 flex-1">
+                            Skipped {skipped.format}: {skipped.path} - {skipped.reason}
+                          </span>
+                          {isBlacklistedPlugin(skipped.path) && (
+                            <Button
+                              variant="default"
+                              size="sm"
+                              onClick={() =>
+                                void handleRetryBlacklistedPlugin(skipped.path)
+                              }
+                              disabled={retryingBlacklistedPlugin !== null || loading}
+                              className="shrink-0"
+                              title="Remove from the safety blacklist and deep scan"
+                            >
+                              <RefreshCw size={12} />
+                              Retry
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                      {scanReport.skipped.length > 6 && (
+                        <div>{scanReport.skipped.length - 6} more skipped candidates are recorded in the scan log.</div>
+                      )}
+                      {scanReport.debugLogPath && (
+                        <div className="break-all" title={scanReport.debugLogPath}>
+                          Log: {scanReport.debugLogPath}
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Category Group Filter Tabs */}
       <div
@@ -611,6 +1043,30 @@ export function PluginBrowser({
           </button>
         ))}
       </div>
+
+      {trackType === "midi" && targetChain !== "instrument" && (
+        <div className="px-3 py-1.5 border-b border-neutral-800 bg-neutral-900 text-[11px] text-neutral-500">
+          MIDI and audio effects are both listed. Audio-only effects need an
+          instrument or another audio-producing route on this track.
+        </div>
+      )}
+
+      {targetChain !== "instrument" && scannedInstrumentCount > 0 && (
+        <div className="px-3 py-2 border-b border-blue-900/50 bg-blue-950/20 text-[11px] text-blue-200/80">
+          This is an FX slot, so instrument plug-ins are intentionally hidden. {scannedInstrumentCount} scanned instrument
+          {scannedInstrumentCount === 1 ? " is" : "s are"} available from the
+          track's Instrument button.
+        </div>
+      )}
+
+      {targetChain === "instrument" && scannedEffectCount > 0 && (
+        <div className="px-3 py-2 border-b border-amber-900/60 bg-amber-950/20 text-[11px] text-amber-200/90">
+          This is the Instrument slot. Guitar amp suites and other audio effects
+          are intentionally hidden here, not missing from the scan. Use the
+          track's FX button to browse {scannedEffectCount} scanned audio effect
+          {scannedEffectCount === 1 ? "" : "s"}.
+        </div>
+      )}
 
       {targetChain === "instrument" && currentInstrumentPlugin && (
         <div className="flex items-center gap-2 px-3 py-2 bg-neutral-900 border-b border-neutral-700">
@@ -667,18 +1123,21 @@ export function PluginBrowser({
           </div>
         ) : sortedPlugins.length === 0 ? (
           <div className="text-center p-10 text-neutral-400">
-            {showFavoritesOnly ? "No favorite plugins. Click the star on a plugin to favorite it." : "No plugins found. Click \"Scan\" to search your system."}
+            {showFavoritesOnly
+              ? "No favorite plug-ins match this slot and the current filters."
+              : emptyCatalogMessage}
           </div>
         ) : (
-          sortedPlugins.map((plugin, idx) => {
+          sortedPlugins.map((plugin) => {
             const isScript = plugin.pluginType === "s13fx";
-            const isFav = favorites.has(plugin.fileOrIdentifier);
+            const pluginIdentity = getPluginIdentity(plugin);
+            const isFav = isPluginFavorite(plugin, favorites);
             const { Icon, color } = isScript
               ? { Icon: Code, color: "#84cc16" }
               : getCategoryIcon(plugin.category);
             return (
               <div
-                key={idx}
+                key={pluginIdentity}
                 className={`flex items-center gap-3 p-3 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
                   isScript ? "border-lime-700/40" : "border-neutral-700"
                 }`}
@@ -686,7 +1145,7 @@ export function PluginBrowser({
                 {/* Favorite star */}
                 <button
                   className="shrink-0 p-0.5 hover:scale-110 transition-transform"
-                  onClick={() => toggleFavorite(plugin.fileOrIdentifier)}
+                  onClick={() => toggleFavorite(plugin)}
                   title={isFav ? "Remove from favorites" : "Add to favorites"}
                 >
                   <Star size={14} fill={isFav ? "#eab308" : "none"} stroke={isFav ? "#eab308" : "#666"} />
@@ -729,7 +1188,7 @@ export function PluginBrowser({
                   disabled={addingPlugin !== null}
                   className="shrink-0"
                 >
-                  {addingPlugin === plugin.fileOrIdentifier ? "Adding..." : "Add"}
+                  {addingPlugin === pluginIdentity ? "Adding..." : "Add"}
                 </Button>
               </div>
             );

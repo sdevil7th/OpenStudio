@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   BuiltInPluginPanel,
   BuiltInParamControl,
+  createFrameCoalescedParamWriter,
   createSchemaRequestGate,
   formatParamValue,
   getPluginKind,
@@ -60,6 +61,34 @@ function schemaWithParams(name: string, category: string, params: BuiltInParamDe
       historyConfidence: [0.7, 0.8, 0.9],
     },
   };
+}
+
+function createFrameHarness() {
+  let nextFrameId = 1;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  return {
+    requestFrame(callback: FrameRequestCallback) {
+      const frameId = nextFrameId;
+      nextFrameId += 1;
+      callbacks.set(frameId, callback);
+      return frameId;
+    },
+    cancelFrame(frameId: number) {
+      callbacks.delete(frameId);
+    },
+    runFrame() {
+      const frameCallbacks = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of frameCallbacks) callback(0);
+    },
+    pendingFrames() {
+      return callbacks.size;
+    },
+  };
+}
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
 
 function continuous(id: string, label: string, value: number, min = 0, max = 1, graphRole = "controls", unit = "") {
@@ -126,7 +155,7 @@ const panelSchemas = [
     continuous("rate", "Rate", 1, 0.01, 20, "modulation", "Hz"),
     continuous("depth", "Depth", 0.5, 0, 1, "modulation"),
     continuous("mix", "Mix", 0.5, 0, 1, "mix"),
-    choice("characterMode", "Character", 1, ["Clean", "Ensemble", "BBD"], "character"),
+    choice("characterMode", "Character", 1, ["Clean", "Ensemble"], "character"),
   ]),
   schemaWithParams("S13 Saturator", "Saturation", [
     choice("satType", "Type", 1, ["Tape", "Tube", "Console"], "character"),
@@ -166,6 +195,176 @@ const panelSchemas = [
 ];
 
 describe("BuiltInPluginPanel schema model", () => {
+  it("coalesces NAM parameter writes to the latest quantized value per animation frame", async () => {
+    const frames = createFrameHarness();
+    const writes: Array<[string, number]> = [];
+    const writer = createFrameCoalescedParamWriter({
+      write: async (paramId, value) => {
+        writes.push([paramId, value]);
+        return true;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+    });
+
+    writer.enqueue("reverbMix", 0.1);
+    writer.enqueue("reverbMix", 0.2);
+    writer.enqueue("reverbMix", 0.2);
+    writer.enqueue("reverbDecaySec", 3.5);
+
+    expect(frames.pendingFrames()).toBe(2);
+    frames.runFrame();
+    await flushMicrotasks();
+
+    expect(writes).toEqual([
+      ["reverbMix", 0.2],
+      ["reverbDecaySec", 3.5],
+    ]);
+
+    writer.enqueue("reverbMix", 0.2);
+    expect(frames.pendingFrames()).toBe(0);
+    writer.dispose();
+  });
+
+  it("retains the trailing knob value while an earlier native write is in flight", async () => {
+    const frames = createFrameHarness();
+    const writes: number[] = [];
+    let finishFirstWrite: ((ok: boolean) => void) | undefined;
+    const firstWrite = new Promise<boolean>((resolve) => {
+      finishFirstWrite = resolve;
+    });
+    const writer = createFrameCoalescedParamWriter({
+      write: async (_paramId, value) => {
+        writes.push(value);
+        return writes.length === 1 ? firstWrite : true;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+    });
+
+    writer.enqueue("chorusDepth", 0.2);
+    frames.runFrame();
+    writer.enqueue("chorusDepth", 0.6);
+    writer.enqueue("chorusDepth", 0.8);
+    expect(writes).toEqual([0.2]);
+    expect(frames.pendingFrames()).toBe(0);
+
+    finishFirstWrite?.(true);
+    await flushMicrotasks();
+    expect(frames.pendingFrames()).toBe(1);
+
+    frames.runFrame();
+    await flushMicrotasks();
+    expect(writes).toEqual([0.2, 0.8]);
+    writer.dispose();
+  });
+
+  it("recovers only when a failed write is still the final requested value", async () => {
+    const frames = createFrameHarness();
+    const failures: Array<[string, number]> = [];
+    let finishFirstWrite: ((ok: boolean) => void) | undefined;
+    const firstWrite = new Promise<boolean>((resolve) => {
+      finishFirstWrite = resolve;
+    });
+    let writeCount = 0;
+    const writer = createFrameCoalescedParamWriter({
+      write: async (_paramId, _value) => {
+        writeCount += 1;
+        return writeCount === 1 ? firstWrite : writeCount === 2;
+      },
+      onFailure: (paramId, value) => failures.push([paramId, value]),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+    });
+
+    writer.enqueue("delayFeedback", 0.3);
+    frames.runFrame();
+    writer.enqueue("delayFeedback", 0.5);
+    finishFirstWrite?.(false);
+    await flushMicrotasks();
+    expect(failures).toEqual([]);
+
+    frames.runFrame();
+    await flushMicrotasks();
+    expect(failures).toEqual([]);
+
+    writer.enqueue("delayFeedback", 0.7);
+    frames.runFrame();
+    await flushMicrotasks();
+    expect(failures).toEqual([["delayFeedback", 0.7]]);
+    writer.dispose();
+  });
+
+  it("flushes the final queued value when the panel is disposed before the next frame", async () => {
+    const frames = createFrameHarness();
+    const writes: number[] = [];
+    const writer = createFrameCoalescedParamWriter({
+      write: async (_paramId, value) => {
+        writes.push(value);
+        return true;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+    });
+
+    writer.enqueue("drive", 0.25);
+    writer.enqueue("drive", 0.75);
+    writer.dispose(true);
+    await flushMicrotasks();
+
+    expect(frames.pendingFrames()).toBe(0);
+    expect(writes).toEqual([0.75]);
+  });
+
+  it("drains queued and in-flight parameter writes before a preset snapshot", async () => {
+    const frames = createFrameHarness();
+    const writes: number[] = [];
+    let finishFirstWrite: ((ok: boolean) => void) | undefined;
+    const firstWrite = new Promise<boolean>((resolve) => {
+      finishFirstWrite = resolve;
+    });
+    const writer = createFrameCoalescedParamWriter({
+      write: async (_paramId, value) => {
+        writes.push(value);
+        return writes.length === 1 ? firstWrite : true;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+    });
+
+    writer.enqueue("reverbDecaySec", 4);
+    frames.runFrame();
+    writer.enqueue("reverbDecaySec", 10);
+    const flushed = writer.flush();
+
+    expect(frames.pendingFrames()).toBe(0);
+    expect(writes).toEqual([4]);
+    finishFirstWrite?.(true);
+    await flushMicrotasks();
+
+    await expect(flushed).resolves.toBe(true);
+    expect(writes).toEqual([4, 10]);
+    writer.dispose();
+  });
+
+  it("tracks immediate toggle writes and rejects a preset flush after a final native failure", async () => {
+    const frames = createFrameHarness();
+    const failures: Array<[string, number]> = [];
+    const writer = createFrameCoalescedParamWriter({
+      write: async () => false,
+      onFailure: (paramId, value) => failures.push([paramId, value]),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+    });
+
+    writer.writeImmediately("reverbEnabled", 1);
+
+    await expect(writer.flush()).resolves.toBe(false);
+    expect(frames.pendingFrames()).toBe(0);
+    expect(failures).toEqual([["reverbEnabled", 1]]);
+    writer.dispose();
+  });
+
   it("rejects stale schema refreshes so an old empty rack cannot replace a loaded capture", () => {
     const gate = createSchemaRequestGate();
     const emptyRackRequest = gate.begin();

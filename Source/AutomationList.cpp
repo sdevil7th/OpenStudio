@@ -1,15 +1,66 @@
 #include "AutomationList.h"
 #include <algorithm>
+#include <cmath>
 
-AutomationList::AutomationList() = default;
+namespace
+{
+class ScopedAutomationPointReader final
+{
+public:
+    explicit ScopedAutomationPointReader(
+        std::atomic<std::uint32_t>& readersToUse) noexcept
+        : readers(readersToUse)
+    {
+        readers.fetch_add(1, std::memory_order_seq_cst);
+    }
+
+    ~ScopedAutomationPointReader()
+    {
+        readers.fetch_sub(1, std::memory_order_seq_cst);
+    }
+
+    ScopedAutomationPointReader(
+        const ScopedAutomationPointReader&) = delete;
+    ScopedAutomationPointReader& operator=(
+        const ScopedAutomationPointReader&) = delete;
+
+private:
+    std::atomic<std::uint32_t>& readers;
+};
+}
+
+AutomationList::AutomationList()
+    : pointsSnapshot(std::make_shared<const PointList>())
+{
+    pointsSnapshotForAudio.store(
+        pointsSnapshot.get(), std::memory_order_seq_cst);
+    retiredPointSnapshots.reserve(8);
+}
 
 void AutomationList::publishPoints(std::shared_ptr<const PointList> newSnapshot)
 {
     if (newSnapshot == nullptr)
         newSnapshot = std::make_shared<const PointList>();
 
-    pointCount.store(static_cast<int>(newSnapshot->size()), std::memory_order_release);
-    std::atomic_store_explicit(&pointsSnapshot, std::move(newSnapshot), std::memory_order_release);
+    if (pointsSnapshot != nullptr)
+        retiredPointSnapshots.push_back(
+            std::move(pointsSnapshot));
+
+    pointsSnapshot = std::move(newSnapshot);
+    pointsSnapshotForAudio.store(
+        pointsSnapshot.get(), std::memory_order_seq_cst);
+    pointCount.store(
+        static_cast<int>(pointsSnapshot->size()),
+        std::memory_order_release);
+
+    // With seq_cst reader entry/publication, a zero count proves no callback
+    // can still be holding an owner retired before this observation. Destruct
+    // immutable vectors only on this control-side writer path.
+    if (pointSnapshotAudioReaders.load(
+            std::memory_order_seq_cst) == 0)
+    {
+        retiredPointSnapshots.clear();
+    }
 }
 
 void AutomationList::setPoints(std::vector<AutomationPoint> newPoints)
@@ -32,7 +83,7 @@ void AutomationList::replacePointsInRange(double startTimeSeconds, double endTim
 
     const juce::ScopedLock sl(writerLock);
 
-    auto current = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    const auto current = pointsSnapshot;
     auto next = std::make_shared<PointList>();
     if (current)
     {
@@ -57,7 +108,7 @@ void AutomationList::addPoint(double timeSeconds, float value)
 {
     const juce::ScopedLock sl(writerLock);
 
-    auto current = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    const auto current = pointsSnapshot;
     auto next = std::make_shared<PointList>(current ? *current : PointList());
     AutomationPoint point { timeSeconds, value };
     auto insertPos = std::lower_bound(next->begin(), next->end(), point,
@@ -73,7 +124,7 @@ void AutomationList::removePointsInRange(double startTimeSeconds, double endTime
 {
     const juce::ScopedLock sl(writerLock);
 
-    auto current = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
+    const auto current = pointsSnapshot;
     auto next = std::make_shared<PointList>(current ? *current : PointList());
     next->erase(std::remove_if(next->begin(), next->end(),
                                [startTimeSeconds, endTimeSeconds] (const AutomationPoint& point)
@@ -89,6 +140,27 @@ void AutomationList::clear()
 {
     const juce::ScopedLock sl(writerLock);
     publishPoints(std::make_shared<const PointList>());
+}
+
+bool AutomationList::hasPointValueAtOrAbove(float threshold) const
+{
+    const ScopedAutomationPointReader readerGuard(
+        pointSnapshotAudioReaders);
+    const auto* const snapshot =
+        pointsSnapshotForAudio.load(
+            std::memory_order_seq_cst);
+    if (snapshot == nullptr)
+        return false;
+
+    for (const auto& point : *snapshot)
+    {
+        // Invalid automation cannot prove that a discrete control stays off,
+        // so keep tail planning conservative for that lane.
+        if (! std::isfinite(point.value) || point.value >= threshold)
+            return true;
+    }
+
+    return false;
 }
 
 void AutomationList::setMode(AutomationMode newMode)
@@ -185,8 +257,12 @@ int AutomationList::findPointBefore(const PointList& points, double timeSeconds)
 
 float AutomationList::eval(double timeSeconds) const
 {
-    auto snapshot = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
-    if (!snapshot || snapshot->empty())
+    const ScopedAutomationPointReader readerGuard(
+        pointSnapshotAudioReaders);
+    const auto* const snapshot =
+        pointsSnapshotForAudio.load(
+            std::memory_order_seq_cst);
+    if (snapshot == nullptr || snapshot->empty())
         return defaultValue.load(std::memory_order_relaxed);
 
     const auto& points = *snapshot;
@@ -221,8 +297,14 @@ void AutomationList::evalBlock(double startTimeSeconds, double sampleRate, int n
     if (outputBuffer == nullptr || numSamples <= 0)
         return;
 
-    auto snapshot = std::atomic_load_explicit(&pointsSnapshot, std::memory_order_acquire);
-    if (!snapshot || snapshot->empty() || sampleRate <= 0.0)
+    const ScopedAutomationPointReader readerGuard(
+        pointSnapshotAudioReaders);
+    const auto* const snapshot =
+        pointsSnapshotForAudio.load(
+            std::memory_order_seq_cst);
+    if (snapshot == nullptr
+        || snapshot->empty()
+        || sampleRate <= 0.0)
     {
         const float def = defaultValue.load(std::memory_order_relaxed);
         for (int i = 0; i < numSamples; ++i)

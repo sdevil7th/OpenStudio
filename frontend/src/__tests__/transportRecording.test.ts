@@ -54,6 +54,65 @@ describe("transport recording", () => {
     expect(transportBarSource).not.toContain("await record();");
   });
 
+  it("does not resume a pending play request after stop", async () => {
+    let releaseSync!: () => void;
+    const syncGate = new Promise<void>((resolve) => {
+      releaseSync = resolve;
+    });
+    const syncClipsWithBackend = vi.fn(() => syncGate);
+    vi.spyOn(nativeBridge, "hasAnyActiveARA").mockResolvedValue(false);
+    useDAWStore.setState({
+      syncClipsWithBackend,
+      transport: {
+        ...useDAWStore.getState().transport,
+        isPlaying: false,
+        isPaused: false,
+        isRecording: false,
+      },
+    });
+
+    const playRequest = useDAWStore.getState().play();
+    await vi.waitFor(() => expect(syncClipsWithBackend).toHaveBeenCalledTimes(1));
+    await useDAWStore.getState().stop();
+    releaseSync();
+    await playRequest;
+
+    expect(useDAWStore.getState().transport.isPlaying).toBe(false);
+    expect(vi.mocked(nativeBridge.setTransportPlaying).mock.calls)
+      .not.toContainEqual([true]);
+  });
+
+  it("does not resume a pending play request after pause", async () => {
+    let releaseSync!: () => void;
+    const syncGate = new Promise<void>((resolve) => {
+      releaseSync = resolve;
+    });
+    const syncClipsWithBackend = vi.fn(() => syncGate);
+    vi.spyOn(nativeBridge, "hasAnyActiveARA").mockResolvedValue(false);
+    useDAWStore.setState({
+      syncClipsWithBackend,
+      transport: {
+        ...useDAWStore.getState().transport,
+        isPlaying: false,
+        isPaused: false,
+        isRecording: false,
+      },
+    });
+
+    const playRequest = useDAWStore.getState().play();
+    await vi.waitFor(() => expect(syncClipsWithBackend).toHaveBeenCalledTimes(1));
+    useDAWStore.getState().pause();
+    releaseSync();
+    await playRequest;
+
+    expect(useDAWStore.getState().transport).toMatchObject({
+      isPlaying: false,
+      isPaused: true,
+    });
+    expect(vi.mocked(nativeBridge.setTransportPlaying).mock.calls)
+      .not.toContainEqual([true]);
+  });
+
   it("punches in at the playhead captured when record is pressed", async () => {
     const calls: string[] = [];
     vi.mocked(nativeBridge.setTransportRecording).mockImplementation(async (recording) => {

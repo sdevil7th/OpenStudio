@@ -4,24 +4,30 @@ export type NAMDesignBodyAssetId =
   | "amp-head-body"
   | "amp-head-body-wide"
   | "cabinet-body"
+  | "cab-room-integrated-body"
   | "expression-body"
   | "ir-shaper-panel-body"
   | "mic-panel-body"
   | "rack-unit-body"
   | "rack-unit-body-deep"
   | "stompbox-body-blue"
+  | "stompbox-body-blue-wide"
   | "stompbox-body-dark"
   | "stompbox-body-dark-wide"
   | "stompbox-body-navy"
   | "stompbox-body-olive"
   | "stompbox-body-red"
+  | "stompbox-body-red-wide"
   | "stompbox-body-stone"
   | "wide-pedal-body-copper"
   | "wide-pedal-body-copper-deep"
+  | "wide-pedal-body-copper-tall"
   | "wide-pedal-body-dark"
   | "wide-pedal-body-dark-deep"
+  | "wide-pedal-body-dark-tall"
   | "wide-pedal-body-navy"
-  | "wide-pedal-body-navy-deep";
+  | "wide-pedal-body-navy-deep"
+  | "wide-pedal-body-navy-tall";
 
 export type NAMDesignControlAssetId =
   | "button-black-top"
@@ -29,6 +35,7 @@ export type NAMDesignControlAssetId =
   | "footswitch-chrome-on-top"
   | "footswitch-chrome-pressed-top"
   | "knob-black-top"
+  | "knob-blue-steel-top"
   | "knob-cream-top"
   | "knob-metal-top"
   | "led-amber-off-top"
@@ -105,24 +112,30 @@ export const NAM_DESIGN_BODY_ASSETS = {
   "amp-head-body": body("amp-head-body", "amp-head-body.webp", 1551, 598),
   "amp-head-body-wide": body("amp-head-body-wide", "amp-head-body-wide.webp", 2272, 598),
   "cabinet-body": body("cabinet-body", "cabinet-body.webp", 1328, 888),
+  "cab-room-integrated-body": body("cab-room-integrated-body", "cab-room-integrated-body.webp", 1634, 962),
   "expression-body": body("expression-body", "expression-body.webp", 582, 1485),
   "ir-shaper-panel-body": body("ir-shaper-panel-body", "ir-shaper-panel-body.webp", 1542, 710),
   "mic-panel-body": body("mic-panel-body", "mic-panel-body.webp", 1542, 710),
   "rack-unit-body": body("rack-unit-body", "rack-unit-body.webp", 2101, 434),
   "rack-unit-body-deep": body("rack-unit-body-deep", "rack-unit-body-deep.webp", 2101, 657),
   "stompbox-body-blue": body("stompbox-body-blue", "stompbox-body-blue.webp", 694, 1340),
+  "stompbox-body-blue-wide": body("stompbox-body-blue-wide", "stompbox-body-blue-wide.webp", 900, 1340),
   "stompbox-body-dark": body("stompbox-body-dark", "stompbox-body-dark.webp", 694, 1340),
   "stompbox-body-dark-wide": body("stompbox-body-dark-wide", "stompbox-body-dark-wide.webp", 900, 1340),
   "stompbox-body-navy": body("stompbox-body-navy", "stompbox-body-navy.webp", 694, 1340),
   "stompbox-body-olive": body("stompbox-body-olive", "stompbox-body-olive.webp", 694, 1340),
   "stompbox-body-red": body("stompbox-body-red", "stompbox-body-red.webp", 694, 1340),
+  "stompbox-body-red-wide": body("stompbox-body-red-wide", "stompbox-body-red-wide.webp", 900, 1340),
   "stompbox-body-stone": body("stompbox-body-stone", "stompbox-body-stone.webp", 694, 1340),
   "wide-pedal-body-copper": body("wide-pedal-body-copper", "wide-pedal-body-copper.webp", 1355, 662),
   "wide-pedal-body-copper-deep": body("wide-pedal-body-copper-deep", "wide-pedal-body-copper-deep.webp", 1355, 968),
+  "wide-pedal-body-copper-tall": body("wide-pedal-body-copper-tall", "wide-pedal-body-copper-tall.webp", 1355, 1078),
   "wide-pedal-body-dark": body("wide-pedal-body-dark", "wide-pedal-body-dark.webp", 1355, 662),
   "wide-pedal-body-dark-deep": body("wide-pedal-body-dark-deep", "wide-pedal-body-dark-deep.webp", 1355, 947),
+  "wide-pedal-body-dark-tall": body("wide-pedal-body-dark-tall", "wide-pedal-body-dark-tall.webp", 1355, 1042),
   "wide-pedal-body-navy": body("wide-pedal-body-navy", "wide-pedal-body-navy.webp", 1355, 662),
   "wide-pedal-body-navy-deep": body("wide-pedal-body-navy-deep", "wide-pedal-body-navy-deep.webp", 1355, 1093),
+  "wide-pedal-body-navy-tall": body("wide-pedal-body-navy-tall", "wide-pedal-body-navy-tall.webp", 1355, 1201),
 } as const satisfies Record<NAMDesignBodyAssetId, NAMDesignBodyAsset>;
 
 export const NAM_DESIGN_CONTROL_ASSETS = {
@@ -131,6 +144,7 @@ export const NAM_DESIGN_CONTROL_ASSETS = {
   "footswitch-chrome-on-top": control("footswitch-chrome-on-top", "footswitch-chrome-on-top.webp", 512, 512),
   "footswitch-chrome-pressed-top": control("footswitch-chrome-pressed-top", "footswitch-chrome-pressed-top.webp", 512, 512),
   "knob-black-top": control("knob-black-top", "knob-black-top.webp", 512, 512),
+  "knob-blue-steel-top": control("knob-blue-steel-top", "knob-blue-steel-top.webp", 512, 512),
   "knob-cream-top": control("knob-cream-top", "knob-cream-top.webp", 512, 512),
   "knob-metal-top": control("knob-metal-top", "knob-metal-top.webp", 512, 512),
   "led-amber-off-top": control("led-amber-off-top", "led-amber-off-top.webp", 512, 512),

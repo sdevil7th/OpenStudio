@@ -42,7 +42,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "transport.loop", name: "Toggle Loop", category: "Transport", shortcut: "L", execute: () => s().toggleLoop() },
 
     // ===== Navigation =====
-    { id: "navigate.nextTransient", name: "Next Transient", category: "Navigation", shortcut: "Tab", execute: () => {
+    { id: "navigate.nextTransient", name: "Next Transient", category: "Navigation", shortcut: "Tab", shortcutScope: "timeline", execute: () => {
       const state = s();
       const selectedIds = state.selectedClipIds;
       if (selectedIds.length === 0) return;
@@ -56,7 +56,7 @@ export function getRegisteredActions(): ActionDef[] {
         });
       });
     }},
-    { id: "navigate.prevTransient", name: "Previous Transient", category: "Navigation", shortcut: "Shift+Tab", execute: () => {
+    { id: "navigate.prevTransient", name: "Previous Transient", category: "Navigation", shortcut: "Shift+Tab", shortcutScope: "timeline", execute: () => {
       const state = s();
       const selectedIds = state.selectedClipIds;
       if (selectedIds.length === 0) return;
@@ -78,31 +78,31 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "tools.smartTool", name: "Smart Tool", category: "Tools", shortcut: "Y", shortcutScope: "timeline", execute: () => s().setToolMode("smart") },
 
     // ===== Edit =====
-    { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", canHandleShortcut: () => !s().showPitchEditor, execute: () => s().undo() },
-    { id: "edit.redo", name: "Redo", category: "Edit", shortcut: "Ctrl+Shift+Z", shortcutAliases: ["Ctrl+Y"], canHandleShortcut: () => !s().showPitchEditor, execute: () => s().redo() },
-    { id: "edit.cut", name: "Cut Selected Clips", category: "Edit", shortcut: "Ctrl+X", canHandleShortcut: () => !s().showPianoRoll && s().selectedClipIds.length > 0, execute: () => s().cutSelectedClips() },
-    { id: "edit.copy", name: "Copy Selected Clips", category: "Edit", shortcut: "Ctrl+C", canHandleShortcut: () => !s().showPianoRoll && s().selectedClipIds.length > 0, execute: () => s().copySelectedClips() },
-    { id: "edit.paste", name: "Paste Clips", category: "Edit", shortcut: "Ctrl+V", canHandleShortcut: () => !s().showPianoRoll, execute: () => s().pasteClips() },
-    { id: "edit.delete", name: "Delete Selected", category: "Edit", shortcut: "Delete", canHandleShortcut: () => !s().showPianoRoll, execute: () => {
+    { id: "edit.undo", name: "Undo", category: "Edit", shortcut: "Ctrl+Z", shortcutScope: "contextual", execute: () => s().undo() },
+    { id: "edit.redo", name: "Redo", category: "Edit", shortcut: "Ctrl+Shift+Z", shortcutAliases: ["Ctrl+Y"], shortcutScope: "contextual", execute: () => s().redo() },
+    { id: "edit.cut", name: "Cut Selected Clips", category: "Edit", shortcut: "Ctrl+X", shortcutScope: "timeline", canHandleShortcut: () => s().selectedClipIds.length > 0, execute: () => s().cutSelectedClips() },
+    { id: "edit.copy", name: "Copy Selected Clips", category: "Edit", shortcut: "Ctrl+C", shortcutScope: "timeline", canHandleShortcut: () => s().selectedClipIds.length > 0, execute: () => s().copySelectedClips() },
+    { id: "edit.paste", name: "Paste Clips", category: "Edit", shortcut: "Ctrl+V", shortcutScope: "timeline", execute: () => s().pasteClips() },
+    { id: "edit.delete", name: "Delete Selected", category: "Edit", shortcut: "Delete", shortcutScope: "timeline", execute: () => {
       const state = s();
       if (state.selectedTrackIds.length > 0) state.deleteSelectedTracks();
       else if (state.selectedClipIds.length > 0) state.selectedClipIds.forEach((id) => state.deleteClip(id));
     }},
-    { id: "edit.selectAllTracks", name: "Select All Tracks", category: "Edit", shortcut: "Ctrl+A", canHandleShortcut: () => !s().showPitchEditor && !s().showPianoRoll, execute: () => s().selectAllTracks() },
-    { id: "edit.selectAllClips", name: "Select All Clips", category: "Edit", shortcut: "Ctrl+Shift+A", canHandleShortcut: () => !s().showPitchEditor && !s().showPianoRoll, execute: () => s().selectAllClips() },
-    { id: "edit.deselectAll", name: "Deselect All", category: "Edit", shortcut: "Esc", execute: () => s().deselectAllTracks() },
-    { id: "edit.splitAtCursor", name: "Split at Cursor", category: "Edit", shortcut: "S", execute: () => s().splitClipAtPlayhead() },
+    { id: "edit.selectAllTracks", name: "Select All Tracks", category: "Edit", shortcut: "Ctrl+A", shortcutScope: "timeline", execute: () => s().selectAllTracks() },
+    { id: "edit.selectAllClips", name: "Select All Clips", category: "Edit", shortcut: "Ctrl+Shift+A", shortcutScope: "timeline", execute: () => s().selectAllClips() },
+    { id: "edit.deselectAll", name: "Deselect All", category: "Edit", shortcut: "Esc", shortcutScope: "timeline", execute: () => s().deselectAllTracks() },
+    { id: "edit.splitAtCursor", name: "Split at Playhead", category: "Edit", shortcut: "S", shortcutScope: "timeline", execute: () => s().splitClipAtPlayhead() },
     { id: "edit.splitAtSelection", name: "Split at Time Selection", category: "Edit", execute: () => s().splitAtTimeSelection() },
-    { id: "edit.groupClips", name: "Group Selected Clips", category: "Edit", shortcut: "Ctrl+G", execute: () => s().groupSelectedClips() },
-    { id: "edit.ungroupClips", name: "Ungroup Selected Clips", category: "Edit", shortcut: "Ctrl+Shift+G", execute: () => s().ungroupSelectedClips() },
+    { id: "edit.groupClips", name: "Group Selected Clips", category: "Edit", shortcut: "Ctrl+G", shortcutScope: "timeline", execute: () => s().groupSelectedClips() },
+    { id: "edit.ungroupClips", name: "Ungroup Selected Clips", category: "Edit", shortcut: "Ctrl+Shift+G", shortcutScope: "timeline", execute: () => s().ungroupSelectedClips() },
     { id: "edit.normalizeClips", name: "Normalize Selected Clips", category: "Edit", execute: () => s().normalizeSelectedClips() },
     { id: "edit.deleteRazorContent", name: "Delete Razor Edit Content", category: "Edit", execute: () => s().deleteRazorEditContent() },
     { id: "edit.clearRazorEdits", name: "Clear Razor Edits", category: "Edit", execute: () => s().clearRazorEdits() },
-    { id: "edit.muteClips", name: "Toggle Clip Mute", category: "Edit", shortcut: "U", execute: () => { const state = s(); state.selectedClipIds.forEach((id) => state.toggleClipMute(id)); } },
-    { id: "edit.nudgeLeft", name: "Nudge Clips Left", category: "Edit", shortcut: "Left", execute: () => s().nudgeClips("left") },
-    { id: "edit.nudgeRight", name: "Nudge Clips Right", category: "Edit", shortcut: "Right", execute: () => s().nudgeClips("right") },
-    { id: "edit.nudgeLeftFine", name: "Nudge Clips Left (Fine)", category: "Edit", shortcut: "Ctrl+Left", execute: () => s().nudgeClips("left", true) },
-    { id: "edit.nudgeRightFine", name: "Nudge Clips Right (Fine)", category: "Edit", shortcut: "Ctrl+Right", execute: () => s().nudgeClips("right", true) },
+    { id: "edit.muteClips", name: "Toggle Clip Mute", category: "Edit", shortcut: "U", shortcutScope: "timeline", execute: () => { const state = s(); state.selectedClipIds.forEach((id) => state.toggleClipMute(id)); } },
+    { id: "edit.nudgeLeft", name: "Nudge Clips Left", category: "Edit", shortcut: "Left", shortcutScope: "timeline", execute: () => s().nudgeClips("left") },
+    { id: "edit.nudgeRight", name: "Nudge Clips Right", category: "Edit", shortcut: "Right", shortcutScope: "timeline", execute: () => s().nudgeClips("right") },
+    { id: "edit.nudgeLeftFine", name: "Nudge Clips Left (Fine)", category: "Edit", shortcut: "Ctrl+Left", shortcutScope: "timeline", execute: () => s().nudgeClips("left", true) },
+    { id: "edit.nudgeRightFine", name: "Nudge Clips Right (Fine)", category: "Edit", shortcut: "Ctrl+Right", shortcutScope: "timeline", execute: () => s().nudgeClips("right", true) },
 
     // ===== Insert =====
     { id: "insert.audioTrack", name: "New Audio Track", category: "Insert", shortcut: "Ctrl+T", execute: () => {
@@ -207,7 +207,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "options.rippleOff", name: "Ripple Editing: Off", category: "Options", execute: () => s().setRippleMode("off") },
     { id: "options.ripplePerTrack", name: "Ripple Editing: Per Track", category: "Options", execute: () => s().setRippleMode("per_track") },
     { id: "options.rippleAllTracks", name: "Ripple Editing: All Tracks", category: "Options", execute: () => s().setRippleMode("all_tracks") },
-    { id: "midi.quantizeLast", name: "MIDI Quantize Using Last Settings", category: "Edit", shortcut: "Q", execute: () => s().quantizeSelectedMIDINotesUsingLast() },
+    { id: "midi.quantizeLast", name: "MIDI Quantize Using Last Settings", category: "Edit", shortcut: "Q", shortcutScope: "piano_roll", execute: () => s().quantizeSelectedMIDINotesUsingLast() },
     { id: "midi.resetQuantize", name: "Reset MIDI Quantize", category: "Edit", execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.resetMIDIQuantize(state.pianoRollTrackId, state.pianoRollClipId); } },
     { id: "midi.freezeQuantize", name: "Freeze MIDI Quantize", category: "Edit", execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.freezeMIDIQuantize(state.pianoRollTrackId, state.pianoRollClipId); } },
 
@@ -321,7 +321,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "file.newFromTemplate", name: "New from Template...", category: "File", execute: () => s().toggleProjectTemplates() },
 
     // ===== Pitch Editor =====
-    { id: "edit.editPitch", name: "Edit Pitch", category: "Edit", shortcut: "P", execute: () => {
+    { id: "edit.editPitch", name: "Edit Pitch", category: "Edit", shortcut: "P", shortcutScope: "timeline", execute: () => {
       const state = s();
       const clipId = state.selectedClipIds[0];
       if (!clipId) return;

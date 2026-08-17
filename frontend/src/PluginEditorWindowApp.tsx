@@ -8,6 +8,7 @@ import {
 import { bootstrapTONE3000Session } from "./services/tone3000Session";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
+import { isEditableShortcutTarget } from "./utils/shortcutContext";
 import { startSharedTransportSync } from "./utils/sharedTransportSync";
 import { windowSessionId } from "./utils/windowEnvironment";
 import "./components/FXChainPanel.css";
@@ -18,6 +19,23 @@ type BuiltInPluginEditorSession = {
   title?: string;
   fallbackName?: string;
 };
+
+const NON_TEXT_PLUGIN_CONTROL_SELECTOR = [
+  "button",
+  "select",
+  "[role='button']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='combobox']",
+  "input[type='button']",
+  "input[type='checkbox']",
+  "input[type='color']",
+  "input[type='file']",
+  "input[type='radio']",
+  "input[type='range']",
+  "input[type='reset']",
+  "input[type='submit']",
+].join(", ");
 
 function parseSession(): BuiltInPluginEditorSession | null {
   if (!windowSessionId) return null;
@@ -61,6 +79,9 @@ export default function PluginEditorWindowApp() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
+      const targetIsNonTextControl = Boolean(
+        target?.closest(NON_TEXT_PLUGIN_CONTROL_SELECTOR),
+      );
       void dispatchGlobalShortcut({
         key: e.key,
         code: e.code,
@@ -70,15 +91,11 @@ export default function PluginEditorWindowApp() {
         metaKey: e.metaKey,
         repeat: e.repeat,
         source: "browser",
-        targetIsEditable:
-          !!target &&
-          (Boolean(target.closest("button, [role='button'], [role='slider'], [role='spinbutton'], [role='combobox']")) ||
-            target instanceof HTMLInputElement ||
-            target instanceof HTMLSelectElement ||
-            target instanceof HTMLTextAreaElement ||
-            target.isContentEditable),
+        targetIsEditable: !targetIsNonTextControl && isEditableShortcutTarget(e.target),
+        targetIsNonTextControl,
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
+        stopImmediatePropagation: () => e.stopImmediatePropagation(),
       });
     };
 

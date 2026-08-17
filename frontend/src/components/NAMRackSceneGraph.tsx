@@ -3,10 +3,11 @@ import type { CSSProperties, PointerEvent, WheelEvent } from "react";
 
 import type { BuiltInParamDescriptor } from "../services/NativeBridge";
 import {
+  denormalizeParamValue,
   formatParamValue,
   normalizeParam,
+  offsetParamValue,
   quantizeParamValue,
-  stepForParam,
 } from "../utils/builtInParamValue";
 import {
   getNAMDesignBodyAsset,
@@ -28,7 +29,6 @@ import preCompressorScene from "./namScenes/pre-compressor.scene.json";
 import preDualOctaverScene from "./namScenes/pre-dual-octaver.scene.json";
 import prePrecisionDriveScene from "./namScenes/pre-precision-drive.scene.json";
 import preTapeEchoScene from "./namScenes/pre-tape-echo.scene.json";
-import specialLaserScene from "./namScenes/special-laser.scene.json";
 
 type SceneControlKind =
   | "knob"
@@ -117,7 +117,6 @@ const SCENES = [
   postModulatorScene,
   postStereoDelayScene,
   postReverbScene,
-  specialLaserScene,
 ] as NAMRackSceneManifest[];
 
 const SCENE_BY_SKIN = new Map(SCENES.map((scene) => [scene.skinId, scene]));
@@ -641,7 +640,7 @@ function SceneCabRoomBody({ scene }: { scene: NAMRackSceneManifest }) {
       <text x="946" y="328" className="nam-scene-mic-card-subtitle" textAnchor="middle">PHASE</text>
       <text x="1258" y="248" className="nam-scene-mic-card-subtitle" textAnchor="middle">DISTANCE</text>
       <text x="1258" y="328" className="nam-scene-mic-card-subtitle" textAnchor="middle">AXIS</text>
-      <text x="1378" y="402" fill="rgba(31,36,46,0.66)" fontSize="11" fontWeight="900" letterSpacing="0.04em" textAnchor="end">ROOM</text>
+      <text x="1378" y="402" fill="rgba(31,36,46,0.66)" fontSize="11" fontWeight="900" letterSpacing="0.04em" textAnchor="end">BLOOM</text>
       <text x="1417" y="402" fill="rgba(31,36,46,0.66)" fontSize="11" fontWeight="900" letterSpacing="0.04em" textAnchor="start">PAN</text>
       <SceneScrew x={90} y={106} />
       <SceneScrew x={654} y={106} />
@@ -685,11 +684,11 @@ function SceneCabRoomBody({ scene }: { scene: NAMRackSceneManifest }) {
 
 function SceneEqRackBody({ scene }: { scene: NAMRackSceneManifest }) {
   const { width, height } = scene.artboard;
-  const gridX = 222;
+  const gridX = 282;
   const gridY = 182;
-  const gridW = 780;
+  const gridW = 802;
   const gridH = 350;
-  const bands = ["31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"];
+  const bands = ["65", "125", "250", "500", "1K", "2K", "4K", "8K", "16K", "LEVEL"];
 
   return (
     <g className="nam-scene-body nam-scene-body-rack nam-scene-body-eq-target">
@@ -701,7 +700,7 @@ function SceneEqRackBody({ scene }: { scene: NAMRackSceneManifest }) {
       <rect x="70" y="102" width="122" height="432" rx="16" fill="#20252a" stroke="rgba(255,255,255,0.09)" strokeWidth="2" />
       <text x="131" y="146" className="nam-scene-eq-section-title" textAnchor="middle">IN</text>
       <text x="131" y="494" className="nam-scene-eq-section-label" textAnchor="middle">ACTIVE</text>
-      <rect x={gridX - 18} y={gridY - 34} width={gridW + 36} height={gridH + 86} rx="16" fill="#323940" stroke="rgba(215,224,230,0.2)" strokeWidth="3" />
+      <rect x={gridX - 60} y={gridY - 34} width={gridW + 120} height={gridH + 86} rx="16" fill="#323940" stroke="rgba(215,224,230,0.2)" strokeWidth="3" />
       <rect x={gridX - 4} y={gridY - 8} width={gridW + 8} height={gridH + 18} rx="8" fill="rgba(210,218,224,0.08)" stroke="rgba(255,255,255,0.08)" strokeWidth="2" />
       <text x={gridX + gridW / 2} y={gridY - 6} className="nam-scene-eq-title" textAnchor="middle">OPENSTUDIO GRAPHIC EQ</text>
       {[-12, 0, 12].map((scale) => {
@@ -727,9 +726,6 @@ function SceneEqRackBody({ scene }: { scene: NAMRackSceneManifest }) {
           </g>
         );
       })}
-      <rect x="1036" y="102" width="174" height="432" rx="16" fill="#20252a" stroke="rgba(255,255,255,0.09)" strokeWidth="2" />
-      <text x="1123" y="146" className="nam-scene-eq-section-title" textAnchor="middle">OUT</text>
-      <text x="1123" y="494" className="nam-scene-eq-section-label" textAnchor="middle">LEVEL</text>
       <SceneScrew x={54} y={82} radius={9} />
       <SceneScrew x={width - 54} y={82} radius={9} />
       <SceneScrew x={54} y={height - 132} radius={9} />
@@ -743,10 +739,8 @@ function SceneEqRackBody({ scene }: { scene: NAMRackSceneManifest }) {
         className="nam-scene-generated-eq-body"
       />
       <text x="131" y="146" className="nam-scene-eq-section-title" textAnchor="middle">IN</text>
-      <text x="1123" y="146" className="nam-scene-eq-section-title" textAnchor="middle">OUT</text>
       <text x={gridX + gridW / 2} y={gridY - 6} className="nam-scene-eq-title" textAnchor="middle">OPENSTUDIO GRAPHIC EQ</text>
       <text x="131" y="494" className="nam-scene-eq-section-label" textAnchor="middle">ACTIVE</text>
-      <text x="1123" y="494" className="nam-scene-eq-section-label" textAnchor="middle">LEVEL</text>
       {bands.map((band, index) => {
         const x = gridX + index * (gridW / (bands.length - 1));
         return <text key={`generated-eq-band-${band}`} x={x} y={gridY + gridH + 54} className="nam-scene-eq-band" textAnchor="middle">{band}</text>;
@@ -848,69 +842,6 @@ function SceneDelayRackBody({ scene, active }: { scene: NAMRackSceneManifest; ac
   );
 }
 
-function SceneExpressionPedalBody({ scene, active }: { scene: NAMRackSceneManifest; active: boolean }) {
-  const { height } = scene.artboard;
-  return (
-    <g className="nam-scene-body nam-scene-body-expression-target">
-      <ellipse cx="214" cy={height - 44} rx="174" ry="30" fill="rgba(3,5,8,0.34)" />
-      <rect x="56" y="350" width="34" height="176" rx="14" fill="url(#sceneJackMetal)" opacity="0.86" />
-      <rect x="336" y="350" width="34" height="176" rx="14" fill="url(#sceneJackMetal)" opacity="0.72" />
-      <rect x="70" y="42" width="288" height={height - 112} rx="36" fill="#05070a" filter="url(#sceneCabModuleShadow)" />
-      <rect x="78" y="50" width="272" height={height - 130} rx="32" fill="#0c1015" stroke="rgba(255,255,255,0.18)" strokeWidth="4" />
-      <rect x="94" y="76" width="240" height={height - 190} rx="26" fill="#151a20" stroke="rgba(255,255,255,0.09)" strokeWidth="4" />
-      <rect x="110" y="112" width="208" height="680" rx="30" fill="#06080a" stroke="rgba(255,255,255,0.16)" strokeWidth="5" />
-      <rect x="126" y="136" width="176" height="624" rx="20" fill="url(#sceneTreadleRubber)" stroke="rgba(255,255,255,0.08)" strokeWidth="3" />
-      <line x1="214" x2="214" y1="150" y2="744" stroke="rgba(255,255,255,0.1)" strokeWidth="9" strokeLinecap="round" />
-      <line x1="194" x2="194" y1="154" y2="740" stroke="rgba(0,0,0,0.42)" strokeWidth="7" strokeLinecap="round" />
-      <line x1="234" x2="234" y1="154" y2="740" stroke="rgba(0,0,0,0.42)" strokeWidth="7" strokeLinecap="round" />
-      {Array.from({ length: 8 }).map((_, index) => (
-        <path
-          key={`left-groove-${index}`}
-          d={`M 148 ${174 + index * 70} C 176 ${160 + index * 70}, 178 ${134 + index * 70}, 202 ${122 + index * 70}`}
-          fill="none"
-          stroke="rgba(0,0,0,0.52)"
-          strokeWidth="8"
-          strokeLinecap="round"
-        />
-      ))}
-      {Array.from({ length: 8 }).map((_, index) => (
-        <path
-          key={`right-groove-${index}`}
-          d={`M 280 ${174 + index * 70} C 252 ${160 + index * 70}, 250 ${134 + index * 70}, 226 ${122 + index * 70}`}
-          fill="none"
-          stroke="rgba(0,0,0,0.52)"
-          strokeWidth="8"
-          strokeLinecap="round"
-        />
-      ))}
-      {Array.from({ length: 11 }).map((_, index) => (
-        <rect key={`left-block-${index}`} x="130" y={156 + index * 52} width="36" height="36" rx="5" fill="rgba(24,28,32,0.92)" stroke="rgba(255,255,255,0.035)" strokeWidth="2" />
-      ))}
-      {Array.from({ length: 11 }).map((_, index) => (
-        <rect key={`right-block-${index}`} x="262" y={156 + index * 52} width="36" height="36" rx="5" fill="rgba(24,28,32,0.92)" stroke="rgba(255,255,255,0.035)" strokeWidth="2" />
-      ))}
-      <rect x="134" y="824" width="160" height="8" rx="4" fill={scene.device.accent} opacity={active ? 0.74 : 0.5} />
-      <text x="214" y={height - 66} className="nam-scene-special-expression-label" textAnchor="middle">LASER EXPRESSION</text>
-
-      <rect x="390" y="166" width="286" height="728" rx="34" fill="rgba(5,7,10,0.34)" filter="url(#sceneCabModuleShadow)" />
-      <rect x="406" y="184" width="254" height="688" rx="28" fill="rgba(13,17,22,0.34)" stroke="rgba(255,255,255,0.13)" strokeWidth="3" />
-      <rect x="430" y="212" width="206" height="620" rx="22" fill="rgba(223,232,244,0.04)" stroke="rgba(0,0,0,0.24)" strokeWidth="3" />
-      <text x="534" y="206" className="nam-scene-special-expression-label" textAnchor="middle">CONTROL</text>
-      <line x1="534" x2="534" y1="292" y2="338" stroke="rgba(255,255,255,0.12)" strokeWidth="3" strokeLinecap="round" />
-      <line x1="534" x2="534" y1="454" y2="528" stroke="rgba(255,255,255,0.1)" strokeWidth="3" strokeLinecap="round" />
-      <line x1="534" x2="534" y1="650" y2="748" stroke="rgba(255,255,255,0.1)" strokeWidth="3" strokeLinecap="round" />
-      <SceneScrew x={98} y={72} />
-      <SceneScrew x={320} y={72} />
-      <SceneScrew x={98} y={height - 116} />
-      <SceneScrew x={320} y={height - 116} />
-      <SceneScrew x={418} y={212} radius={8} />
-      <SceneScrew x={648} y={212} radius={8} />
-      <SceneScrew x={418} y={844} radius={8} />
-      <SceneScrew x={648} y={844} radius={8} />
-    </g>
-  );
-}
-
 function SceneModulatorPedalBody({ scene, active }: { scene: NAMRackSceneManifest; active: boolean }) {
   const { width, height } = scene.artboard;
   const knobControls = scene.controls.filter((control) => control.kind === "knob");
@@ -1001,8 +932,7 @@ function SceneReverbPedalBody({ scene, active }: { scene: NAMRackSceneManifest; 
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <text x="246" y="988" className="nam-scene-reverb-footswitch-label" textAnchor="middle">FREEZE</text>
-      <text x="474" y="988" className="nam-scene-reverb-footswitch-label" textAnchor="middle">ENGAGE</text>
+      <text x="360" y="988" className="nam-scene-reverb-footswitch-label" textAnchor="middle">ENGAGE</text>
       <SceneScrew x={82} y={82} radius={9} />
       <SceneScrew x={width - 82} y={82} radius={9} />
       <SceneScrew x={82} y={height - 102} radius={9} />
@@ -1017,8 +947,7 @@ function SceneReverbPedalBody({ scene, active }: { scene: NAMRackSceneManifest; 
       />
       <text x={width / 2} y="92" className="nam-scene-reverb-kicker" textAnchor="middle">OPENSTUDIO SPACE</text>
       <text x={width / 2} y="740" className="nam-scene-reverb-title" textAnchor="middle" opacity={active ? 1 : 0.72}>{scene.device.title.toUpperCase()}</text>
-      <text x="246" y="988" className="nam-scene-reverb-footswitch-label" textAnchor="middle">FREEZE</text>
-      <text x="474" y="988" className="nam-scene-reverb-footswitch-label" textAnchor="middle">ENGAGE</text>
+      <text x="360" y="988" className="nam-scene-reverb-footswitch-label" textAnchor="middle">ENGAGE</text>
     </g>
   );
 }
@@ -1046,7 +975,6 @@ function SceneDeviceBody({ scene, active }: { scene: NAMRackSceneManifest; activ
   const accent = scene.device.accent;
   const bodyColor = scene.device.color;
 
-  if (scene.skinId === "special-laser-design-a") return <SceneExpressionPedalBody scene={scene} active={active} />;
   if (scene.skinId === "amp-head-design-a") return <SceneAmpHeadBody scene={scene} active={active} />;
   if (scene.skinId === "cab-room-design-a") return <SceneCabRoomBody scene={scene} />;
   if (scene.skinId === "post-stereo-delay-design-a") return <SceneDelayRackBody scene={scene} active={active} />;
@@ -1253,10 +1181,12 @@ function SceneDisplay({
   scene,
   control,
   device,
+  param,
 }: {
   scene: NAMRackSceneManifest;
   control: NAMRackSceneControl;
   device: NAMRackSceneStageDevice;
+  param?: BuiltInParamDescriptor;
 }) {
   if (scene.skinId === "post-stereo-delay-design-a" && control.id === "delay-display") {
     return <SceneStereoDelayDisplay scene={scene} control={control} device={device} />;
@@ -1273,7 +1203,7 @@ function SceneDisplay({
     <g className="nam-scene-control nam-scene-display" data-bound="true" style={{ "--nam-scene-z": control.zIndex ?? 6 } as CSSProperties}>
       <rect className="nam-scene-control-visual" x={rect.x} y={rect.y} width={rect.width} height={rect.height} rx="10" fill="#070809" stroke="rgba(255,255,255,0.18)" strokeWidth="2" {...qaData(scene, control)} />
       <rect x={rect.x + 8} y={rect.y + 8} width={rect.width - 16} height={rect.height - 16} rx="7" fill="rgba(255,255,255,0.035)" />
-      <text x={control.x} y={control.y + 7} className="nam-scene-display-text" textAnchor="middle">{displayText(control, device)}</text>
+      <text x={control.x} y={control.y + 7} className="nam-scene-display-text" textAnchor="middle">{displayText(control, device, param)}</text>
     </g>
   );
 }
@@ -1507,8 +1437,7 @@ function SceneTreadle({ scene, control, param, onParamChange }: {
 }) {
   const rect = controlRect(control);
   const pct = param ? normalizeParam(param) : 0.5;
-  if ((scene.skinId === "post-modulator-design-a" && control.id === "mod-treadle")
-    || (scene.skinId === "special-laser-design-a" && control.id === "laser-treadle")) {
+  if (scene.skinId === "post-modulator-design-a" && control.id === "mod-treadle") {
     return (
       <g className="nam-scene-control nam-scene-treadle nam-scene-treadle-skin-hitbox" data-bound={controlLooksBound(control, param)} style={{ "--nam-scene-z": control.zIndex ?? 8 } as CSSProperties}>
         <rect className="nam-scene-control-visual" x={rect.x} y={rect.y} width={rect.width} height={rect.height} rx="18" fill="transparent" stroke="transparent" strokeWidth="2" {...qaData(scene, control)} />
@@ -1620,14 +1549,21 @@ function ControlInteractionRect({
   onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
   toggleOnly?: boolean;
 }) {
-  const dragRef = useRef<{ startY: number; startValue: number; pointerId: number } | null>(null);
+  const dragRef = useRef<{
+    startY: number;
+    startNormalized: number;
+    pointerId: number;
+  } | null>(null);
   const rect = controlRect(control);
 
   const setAbsoluteFromPointer = (event: PointerEvent<SVGRectElement>) => {
     if (!param || toggleOnly) return;
     const targetRect = event.currentTarget.getBoundingClientRect();
     const pct = clampPercent(1 - (event.clientY - targetRect.top) / Math.max(targetRect.height, 1));
-    onParamChange(param, quantizeParamValue(param, param.min + (param.max - param.min) * pct));
+    onParamChange(
+      param,
+      quantizeParamValue(param, denormalizeParamValue(param, pct)),
+    );
   };
 
   return (
@@ -1639,19 +1575,36 @@ function ControlInteractionRect({
       height={rect.height}
       rx="8"
       fill="transparent"
+      role={param ? (toggleOnly ? "switch" : "slider") : undefined}
+      tabIndex={param ? 0 : undefined}
+      aria-label={param ? (control.label ?? param.label) : undefined}
+      aria-checked={param && toggleOnly ? param.value >= 0.5 : undefined}
+      aria-valuemin={param && !toggleOnly ? param.min : undefined}
+      aria-valuemax={param && !toggleOnly ? param.max : undefined}
+      aria-valuenow={param && !toggleOnly ? param.value : undefined}
+      aria-valuetext={param && !toggleOnly ? formatParamValue(param) : undefined}
       onClick={(event) => {
         event.stopPropagation();
         if (param && toggleOnly) onParamChange(param, nextToggleValue(control, param));
       }}
       onDoubleClick={(event) => {
         event.stopPropagation();
-        if (param && !toggleOnly) onParamChange(param, quantizeParamValue(param, (param.min + param.max) / 2));
+        if (param && !toggleOnly) {
+          onParamChange(
+            param,
+            quantizeParamValue(param, param.defaultValue ?? param.min),
+          );
+        }
       }}
       onPointerDown={(event) => {
         event.stopPropagation();
         if (!param) return;
         event.currentTarget.setPointerCapture(event.pointerId);
-        dragRef.current = { startY: event.clientY, startValue: param.value, pointerId: event.pointerId };
+        dragRef.current = {
+          startY: event.clientY,
+          startNormalized: normalizeParam(param),
+          pointerId: event.pointerId,
+        };
         if (control.kind === "fader" || control.kind === "treadle" || control.kind === "mic") setAbsoluteFromPointer(event);
       }}
       onPointerMove={(event) => {
@@ -1661,8 +1614,18 @@ function ControlInteractionRect({
           setAbsoluteFromPointer(event);
           return;
         }
-        const delta = (dragRef.current.startY - event.clientY) * stepForParam(param) * 2;
-        onParamChange(param, quantizeParamValue(param, dragRef.current.startValue + delta));
+        const deltaNormalized =
+          (dragRef.current.startY - event.clientY) / 250;
+        onParamChange(
+          param,
+          quantizeParamValue(
+            param,
+            denormalizeParamValue(
+              param,
+              dragRef.current.startNormalized + deltaNormalized,
+            ),
+          ),
+        );
       }}
       onPointerUp={(event) => {
         if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
@@ -1673,7 +1636,43 @@ function ControlInteractionRect({
         event.preventDefault();
         const direction = event.deltaY > 0 ? -1 : 1;
         const multiplier = event.shiftKey ? 8 : 2;
-        onParamChange(param, quantizeParamValue(param, param.value + direction * stepForParam(param) * multiplier));
+        onParamChange(
+          param,
+          quantizeParamValue(
+            param,
+            offsetParamValue(param, param.value, direction * multiplier),
+          ),
+        );
+      }}
+      onKeyDown={(event) => {
+        if (!param) return;
+        if (toggleOnly) {
+          if (event.key === " " || event.key === "Enter") {
+            event.preventDefault();
+            onParamChange(param, nextToggleValue(control, param));
+          }
+          return;
+        }
+
+        let nextValue: number | undefined;
+        if (event.key === "ArrowUp" || event.key === "ArrowRight") {
+          nextValue = offsetParamValue(param, param.value, 1);
+        } else if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
+          nextValue = offsetParamValue(param, param.value, -1);
+        } else if (event.key === "PageUp") {
+          nextValue = offsetParamValue(param, param.value, 8);
+        } else if (event.key === "PageDown") {
+          nextValue = offsetParamValue(param, param.value, -8);
+        } else if (event.key === "Home") {
+          nextValue = param.min;
+        } else if (event.key === "End") {
+          nextValue = param.max;
+        }
+
+        if (nextValue !== undefined) {
+          event.preventDefault();
+          onParamChange(param, quantizeParamValue(param, nextValue));
+        }
       }}
     />
   );
@@ -1697,7 +1696,7 @@ function SceneControlRenderer({
   if (control.kind === "knob") return <SceneKnob scene={scene} control={control} param={param} onParamChange={onParamChange} />;
   if (control.kind === "switch") return <SceneSwitch scene={scene} control={control} param={param} onParamChange={onParamChange} />;
   if (control.kind === "button") return <SceneButton scene={scene} control={control} param={param} onParamChange={onParamChange} />;
-  if (control.kind === "display") return <SceneDisplay scene={scene} control={control} device={device} />;
+  if (control.kind === "display") return <SceneDisplay scene={scene} control={control} device={device} param={param} />;
   if (control.kind === "footswitch") return <SceneFootswitch scene={scene} control={control} param={param} active={device.active} onParamChange={onParamChange} />;
   if (control.kind === "fader") return <SceneFader scene={scene} control={control} param={param} onParamChange={onParamChange} />;
   if (control.kind === "treadle") return <SceneTreadle scene={scene} control={control} param={param} onParamChange={onParamChange} />;

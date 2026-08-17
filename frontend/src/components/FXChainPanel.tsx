@@ -27,7 +27,12 @@ import {
   Star,
   ExternalLink,
 } from "lucide-react";
-import { nativeBridge, type BuiltInPluginAddress, type PluginParameterInfo } from "../services/NativeBridge";
+import {
+  nativeBridge,
+  type BuiltInPluginAddress,
+  type PluginParameterInfo,
+  type PluginScanReport,
+} from "../services/NativeBridge";
 import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
 import { BuiltInPluginPanel } from "./BuiltInPluginPanel";
 import { MIDIFXControls } from "./MIDIFXControls";
@@ -106,11 +111,27 @@ interface Plugin {
   manufacturer: string;
   category: string;
   fileOrIdentifier: string;
+  identifier?: string;
   isInstrument: boolean;
   hasARA?: boolean;
   snapshot?: string;
   pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin";
   instrumentMode?: number;
+}
+
+function getPluginCategoryTokens(category: string): string[] {
+  const categories = new Map<string, string>();
+  for (const rawToken of category.split("|")) {
+    const token = rawToken.trim();
+    if (token) categories.set(token.toLowerCase(), token);
+  }
+  return Array.from(categories.values());
+}
+
+function getPluginReference(plugin: Plugin): string {
+  return plugin.pluginType === "s13fx" || plugin.pluginType === "builtin"
+    ? plugin.fileOrIdentifier
+    : plugin.identifier || plugin.fileOrIdentifier;
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -150,7 +171,8 @@ function getPluginDisplayName(
 ) {
   if (!pluginPath) return "Instrument";
   const knownPlugin = plugins.find(
-    (plugin) => plugin.fileOrIdentifier === pluginPath,
+    (plugin) =>
+      plugin.fileOrIdentifier === pluginPath || plugin.identifier === pluginPath,
   );
   if (knownPlugin) return knownPlugin.name;
 
@@ -341,6 +363,9 @@ export function FXChainPanel({
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(false);
+  const [pluginScanReport, setPluginScanReport] =
+    useState<PluginScanReport | null>(null);
+  const [pluginScanError, setPluginScanError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const currentTrack = tracks.find((track) => track.id === trackId);
@@ -499,6 +524,23 @@ export function FXChainPanel({
   }, [chainType, loadAvailablePlugins, loadPlugins, trackId]);
 
   useEffect(() => {
+    const handleCatalogChanged = () => {
+      void loadAvailablePlugins();
+    };
+
+    window.addEventListener(
+      "openstudio:plugin-catalog-changed",
+      handleCatalogChanged,
+    );
+    return () => {
+      window.removeEventListener(
+        "openstudio:plugin-catalog-changed",
+        handleCatalogChanged,
+      );
+    };
+  }, [loadAvailablePlugins]);
+
+  useEffect(() => {
     return subscribeToFXChainChanged((detail) => {
       if (detail.trackId !== trackId || detail.chainType !== chainType) {
         return;
@@ -508,20 +550,43 @@ export function FXChainPanel({
     });
   }, [chainType, loadPlugins, trackId]);
 
-  const handleScan = async () => {
+  const handleScan = async (forceRescan: boolean) => {
     setPluginsLoading(true);
+    setPluginScanError("");
     try {
-      await nativeBridge.scanForPlugins();
+      setPluginScanReport(await nativeBridge.scanForPlugins(forceRescan));
       await loadAvailablePlugins();
     } catch (e) {
       console.error("[FXChain] Failed to scan:", e);
+      setPluginScanError(
+        "Scan did not complete; the previous plug-in catalog was preserved.",
+      );
     } finally {
       setPluginsLoading(false);
     }
   };
 
+  const handleAddPluginScanFolder = async () => {
+    setPluginScanError("");
+    try {
+      const folder = (
+        await nativeBridge.browseForFolder("Choose a plug-in scan folder")
+      ).trim();
+      if (!folder) return;
+      if (!(await nativeBridge.addPluginScanPath(folder))) {
+        setPluginScanError("That plug-in folder could not be added.");
+        return;
+      }
+      await handleScan(false);
+    } catch (error) {
+      console.error("[FXChain] Failed to add plug-in scan folder:", error);
+      setPluginScanError("That plug-in folder could not be added.");
+    }
+  };
+
   const handleAddPlugin = async (plugin: Plugin) => {
-    setAddingPlugin(plugin.fileOrIdentifier);
+    const pluginReference = getPluginReference(plugin);
+    setAddingPlugin(pluginReference);
     try {
       let success = false;
       const expectedLength =
@@ -566,25 +631,25 @@ export function FXChainPanel({
           );
         }
       } else if (chainType === "master") {
-        success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
+        success = await nativeBridge.addMasterFX(pluginReference);
       } else if (plugin.isInstrument && chainType === "track" && trackId) {
         // Instrument plugins (VSTi) must be loaded via loadInstrument so the
         // track is set to Instrument type and receives MIDI for synthesis.
         success = await loadInstrumentWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginReference,
         );
         if (success) {
           notifyInstrumentChanged({
             trackId,
-            instrumentPlugin: plugin.fileOrIdentifier,
+            instrumentPlugin: pluginReference,
           });
           await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (chainType === "input" || chainType === "track") {
         success = await addTrackFXWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginReference,
           chainType,
         );
       }
@@ -596,6 +661,7 @@ export function FXChainPanel({
           chainType,
           trackId,
           fileOrIdentifier: plugin.fileOrIdentifier,
+          identifier: plugin.identifier,
         });
         let updatedFx: FXSlot[] = [];
         if (chainType === "master") {
@@ -1132,9 +1198,20 @@ export function FXChainPanel({
     }
   };
 
+  const categoryByIdentity = new Map<string, string>();
+  for (const plugin of plugins) {
+    for (const category of getPluginCategoryTokens(plugin.category)) {
+      const identity = category.toLowerCase();
+      if (!categoryByIdentity.has(identity)) {
+        categoryByIdentity.set(identity, category);
+      }
+    }
+  }
   const categories = [
     "All",
-    ...Array.from(new Set(plugins.map((p) => p.category))),
+    ...Array.from(categoryByIdentity.values()).sort((a, b) =>
+      a.localeCompare(b),
+    ),
   ];
   const filteredPlugins = plugins.filter((p) => {
     if (p.isInstrument && chainType !== "track") return false;
@@ -1144,7 +1221,11 @@ export function FXChainPanel({
       p.manufacturer.toLowerCase().includes(term) ||
       p.category.toLowerCase().includes(term);
     const matchesCategory =
-      categoryFilter === "All" || p.category === categoryFilter;
+      categoryFilter === "All" ||
+      getPluginCategoryTokens(p.category).some(
+        (category) =>
+          category.toLowerCase() === categoryFilter.toLowerCase(),
+      );
     return matchesSearch && matchesCategory;
   });
 
@@ -2082,15 +2163,51 @@ export function FXChainPanel({
                 aria-label="Filter plugins by category"
               />
               <Button
+                variant="default"
+                size="md"
+                onClick={() => void handleAddPluginScanFolder()}
+                disabled={pluginsLoading}
+                aria-label="Add a plug-in scan folder"
+                title="Add a vendor or custom VST3, CLAP, or LV2 folder and scan it"
+              >
+                <FolderOpen size={14} />
+                Folder
+              </Button>
+              <Button
                 variant="primary"
                 size="md"
-                onClick={handleScan}
+                onClick={() => void handleScan(true)}
                 disabled={pluginsLoading}
-                aria-label="Scan for plugins"
+                aria-label="Deep scan for plugins"
+                title="Inspect every plug-in in every configured location"
               >
-                {pluginsLoading ? "Scanning..." : "Scan"}
+                {pluginsLoading ? "Scanning..." : "Deep Scan"}
               </Button>
             </div>
+
+            {(pluginScanReport || pluginScanError) && (
+              <div
+                className={`px-3 py-1.5 border-b text-[11px] ${
+                  pluginScanError ||
+                  !pluginScanReport?.success ||
+                  (pluginScanReport?.failedCount ?? 0) > 0 ||
+                  (pluginScanReport?.skippedCount ?? 0) > 0
+                    ? "border-amber-800/60 bg-amber-950/30 text-amber-200"
+                    : "border-emerald-800/50 bg-emerald-950/20 text-emerald-200"
+                }`}
+                role={pluginScanError ? "alert" : "status"}
+              >
+                {pluginScanError ||
+                  (!pluginScanReport?.success && pluginScanReport?.error) ||
+                  `Cataloged ${pluginScanReport?.pluginCount ?? 0} plug-in classes from ${pluginScanReport?.candidateCount ?? 0} candidates${
+                    (pluginScanReport?.failedCount ?? 0) > 0
+                      ? `; ${pluginScanReport?.failedCount} could not be loaded. Open the full Plugin Browser for details.`
+                      : (pluginScanReport?.skippedCount ?? 0) > 0
+                        ? `; ${pluginScanReport?.skippedCount} were skipped. Open the full Plugin Browser for details or retry.`
+                      : "."
+                  }`}
+              </div>
+            )}
 
             {/* Plugin List */}
             <div className="flex-1 overflow-y-auto p-2">
@@ -2100,10 +2217,13 @@ export function FXChainPanel({
                 </div>
               ) : filteredPlugins.length === 0 ? (
                 <div className="text-center p-10 text-neutral-400">
-                  No plugins found. Click "Scan" to search your system.
+                  {plugins.length > 0
+                    ? "No plug-ins match the current search or category filter."
+                    : "No plug-ins are cataloged. Click Deep Scan to inspect the configured folders."}
                 </div>
               ) : (
-                filteredPlugins.map((plugin, idx) => {
+                filteredPlugins.map((plugin) => {
+                  const pluginReference = getPluginReference(plugin);
                   const isScript = plugin.pluginType === "s13fx";
                   const isBuiltInPlugin = plugin.pluginType === "builtin";
                   const { Icon, color } = isScript
@@ -2113,7 +2233,7 @@ export function FXChainPanel({
                       : getCategoryIcon(plugin.category);
                   return (
                     <div
-                      key={idx}
+                      key={pluginReference}
                       className={`flex items-center gap-2 p-2 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
                         isScript
                           ? "border-lime-700/40"
@@ -2170,7 +2290,7 @@ export function FXChainPanel({
                         onClick={() => handleAddPlugin(plugin)}
                         disabled={addingPlugin !== null}
                       >
-                        {addingPlugin === plugin.fileOrIdentifier
+                        {addingPlugin === pluginReference
                           ? "Adding..."
                           : "Add"}
                       </Button>

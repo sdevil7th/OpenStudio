@@ -1,5 +1,11 @@
+import { useSyncExternalStore } from "react";
 import { MenuDropdown, MenuItemProps } from "./MenuDropdown";
 import { useDAWStore } from "../../store/useDAWStore";
+import { usePitchEditorStore } from "../../store/pitchEditorStore";
+import {
+  getActiveShortcutContext,
+  subscribeShortcutContext,
+} from "../../utils/shortcutContext";
 import { useShallow } from "zustand/shallow";
 
 /**
@@ -40,19 +46,40 @@ export function EditMenu() {
     deleteSelectedTracks: s.deleteSelectedTracks,
     transport: s.transport,
   })));
+  const {
+    pitchUndo,
+    pitchRedo,
+    pitchCanUndo,
+    pitchCanRedo,
+  } = usePitchEditorStore(useShallow((s) => ({
+    pitchUndo: s.undo,
+    pitchRedo: s.redo,
+    pitchCanUndo: s.undoStack.length > 0,
+    pitchCanRedo: s.redoStack.length > 0,
+  })));
+  const activeShortcutContext = useSyncExternalStore(
+    subscribeShortcutContext,
+    getActiveShortcutContext,
+    getActiveShortcutContext,
+  );
+  const pitchOwnsHistory = activeShortcutContext.kind === "pitch_editor";
+  const effectiveUndo = pitchOwnsHistory ? pitchUndo : undo;
+  const effectiveRedo = pitchOwnsHistory ? pitchRedo : redo;
+  const effectiveCanUndo = pitchOwnsHistory ? pitchCanUndo : canUndo;
+  const effectiveCanRedo = pitchOwnsHistory ? pitchCanRedo : canRedo;
 
   const menuItems: MenuItemProps[] = [
     {
       label: "Undo",
       shortcut: "Ctrl+Z",
-      onClick: undo,
-      disabled: !canUndo,
+      onClick: effectiveUndo,
+      disabled: !effectiveCanUndo,
     },
     {
       label: "Redo",
       shortcut: "Ctrl+Shift+Z",
-      onClick: redo,
-      disabled: !canRedo,
+      onClick: effectiveRedo,
+      disabled: !effectiveCanRedo,
       dividerAfter: true,
     },
     {
@@ -98,7 +125,7 @@ export function EditMenu() {
       dividerAfter: true,
     },
     {
-      label: "Split at Cursor",
+      label: "Split at Playhead",
       shortcut: "S",
       onClick: () => useDAWStore.getState().splitClipAtPlayhead(),
     },
